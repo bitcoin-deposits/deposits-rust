@@ -145,20 +145,18 @@ impl DepositsHandler {
 
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
 
-        // Load existing ledgers from disk
+        // Load existing ledgers from disk. `load_single_ledger_from_jsonl`
+        // reads the FULL append-only JSONL (the durable log holds the whole
+        // chain — genesis, QuorumBegin, everything), so `ledger.history` here
+        // is the complete chain, potentially larger than the in-memory cap. We
+        // populate the event store from that full history first, THEN apply the
+        // RAM cap (below) so the daemon comes back up in the same steady state
+        // it maintains after a compaction: full chain on disk, capped in RAM.
         let ledgers = Self::load_ledgers_from_disk(&data_dir);
 
-        // Initialize persisted counts from loaded ledger history lengths
-        let persisted_update_counts = {
-            let mut counts = HashMap::new();
-            for (id, arc) in &ledgers {
-                let ledger = arc.read().unwrap();
-                counts.insert(id.clone(), ledger.history.len());
-            }
-            Mutex::new(counts)
-        };
-
-        // Populate event store from loaded ledger histories
+        // Populate event store from the FULL loaded history (before capping RAM)
+        // so the resync/heal live cache holds every event up to the store's own
+        // FIFO cap, not just the retained in-memory tail.
         let max_events: usize = std::env::var("DEPOSITS_EVENT_STORE_MAX")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -193,6 +191,24 @@ impl DepositsHandler {
                 );
             }
             Mutex::new(store)
+        };
+
+        // Apply the in-memory cap to each freshly-loaded ledger, then initialize
+        // the append cursor from the CAPPED length. `persisted_update_counts` is
+        // an index into the in-memory `history` Vec (append writes
+        // `history[previously_saved..]`), so it must equal the RAM length after
+        // capping — the disk file already holds the full chain, and the next
+        // append adds only updates past the retained tail. Capping here (rather
+        // than waiting for the next compaction) re-establishes the durable-disk /
+        // capped-RAM invariant immediately on restart.
+        let retain = Self::history_retain();
+        let persisted_update_counts = {
+            let mut counts = HashMap::new();
+            for (id, arc) in &ledgers {
+                let capped_len = Self::truncate_history(arc, retain);
+                counts.insert(id.clone(), capped_len);
+            }
+            Mutex::new(counts)
         };
 
         let handler = Self {
@@ -1360,20 +1376,27 @@ impl DepositsHandler {
         };
 
         if previously_saved == 0 {
-            // First save — write State + bounded history tail
+            // First save — write State + the FULL in-memory history to disk.
+            //
+            // DURABILITY: the on-disk JSONL must hold the complete chain. In
+            // the common case first-save runs on a fresh, small ledger whose
+            // in-memory `history` IS the full chain, so `retain=None` (write
+            // everything) is exactly right. On the reload path the append
+            // cursor is initialized from `history.len()` (see `Self::new`), so
+            // this branch only fires when the file has never been written —
+            // never after a truncating reload. Writing the untruncated history
+            // here is what keeps genesis/QuorumBegin durable from the start.
             let ledger = ledger_arc.read().unwrap();
             let history_len = ledger.history.len();
-            Self::save_ledger_to_disk_streaming(
-                ledger_id,
-                &ledger,
-                &self.data_dir,
-                Some(Self::history_retain()),
-            );
+            Self::save_ledger_to_disk_streaming(ledger_id, &ledger, &self.data_dir, None);
             drop(ledger);
 
+            // Cap ONLY RAM; the disk file above holds the full chain.
             let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
 
-            // Re-lock to update counts after I/O
+            // Append cursor = capped in-memory length (index into the RAM Vec).
+            // Disk already holds `history_len` entries; subsequent appends add
+            // only updates past the retained tail.
             self.persisted_update_counts
                 .lock()
                 .unwrap()
@@ -1386,9 +1409,9 @@ impl DepositsHandler {
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
                 tracing::info!(
-                    "[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=full_write",
-                    final_len.min(Self::history_retain()),
+                    "[PROFILE] persist_ledger_to_disk: disk={}, RAM={} entries, total={:?}, mode=full_write",
                     history_len,
+                    final_len,
                     total_elapsed
                 );
             }
@@ -1490,7 +1513,27 @@ impl DepositsHandler {
             .collect()
     }
 
-    /// Run compaction (full rewrite) for a single ledger. Call from background task.
+    /// Run compaction for a single ledger. Call from background task.
+    ///
+    /// DURABILITY INVARIANT: compaction caps ONLY the in-memory `history` Vec;
+    /// it MUST NOT truncate the on-disk JSONL. The JSONL is append-only and
+    /// [`persist_ledger_to_disk`] has already appended every update up to the
+    /// current tip, so the full chain — genesis `LedgerOpen` (seq 0), early
+    /// `QuorumBegin` and all — is already durable on disk. A custody ledger's
+    /// full history is only a few MB; unbounded on-disk growth is acceptable
+    /// and correct because depositors reconstruct from genesis and the daemon
+    /// must be able to re-publish the whole chain (heal) after relay retention
+    /// expires the old span. Truncating disk here (the old behavior) deleted
+    /// seq 0 / QuorumBegin from the durable log once a ledger passed the retain
+    /// window — the data-loss bug this closes.
+    ///
+    /// So compaction's job is now purely: (1) cap RAM via `truncate_history`,
+    /// and (2) re-base the append cursor. `persisted_update_counts` is an INDEX
+    /// into the in-memory Vec (append writes `history[previously_saved..]`), so
+    /// after truncation it must equal the new (capped) in-memory length — the
+    /// disk already holds everything up to the tip, and the next append picks up
+    /// from the retained tail. It does NOT track the on-disk length (which is
+    /// larger and keeps growing).
     pub fn compact_ledger(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
@@ -1502,19 +1545,14 @@ impl DepositsHandler {
                 .clone()
         };
 
-        let history_len = {
-            let ledger = ledger_arc.read().unwrap();
-            Self::save_ledger_to_disk_streaming(
-                ledger_id,
-                &ledger,
-                &self.data_dir,
-                Some(Self::history_retain()),
-            );
-            ledger.history.len()
-        };
+        let history_len = ledger_arc.read().unwrap().history.len();
 
+        // Cap ONLY RAM. Disk keeps the full append-only chain untouched.
         let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
 
+        // Re-base the append cursor to the capped in-memory length. Everything
+        // up to the tip is already on disk (appended incrementally), so the next
+        // persist appends only genuinely-new updates past the retained tail.
         self.persisted_update_counts
             .lock()
             .unwrap()
@@ -1525,22 +1563,14 @@ impl DepositsHandler {
             .insert(ledger_id.to_string(), 0);
         crate::metrics::record_ledger_compaction();
 
-        // Update modtime
-        let ledger_file = self
-            .data_dir
-            .join("ledgers")
-            .join(format!("{}.jsonl", ledger_id));
-        if let Ok(mtime) = ledger_file.metadata().and_then(|m| m.modified()) {
-            self.last_file_modtimes
-                .lock()
-                .unwrap()
-                .insert(ledger_id.to_string(), mtime);
-        }
+        // NOTE: intentionally do NOT touch the JSONL modtime here. We didn't
+        // write the file, so leaving the modtime as-is is correct; there is no
+        // self-write for `discover_new_ledgers` to skip.
 
         tracing::info!(
-            "[PROFILE] compact_ledger: {}/{} entries, total={:?}",
-            final_len.min(Self::history_retain()),
+            "[PROFILE] compact_ledger: RAM {}→{} entries (disk keeps full chain), total={:?}",
             history_len,
+            final_len,
             t0.elapsed()
         );
 
@@ -1558,23 +1588,27 @@ impl DepositsHandler {
         ledger.history.len()
     }
 
-    /// Save a single ledger to its JSONL file
-    /// Write a full ledger to disk by streaming directly from a read-locked reference.
-    /// Avoids cloning the entire history Vec (which at 100K+ entries = ~57 MB of allocations).
-    /// Maximum history entries to retain on disk and in memory during compaction.
-    /// State snapshot captures all balances/deposits; history only needed for
-    /// chain continuity and recent audit trail.
+    /// Maximum history entries to retain IN MEMORY. This caps ONLY the
+    /// in-memory `Ledger::history` Vec — the on-disk JSONL is append-only and
+    /// always holds the FULL chain (see [`Self::compact_ledger`]). The State
+    /// snapshot captures all balances/deposits; the in-memory history tail is
+    /// needed only for chain continuity and a recent audit trail. Any path that
+    /// needs the whole chain (heal / reconstruction) sources it from disk via
+    /// [`Self::read_persisted_history`].
     ///
-    /// PROD DEFAULT: 2000. The `DEPOSITS_HISTORY_RETAIN` env var overrides it
-    /// ONLY for tests — it lets a regtest reproduce the deep/truncated-ledger
-    /// case (in-memory history drops seq 0 / QuorumBegin while the full chain
-    /// stays on disk) without building 2000+ real updates. Never set it in
-    /// production; the default is what ships.
-    const HISTORY_RETAIN: usize = 2000;
+    /// PROD DEFAULT: 50_000 — matches the EventStore FIFO cap and keeps even a
+    /// ~12k-update ledger (e.g. mainnet `57f60e1d`) fully in memory, so only
+    /// pathologically huge ledgers ever truncate in RAM. Raised from 2000,
+    /// which truncated deep ledgers in RAM far too eagerly. The
+    /// `DEPOSITS_HISTORY_RETAIN` env var overrides it ONLY for tests — it lets a
+    /// regtest reproduce the deep/truncated-ledger case (in-memory history drops
+    /// seq 0 / QuorumBegin while the full chain stays on disk) without building
+    /// 50k+ real updates. Never set it in production; the default is what ships.
+    const HISTORY_RETAIN: usize = 50_000;
 
-    /// Effective in-memory/on-disk history retention. Reads the
+    /// Effective in-memory history retention. Reads the
     /// `DEPOSITS_HISTORY_RETAIN` test override, falling back to the prod
-    /// default [`Self::HISTORY_RETAIN`] (2000). A value of 0 or an unparseable
+    /// default [`Self::HISTORY_RETAIN`] (50_000). A value of 0 or an unparseable
     /// value falls back to the default (retain must be >= 1 for chain continuity).
     fn history_retain() -> usize {
         std::env::var("DEPOSITS_HISTORY_RETAIN")
@@ -2251,6 +2285,11 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    /// Serializes tests that mutate the process-global `DEPOSITS_HISTORY_RETAIN`
+    /// env var so a small override from one test can't leak into another's
+    /// handler construction (which reads the var on load/persist).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn test_secret_key() -> SecretKey {
         SecretKey::from_slice(&[1u8; 32]).unwrap()
     }
@@ -2519,6 +2558,207 @@ mod tests {
                 .iter()
                 .any(|u| u.content_hash[0] == QUORUM_TAG),
             "in-memory-sourced heal MISSES QuorumBegin — the bug this fix closes"
+        );
+    }
+
+    /// Durability: compaction MUST keep the full chain on the on-disk JSONL
+    /// (append-only) while capping ONLY the in-memory `history` Vec. This is the
+    /// exact data-loss bug being closed — before the fix, `compact_ledger`
+    /// rewrote the JSONL down to the retained tail, deleting genesis
+    /// `LedgerOpen` (seq 0) and early `QuorumBegin` from the durable log once a
+    /// ledger passed the retain window. Reproduces the shape cheaply with a
+    /// tiny `DEPOSITS_HISTORY_RETAIN` and asserts:
+    ///   1. after compaction the in-memory history is capped to the retain tail
+    ///      (genesis/QuorumBegin gone from RAM), but
+    ///   2. the on-disk JSONL STILL contains seq 0 + the whole chain, and
+    ///   3. a subsequent append does not drop/duplicate — disk keeps growing.
+    #[test]
+    fn compaction_retains_full_disk_history_while_capping_ram() {
+        // Scope the env override so it can't leak into sibling tests.
+        struct RetainGuard;
+        impl Drop for RetainGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("DEPOSITS_HISTORY_RETAIN");
+            }
+        }
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("DEPOSITS_HISTORY_RETAIN", "3");
+        let _guard = RetainGuard;
+        assert_eq!(DepositsHandler::history_retain(), 3);
+
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+
+        let (handler, _rx) =
+            DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
+        let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+
+        const CHAIN_LEN: u64 = 10;
+        const GENESIS_TAG: u8 = 0x00; // seq 0 → LedgerOpen
+        const QUORUM_TAG: u8 = 0x04; // seq 4 → QuorumBegin
+
+        // First update, then first persist (full write of the small chain).
+        arc.write()
+            .unwrap()
+            .history
+            .push(mk_update(op_pk, 0, GENESIS_TAG));
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        // Append the rest one at a time as the live path does.
+        for seq in 1..CHAIN_LEN {
+            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        }
+
+        // Compact — caps RAM, must NOT touch the on-disk chain.
+        handler.compact_ledger(&ledger_id).unwrap();
+
+        // (1) In-memory history capped to the retain tail; genesis/QuorumBegin gone from RAM.
+        let in_mem_seqs: Vec<u64> = arc
+            .read()
+            .unwrap()
+            .history
+            .iter()
+            .map(|u| u.sequence_number)
+            .collect();
+        assert_eq!(in_mem_seqs, vec![7, 8, 9], "RAM capped to retain=3 tail");
+
+        // (2) The on-disk JSONL still holds the FULL chain, seq 0 present.
+        let disk = handler
+            .read_persisted_history(&ledger_id)
+            .expect("JSONL exists");
+        let disk_seqs: Vec<u64> = disk.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(
+            disk_seqs,
+            (0..CHAIN_LEN).collect::<Vec<_>>(),
+            "on-disk chain survives compaction intact, seq 0..9"
+        );
+        assert!(
+            disk.iter().any(|u| u.content_hash[0] == GENESIS_TAG),
+            "genesis LedgerOpen (seq 0) STILL on disk after compaction"
+        );
+        assert!(
+            disk.iter().any(|u| u.content_hash[0] == QUORUM_TAG),
+            "early QuorumBegin (seq 4) STILL on disk after compaction"
+        );
+
+        // (3) A post-compaction append grows the disk chain without dropping or
+        // duplicating: seq 10 lands, seq 0 stays, no dupes.
+        arc.write()
+            .unwrap()
+            .history
+            .push(mk_update(op_pk, CHAIN_LEN, CHAIN_LEN as u8));
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        let disk2 = handler.read_persisted_history(&ledger_id).unwrap();
+        let disk2_seqs: Vec<u64> = disk2.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(
+            disk2_seqs,
+            (0..=CHAIN_LEN).collect::<Vec<_>>(),
+            "append after compaction extends the full on-disk chain (seq 0..10, no dupes/gaps)"
+        );
+    }
+
+    /// Restart survival: a full (untruncated) JSONL on disk reloads into a
+    /// handler that (a) exposes the FULL chain via `read_persisted_history`
+    /// (genesis present) and (b) caps the in-memory `history` to the retain
+    /// window. Confirms the durable-disk / capped-RAM invariant survives a
+    /// daemon restart and no load path assumes a pre-truncated JSONL.
+    #[test]
+    fn restart_reloads_full_chain_from_disk_and_recaps_ram() {
+        struct RetainGuard;
+        impl Drop for RetainGuard {
+            fn drop(&mut self) {
+                std::env::remove_var("DEPOSITS_HISTORY_RETAIN");
+            }
+        }
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("DEPOSITS_HISTORY_RETAIN", "3");
+        let _guard = RetainGuard;
+
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+
+        const CHAIN_LEN: u64 = 10;
+        const GENESIS_TAG: u8 = 0x00;
+
+        // Session 1: build + persist the full chain, compact, then drop.
+        let ledger_id = {
+            let (handler, _rx) =
+                DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
+            let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, 0, GENESIS_TAG));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+            for seq in 1..CHAIN_LEN {
+                arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+                handler.persist_ledger_to_disk(&ledger_id).unwrap();
+            }
+            handler.compact_ledger(&ledger_id).unwrap();
+            ledger_id
+        };
+
+        // Session 2: restart — construct a fresh handler over the same data_dir.
+        let (handler2, _rx2) =
+            DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
+
+        // Disk still holds the whole chain including genesis.
+        let disk = handler2.read_persisted_history(&ledger_id).unwrap();
+        let disk_seqs: Vec<u64> = disk.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(
+            disk_seqs,
+            (0..CHAIN_LEN).collect::<Vec<_>>(),
+            "restart preserves the full on-disk chain (genesis present)"
+        );
+
+        // In-memory history is re-capped to the retain window on load.
+        let arc2 = handler2
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .unwrap()
+            .clone();
+        let in_mem_seqs: Vec<u64> = arc2
+            .read()
+            .unwrap()
+            .history
+            .iter()
+            .map(|u| u.sequence_number)
+            .collect();
+        assert_eq!(
+            in_mem_seqs,
+            vec![7, 8, 9],
+            "restart re-applies the in-memory cap (retain=3 tail)"
+        );
+
+        // Append cursor equals the capped RAM length so the next append targets
+        // the retained tail (not an out-of-bounds full-disk index).
+        assert_eq!(
+            *handler2
+                .persisted_update_counts
+                .lock()
+                .unwrap()
+                .get(&ledger_id)
+                .unwrap(),
+            3,
+            "append cursor re-based to capped in-memory length on restart"
         );
     }
 
