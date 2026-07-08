@@ -1742,11 +1742,18 @@ impl Node {
                 // Rotate notification-level dedup set
                 self.nostr.rotate_seen_events();
 
-                // Truncate joined ledger histories to prevent unbounded memory growth.
-                // Owned ledgers are truncated during persist_ledger_to_disk compaction,
-                // but joined ledgers accumulate history from Nostr updates forever.
+                // Cap joined ledger histories in RAM to prevent unbounded memory
+                // growth. This is a RAM-only backstop: `compact_ledger` already
+                // caps in-memory history for every ledger (owned AND joined —
+                // `ledgers_needing_compaction` is not owner-filtered) and never
+                // truncates the durable on-disk JSONL. This drain must NOT shrink
+                // disk either — it only mutates the in-memory Vec; the full chain
+                // stays on disk via `persist_ledger_to_disk` (append-only). Kept
+                // at the same ceiling as the owned cap (`HISTORY_RETAIN`, 50k) so
+                // joined replicas keep as much of the recent chain hot in RAM as
+                // owned ledgers do; the on-disk copy is always complete regardless.
                 if let Ok(ledgers) = self.handler.ledgers.try_lock() {
-                    const JOINED_HISTORY_RETAIN: usize = 2000;
+                    const JOINED_HISTORY_RETAIN: usize = 50_000;
                     for (lid, arc) in ledgers.iter() {
                         let mut ledger = arc.write().unwrap();
                         let len = ledger.history.len();
