@@ -141,47 +141,76 @@ impl Node {
         let relay_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
         let relay_present: std::collections::HashSet<[u8; 32]> =
             relay_updates.iter().map(|u| u.content_hash).collect();
-        let local_len = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .get(ledger_id)
-                .map(|a| a.read().unwrap().history.len())
-                .unwrap_or(0)
-        };
+
+        // Source the local history from the FULL persisted JSONL on disk, NOT
+        // the in-memory `Ledger::history` (which is truncated to the most recent
+        // HISTORY_RETAIN entries — a RAM optimization). A deep ledger's genesis
+        // `LedgerOpen` (seq 0) and early `QuorumBegin` live only on disk once
+        // the chain grows past the retain window; healing must re-publish that
+        // old span or a depositor can never reconstruct/`open` from genesis and
+        // a disputed deep ledger can't recover (its QuorumBegin derives N=Q).
+        //
+        // Fall back to the in-memory history only if the JSONL is missing or
+        // unreadable. Reading from our own persisted log preserves the safety
+        // invariant: we only ever re-publish updates we hold AND have persisted
+        // (validated) — never anything fabricated.
+        let disk_history = self.handler.read_persisted_history(ledger_id);
+        let history_source = if disk_history.is_some() { "disk" } else { "memory" };
+
+        // Clone the missing subset out while holding the read lock (for the
+        // in-memory fallback), then release it before awaiting the broadcasts.
+        let (local_len, to_publish): (usize, Vec<deposits_core::types::SignedLedgerUpdate>) =
+            match &disk_history {
+                Some(history) => (
+                    history.len(),
+                    missing_updates(&relay_present, history, HEAL_BATCH_LIMIT)
+                        .into_iter()
+                        .cloned()
+                        .collect(),
+                ),
+                None => {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    let arc = match ledgers.get(ledger_id) {
+                        Some(a) => a,
+                        None => return Ok(0),
+                    };
+                    let ledger = arc.read().unwrap();
+                    (
+                        ledger.history.len(),
+                        missing_updates(&relay_present, &ledger.history, HEAL_BATCH_LIMIT)
+                            .into_iter()
+                            .cloned()
+                            .collect(),
+                    )
+                }
+            };
+
         tracing::debug!(
-            "heal: ledger {}… relay_present={} local_history={}",
+            "heal: ledger {}… relay_present={} local_history={} (source={})",
             &ledger_id[..16.min(ledger_id.len())],
             relay_present.len(),
             local_len,
+            history_source,
         );
-
-        // Local persisted history is the source of truth for what we may
-        // re-publish. Clone the missing subset out while holding the read lock,
-        // then release it before awaiting the (network) broadcasts.
-        let to_publish: Vec<deposits_core::types::SignedLedgerUpdate> = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = match ledgers.get(ledger_id) {
-                Some(a) => a,
-                None => return Ok(0),
-            };
-            let ledger = arc.read().unwrap();
-            missing_updates(&relay_present, &ledger.history, HEAL_BATCH_LIMIT)
-                .into_iter()
-                .cloned()
-                .collect()
-        };
 
         if to_publish.is_empty() {
             return Ok(0);
         }
 
+        // How much of the chain is still missing beyond this capped pass, so a
+        // deep ledger's multi-pass progress is visible in the logs.
+        let total_missing = local_len.saturating_sub(relay_present.len());
+        let remaining_after = total_missing.saturating_sub(to_publish.len());
         tracing::info!(
-            "heal: ledger {}… relay holds {} update(s), local history has more; \
-             re-publishing {} missing (oldest-first, cap {})",
+            "heal: ledger {}… relay holds {} of {} update(s) (source={}); \
+             re-publishing {} missing this pass (oldest-first, cap {}); {} remaining after",
             &ledger_id[..16.min(ledger_id.len())],
             relay_present.len(),
+            local_len,
+            history_source,
             to_publish.len(),
             HEAL_BATCH_LIMIT,
+            remaining_after,
         );
 
         // Re-publish oldest-first with a FRESH created_at (None) so the events

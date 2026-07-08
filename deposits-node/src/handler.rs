@@ -1231,6 +1231,54 @@ impl DepositsHandler {
         best_seq.map(|s| (s, best_hash))
     }
 
+    /// Read the FULL persisted update chain for a ledger from its append-only
+    /// JSONL log on disk, in sequence order.
+    ///
+    /// The in-memory `Ledger::history` is truncated to the most recent
+    /// [`Self::history_retain`] entries (a RAM optimization). The JSONL on disk,
+    /// however, holds the entire chain — including the genesis `LedgerOpen`
+    /// (seq 0) and the early `QuorumBegin`. Callers that need the whole chain
+    /// (e.g. ledger healing, which must re-publish the old span the relay
+    /// dropped) read from here rather than from the truncated `Vec`.
+    ///
+    /// Returns the updates de-duplicated by `content_hash` (a compacted log may
+    /// legitimately contain the same update in both a State-snapshot region and
+    /// a later append region) and sorted ascending by `sequence_number` so the
+    /// result is a clean, oldest-first chain. Returns `None` if the file is
+    /// missing or unreadable (so callers can fall back to in-memory history);
+    /// returns `Some(empty)` only if the file exists but has no `Update` rows.
+    pub fn read_persisted_history(&self, ledger_id: &str) -> Option<Vec<SignedLedgerUpdate>> {
+        Self::read_persisted_history_at(&self.data_dir, ledger_id)
+    }
+
+    /// Static core of [`Self::read_persisted_history`]: parse the ledger's
+    /// `{data_dir}/ledgers/{ledger_id}.jsonl` into a de-duplicated,
+    /// sequence-ordered chain. Split out so it can be unit-tested against a
+    /// temp dir without constructing a full [`DepositsHandler`].
+    pub fn read_persisted_history_at(
+        data_dir: &std::path::Path,
+        ledger_id: &str,
+    ) -> Option<Vec<SignedLedgerUpdate>> {
+        let ledger_file = data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let contents = fs::read_to_string(&ledger_file).ok()?;
+
+        let mut by_hash: HashMap<[u8; 32], SignedLedgerUpdate> = HashMap::new();
+        for line in contents.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(LedgerLogRow::Update(u)) = serde_json::from_str::<LedgerLogRow>(line) {
+                by_hash.entry(u.content_hash).or_insert(u);
+            }
+        }
+
+        let mut updates: Vec<SignedLedgerUpdate> = by_hash.into_values().collect();
+        updates.sort_by_key(|u| u.sequence_number);
+        Some(updates)
+    }
+
     /// Insert a signed ledger update into the event store.
     /// Returns true if the event was new (not a duplicate).
     pub fn insert_event(&self, update: &SignedLedgerUpdate) -> bool {
@@ -1319,11 +1367,11 @@ impl DepositsHandler {
                 ledger_id,
                 &ledger,
                 &self.data_dir,
-                Some(Self::HISTORY_RETAIN),
+                Some(Self::history_retain()),
             );
             drop(ledger);
 
-            let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+            let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
 
             // Re-lock to update counts after I/O
             self.persisted_update_counts
@@ -1339,7 +1387,7 @@ impl DepositsHandler {
             if total_elapsed.as_millis() > 1 {
                 tracing::info!(
                     "[PROFILE] persist_ledger_to_disk: {}/{} entries, total={:?}, mode=full_write",
-                    final_len.min(Self::HISTORY_RETAIN),
+                    final_len.min(Self::history_retain()),
                     history_len,
                     total_elapsed
                 );
@@ -1442,12 +1490,12 @@ impl DepositsHandler {
                 ledger_id,
                 &ledger,
                 &self.data_dir,
-                Some(Self::HISTORY_RETAIN),
+                Some(Self::history_retain()),
             );
             ledger.history.len()
         };
 
-        let final_len = Self::truncate_history(&ledger_arc, Self::HISTORY_RETAIN);
+        let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
 
         self.persisted_update_counts
             .lock()
@@ -1473,7 +1521,7 @@ impl DepositsHandler {
 
         tracing::info!(
             "[PROFILE] compact_ledger: {}/{} entries, total={:?}",
-            final_len.min(Self::HISTORY_RETAIN),
+            final_len.min(Self::history_retain()),
             history_len,
             t0.elapsed()
         );
@@ -1498,7 +1546,25 @@ impl DepositsHandler {
     /// Maximum history entries to retain on disk and in memory during compaction.
     /// State snapshot captures all balances/deposits; history only needed for
     /// chain continuity and recent audit trail.
+    ///
+    /// PROD DEFAULT: 2000. The `DEPOSITS_HISTORY_RETAIN` env var overrides it
+    /// ONLY for tests — it lets a regtest reproduce the deep/truncated-ledger
+    /// case (in-memory history drops seq 0 / QuorumBegin while the full chain
+    /// stays on disk) without building 2000+ real updates. Never set it in
+    /// production; the default is what ships.
     const HISTORY_RETAIN: usize = 2000;
+
+    /// Effective in-memory/on-disk history retention. Reads the
+    /// `DEPOSITS_HISTORY_RETAIN` test override, falling back to the prod
+    /// default [`Self::HISTORY_RETAIN`] (2000). A value of 0 or an unparseable
+    /// value falls back to the default (retain must be >= 1 for chain continuity).
+    fn history_retain() -> usize {
+        std::env::var("DEPOSITS_HISTORY_RETAIN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(Self::HISTORY_RETAIN)
+    }
 
     fn save_ledger_to_disk_streaming(
         ledger_id: &str,
@@ -2318,6 +2384,124 @@ mod tests {
                 "created_at should survive restart so re-broadcast reuses it"
             );
         }
+    }
+
+    /// Deep-ledger healing: the heal must diff+republish against the FULL
+    /// on-disk chain, not the truncated in-memory `Vec`. This reproduces the
+    /// `57f60e1d` failure shape in miniature — an in-memory history truncated
+    /// past its genesis `LedgerOpen` (seq 0) and early `QuorumBegin` (seq 4),
+    /// while the JSONL on disk still holds the whole chain — and asserts:
+    ///   1. in-memory history really is truncated (seq 0/4 gone),
+    ///   2. `read_persisted_history` returns the full chain (seq 0/4 present),
+    ///   3. the heal's missing-set, computed from the DISK history against an
+    ///      empty relay, INCLUDES the old genesis+QuorumBegin span,
+    ///   4. contrast: the same diff over the truncated IN-MEMORY history omits
+    ///      them — i.e. sourcing from disk is exactly what restores them.
+    #[test]
+    fn heal_sources_full_on_disk_history_including_genesis_and_quorumbegin() {
+        use crate::node::heal::{missing_updates, HEAL_BATCH_LIMIT};
+
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+
+        let (handler, _rx) =
+            DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
+        let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+
+        // Build a 10-deep chain. seq 0 stands in for the genesis LedgerOpen,
+        // seq 4 for the early QuorumBegin; both use distinct content_hash tags.
+        const CHAIN_LEN: u64 = 10;
+        const GENESIS_TAG: u8 = 0x00; // seq 0 → LedgerOpen
+        const QUORUM_TAG: u8 = 0x04; // seq 4 → QuorumBegin
+        for seq in 0..CHAIN_LEN {
+            let tag = seq as u8; // content_hash = [seq; 32], distinct per update
+            let u = mk_update(op_pk, seq, tag);
+            arc.write().unwrap().history.push(u.clone());
+            handler.insert_event(&u);
+        }
+        // Persist the FULL chain to disk (first save writes State + history).
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+
+        // Simulate the RAM truncation that a deep ledger undergoes: keep only
+        // the most-recent 3 in memory, dropping seq 0..=6 (genesis + QuorumBegin).
+        let retain = 3usize;
+        let in_mem_len = DepositsHandler::truncate_history(&arc, retain);
+        assert_eq!(in_mem_len, retain);
+
+        // (1) In-memory history is truncated past genesis/QuorumBegin.
+        let in_mem: Vec<SignedLedgerUpdate> = arc.read().unwrap().history.clone();
+        let in_mem_seqs: Vec<u64> = in_mem.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(in_mem_seqs, vec![7, 8, 9], "RAM keeps only the recent tail");
+        assert!(
+            !in_mem.iter().any(|u| u.content_hash[0] == GENESIS_TAG),
+            "genesis LedgerOpen dropped from RAM"
+        );
+        assert!(
+            !in_mem.iter().any(|u| u.content_hash[0] == QUORUM_TAG),
+            "early QuorumBegin dropped from RAM"
+        );
+
+        // (2) The JSONL on disk still has the whole chain, oldest-first.
+        let disk = handler
+            .read_persisted_history(&ledger_id)
+            .expect("JSONL exists");
+        let disk_seqs: Vec<u64> = disk.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(
+            disk_seqs,
+            (0..CHAIN_LEN).collect::<Vec<_>>(),
+            "disk holds the full chain in sequence order"
+        );
+        assert!(disk.iter().any(|u| u.content_hash[0] == GENESIS_TAG));
+        assert!(disk.iter().any(|u| u.content_hash[0] == QUORUM_TAG));
+
+        // (3) Heal diff over the DISK history against an EMPTY relay (post-wipe):
+        // the missing set is the whole chain, INCLUDING genesis + QuorumBegin.
+        let empty_relay: std::collections::HashSet<[u8; 32]> =
+            std::collections::HashSet::new();
+        let missing_from_disk = missing_updates(&empty_relay, &disk, HEAL_BATCH_LIMIT);
+        let missing_disk_seqs: Vec<u64> =
+            missing_from_disk.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(
+            missing_disk_seqs,
+            (0..CHAIN_LEN).collect::<Vec<_>>(),
+            "disk-sourced heal re-publishes the entire chain oldest-first"
+        );
+        assert!(
+            missing_from_disk
+                .iter()
+                .any(|u| u.content_hash[0] == GENESIS_TAG),
+            "disk-sourced heal INCLUDES genesis LedgerOpen (seq 0)"
+        );
+        assert!(
+            missing_from_disk
+                .iter()
+                .any(|u| u.content_hash[0] == QUORUM_TAG),
+            "disk-sourced heal INCLUDES early QuorumBegin (seq 4)"
+        );
+
+        // (4) Contrast — the pre-fix behavior. The same diff over the truncated
+        // IN-MEMORY history can NEVER surface the old span: it isn't there.
+        let missing_from_mem = missing_updates(&empty_relay, &in_mem, HEAL_BATCH_LIMIT);
+        assert!(
+            !missing_from_mem
+                .iter()
+                .any(|u| u.content_hash[0] == GENESIS_TAG),
+            "in-memory-sourced heal MISSES genesis — the bug this fix closes"
+        );
+        assert!(
+            !missing_from_mem
+                .iter()
+                .any(|u| u.content_hash[0] == QUORUM_TAG),
+            "in-memory-sourced heal MISSES QuorumBegin — the bug this fix closes"
+        );
     }
 
     #[test]
