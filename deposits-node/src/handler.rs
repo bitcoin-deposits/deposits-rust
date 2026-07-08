@@ -1462,12 +1462,30 @@ impl DepositsHandler {
         Ok(())
     }
 
-    /// Returns ledger IDs that need compaction (>= 1000 appends since last compaction).
+    /// Full-compaction threshold (appends since last compaction). PROD DEFAULT:
+    /// 1000. `DEPOSITS_COMPACT_THRESHOLD` overrides it ONLY for tests — paired
+    /// with `DEPOSITS_HISTORY_RETAIN`, it lets a regtest reproduce the real
+    /// deep-ledger condition (compaction fires → in-memory history truncated
+    /// past seq 0 / QuorumBegin while the full chain stays on disk) on a shallow
+    /// ledger, instead of having to build 1000+ real updates. Never set in prod.
+    const COMPACT_THRESHOLD: usize = 1000;
+
+    fn compact_threshold() -> usize {
+        std::env::var("DEPOSITS_COMPACT_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&n| n >= 1)
+            .unwrap_or(Self::COMPACT_THRESHOLD)
+    }
+
+    /// Returns ledger IDs that need compaction (>= [`Self::compact_threshold`]
+    /// appends since last compaction; prod default 1000).
     pub fn ledgers_needing_compaction(&self) -> Vec<String> {
+        let threshold = Self::compact_threshold();
         let compaction = self.appends_since_compaction.lock().unwrap();
         compaction
             .iter()
-            .filter(|(_, &count)| count >= 1000)
+            .filter(|(_, &count)| count >= threshold)
             .map(|(id, _)| id.clone())
             .collect()
     }
