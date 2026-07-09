@@ -294,6 +294,20 @@ Field IDs 106 (entropy_block_hash) and 116 (entropy_block_height) were used by a
 | 272 | target_ledger_id | 32 | DeliveryEmbed |
 | 274 | target_operator | 33 | DeliveryEmbed |
 
+#### Balance commitments (odd tags → optional)
+
+| Type | Name | Size | Used by |
+|---|---|---|---|
+| 223 | balance_after | 8 | Every balance-touching op (see §Balance Commitments) — post-op `balance` of the op's primary deposit |
+| 225 | locked_after | 8 | Same ops as 223 — post-op `locked_balance` of the op's primary deposit |
+| 227 | dest_balance_after | 8 | TransferComplete — post-op `balance` of the destination deposit |
+| 229 | dest_locked_after | 8 | TransferComplete — post-op `locked_balance` of the destination deposit |
+
+All four are odd tags: unknown implementations skip them, and their absence
+leaves the operation byte-identical to the pre-commitment encoding, so existing
+signatures and hashes are unaffected. Semantics, the conformance rule, and the
+`balance-commit-v4` activation gate are specified in §Balance Commitments below.
+
 ### Nested TLV: FeeStructure
 
 | Type | Name | Size |
@@ -331,6 +345,122 @@ Each inner op is encoded as a standalone TLV-LedgerOperation; the outer Batch's 
 **Cosignature semantics.** Batched updates carry exactly one set of cosignatures over the outer signed update (which encodes the Batch op in `message`). Cosigners validate by replaying the batch transactionally; on success they sign the same single SignedLedgerUpdate. This is the whole point — N operations cost one cosignature round.
 
 **When to batch.** Agent commerce workloads where one wallet performs many micro-operations (e.g. a settlement service running hundreds of transfers per minute) benefit most. Single-operation updates remain valid and are still the right choice for high-value or one-shot operations where atomic-across-N is irrelevant.
+
+## Balance Commitments (balance-commit-v4)
+
+### Motivation
+
+Every balance-moving operation is a *relative* delta (`amount`). The only way
+to learn a deposit's balance is to replay the entire chain from genesis into
+ledger state. Two consequences:
+
+1. **Catastrophic-recovery opacity.** If the early chain becomes unavailable
+   (relay loss, disk loss during a dispute), the surviving suffix of cosigned
+   updates cannot answer "what does this deposit hold, and how much of it is
+   locked against which in-flight payments?" — precisely the questions a
+   recovery custodian must answer.
+2. **Expensive reads.** Auditors, explorers, and fraud verifiers all pay a
+   full replay for a single balance.
+
+Balance commitments make every balance-touching update carry the operator's
+signed, quorum-cosigned declaration of the resulting absolute state, so any
+update is self-describing and any chain suffix carries usable balances.
+
+### Semantics
+
+A **balance-touching operation** is any operation that mutates a deposit's
+`(balance, locked_balance)` pair:
+
+| Operation | primary deposit (tags 223/225) | destination (tags 227/229) |
+|---|---|---|
+| DepositOpen | the opened deposit (0, 0 today) | — |
+| DepositClose | the closed deposit (0, 0 after drain) | — |
+| FeeCollect | `deposit_id` | — |
+| InvoiceCredit / OnchainCredit | `deposit_id` | — |
+| InvoiceLock / OnchainLock | `deposit_id` | — |
+| InvoiceFail / OnchainFail | `deposit_id` | — |
+| InvoiceFulfill / OnchainFulfill | `deposit_id` | — |
+| TransferLock | `source_deposit_id` | — |
+| TransferFail | source of the pending `transfer_id` | — |
+| TransferComplete | `source_deposit_id` | `destination_deposit_id` |
+
+`balance_after` / `locked_after` (and the `dest_*` pair where applicable) are
+the deposit's `balance` and `locked_balance` in millisatoshis **after** the
+operation is applied. The pair MUST always appear together: a single update
+then states the deposit's complete fund state, which is the recovery property
+this section exists for. Operations that do not touch a pair (DepositKeyRotate,
+FeeChange, quorum/dispute/delivery ops) carry no commitment fields.
+
+Inside a `Batch`, commitments ride the inner operations and are evaluated
+sequentially against the transactional replay: each inner op's declared pair is
+the state immediately after that inner op.
+
+**Locking clarity.** For lock-class operations the triple
+(`amount`, `balance_after`, `locked_after`) is deliberately redundant: it
+states "this deposit holds X, of which Y is now locked, Z of that for this
+payment" in one signed artifact. Combined with the fulfill/fail commitment
+that later resolves the lock, an observer can track every in-flight
+obligation's lifecycle without state reconstruction.
+
+### Not part of the depositor authorization
+
+Commitment fields are the **operator's assertion, verified by cosigners**.
+They are NOT bound into the dep-16 operation preimage (DEP-16/DEP-17): the
+depositor continues to sign exactly the fields they sign today. Binding a
+racing quantity (balance changes under fee assessment and concurrent ops
+between wallet-sign time and apply time) into the depositor signature would
+couple authorization to state the wallet cannot know; verification belongs to
+the parties that replay state — the quorum.
+
+### Conformance
+
+Two rules, split by ruleset (DEP-18):
+
+- **Intrinsic (every ruleset, including `legacy`):** if commitment fields are
+  present on an operation, they MUST equal the replayed post-state. A cosigner
+  applies the operation and compares; any mismatch is
+  `ConformanceViolation::BalanceCommitmentMismatch` and the update MUST NOT be
+  cosigned. This is safe to enforce unconditionally: pre-commitment updates
+  contain no such fields (odd tags), so no historical update can retroactively
+  fault.
+- **Under `balance-commit-v4`:** every balance-touching operation MUST carry
+  its commitment pair(s). A missing pair is
+  `ConformanceViolation::MissingBalanceCommitment`. Legacy and `fee-cap-v3`
+  ledgers accept commitment-less operations indefinitely.
+
+A cosigned update whose commitments are wrong is fraud under the existing
+DEP-06 machinery — `NonConformingCosignature` (the quorum signed a
+non-conforming update) or `NonConformingUpdate` (operator-only signature) —
+and grounds confiscation. No new fraud-proof type is required.
+
+### Ruleset
+
+`balance-commit-v4` is a named ruleset in the `cltv-offset-v2`
+reserves-cascade family (no on-chain script change): its rules are
+`fee-cap-v3`'s plus the commitment requirement above. Because the family is
+unchanged, a fleet activates it with per-ledger `QuorumUpgrade` sweeps or at
+the next `QuorumBegin.protocol_version` — no reserves rotation. Members that
+do not advertise `balance-commit-v4` in `supported_rulesets` block the upgrade
+per DEP-18 admission.
+
+### Recovery guarantee: bounded staleness, not suffix-sufficiency
+
+Losing genesis is still not fully covered. A deposit's balance is only as
+fresh as its most recent balance-touching update, and an **idle** deposit has
+none. What bounds the gap is fee collection: `FeeCollect` touches every
+fee-bearing deposit on its `frequency_blocks` cadence (DEP-07) and carries a
+commitment, so:
+
+- a surviving suffix spanning at least one full fee-assessment period contains
+  a committed balance for every deposit on a fee schedule;
+- deposits with no fee cadence have unbounded staleness. Operators SHOULD give
+  every deposit a `frequency_blocks` even at zero fee rates — a zero-amount
+  `FeeCollect` after the window is conforming (`0 ≤` any assessment cap) and
+  serves as a balance heartbeat.
+
+This changes the catastrophic posture from "obligations unknowable without
+genesis" to "obligations readable from the recent cosigned tail, at worst one
+fee period stale, plus any in-flight locks visible in the same tail."
 
 ## Related DEPs
 
