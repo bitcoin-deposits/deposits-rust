@@ -2231,6 +2231,62 @@ impl Node {
         None
     }
 
+    /// Self-verifying inline evidence for a `NonConformingUpdate` confiscation
+    /// — the operator-signed, uncosigned counterpart to
+    /// [`fetch_non_conforming_cosig_inline_evidence`]. The fault is an update
+    /// the *original operator* BIP-340-signed that fails to chain onto the
+    /// canonical tip (wrong `previous_hash`) or carries a bad `content_hash`.
+    /// This is what `recovery start`'s hash-chain scan detects and disputes via
+    /// kind:9103; here the cosigner independently re-derives the fault from the
+    /// relay's durable copy of the bad update so the confiscation is grounded
+    /// without a separately-broadcast kind:9101. No embedding needed — the bad
+    /// update is already on the relay.
+    pub(crate) async fn fetch_non_conforming_update_inline_evidence(
+        &self,
+        ledger_id: &str,
+    ) -> Option<deposits_core::fraud::FraudProofType> {
+        use deposits_core::fraud::{FraudEvidence, FraudProof, FraudProofType};
+        use deposits_core::SignedLedgerUpdate;
+        use deposits_core::TlvEncode;
+
+        let mut updates: Vec<SignedLedgerUpdate> =
+            self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        if updates.is_empty() {
+            return None;
+        }
+        updates.sort_by_key(|u| u.sequence_number);
+
+        // NonConformingUpdate is the *original operator's* unilateral fault
+        // (fork-branch updates from disputants are signed by a different key
+        // and are excluded by the operator_id binding in the verifier).
+        let original_operator = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)?;
+        let accused = hex::encode(original_operator.serialize());
+
+        // Newest-first: a broadcast orphan is typically the operator's latest
+        // event. The first update that verifies grounds the confiscation.
+        for u in updates.iter().rev() {
+            if u.operator_id != original_operator {
+                continue;
+            }
+            let proof = FraudProof {
+                proof_type: FraudProofType::NonConformingUpdate,
+                accused: accused.clone(),
+                ledger_id: ledger_id.to_string(),
+                evidence: FraudEvidence::NonConformingUpdate {
+                    fault_sequence: u.sequence_number,
+                    fault_update_hex: hex::encode(u.tlv_encode()),
+                },
+            };
+            if deposits_core::fraud::verify_non_conforming_update(&proof, &updates).is_ok() {
+                return Some(FraudProofType::NonConformingUpdate);
+            }
+        }
+        None
+    }
+
     /// Auto-initiate confiscation when all participants are armed
     ///
     /// For each ledger where we're armed but confiscation hasn't happened yet,

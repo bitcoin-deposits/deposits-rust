@@ -331,6 +331,28 @@ pub enum FraudEvidence {
         /// replayed state to confirm non-conformance.
         fault_update_hex: String,
     },
+
+    /// The operator BIP-340-signed a ledger update that is structurally
+    /// non-conforming on their OWN ledger — it does not chain onto the
+    /// canonical tip (wrong `previous_hash`) or its `content_hash` is not
+    /// the correct `compute_hash()`. Unlike `NonConformingCosignature`,
+    /// no cosignatures are required: an operator-signed update that breaks
+    /// the hash chain is unilateral operator fraud (only the operator's key
+    /// can produce the signature, and an honest operator never signs an
+    /// update that doesn't extend its canonical chain). This is the fault
+    /// that `recovery start`'s hash-chain scan detects; the durable bad
+    /// update on the relay is self-verifying evidence.
+    NonConformingUpdate {
+        /// Sequence number of the bad update on the accused's ledger.
+        /// Redundancy check against the inline update's `sequence_number`.
+        fault_sequence: u64,
+        /// The non-conforming `SignedLedgerUpdate` (TLV bytes, lowercase
+        /// hex). Verifier checks the operator's BIP-340 signature, then
+        /// reconstructs the accused operator's canonical chain from the
+        /// supplied history to confirm the update neither chains onto its
+        /// predecessor nor carries a valid `content_hash`.
+        fault_update_hex: String,
+    },
 }
 
 impl FraudProof {
@@ -1166,6 +1188,173 @@ pub fn verify_non_conforming_cosignature(
     }
 }
 
+/// Verify a `NonConformingUpdate` claim.
+///
+/// The accusation: the accused operator BIP-340-signed an update on their
+/// own ledger that is structurally non-conforming — it does not chain onto
+/// the canonical tip (`previous_hash` mismatch) or its `content_hash` is not
+/// the correct `compute_hash()`. Because only the operator's key can produce
+/// the signature, and an honest operator's daemon always signs onto its
+/// current tip with a correct hash, such an update is unilateral operator
+/// fraud. This is what `recovery start`'s hash-chain scan surfaces.
+///
+/// `history` is the accused ledger's updates (the caller supplies the full
+/// relay history). The verifier reconstructs the accused operator's canonical
+/// chain from genesis, following `chain_hash → previous_hash` links, then
+/// confirms the inline fault update fails to extend that chain.
+///
+/// Fails closed: if the fault update actually conforms (valid `content_hash`
+/// AND `previous_hash` == the reconstructed predecessor's `chain_hash`), or
+/// the canonical predecessor at `fault_sequence - 1` can't be established from
+/// `history`, it returns `Err` — the proof is not demonstrated.
+///
+/// A same-sequence fork whose `previous_hash` DOES match the canonical
+/// predecessor is deliberately NOT caught here — that is `Equivocation`
+/// (two operator-signed updates at one sequence), which has its own verifier.
+pub fn verify_non_conforming_update(
+    proof: &FraudProof,
+    history: &[crate::types::SignedLedgerUpdate],
+) -> Result<(), String> {
+    use crate::tlv::TlvDecode;
+
+    let FraudEvidence::NonConformingUpdate {
+        fault_sequence,
+        fault_update_hex,
+    } = &proof.evidence
+    else {
+        return Err("verify_non_conforming_update: wrong evidence type".into());
+    };
+
+    // (1) Decode the inline fault update.
+    let bytes = hex::decode(fault_update_hex)
+        .map_err(|e| format!("fault_update hex decode: {}", e))?;
+    let fault = crate::types::SignedLedgerUpdate::tlv_decode(&bytes)
+        .map_err(|e| format!("fault_update TLV decode: {:?}", e))?;
+
+    // (2) Redundancy: inline seq matches the evidence seq.
+    if fault.sequence_number != *fault_sequence {
+        return Err(format!(
+            "evidence.fault_sequence {} ≠ fault update's sequence_number {} \
+             — redundancy check failed (encoding-corrupted or forged)",
+            fault_sequence, fault.sequence_number
+        ));
+    }
+
+    // (3) The fault update is on the proof's ledger.
+    let outer_ledger_bytes =
+        hex::decode(&proof.ledger_id).map_err(|e| format!("outer ledger_id hex: {}", e))?;
+    if outer_ledger_bytes.len() != 32 || outer_ledger_bytes[..] != fault.ledger_id[..] {
+        return Err(format!(
+            "outer ledger_id {} ≠ fault update's ledger_id {}",
+            &proof.ledger_id[..16.min(proof.ledger_id.len())],
+            hex::encode(&fault.ledger_id[..8])
+        ));
+    }
+
+    // (4) The accused is the operator that signed the fault update. Only
+    //     the accused's key could have produced the signature verified at
+    //     (5), so this binds the fraud to them (no impersonation).
+    let accused_bytes = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
+    if accused_bytes != fault.operator_id.serialize() {
+        return Err(format!(
+            "outer accused {} ≠ fault update's operator_id {} — impersonation check",
+            &proof.accused[..16.min(proof.accused.len())],
+            hex::encode(&fault.operator_id.serialize()[..8])
+        ));
+    }
+
+    // (5) The operator actually signed this update. Without it, anyone could
+    //     fabricate "evidence" by writing an arbitrary non-conforming update
+    //     and stuffing in zero bytes for operator_signature.
+    fault
+        .verify_operator_signature()
+        .map_err(|e| format!("fault update signature verification: {}", e))?;
+
+    // (6) Defensive: content_hash must be the correct compute_hash(). In
+    //     practice the TLV wire format does NOT carry content_hash (it is
+    //     re-derived on decode — see SignedLedgerUpdate::tlv_decode), so any
+    //     update that travelled the relay already has content_hash ==
+    //     compute_hash(); this branch only bites an in-memory update with a
+    //     hand-corrupted hash. The load-bearing structural signal is the
+    //     previous_hash link checked at (8).
+    if fault.content_hash != fault.compute_hash() {
+        return Ok(());
+    }
+
+    // (7) Establish the canonical predecessor at fault_sequence - 1 by
+    //     reconstructing the accused operator's chain from genesis. seq 0
+    //     links to the all-zero previous_hash.
+    if fault.sequence_number == 0 {
+        // A seq-0 open must link to [0; 32]; anything else is non-conforming.
+        return if fault.previous_hash == [0u8; 32] {
+            Err("fault update at seq 0 chains onto the zero hash and its \
+                 content_hash is valid — conforming, proof not demonstrated"
+                .into())
+        } else {
+            Ok(())
+        };
+    }
+
+    // Reconstruct the accused operator's canonical chain, following hash
+    // links forward from genesis. The fault update (wrong previous_hash)
+    // is never adopted into the chain, so this yields the honest predecessor.
+    let genesis = history
+        .iter()
+        .find(|u| u.sequence_number == 0 && u.operator_id == fault.operator_id)
+        .ok_or_else(|| {
+            "accused operator's genesis (seq 0) not in supplied history — \
+             cannot establish canonical chain (fail closed)"
+                .to_string()
+        })?;
+    let mut canonical: Vec<&crate::types::SignedLedgerUpdate> = vec![genesis];
+    loop {
+        let tip = *canonical.last().unwrap();
+        let expected_prev = tip.chain_hash();
+        let next = history.iter().find(|u| {
+            u.sequence_number == tip.sequence_number + 1
+                && u.operator_id == fault.operator_id
+                && u.previous_hash == expected_prev
+                && u.content_hash == u.compute_hash()
+        });
+        match next {
+            Some(n) => canonical.push(n),
+            None => break,
+        }
+    }
+
+    // Predecessor at fault_sequence - 1 must exist on the canonical chain to
+    // make a positive judgement; absence is inconclusive (fail closed).
+    let pred_idx = (fault.sequence_number - 1) as usize;
+    let Some(predecessor) = canonical.get(pred_idx) else {
+        return Err(format!(
+            "canonical predecessor at seq {} not reconstructable from history \
+             (chain reaches seq {}) — inconclusive, fail closed",
+            fault.sequence_number - 1,
+            canonical.len().saturating_sub(1)
+        ));
+    };
+    if predecessor.sequence_number != fault.sequence_number - 1 {
+        return Err(
+            "reconstructed canonical chain has a gap before the fault sequence \
+             — inconclusive, fail closed"
+                .into(),
+        );
+    }
+
+    // (8) The verdict: the operator-signed update does not chain onto the
+    //     canonical predecessor. An honest update at this sequence would
+    //     carry previous_hash == predecessor.chain_hash().
+    if fault.previous_hash != predecessor.chain_hash() {
+        Ok(())
+    } else {
+        Err(format!(
+            "fault update at seq {} chains onto the canonical predecessor and \
+             its content_hash is valid — conforming, proof not demonstrated",
+            fault.sequence_number
+        ))
+    }
+}
+
 /// Verify a `WinnerCollateralDeviation` claim.
 ///
 /// The accusation: the lottery winner broadcast a claim TX whose shape
@@ -1687,19 +1876,19 @@ pub fn verify_fraud_broadcast(
             verify_uncredited_onchain(proof, &accused_history, block_oracle)?;
         }
         FraudProofType::NonConformingUpdate => {
-            // FAIL CLOSED. This legacy variant has no implemented verifier, and
-            // an accept-by-default here is a confiscation hole: callers that
-            // ground a confiscation by running verify_fraud_broadcast (the
-            // cosign/resolution path) would treat a bogus NonConformingUpdate
-            // proof as verified and act on it. The superseding framing is
-            // `NonConformingCosignature` (keys the fault to whoever signed the
-            // bad update, with a real replay-based verifier). Reject until/unless
-            // a genuine verifier is implemented for this variant.
-            return Err(
-                "NonConformingUpdate has no verifier — use NonConformingCosignature; \
-                 rejecting (fail-closed)"
-                    .to_string(),
-            );
+            // The accused operator BIP-340-signed an update on their own ledger
+            // that doesn't chain onto the canonical tip (or carries a bad
+            // content_hash). `verify_non_conforming_update` re-derives the
+            // canonical chain from the accused's history and confirms the inline
+            // fault update fails to extend it. Fails closed if the update
+            // actually conforms or the predecessor can't be established.
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_non_conforming_update(proof, &accused_history)?;
         }
         FraudProofType::QuorumExpired => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
@@ -1940,6 +2129,13 @@ impl FraudEvidence {
                 out.extend_from_slice(fault_ledger_id.as_bytes());
                 out.extend_from_slice(&fault_sequence.to_le_bytes());
                 out.extend_from_slice(&governing_quorumbegin_seq.to_le_bytes());
+                out.extend_from_slice(fault_update_hex.as_bytes());
+            }
+            Self::NonConformingUpdate {
+                fault_sequence,
+                fault_update_hex,
+            } => {
+                out.extend_from_slice(&fault_sequence.to_le_bytes());
                 out.extend_from_slice(fault_update_hex.as_bytes());
             }
         }

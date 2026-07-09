@@ -712,48 +712,35 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let message_type: u16 = 0x0001;
             let new_seq = current_seq + 1;
 
-            let computed_hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&new_seq.to_le_bytes());
-                hasher.update(&wrong_prev_hash);
-                hasher.update(&dummy_message);
-                let result = hasher.finalize();
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&result);
-                hash
-            };
-
-            let signing_data = {
-                let mut data = Vec::new();
-                data.extend_from_slice(&dummy_message);
-                data.extend_from_slice(&message_type.to_le_bytes());
-                data.extend_from_slice(&new_seq.to_le_bytes());
-                data.extend_from_slice(&wrong_prev_hash);
-                data.extend_from_slice(&computed_hash);
-                data
-            };
-
-            let msg_hash = sha256_hash(&signing_data);
-            let message = Message::from_digest(msg_hash);
-            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
-            let operator_signature = sig.serialize();
-
-            SignedLedgerUpdate {
+            // Build the update with a WRONG previous_hash (the fraud) but an
+            // otherwise well-formed body: a valid content_hash and a REAL
+            // operator signature over the canonical v1 digest. A faithful
+            // malicious operator signs correctly with their own key — the
+            // fault is that the update doesn't chain onto the canonical tip.
+            // (The old bespoke signing digest matched no format the protocol
+            // accepts, so verify_operator_signature rejected it and the
+            // NonConformingUpdate confiscation verifier could never ground.)
+            let mut update = SignedLedgerUpdate {
                 message: dummy_message,
                 message_type,
                 operator_id: node.node_id,
                 ledger_id: ledger.ledger_id(),
                 sequence_number: new_seq,
                 previous_hash: wrong_prev_hash,
-                content_hash: computed_hash,
+                content_hash: [0u8; 32],
                 block_height: 0,
                 block_hash: [0u8; 32],
                 cosign_signature: [0u8; 64],
-                operator_signature,
+                operator_signature: [0u8; 64],
                 cosigner_pubkey: None,
                 member_ledger_hash: None,
                 cosignatures: Vec::new(),
-            }
+            };
+            update.content_hash = update.compute_hash();
+            let digest = update.operator_sign_digest_v1();
+            let sig = secp.sign_schnorr(&Message::from_digest(digest), &secret_key.keypair(&secp));
+            update.operator_signature = sig.serialize();
+            update
         }
 
         "skip-sequence" => {
@@ -864,7 +851,13 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
         .await?;
 
     let event_id = transport.broadcast_ledger_update(&invalid_update).await?;
-
+    // Give the relay pool time to flush before tearing down the WebSocket.
+    // `broadcast_ledger_update` returns when the EVENT is QUEUED, not when
+    // strfry has acknowledged it; disconnecting sub-millisecond later drops
+    // the forged update before the relay stores it — so `recovery start`
+    // and the confiscation-time inline-evidence fetch never see it. Same
+    // flush the fork-update path performs.
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     transport.disconnect().await;
 
     println!("Published invalid update!");

@@ -1691,14 +1691,21 @@ impl Node {
                     .await
                 {
                     Some(pt) => pt,
-                    None => self
+                    None => match self
                         .fetch_non_conforming_cosig_inline_evidence(&request.ledger_id)
                         .await
-                        .ok_or_else(|| {
-                            "no kind:9101 fraud broadcast, or fork-branch QuorumExpired / \
-                             equivocation / non-conforming-cosignature evidence for this ledger"
-                                .to_string()
-                        })?,
+                    {
+                        Some(pt) => pt,
+                        None => self
+                            .fetch_non_conforming_update_inline_evidence(&request.ledger_id)
+                            .await
+                            .ok_or_else(|| {
+                                "no kind:9101 fraud broadcast, or fork-branch QuorumExpired / \
+                                 equivocation / non-conforming-cosignature / \
+                                 non-conforming-update evidence for this ledger"
+                                    .to_string()
+                            })?,
+                    },
                 },
             },
         };
