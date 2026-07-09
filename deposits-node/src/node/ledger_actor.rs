@@ -378,6 +378,11 @@ impl LedgerActor {
         //    any .await so the cosig round doesn't block readers.
         let (mut staged, quorum_active, members) = {
             let ledger = self.ledger.read().unwrap();
+            // Fill DEP-02 balance commitments before staging so the
+            // operator declares the post-op (balance, locked_balance) it
+            // computes; cosigners recompute and compare (verify-when-present,
+            // intrinsic to every ruleset). Safe unconditionally per DEP-18.
+            let operation = ledger.state.fill_balance_commitments(operation);
             // Speculative-apply conformance during stage uses the same
             // chain_tip the StagedUpdate carries — so descriptor
             // `after(N)` checks on the operator side match what

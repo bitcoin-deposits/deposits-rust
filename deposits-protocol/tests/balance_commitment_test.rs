@@ -203,3 +203,78 @@ fn lock_commitment_tracks_locked_balance() {
     let (_n, v2) = funded.apply_with_verifier(&bad_lock, &AllowAll, 0).unwrap();
     assert!(has_mismatch(&v2), "a lock that under-declares locked_balance must fault");
 }
+
+#[test]
+fn fill_then_verify_roundtrips() {
+    // The operator's `fill_balance_commitments` must produce a commitment the
+    // cosigner's `check_conformance` accepts — for credit AND lock.
+    let state = open_deposit(&make_state(), "pk(aabbcc)");
+    let did = compute_deposit_id("pk(aabbcc)");
+
+    let filled_credit = state.fill_balance_commitments(credit(did, 500_000, None));
+    match &filled_credit {
+        LedgerOperation::InvoiceCredit { commitment, .. } => assert_eq!(
+            *commitment,
+            Some(BalanceCommitment { balance_after: 500_000, locked_after: 0 })
+        ),
+        _ => panic!("wrong op"),
+    }
+    let (funded, v) = state.apply_with_verifier(&filled_credit, &AllowAll, 0).unwrap();
+    assert!(!has_mismatch(&v), "filled credit must verify clean: {:?}", v);
+
+    let lock = LedgerOperation::InvoiceLock {
+        deposit_id: did,
+        amount: 100_000,
+        payment_id: [0xcd; 32],
+        sequence_number: 2,
+        nonce: 1,
+        expiry: u32::MAX,
+        timeout_height: None,
+        fee: None,
+        witness: Default::default(),
+        commitment: None,
+    };
+    let filled_lock = funded.fill_balance_commitments(lock);
+    match &filled_lock {
+        LedgerOperation::InvoiceLock { commitment, .. } => assert_eq!(
+            *commitment,
+            Some(BalanceCommitment { balance_after: 500_000, locked_after: 100_000 })
+        ),
+        _ => panic!("wrong op"),
+    }
+    let (_n, v2) = funded.apply_with_verifier(&filled_lock, &AllowAll, 0).unwrap();
+    assert!(!has_mismatch(&v2), "filled lock must verify clean: {:?}", v2);
+}
+
+#[test]
+fn fill_satisfies_v4_requirement() {
+    // On a balance-commit-v4 ledger, a filled op must NOT trip
+    // MissingBalanceCommitment.
+    let mut state = make_state();
+    state.active_ruleset_name = "balance-commit-v4".to_string();
+    let state = open_deposit(&state, "pk(aabbcc)");
+    let did = compute_deposit_id("pk(aabbcc)");
+    let filled = state.fill_balance_commitments(credit(did, 500_000, None));
+    let (_n, v) = state.apply_with_verifier(&filled, &AllowAll, 0).unwrap();
+    assert!(
+        !has_missing(&v) && !has_mismatch(&v),
+        "a filled op must satisfy balance-commit-v4 cleanly: {:?}",
+        v
+    );
+}
+
+#[test]
+fn fill_leaves_non_balance_ops_untouched() {
+    // DepositKeyRotate touches no (balance, locked) pair → returned unchanged.
+    let state = open_deposit(&make_state(), "pk(aabbcc)");
+    let did = compute_deposit_id("pk(aabbcc)");
+    let rotate = LedgerOperation::DepositKeyRotate {
+        deposit_id: did,
+        new_descriptor: "pk(ddeeff)".to_string(),
+        witness: Default::default(),
+        nonce: 1,
+        expiry: u32::MAX,
+    };
+    let out = state.fill_balance_commitments(rotate.clone());
+    assert_eq!(out, rotate, "non-balance-touching ops are returned unchanged");
+}

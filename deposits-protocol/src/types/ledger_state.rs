@@ -1015,6 +1015,85 @@ impl LedgerState {
         Ok((next, violations))
     }
 
+    /// Populate DEP-02 §Balance Commitments on `op` for the OPERATOR build path.
+    ///
+    /// Speculatively applies `op` to `self` and writes the resulting post-op
+    /// `(balance, locked_balance)` of the deposit(s) `op` touches into its
+    /// commitment field(s). This is the counterpart to the cosigner's
+    /// verify-when-present check in `check_conformance`: the operator declares
+    /// what it computes, the cosigner independently recomputes and compares —
+    /// so `fill` MUST agree with `check` by construction (both derive balances
+    /// from the same `apply`).
+    ///
+    /// Safe to call unconditionally under any ruleset (DEP-18): a correct
+    /// commitment is conforming everywhere, and `compute_hash` hashes the raw
+    /// message bytes, so a cosigner on older code re-derives the same
+    /// content_hash while simply skipping the odd tags. Emitting commitments
+    /// always means a later `QuorumUpgrade` to `balance-commit-v4` finds the
+    /// require-presence rule already satisfied.
+    ///
+    /// Ops that touch no deposit, or that fail to apply (the caller will
+    /// surface the same error at real commit time), are returned unchanged.
+    pub fn fill_balance_commitments(
+        &self,
+        mut op: crate::messages::LedgerOperation,
+    ) -> crate::messages::LedgerOperation {
+        use crate::messages::{BalanceCommitment, LedgerOperation as Op};
+
+        let next = match self.apply(&op) {
+            Ok(n) => n,
+            Err(_) => return op,
+        };
+        // Post-op pair for a deposit id; (0, 0) if the op removed it (close).
+        let pair = |id: &DepositId| -> BalanceCommitment {
+            let (balance_after, locked_after) = next
+                .deposits
+                .get(id)
+                .map(|d| (d.balance, d.locked_balance))
+                .unwrap_or((0, 0));
+            BalanceCommitment {
+                balance_after,
+                locked_after,
+            }
+        };
+        match &mut op {
+            Op::DepositOpen { deposit_id, commitment, .. }
+            | Op::DepositClose { deposit_id, commitment, .. }
+            | Op::FeeCollect { deposit_id, commitment, .. }
+            | Op::InvoiceCredit { deposit_id, commitment, .. }
+            | Op::InvoiceLock { deposit_id, commitment, .. }
+            | Op::InvoiceFail { deposit_id, commitment, .. }
+            | Op::InvoiceFulfill { deposit_id, commitment, .. }
+            | Op::OnchainCredit { deposit_id, commitment, .. }
+            | Op::OnchainLock { deposit_id, commitment, .. }
+            | Op::OnchainFail { deposit_id, commitment, .. }
+            | Op::OnchainFulfill { deposit_id, commitment, .. } => {
+                *commitment = Some(pair(deposit_id));
+            }
+            Op::TransferLock { source_deposit_id, commitment, .. } => {
+                *commitment = Some(pair(source_deposit_id));
+            }
+            Op::TransferFail { transfer_id, commitment, .. } => {
+                if let Some(pt) = self.pending_transfers.get(transfer_id) {
+                    *commitment = Some(pair(&pt.source_deposit_id));
+                }
+            }
+            Op::TransferComplete {
+                transfer_id,
+                commitment,
+                dest_commitment,
+                ..
+            } => {
+                if let Some(pt) = self.pending_transfers.get(transfer_id) {
+                    *commitment = Some(pair(&pt.source_deposit_id));
+                    *dest_commitment = Some(pair(&pt.destination_deposit_id));
+                }
+            }
+            _ => {}
+        }
+        op
+    }
+
     /// The canonical way to advance a `LedgerState`: verify that
     /// `update` carries the threshold of cryptographic blessings the
     /// protocol requires, then apply the embedded operation through
