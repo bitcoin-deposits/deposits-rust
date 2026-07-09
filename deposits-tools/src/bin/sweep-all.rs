@@ -4,12 +4,17 @@
 //! cosign coordination — assumes the operator holds every key in the
 //! quorum (typical when liquidating a test deployment).
 //!
-//! Directory layout expected:
+//! Directory layout expected (either form is accepted):
 //! ```text
-//! <root>/<name>/node/seed.hex
+//! <root>/<name>/node/seed.hex            # nested data_dir
 //! <root>/<name>/node/wallet/ledgers/<ledger_id>.jsonl
+//!   -- or --
+//! <root>/<name>/seed.hex                 # operator dir IS the data_dir
+//! <root>/<name>/wallet/ledgers/<ledger_id>.jsonl
 //! ```
-//! Each `<name>/node/` is a deposits-node `data_dir`. The tool loads every
+//! The second form is what `deposits-hub bootstrap` writes (and hence what a
+//! mainnet reap points `--root .../bootstrap-nodes` at). The data_dir is
+//! whichever directory holds `seed.hex`. The tool loads every
 //! seed.hex, derives the operator pubkey (m/86'/0'/0'/0/0), and builds a
 //! keyring `pubkey → seed`. Then for each operator's ledgers (where they
 //! are the operator, not a cosigner), it:
@@ -359,11 +364,27 @@ fn load_operators(root: &Path, network: Network) -> Result<Vec<OperatorSlot>, St
         if !path.is_dir() {
             continue;
         }
-        let node_dir = path.join("node");
-        let seed_path = node_dir.join("seed.hex");
-        if !seed_path.exists() {
+        // Two on-disk layouts hold a deposits-node data_dir:
+        //   (a) `<name>/node/seed.hex` — a `node/` subdir nests the data_dir
+        //       under the operator dir (the layout this tool's docs describe).
+        //   (b) `<name>/seed.hex`      — the operator dir IS the data_dir, no
+        //       `node/` nesting. This is what `deposits-hub bootstrap` writes
+        //       (bootstrap-nodes/nodeN/ is passed to the daemon verbatim as
+        //       --data-dir), and therefore what a mainnet reap of a
+        //       hub-bootstrapped cluster points `--root` at.
+        // Prefer (a); fall back to (b). `data_dir` must land on whichever
+        // directory actually holds `wallet/ledgers/` so the downstream jsonl
+        // scan resolves.
+        let nested = path.join("node");
+        let (node_dir, seed_path) = if nested.join("seed.hex").exists() {
+            let sp = nested.join("seed.hex");
+            (nested, sp)
+        } else if path.join("seed.hex").exists() {
+            let sp = path.join("seed.hex");
+            (path.clone(), sp)
+        } else {
             continue;
-        }
+        };
         let seed_hex = std::fs::read_to_string(&seed_path)
             .map_err(|e| format!("read {:?}: {}", seed_path, e))?;
         let seed_hex = seed_hex.trim();
@@ -1681,6 +1702,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Loading operators from {:?}...", args.root);
     let operators = load_operators(&args.root, args.network)?;
+    if operators.is_empty() {
+        // Fail LOUD. A misconfigured `--root` that finds no seeds must never
+        // look like a clean reap — exiting 0 here (the old behavior) would tell
+        // an operator "swept everything" while leaving 100% of funds behind.
+        return Err(format!(
+            "no operator seeds found under {:?} — refusing to exit success having \
+             swept nothing. Check --root: expected `<root>/<name>/seed.hex` \
+             (deposits-hub bootstrap layout) or `<root>/<name>/node/seed.hex`.",
+            args.root
+        )
+        .into());
+    }
     println!("Found {} operator seed(s):", operators.len());
     for op in &operators {
         println!(
