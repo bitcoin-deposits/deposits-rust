@@ -55,7 +55,7 @@ fn refund_refuses_when_reserves_utxo_is_funded() {
         }
     };
     let seed = op_seed(op_idx);
-    let op_name = format!("op{}", op_idx);
+    let op_name = op_name(op_idx);
     // Wait for the owning daemon to ingest its own QuorumBegin (race with
     // `setup.sh` returning).
     wait_for_quorum_begin(op_idx, &ledger_id, std::time::Duration::from_secs(30));

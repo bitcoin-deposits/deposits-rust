@@ -68,8 +68,9 @@ fn op_first_owned_ledger(i: usize) -> String {
 }
 
 /// Kill op-`i`'s daemon by its --name. Mirrors `kill_op0`'s shape.
+/// The hub cluster names daemons `node{i}`, so match `name node{i}`.
 fn kill_op(i: usize) {
-    let name = format!("name op{}", i);
+    let name = format!("name {}", op_name(i));
     let _ = Command::new("pkill").args(["-f", &name]).output();
     for _ in 0..20 {
         let still = Command::new("pgrep")
@@ -194,7 +195,7 @@ fn auto_quorum_refresh_consumes_candidate_to_replace_dead_member() {
     }
 
     // ── 5. Kill the victim daemon ──
-    eprintln!("[kill]  pkill -f name op{}", victim_idx);
+    eprintln!("[kill]  pkill -f name {}", op_name(victim_idx));
     kill_op(victim_idx);
 
     // ── 5b. Snapshot op0's CURRENT expiry (the settle phase pushed it

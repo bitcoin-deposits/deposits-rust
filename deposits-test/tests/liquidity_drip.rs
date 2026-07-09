@@ -73,7 +73,7 @@ fn drip_self_liquidity_opens_funds_and_drains() {
         .args(["--initial-sats", &initial_sats.to_string()])
         .args(["--decrement-sats", &decrement_sats.to_string()])
         .args(["--interval-sec", &interval_sec.to_string()])
-        .args(["--seed", OP0_SEED])
+        .args(["--seed", op0_seed()])
         .args(["--data-dir", op0_data_dir().to_str().unwrap()])
         .args(["--network", "regtest"])
         .output()
@@ -191,7 +191,7 @@ fn drip_interval_fuzz_jitters_tick_spacing() {
         .args(["--decrement-sats", &decrement_sats.to_string()])
         .args(["--interval-sec", &interval_sec.to_string()])
         .args(["--interval-fuzz-sec", &fuzz_sec.to_string()])
-        .args(["--seed", OP0_SEED])
+        .args(["--seed", op0_seed()])
         .args(["--data-dir", op0_data_dir().to_str().unwrap()])
         .args(["--network", "regtest"])
         .output()
@@ -347,7 +347,8 @@ fn ledger_deposits_total_msats(ledger_id: &str) -> u128 {
         return 0;
     };
     let token = token.trim();
-    let url = "http://127.0.0.1:8765/api/ledgers";
+    let url = format!("http://127.0.0.1:{}/api/ledgers", admin_port(0));
+    let url = url.as_str();
     let resp = Command::new("curl")
         .args(["-s", "-H", &format!("Authorization: Bearer {}", token), url])
         .output()

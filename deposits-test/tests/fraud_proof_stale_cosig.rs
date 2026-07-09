@@ -134,8 +134,8 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
             &hex::encode(stale_hash),
             &forge_block.to_string(),
         ])
-        .args(["--seed", OP0_SEED])
-        .args(["--name", "op0"])
+        .args(["--seed", op0_seed()])
+        .args(["--name", &op_name(0)])
         .args(["--network", "regtest"])
         .args(["--data-dir", op0_data_dir().to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])

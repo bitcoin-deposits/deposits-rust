@@ -10,7 +10,26 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-pub const OP0_SEED: &str = "6f70300000000000000000000000000000000000000000000000000000000000";
+/// op0's seed, read from the hub-bootstrapped cluster on disk.
+///
+/// The regtest cluster is now the production `deposits-hub bootstrap`
+/// shape (`deposits-tools/data/bootstrap-nodes/node{i}/`), so op0's seed
+/// is whatever `hub bootstrap` derived and wrote to
+/// `bootstrap-nodes/node0/seed.hex` — NOT the old `"op0"`-hex-padded
+/// constant. Reading it off disk keeps the harness in lockstep with the
+/// daemon: whatever key the node0 daemon runs as is exactly the key the
+/// tests sign / match quorum members against.
+///
+/// Kept as a function-like `&'static str` (via `op_seed(0)`) so the many
+/// `op0_seed()` call sites compile unchanged. Panics if the cluster hasn't
+/// been bootstrapped (no seed.hex) — the same failure mode as a missing
+/// data dir, surfaced early.
+pub fn op0_seed() -> &'static str {
+    use std::sync::OnceLock;
+    static SEED: OnceLock<String> = OnceLock::new();
+    SEED.get_or_init(|| op_seed(0))
+}
+
 pub const ELECTRS_URL: &str = "http://localhost:3102";
 
 /// Default ledgers (durable) relay URL.
@@ -66,24 +85,89 @@ pub fn wallet_bin() -> PathBuf {
 }
 
 pub fn op0_data_dir() -> PathBuf {
-    repo_root().join("deposits-tools/data/op0")
+    op_data_dir(0)
 }
 
-/// Seed for operator at index `i`. Matches setup.sh's convention:
-///   SEEDS["op$i"] = python3 -c "print('op$i'.encode().hex().ljust(64, '0'))"
-/// So op0 → "6f7030..." (= "op0" hex, zero-padded to 64).
+/// The daemon `--name` for operator `i`. The regtest cluster is stood up
+/// by `deposits-hub bootstrap`, which names its daemons `node{i}`; this
+/// is the name they advertise under (Kind 39100) and match on. The tests
+/// call operators "op{i}" colloquially, but the on-the-wire name is
+/// `node{i}` — so any CLI `--name` or ad-filter that must line up with
+/// the running daemon has to use THIS, not the literal "op{i}".
+pub fn op_name(i: usize) -> String {
+    format!("node{}", i)
+}
+
+/// Admin-UI HTTP port for operator `i`. Hub bootstrap binds each daemon's
+/// admin API at `8870 + i` (`deposits-hub/src/bootstrap.rs::admin_port`),
+/// clear of the legacy setup.sh `8765+` range. Centralized here so the
+/// `/api/lifecycle` + `/api/ledgers` pollers below (and tests) resolve to
+/// the daemon that hub actually spawned.
+pub fn admin_port(i: usize) -> u16 {
+    8870 + i as u16
+}
+
+/// Seed for operator at index `i`, read from the hub-bootstrapped cluster.
+///
+/// `deposits-hub bootstrap` derives every node seed from one
+/// `hub-master-seed` (BIP-85) and writes it to
+/// `bootstrap-nodes/node{i}/seed.hex`. Reading it off disk — rather than
+/// recomputing the derivation — guarantees the seed the harness signs
+/// with is byte-for-byte the one the node{i} daemon is running. Panics if
+/// the cluster hasn't been bootstrapped yet (the seed file is the
+/// canonical "is the cluster up?" artifact).
 pub fn op_seed(i: usize) -> String {
-    let label = format!("op{}", i);
-    let mut hex = hex::encode(label.as_bytes());
-    while hex.len() < 64 {
-        hex.push('0');
-    }
-    hex
+    let path = op_data_dir(i).join("seed.hex");
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| {
+            panic!(
+                "reading operator seed at {} — is the cluster bootstrapped? \
+                 (`deposits-tools/bin/setup.sh 10`). {}",
+                path.display(),
+                e
+            )
+        })
+        .trim()
+        .to_string()
 }
 
 /// Data dir for operator at index `i` under the running cluster.
+///
+/// Points at the hub-bootstrap layout (`bootstrap-nodes/node{i}`), which
+/// is the SAME shape production runs — so sweep-all / archive / hub-admin
+/// work against regtest exactly as against mainnet, with no layout
+/// adapter. Overridable via `DEPOSITS_DATA_ROOT` for ad-hoc clusters
+/// (matches setup.sh's `DATA_ROOT`).
 pub fn op_data_dir(i: usize) -> PathBuf {
-    repo_root().join(format!("deposits-tools/data/op{}", i))
+    data_root().join("bootstrap-nodes").join(format!("node{}", i))
+}
+
+/// True iff node `i` exists in the bootstrapped cluster (its seed.hex is
+/// on disk). The tests scan fixed index ranges (`0..16`) that are wider
+/// than the cluster; helpers that fund/derive per-op keys use this to
+/// skip absent nodes rather than panic. On the legacy 10-op cluster the
+/// scans over-provisioned harmlessly because seeds were computed, never
+/// read; now they're read from disk, so absent nodes must be skipped.
+pub fn op_exists(i: usize) -> bool {
+    op_data_dir(i).join("seed.hex").is_file()
+}
+
+/// Like [`op_seed`] but returns `None` for a node that isn't in the
+/// cluster (its seed.hex is missing), for scan loops over a fixed index
+/// range wider than the actual node count.
+pub fn try_op_seed(i: usize) -> Option<String> {
+    let path = op_data_dir(i).join("seed.hex");
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+}
+
+/// Root of the bootstrapped cluster's data (the hub `--data-dir`).
+/// Defaults to `deposits-tools/data`, matching setup.sh's `DATA_ROOT`.
+pub fn data_root() -> PathBuf {
+    std::env::var("DEPOSITS_DATA_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo_root().join("deposits-tools/data"))
 }
 
 /// Derive operator `i`'s secret key (BIP-86 `m/86'/0'/0'/0/0` from seed).
@@ -200,15 +284,84 @@ pub fn read_ledger_history(
     updates
 }
 
-/// Look up a ledger ID stored under `data_dir/state/<key>` by `setup.sh`.
+/// The hub's `bootstrap-state.json` as a raw JSON value — the
+/// authoritative record of the regtest cluster's topology (node → ledger
+/// id, node → operator pubkey). Replaces the old per-key
+/// `data/state/<key>` files setup.sh used to scatter: the cluster is now
+/// `deposits-hub bootstrap`, which persists everything here, so the
+/// harness reads THIS (no separate state dir to keep in sync).
+fn bootstrap_state() -> serde_json::Value {
+    let path = data_root().join("bootstrap-state.json");
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "reading {} — is the cluster bootstrapped? (`deposits-tools/bin/setup.sh 10`): {}",
+            path.display(),
+            e
+        )
+    });
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("parsing {}: {}", path.display(), e))
+}
+
+/// node{i}'s activated ledger id from `bootstrap-state.json`.
+pub fn op_ledger(i: usize) -> String {
+    try_op_ledger(i)
+        .unwrap_or_else(|| panic!("no ledger for {} in bootstrap-state.json", op_name(i)))
+}
+
+/// Like [`op_ledger`] but returns `None` (instead of panicking) when the
+/// node has no ledger recorded — for scan loops that walk a fixed index
+/// range wider than the cluster.
+pub fn try_op_ledger(i: usize) -> Option<String> {
+    bootstrap_state()
+        .get("ledgers")
+        .and_then(|m| m.get(op_name(i)))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// node{i}'s operator pubkey (Node ID, compressed hex) from
+/// `bootstrap-state.json`.
+pub fn op_node_id(i: usize) -> Option<String> {
+    bootstrap_state()
+        .get("node_ids")
+        .and_then(|m| m.get(op_name(i)))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Resolve a legacy `setup.sh`-style state key against the hub cluster.
+///
+/// The old cluster gave each operator 3 ledgers and stored their ids at
+/// `data/state/ledger_{i}_{l}` (l ∈ 1..3) and node ids at
+/// `data/state/node_id_{i}`. The hub cluster gives each node exactly ONE
+/// ledger. We map every `ledger_{i}_{l}` → node{i}'s single ledger and
+/// `node_id_{i}` → node{i}'s operator pubkey, so the callers that pick
+/// distinct operators (op1 vs op3 vs op4) for cross-test isolation still
+/// land on distinct nodes — the isolation those picks provide is
+/// preserved (it was always "distinct OPERATOR", the ledger-index was
+/// just how a single op fanned out its three ledgers).
 pub fn read_setup_state(key: &str) -> String {
-    let path = repo_root()
-        .join("deposits-tools/data/state")
-        .join(key);
-    std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e))
-        .trim()
-        .to_string()
+    if let Some(rest) = key.strip_prefix("ledger_") {
+        // `ledger_{i}_{l}` → node{i}'s ledger.
+        let i: usize = rest
+            .split('_')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("malformed setup-state key `{}`", key));
+        return op_ledger(i);
+    }
+    if let Some(rest) = key.strip_prefix("node_id_") {
+        let i: usize = rest
+            .parse()
+            .unwrap_or_else(|_| panic!("malformed setup-state key `{}`", key));
+        return op_node_id(i)
+            .unwrap_or_else(|| panic!("no node id for {} in bootstrap-state.json", op_name(i)));
+    }
+    panic!(
+        "read_setup_state: unrecognized key `{}` (expected ledger_i_l or node_id_i)",
+        key
+    );
 }
 
 /// True iff the htlc-agent process is running. Tests that exercise
@@ -257,7 +410,7 @@ pub fn operator_credit_deposit(
 
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
-    let name = format!("op{}", op_idx);
+    let name = op_name(op_idx);
     let out = Command::new(node_bin())
         .args([
             "deposit",
@@ -482,7 +635,7 @@ pub fn embed_proof_hash(
 ) -> deposits_protocol::types::SignedLedgerUpdate {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
-    let name = format!("op{}", op_idx);
+    let name = op_name(op_idx);
     let out = Command::new(node_bin)
         .args(["recovery", "embed-hash", ledger_id, &hex::encode(proof_hash)])
         .args(["--seed", &seed])
@@ -546,7 +699,7 @@ pub fn publish_fraud_broadcast(
 ) {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
-    let name = format!("op{}", op_idx);
+    let name = op_name(op_idx);
     let json = serde_json::to_string(broadcast).unwrap();
     let json_path = std::env::temp_dir().join(format!(
         "fp_broadcast_op{}_{}.json",
@@ -611,11 +764,19 @@ pub fn op_identity_pubkey(op_idx: usize) -> (String, String) {
     )
 }
 
-pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Txid {
+/// Send `amount_sats` to node `op_idx`'s operator-key P2WPKH from the
+/// faucet, returning the funding txid — or `None` if node `op_idx` isn't
+/// in the cluster. Tests fund "all potential disputants" by looping a
+/// fixed index range (`0..16`) wider than the actual node count; funding
+/// an absent node is meaningless, so skip it (the legacy harness derived
+/// a seed for any index and funded a throwaway address; the hub harness
+/// reads real seeds from disk and there simply is no node beyond N-1).
+pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> Option<bitcoin::Txid> {
     use bitcoin::secp256k1::{PublicKey, Secp256k1};
     use std::str::FromStr;
+    // Skip nodes that don't exist in the cluster.
+    let seed = try_op_seed(op_idx)?;
     // Mirror derive_operator_secret: `m/86'/0'/0'/0/0` from seed.
-    let seed = op_seed(op_idx);
     let seed_bytes = hex::decode(&seed).expect("op seed hex");
     let secp = Secp256k1::new();
     let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes)
@@ -650,7 +811,7 @@ pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> bitcoin::Tx
         String::from_utf8_lossy(&out.stderr)
     );
     let txid_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    bitcoin::Txid::from_str(&txid_str).expect("parse txid")
+    Some(bitcoin::Txid::from_str(&txid_str).expect("parse txid"))
 }
 
 /// Mine `n` blocks to a throwaway address (regtest). Used to confirm the
@@ -682,7 +843,7 @@ pub fn wait_for_daemon_chain_tip(op_idx: usize, target_height: u32, timeout: Dur
         .unwrap_or_default()
         .trim()
         .to_string();
-    let url = format!("http://127.0.0.1:{}/api/lifecycle", 8765 + op_idx);
+    let url = format!("http://127.0.0.1:{}/api/lifecycle", admin_port(op_idx));
     let deadline = std::time::Instant::now() + timeout;
     let mut last_tip = 0u32;
     while std::time::Instant::now() < deadline {
@@ -758,7 +919,7 @@ pub fn wait_for_quorum_begin(op_idx: usize, ledger_id: &str, timeout: Duration) 
 pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
     let token_path = op_data_dir(op_idx).join("admin-token");
     let token = std::fs::read_to_string(&token_path).ok()?.trim().to_string();
-    let url = format!("http://127.0.0.1:{}/api/lifecycle", 8765 + op_idx);
+    let url = format!("http://127.0.0.1:{}/api/lifecycle", admin_port(op_idx));
     let out = Command::new("curl")
         .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
         .output()
@@ -804,57 +965,51 @@ pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
 /// caller should skip rather than fail, and rerun against
 /// `setup.sh --fresh`.
 pub fn find_clean_healthy_setup_ledger(min_headroom_blocks: u32) -> Option<(usize, String)> {
-    let state_dir = repo_root().join("deposits-tools/data/state");
+    // Hub cluster: each node{op} has exactly one ledger. Walk the nodes
+    // and return the first whose ledger is clean + healthy + undisputed.
     for op in 0..16 {
-        for idx in 1..=3 {
-            let path = state_dir.join(format!("ledger_{}_{}", op, idx));
-            if !path.exists() {
-                continue;
-            }
-            let ledger_id = std::fs::read_to_string(&path)
-                .ok()?
-                .trim()
-                .to_string();
-            if ledger_id.len() != 64 {
-                continue;
-            }
-            // Custody-armed check.
-            let marker = format!("custody_armed_{}.marker", &ledger_id[..16]);
-            let any_armed = (0..16).any(|i| op_data_dir(i).join(&marker).exists());
-            if any_armed {
-                continue;
-            }
-            // Quorum-healthy check — query the owning op's daemon.
-            let Some((tip, exp)) = lifecycle_expiry(op, &ledger_id) else {
-                continue;
-            };
-            if tip + min_headroom_blocks >= exp {
-                continue;
-            }
-            // No fork-branch file on this ledger at any peer. Fork
-            // names are `<lid:64>_<seq:06>_<pk16>.jsonl` (94 chars);
-            // canonical is `<lid>.jsonl` (70 chars).
-            let fork_name_len = ledger_id.len() + 1 + 6 + 1 + 16 + ".jsonl".len();
-            let mut any_disputed = false;
-            for peer in 0..16 {
-                let ledgers_dir = op_data_dir(peer).join("wallet/ledgers");
-                let Ok(entries) = std::fs::read_dir(&ledgers_dir) else { continue };
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    if name.starts_with(&ledger_id[..]) && name.len() == fork_name_len {
-                        any_disputed = true;
-                        break;
-                    }
-                }
-                if any_disputed {
+        let Some(ledger_id) = try_op_ledger(op) else {
+            continue;
+        };
+        if ledger_id.len() != 64 {
+            continue;
+        }
+        // Custody-armed check.
+        let marker = format!("custody_armed_{}.marker", &ledger_id[..16]);
+        let any_armed = (0..16).any(|i| op_data_dir(i).join(&marker).exists());
+        if any_armed {
+            continue;
+        }
+        // Quorum-healthy check — query the owning op's daemon.
+        let Some((tip, exp)) = lifecycle_expiry(op, &ledger_id) else {
+            continue;
+        };
+        if tip + min_headroom_blocks >= exp {
+            continue;
+        }
+        // No fork-branch file on this ledger at any peer. Fork
+        // names are `<lid:64>_<seq:06>_<pk16>.jsonl` (94 chars);
+        // canonical is `<lid>.jsonl` (70 chars).
+        let fork_name_len = ledger_id.len() + 1 + 6 + 1 + 16 + ".jsonl".len();
+        let mut any_disputed = false;
+        for peer in 0..16 {
+            let ledgers_dir = op_data_dir(peer).join("wallet/ledgers");
+            let Ok(entries) = std::fs::read_dir(&ledgers_dir) else { continue };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(&ledger_id[..]) && name.len() == fork_name_len {
+                    any_disputed = true;
                     break;
                 }
             }
             if any_disputed {
-                continue;
+                break;
             }
-            return Some((op, ledger_id));
         }
+        if any_disputed {
+            continue;
+        }
+        return Some((op, ledger_id));
     }
     None
 }
@@ -1238,7 +1393,7 @@ pub fn lottery_output_address(reserves_spend_txid: &str) -> Option<String> {
 pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
-    let name = format!("op{}", op_idx);
+    let name = op_name(op_idx);
     let out = Command::new(node_bin())
         .args(["ledger", "health", ledger_id])
         .args(["--seed", &seed])
@@ -1263,7 +1418,7 @@ pub fn ledger_health(op_idx: usize, ledger_id: &str) -> String {
 pub fn dispute_status(op_idx: usize, ledger_id: &str) -> String {
     let seed = op_seed(op_idx);
     let data_dir = op_data_dir(op_idx);
-    let name = format!("op{}", op_idx);
+    let name = op_name(op_idx);
     let out = Command::new(node_bin())
         .args(["nostr", "dispute", "status", ledger_id])
         .args(["--seed", &seed])
@@ -1478,13 +1633,17 @@ pub fn tempdir() -> PathBuf {
     p
 }
 
-/// Kill the current op0 daemon, matching by `name op0` in the cmdline.
-/// Blocks until the process is gone (up to ~5s).
+/// Kill the current op0 (= node0) daemon, matching by `--name node0` in
+/// the cmdline. Blocks until the process is gone (up to ~5s).
+///
+/// The hub cluster names node0's daemon `node0`, so the match pattern is
+/// `name node0` — NOT the legacy `name op0`. (`--name` and the data-dir
+/// path both carry `node0`, so this is unambiguous.)
 pub fn kill_op0() {
-    let _ = Command::new("pkill").args(["-f", "name op0"]).output();
+    let _ = Command::new("pkill").args(["-f", "name node0"]).output();
     for _ in 0..20 {
         let still = Command::new("pgrep")
-            .args(["-f", "name op0"])
+            .args(["-f", "name node0"])
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
@@ -1495,25 +1654,38 @@ pub fn kill_op0() {
     }
 }
 
-/// Spawn op0 with the standard release-binary arguments plus any caller-
-/// supplied extra env vars (e.g. `DEPOSIT_ACCESS_CONTROL=true`,
-/// `ATTESTATION_VERIFIER_PUBKEY=<hex>`). Sleeps briefly so the daemon
-/// is up and has loaded its on-disk lists before callers continue.
+/// Spawn op0 (= node0) with the SAME argument shape the hub bootstrap
+/// uses (`--name node0`, `--seed-file`, admin/metrics ports, `--fast-poll`)
+/// plus any caller-supplied extra env vars (e.g.
+/// `DEPOSIT_ACCESS_CONTROL=true`, `ATTESTATION_VERIFIER_PUBKEY=<hex>`).
+/// Sleeps briefly so the daemon is up and has loaded its on-disk lists
+/// before callers continue.
+///
+/// Mirroring bootstrap's spawn line matters: the ACL tests kill the
+/// hub-spawned node0 and relaunch it here, so the relaunched daemon has
+/// to bind the same admin port (8870) and advertise under the same name
+/// as the rest of the cluster expects.
 pub fn spawn_op0(extra_env: &[(&str, &str)]) {
-    let log = op0_data_dir().join("daemon.log");
+    let dir = op0_data_dir();
+    let log = dir.join("daemon.log");
     let log_out = std::fs::File::options()
         .append(true)
         .create(true)
         .open(&log)
         .unwrap();
     let log_err = log_out.try_clone().unwrap();
+    let seed_file = dir.join("seed.hex");
     let mut cmd = Command::new(node_bin());
     cmd.arg("run")
-        .args(["--seed", OP0_SEED])
-        .args(["--name", "op0"])
+        .args(["--seed-file", seed_file.to_str().unwrap()])
+        .args(["--name", &op_name(0)])
         .args(["--network", "regtest"])
-        .args(["--data-dir", op0_data_dir().to_str().unwrap()])
+        .args(["--data-dir", dir.to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])
+        // node0's metrics port (hub bootstrap: metrics_port(i) = 9200 + i).
+        .args(["--metrics-port", "9200"])
+        .args(["--admin-bind", &format!("127.0.0.1:{}", admin_port(0))])
+        .arg("--fast-poll")
         .args(["--relay", relay_ledgers()])
         .args(["--relay", relay_messaging()])
         .env("RUST_LOG", "warn")
@@ -1522,7 +1694,8 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
-    let _child = cmd.spawn().expect("op0 spawn failed");
+    let child = cmd.spawn().expect("op0 spawn failed");
+    let _ = std::fs::write(dir.join("daemon.pid"), child.id().to_string());
     std::thread::sleep(Duration::from_secs(6));
 }
 
@@ -1539,82 +1712,39 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
 /// is purely additive: faster path for active-quorum callers, no
 /// regression for not-yet-active fallback callers.
 pub fn discover_op0_ledger() -> String {
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut last_fallback: Option<String> = None;
-    loop {
-        let (active, fallback) = discover_op0_ledger_once();
-        if let Some(id) = active {
-            return id;
-        }
-        if fallback.is_some() {
-            last_fallback = fallback;
-        }
-        if std::time::Instant::now() >= deadline {
-            return last_fallback.expect("couldn't find any ledger owned by op0");
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
-
-/// Returns `(active_ledger, any_op0_ledger)`. `active_ledger` is
-/// `Some(id)` if any op0 ledger has QuorumBegin in local history;
-/// `any_op0_ledger` is `Some(id)` if discover saw any op0 ledger at
-/// all on the relay.
-fn discover_op0_ledger_once() -> (Option<String>, Option<String>) {
+    // node0's ledger id is authoritative in bootstrap-state.json — no need
+    // to sift relay ads by operator_name (which the hub cluster advertises
+    // as "node0", not "op0"). Poll node0's local jsonl for a committed
+    // QuorumBegin so callers that expect an *active* quorum still get one;
+    // fall back to the bare ledger id after the window for callers that
+    // just want SOME op0 ledger (allowlist tests).
     use deposits_core::messages::LedgerOperation;
     use deposits_core::tlv::TlvDecode;
 
-    let scratch = tempdir();
-    let out = Command::new(wallet_bin())
-        .args(["discover", "--json"])
-        .args(["--relay", relay_ledgers()])
-        .args(["--network", "regtest"])
-        .args(["--data-dir", scratch.to_str().unwrap()])
-        .output()
-        .expect("discover failed");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let ledger_id = op_ledger(0);
     let op0_data_dir = op0_data_dir();
-    let mut any_ledger: Option<String> = None;
-    for line in stdout.lines() {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("type").and_then(|x| x.as_str()) != Some("ledger")
-            || v.get("operator_name").and_then(|x| x.as_str()) != Some("op0")
-        {
-            continue;
-        }
-        let ledger_id = v
-            .get("ledger_id")
-            .and_then(|x| x.as_str())
-            .unwrap()
-            .to_string();
-        if any_ledger.is_none() {
-            any_ledger = Some(ledger_id.clone());
-        }
-        // Inspect the local jsonl for a QuorumBegin. If the file
-        // doesn't exist (stale ledger ID from prior relay state),
-        // skip silently — the canonical local path is empty until
-        // the daemon ingests its own QuorumBegin.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
         let path = op0_data_dir
             .join("wallet/ledgers")
             .join(format!("{}.jsonl", ledger_id));
-        if !path.exists() {
-            continue;
+        if path.exists() {
+            let history = read_ledger_history(&op0_data_dir, &ledger_id);
+            let has_quorum_begin = history.iter().any(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::QuorumBegin { .. })
+                )
+            });
+            if has_quorum_begin {
+                return ledger_id;
+            }
         }
-        let history = read_ledger_history(&op0_data_dir, &ledger_id);
-        let has_quorum_begin = history.iter().any(|u| {
-            matches!(
-                LedgerOperation::tlv_decode(&u.message),
-                Ok(LedgerOperation::QuorumBegin { .. })
-            )
-        });
-        if has_quorum_begin {
-            return (Some(ledger_id), any_ledger);
+        if std::time::Instant::now() >= deadline {
+            return ledger_id;
         }
+        std::thread::sleep(Duration::from_millis(500));
     }
-    (None, any_ledger)
 }
 
 /// Run `deposits-wallet open` with the given args. Returns combined
@@ -1864,7 +1994,7 @@ fn restore_file(path: &Path, backup: Option<&[u8]>) {
 pub fn op_cli_args(i: usize) -> Vec<String> {
     vec![
         "--seed".into(), op_seed(i),
-        "--name".into(), format!("op{}", i),
+        "--name".into(), op_name(i),
         "--data-dir".into(), op_data_dir(i).to_string_lossy().into_owned(),
         "--network".into(), "regtest".into(),
         "--esplora".into(), ELECTRS_URL.into(),
@@ -1935,13 +2065,11 @@ pub fn find_healthy_members(wanted: usize, exclude_op: usize) -> Vec<(usize, Str
         if op_idx == exclude_op {
             continue;
         }
-        let pk_path = repo_root().join("deposits-tools/data/state").join(format!("node_id_{}", op_idx));
-        let lid_path = repo_root().join("deposits-tools/data/state").join(format!("ledger_{}_1", op_idx));
-        let (Ok(pk), Ok(lid)) = (std::fs::read_to_string(&pk_path), std::fs::read_to_string(&lid_path)) else {
+        // node{op_idx}'s operator pubkey + its single ledger, from the
+        // hub's bootstrap-state.json.
+        let (Some(pk), Some(lid)) = (op_node_id(op_idx), try_op_ledger(op_idx)) else {
             continue;
         };
-        let pk = pk.trim().to_string();
-        let lid = lid.trim().to_string();
         let Some((tip, exp)) = lifecycle_expiry(op_idx, &lid) else {
             continue;
         };
@@ -2022,7 +2150,7 @@ pub fn open_victim_quorum_ledger(
     std::thread::sleep(Duration::from_secs(45));
     let _ = run_op_node(node, owner_op_idx, &[
         "ledger", "advertise",
-        "--name", &format!("op{}", owner_op_idx),
+        "--name", &op_name(owner_op_idx),
         "--advertise-relay", relay_ledgers(),
     ]);
 

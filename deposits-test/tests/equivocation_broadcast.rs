@@ -93,7 +93,7 @@ fn equivocation_chain_continuity_keeps_quorum_consistent() {
     let mut cmd = Command::new(&node);
     cmd.args(["danger", "fork-update", &accused_ledger])
         .args(["--seed", &op_seed(attacker_op_idx)])
-        .args(["--name", &format!("op{}", attacker_op_idx)])
+        .args(["--name", &op_name(attacker_op_idx)])
         .args(["--network", "regtest"])
         .args(["--data-dir", op_data_dir(attacker_op_idx).to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])

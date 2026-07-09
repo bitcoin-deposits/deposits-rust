@@ -111,7 +111,7 @@ fn fraud_proof_equivocation_drives_confiscation() {
     let out = Command::new(&node)
         .args(&fork_args)
         .args(["--seed", &op_seed(accused_op_idx)])
-        .args(["--name", &format!("op{}", accused_op_idx)])
+        .args(["--name", &op_name(accused_op_idx)])
         .args(["--network", "regtest"])
         .args([
             "--data-dir",
@@ -279,7 +279,7 @@ fn equivocation_auto_emits_and_confiscates() {
     let out = Command::new(&node)
         .args(&fork_args)
         .args(["--seed", &op_seed(accused_op_idx)])
-        .args(["--name", &format!("op{}", accused_op_idx)])
+        .args(["--name", &op_name(accused_op_idx)])
         .args(["--network", "regtest"])
         .args(["--data-dir", op_data_dir(accused_op_idx).to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])
@@ -365,7 +365,7 @@ fn equivocation_recovers_to_serviceable_ledger() {
     let out = Command::new(&node)
         .args(&fork_args)
         .args(["--seed", &op_seed(accused_op_idx)])
-        .args(["--name", &format!("op{}", accused_op_idx)])
+        .args(["--name", &op_name(accused_op_idx)])
         .args(["--network", "regtest"])
         .args(["--data-dir", op_data_dir(accused_op_idx).to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])

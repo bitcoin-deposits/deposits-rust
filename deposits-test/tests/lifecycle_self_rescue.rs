@@ -72,7 +72,7 @@ const VICTIM_EXPIRY_BLOCKS: u32 = 100;
 /// Common args every node CLI invocation needs.
 fn op0_cli_args() -> Vec<String> {
     vec![
-        "--seed".into(), OP0_SEED.into(),
+        "--seed".into(), op0_seed().to_string(),
         "--data-dir".into(), op0_data_dir().to_string_lossy().into_owned(),
         "--network".into(), "regtest".into(),
         "--esplora".into(), ELECTRS_URL.into(),
@@ -248,7 +248,7 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     std::thread::sleep(Duration::from_secs(45));
     let _ = run_op0_node(&node, &[
         "ledger", "advertise",
-        "--name", "op0",
+        "--name", &op_name(0),
         "--advertise-relay", relay_ledgers(),
     ]);
 
@@ -490,7 +490,7 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
     std::thread::sleep(Duration::from_secs(45));
     let _ = run_op0_node(&node, &[
         "ledger", "advertise",
-        "--name", "op0",
+        "--name", &op_name(0),
         "--advertise-relay", relay_ledgers(),
     ]);
 
