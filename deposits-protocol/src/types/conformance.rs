@@ -73,6 +73,33 @@ pub enum ConformanceViolation {
     /// QuorumUpgrade (DEP-18) named a ruleset this implementation doesn't know.
     UnknownRuleset { name: String },
 
+    /// A balance-touching op declared a post-op `(balance, locked_balance)`
+    /// commitment (DEP-02 §Balance Commitments) that does not equal the
+    /// replayed post-state for that deposit. Intrinsic to every ruleset,
+    /// including `legacy`: a present-but-wrong commitment is always a
+    /// conformance break (an honest operator declares the truth). The
+    /// verify-when-present half of the rule.
+    BalanceCommitmentMismatch {
+        operation: &'static str,
+        /// Hex deposit_id the commitment is for (primary or, for a transfer,
+        /// the destination).
+        deposit_id: String,
+        declared_balance: u64,
+        declared_locked: u64,
+        actual_balance: u64,
+        actual_locked: u64,
+    },
+
+    /// A balance-touching op omitted its required commitment under a ruleset
+    /// that mandates them (`balance-commit-v4`; DEP-02 §Balance Commitments).
+    /// The require-presence half of the rule — dormant on `legacy` /
+    /// `fee-cap-v3`, where commitment-less ops stay conforming.
+    MissingBalanceCommitment {
+        operation: &'static str,
+        /// Hex deposit_id whose commitment is missing.
+        deposit_id: String,
+    },
+
     /// QuorumUpgrade (DEP-18) tried to move to a ruleset in a different
     /// reserves-cascade family. That changes the on-chain reserves script, so it
     /// requires a QuorumBegin (reserves rotation), not an off-chain upgrade.
@@ -187,6 +214,32 @@ impl std::fmt::Display for ConformanceViolation {
             Self::StateMachineRejected { detail } => {
                 write!(f, "state machine refused transition: {}", detail)
             }
+            Self::BalanceCommitmentMismatch {
+                operation,
+                deposit_id,
+                declared_balance,
+                declared_locked,
+                actual_balance,
+                actual_locked,
+            } => write!(
+                f,
+                "{}: balance commitment for deposit {} declared ({}, {}) but replayed state is ({}, {})",
+                operation,
+                &deposit_id[..deposit_id.len().min(16)],
+                declared_balance,
+                declared_locked,
+                actual_balance,
+                actual_locked,
+            ),
+            Self::MissingBalanceCommitment {
+                operation,
+                deposit_id,
+            } => write!(
+                f,
+                "{}: missing required balance commitment for deposit {} (balance-commit-v4)",
+                operation,
+                &deposit_id[..deposit_id.len().min(16)],
+            ),
         }
     }
 }

@@ -59,6 +59,7 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "cltv-offset-literal" => Some(&CLTV_OFFSET_LITERAL),
         "cltv-offset-v2" => Some(&CLTV_OFFSET_V2),
         "fee-cap-v3" => Some(&FEE_CAP_V3),
+        "balance-commit-v4" => Some(&BALANCE_COMMIT_V4),
         _ => None,
     }
 }
@@ -85,6 +86,7 @@ pub fn all_supported_names() -> Vec<&'static str> {
         CLTV_OFFSET_LITERAL.name,
         CLTV_OFFSET_V2.name,
         FEE_CAP_V3.name,
+        BALANCE_COMMIT_V4.name,
     ]
 }
 
@@ -190,6 +192,21 @@ pub static CLTV_OFFSET_V2: Ruleset = Ruleset {
 /// cascade.
 pub static FEE_CAP_V3: Ruleset = Ruleset {
     name: "fee-cap-v3",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// Same on-chain reserves cascade as [`CLTV_OFFSET_V2`] / [`FEE_CAP_V3`] —
+/// byte-identical UTXO scripts, same reserves-cascade family — plus, on top of
+/// `fee-cap-v3`'s rules, the DEP-02 §Balance Commitments requirement: every
+/// balance-touching op MUST carry its post-op `(balance, locked_balance)`
+/// declaration, and any declaration present under any ruleset must match the
+/// replayed state. Adopted via a cheap `QuorumUpgrade` (DEP-18), no reserves
+/// rotation. The op-rules are gated in deposits-protocol
+/// (`ruleset_requires_balance_commitments` / `ruleset_enforces_fee_cap`); this
+/// entry exists so reserves reconstruction and member-support resolve
+/// `balance-commit-v4` to the v2 cascade.
+pub static BALANCE_COMMIT_V4: Ruleset = Ruleset {
+    name: "balance-commit-v4",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

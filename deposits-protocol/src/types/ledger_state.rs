@@ -31,7 +31,20 @@ fn default_ruleset_name() -> String {
 /// `FeeCollect` and trips the DEP-06 confiscation cascade. Keyed by ruleset name
 /// (the reserves half of `fee-cap-v3` lives in `deposits-core::ruleset`).
 pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "fee-cap-v3")
+    // `balance-commit-v4` is a strict superset of `fee-cap-v3` (its rules plus
+    // the balance-commitment requirement), so it enforces the fee cap too.
+    matches!(ruleset_name, "fee-cap-v3" | "balance-commit-v4")
+}
+
+/// Whether a ledger's active ruleset REQUIRES a balance commitment on every
+/// balance-touching op (DEP-02 §Balance Commitments, `MissingBalanceCommitment`).
+/// Version-gated per DEP-18: dormant until a ledger is upgraded to
+/// `balance-commit-v4`, so commitment-less ops on legacy / `fee-cap-v3` ledgers
+/// stay conforming. The *verify-when-present* rule (a declared commitment must
+/// match the replayed state) is intrinsic to every ruleset and is NOT gated by
+/// this — see `check_conformance`.
+pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
+    matches!(ruleset_name, "balance-commit-v4")
 }
 
 /// Whether this binary knows the named ruleset at all. Mirrors the
@@ -52,7 +65,7 @@ pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
         "legacy" => "legacy",
         "cltv-offset-literal" => "cltv-offset-literal",
-        "cltv-offset-v2" | "fee-cap-v3" => "cltv-offset-v2",
+        "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" => "cltv-offset-v2",
         _ => "",
     }
 }
@@ -1580,6 +1593,116 @@ impl LedgerState {
                 }
             }
             _ => {}
+        }
+
+        // ── Balance commitments (DEP-02 §Balance Commitments) ──────────────
+        // Every balance-touching op may declare the post-op `(balance,
+        // locked_balance)` of the deposit(s) it moves. `self` is the POST-apply
+        // state, so the declared pair must equal `self.deposits[id]`'s pair
+        // (or (0,0) when the op removed the deposit, i.e. DepositClose).
+        //
+        //   - verify-when-present: intrinsic to EVERY ruleset — a declared
+        //     commitment that doesn't match the replay is always a violation.
+        //   - require-presence: only under `balance-commit-v4`, every
+        //     balance-touching op MUST carry its commitment(s).
+        //
+        // TransferComplete/TransferFail resolve their deposit_id(s) from the
+        // pending-transfer entry in `pre_state` (apply() has already removed it
+        // from post-state).
+        {
+            use crate::messages::{BalanceCommitment, LedgerOperation as Op};
+
+            // (deposit_id, declared, op_label) triples this op is responsible for.
+            let mut obligations: Vec<(DepositId, &Option<BalanceCommitment>, &'static str)> =
+                Vec::new();
+            match operation {
+                Op::DepositOpen { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "DepositOpen"))
+                }
+                Op::DepositClose { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "DepositClose"))
+                }
+                Op::FeeCollect { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "FeeCollect"))
+                }
+                Op::InvoiceCredit { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "InvoiceCredit"))
+                }
+                Op::InvoiceLock { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "InvoiceLock"))
+                }
+                Op::InvoiceFail { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "InvoiceFail"))
+                }
+                Op::InvoiceFulfill { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "InvoiceFulfill"))
+                }
+                Op::OnchainCredit { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "OnchainCredit"))
+                }
+                Op::OnchainLock { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "OnchainLock"))
+                }
+                Op::OnchainFail { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "OnchainFail"))
+                }
+                Op::OnchainFulfill { deposit_id, commitment, .. } => {
+                    obligations.push((*deposit_id, commitment, "OnchainFulfill"))
+                }
+                Op::TransferLock { source_deposit_id, commitment, .. } => {
+                    obligations.push((*source_deposit_id, commitment, "TransferLock"))
+                }
+                Op::TransferFail { transfer_id, commitment, .. } => {
+                    if let Some(pt) = pre_state.and_then(|p| p.pending_transfers.get(transfer_id)) {
+                        obligations.push((pt.source_deposit_id, commitment, "TransferFail"));
+                    }
+                }
+                Op::TransferComplete {
+                    transfer_id,
+                    commitment,
+                    dest_commitment,
+                    ..
+                } => {
+                    if let Some(pt) = pre_state.and_then(|p| p.pending_transfers.get(transfer_id)) {
+                        obligations.push((pt.source_deposit_id, commitment, "TransferComplete"));
+                        obligations
+                            .push((pt.destination_deposit_id, dest_commitment, "TransferComplete"));
+                    }
+                }
+                _ => {}
+            }
+
+            let requires = ruleset_requires_balance_commitments(&self.active_ruleset_name);
+            for (deposit_id, declared, label) in obligations {
+                // Post-op pair; absent (removed by DepositClose) reads as (0, 0).
+                let (actual_balance, actual_locked) = self
+                    .deposits
+                    .get(&deposit_id)
+                    .map(|d| (d.balance, d.locked_balance))
+                    .unwrap_or((0, 0));
+                match declared {
+                    Some(c) => {
+                        if c.balance_after != actual_balance || c.locked_after != actual_locked {
+                            violations.push(ConformanceViolation::BalanceCommitmentMismatch {
+                                operation: label,
+                                deposit_id: hex::encode(deposit_id),
+                                declared_balance: c.balance_after,
+                                declared_locked: c.locked_after,
+                                actual_balance,
+                                actual_locked,
+                            });
+                        }
+                    }
+                    None => {
+                        if requires {
+                            violations.push(ConformanceViolation::MissingBalanceCommitment {
+                                operation: label,
+                                deposit_id: hex::encode(deposit_id),
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         violations
