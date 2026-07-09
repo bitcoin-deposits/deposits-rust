@@ -66,11 +66,8 @@ fn find_accused_op_with_quorum_begin() -> Option<(usize, String)> {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::tlv::TlvDecode;
     for op in 0..16 {
-        let path = repo_root()
-            .join("deposits-tools/data/state")
-            .join(format!("ledger_{}_1", op));
-        let Ok(lid_raw) = std::fs::read_to_string(&path) else { continue };
-        let lid = lid_raw.trim().to_string();
+        // node{op}'s single ledger, from the hub's bootstrap-state.json.
+        let Some(lid) = try_op_ledger(op) else { continue };
         if lid.len() != 64 {
             continue;
         }

@@ -147,13 +147,11 @@ fn find_healthy_members(wanted: usize) -> Vec<(usize, String, String)> {
         if found.len() >= wanted {
             break;
         }
-        let pk_path = repo_root().join("deposits-tools/data/state").join(format!("node_id_{}", op_idx));
-        let lid_path = repo_root().join("deposits-tools/data/state").join(format!("ledger_{}_1", op_idx));
-        let (Ok(pk), Ok(lid)) = (std::fs::read_to_string(&pk_path), std::fs::read_to_string(&lid_path)) else {
+        // node{op_idx}'s operator pubkey + single ledger, from the hub's
+        // bootstrap-state.json (was data/state/{node_id_i, ledger_i_1}).
+        let (Some(pk), Some(lid)) = (op_node_id(op_idx), try_op_ledger(op_idx)) else {
             continue;
         };
-        let pk = pk.trim().to_string();
-        let lid = lid.trim().to_string();
         let Some((tip, exp)) = lifecycle_expiry(op_idx, &lid) else {
             continue;
         };
