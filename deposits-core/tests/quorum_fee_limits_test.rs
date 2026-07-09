@@ -683,6 +683,7 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
 

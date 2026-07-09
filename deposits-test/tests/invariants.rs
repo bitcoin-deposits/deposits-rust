@@ -53,6 +53,7 @@ fn invariant_e1_reserve_backing() {
                 invoice_id: "x".into(),
                 sequence_number: 9,
                 wallet_authorization: None,
+                commitment: None,
             },
             &deposits_protocol::types::AllowAll,
             0,
@@ -246,6 +247,7 @@ fn invariant_c1_witness_validity() {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
     state = state
@@ -256,6 +258,7 @@ fn invariant_c1_witness_validity() {
             invoice_id: "x".into(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -272,6 +275,7 @@ fn invariant_c1_witness_validity() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let good_op = deposits_core::signing::sign_op(good_proto, &user_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
@@ -292,6 +296,7 @@ fn invariant_c1_witness_validity() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let bad_op = deposits_core::signing::sign_op(bad_proto, &attacker_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
@@ -340,6 +345,7 @@ fn invariant_c2_payment_uniqueness() {
             invoice_id: "dup".into(),
             sequence_number: 99,
             wallet_authorization: None,
+            commitment: None,
         });
 
     log.record(AttackResult {
@@ -388,6 +394,7 @@ fn invariant_c3_signature_binding() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let withdrawal_op = LedgerOperation::OnchainLock {
         deposit_id,
@@ -398,6 +405,7 @@ fn invariant_c3_signature_binding() {
         nonce: 0,
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let msg_invoice = preimage(&invoice_op);
     let msg_withdrawal = preimage(&withdrawal_op);
@@ -423,6 +431,7 @@ fn invariant_c3_signature_binding() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let msg_other_deposit = preimage(&other_op);
     assert_ne!(
@@ -491,6 +500,7 @@ fn invariant_s1_dispute_state_gate() {
                 invoice_id: "x".into(),
                 sequence_number: 99,
                 wallet_authorization: None,
+                commitment: None,
             },
         ),
         (
@@ -508,11 +518,12 @@ fn invariant_s1_dispute_state_gate() {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             },
         ),
         (
             "DepositClose",
-            LedgerOperation::DepositClose { deposit_id: did },
+            LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
         ),
         (
             "FeeCollect",
@@ -520,6 +531,7 @@ fn invariant_s1_dispute_state_gate() {
                 deposit_id: did,
                 amount: 100,
                 block_height: 1000,
+                commitment: None,
             },
         ),
     ];
@@ -684,6 +696,7 @@ fn invariant_s3_balance_non_negative() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
         .expect("InvoiceLock signs via dep-17 preimage");

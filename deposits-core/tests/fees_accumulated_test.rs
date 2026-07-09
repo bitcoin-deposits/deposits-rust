@@ -56,6 +56,7 @@ fn open_deposit_fixed_fee(ledger: &mut Ledger, descriptor: &str, fixed_msats: u6
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
     deposit_id
@@ -75,6 +76,7 @@ fn credit(ledger: &mut Ledger, deposit_id: [u8; 16], amount: u64, seq: u64) {
             invoice_id: format!("inv-{}", seq),
             sequence_number: seq,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 }
@@ -96,6 +98,7 @@ fn fee_collect_adds_to_accumulator() {
             deposit_id: did,
             amount: 12_345,
             block_height: 2016,
+            commitment: None,
         })
         .unwrap();
 
@@ -107,6 +110,7 @@ fn fee_collect_adds_to_accumulator() {
             deposit_id: did,
             amount: 500,
             block_height: 4032,
+            commitment: None,
         })
         .unwrap();
     assert_eq!(ledger.state.fees_accumulated, 12_845);
@@ -138,6 +142,7 @@ fn transfer_complete_adds_fee_to_accumulator() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
 
@@ -150,6 +155,8 @@ fn transfer_complete_adds_fee_to_accumulator() {
             script_witness: DescriptorWitness {
                 stack: vec![[0x22u8; 64].to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         })
         .unwrap();
 
@@ -180,6 +187,7 @@ fn transfer_fail_accumulates_fixed_fee() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
     ledger
@@ -187,6 +195,7 @@ fn transfer_fail_accumulates_fixed_fee() {
             transfer_id,
             block_hash: [0; 32],
             reason: 1,
+            commitment: None,
         })
         .unwrap();
 
@@ -218,6 +227,7 @@ fn invoice_fail_accumulates_fixed_fee() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
     ledger
@@ -225,6 +235,7 @@ fn invoice_fail_accumulates_fixed_fee() {
             deposit_id: did,
             payment_id,
             sequence_number: 3,
+            commitment: None,
         })
         .unwrap();
 
@@ -254,12 +265,14 @@ fn onchain_fail_accumulates_fixed_fee() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
     ledger
         .apply_state_changes(&LedgerOperation::OnchainFail {
             deposit_id: did,
             withdrawal_id,
+            commitment: None,
         })
         .unwrap();
 
@@ -290,6 +303,7 @@ fn onchain_fulfill_does_not_accumulate() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
     ledger
@@ -299,6 +313,7 @@ fn onchain_fulfill_does_not_accumulate() {
             amount: 100_000,
             txid: [0xAA; 32],
             destination_address: "bcrt1qsomewhere".to_string(),
+            commitment: None,
         })
         .unwrap();
 
@@ -315,6 +330,7 @@ fn accumulator_survives_json_roundtrip() {
             deposit_id: did,
             amount: 9_999,
             block_height: 2016,
+            commitment: None,
         })
         .unwrap();
     assert_eq!(ledger.state.fees_accumulated, 9_999);

@@ -440,6 +440,7 @@ impl Node {
             nonce: op_nonce,
             expiry: op_expiry,
             witness,
+            commitment: None,
         };
 
         // Append operation (applies state changes: deducts balance, adds to locked)
@@ -599,6 +600,8 @@ impl Node {
         let operation = LedgerOperation::TransferComplete {
             transfer_id,
             script_witness,
+            commitment: None,
+            dest_commitment: None,
         };
 
         // Commit via staged flow

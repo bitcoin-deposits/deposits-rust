@@ -454,7 +454,7 @@ impl LedgerState {
                 // carry so the cache stays correct if that ever changes.
                 next.add_balance_delta(0, opened_balance);
             }
-            LedgerOperation::DepositClose { deposit_id } => {
+            LedgerOperation::DepositClose { deposit_id, .. } => {
                 let deposit = next
                     .deposits
                     .get(deposit_id)
@@ -661,8 +661,7 @@ impl LedgerState {
             }
             LedgerOperation::OnchainFail {
                 withdrawal_id,
-                deposit_id,
-            } => {
+                deposit_id, .. } => {
                 // Ensure the named deposit exists (mirrors prior behavior).
                 next.deposits
                     .get(deposit_id)
@@ -716,8 +715,7 @@ impl LedgerState {
             LedgerOperation::FeeCollect {
                 deposit_id,
                 amount,
-                block_height,
-            } => {
+                block_height, .. } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     if let Some((new_fees, effective)) = deposit.pending_fee_change.take() {
                         if *block_height >= effective {
@@ -1419,8 +1417,7 @@ impl LedgerState {
         if let LedgerOperation::FeeCollect {
             deposit_id,
             amount,
-            block_height,
-        } = operation
+            block_height, .. } = operation
         {
             if let Some(pre) = pre_state {
                 if let Some(deposit) = pre.deposits.get(deposit_id) {
@@ -1719,6 +1716,7 @@ mod replay_protection_tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         }
     }
 
@@ -1748,6 +1746,7 @@ mod replay_protection_tests {
             timeout_height: None,
             fee,
             witness: DescriptorWitness::new(),
+            commitment: None,
         }
     }
 
@@ -1771,6 +1770,7 @@ mod replay_protection_tests {
             sequence_number: 2,
             witness: DescriptorWitness::new(),
             preimage: [0u8; 32],
+            commitment: None,
         };
         let (s2, _) = apply(&s1, &fulfill, 101);
         let d2 = &s2.deposits[&did];
@@ -1790,6 +1790,7 @@ mod replay_protection_tests {
             deposit_id: did,
             payment_id: pid,
             sequence_number: 2,
+            commitment: None,
         };
         let (s2, _) = apply(&s1, &fail, 101);
         let d = &s2.deposits[&did];
@@ -1910,6 +1911,7 @@ mod replay_protection_tests {
             sequence_number: 2,
             preimage: [0xee; 32],
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let (_, violations) = apply(&state, &fulfill, 500);
         assert!(
@@ -1954,6 +1956,7 @@ mod balance_cache_tests {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             })
             .unwrap();
     }
@@ -1967,6 +1970,7 @@ mod balance_cache_tests {
                 invoice_id: format!("i{}", hash),
                 sequence_number: 0,
                 wallet_authorization: None,
+                commitment: None,
             })
             .unwrap();
     }
@@ -1993,7 +1997,7 @@ mod balance_cache_tests {
         let c = [3u8; 16];
         open(&mut state, c);
         state
-            .apply_in_place(&LedgerOperation::DepositClose { deposit_id: c })
+            .apply_in_place(&LedgerOperation::DepositClose { deposit_id: c, commitment: None })
             .unwrap();
         assert_eq!(state.total_deposit_balance(), 1000);
         assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());

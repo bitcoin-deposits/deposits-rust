@@ -130,6 +130,7 @@ fn deposit_open() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     });
 }
 
@@ -148,12 +149,13 @@ fn deposit_open_minimal() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     });
 }
 
 #[test]
 fn deposit_close() {
-    test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did() });
+    test_roundtrip(&LedgerOperation::DepositClose { deposit_id: did(), commitment: None, });
 }
 
 #[test]
@@ -185,6 +187,7 @@ fn invoice_credit() {
         invoice_id: "bolt11:test".into(),
         sequence_number: 42,
         wallet_authorization: None,
+        commitment: None,
     });
 }
 
@@ -200,6 +203,7 @@ fn invoice_lock() {
         timeout_height: None,
         fee: None,
         witness: wit(),
+        commitment: None,
     });
 }
 
@@ -216,6 +220,7 @@ fn invoice_lock_with_fee() {
         timeout_height: Some(950_000),
         fee: Some(9_582),
         witness: wit(),
+        commitment: None,
     });
 }
 
@@ -225,6 +230,7 @@ fn invoice_fail() {
         deposit_id: did(),
         payment_id: h32(),
         sequence_number: 44,
+        commitment: None,
     });
 }
 
@@ -237,6 +243,7 @@ fn invoice_fulfill() {
         sequence_number: 45,
         witness: wit(),
         preimage: h32(),
+        commitment: None,
     });
 }
 
@@ -248,6 +255,7 @@ fn onchain_credit() {
         deposit_id: did(),
         amount: 100_000_000,
         funding_address: "bcrt1qfund".into(),
+        commitment: None,
     });
 }
 
@@ -262,6 +270,7 @@ fn onchain_lock() {
         nonce: 0,
         expiry: u32::MAX,
         witness: wit(),
+        commitment: None,
     });
 }
 
@@ -270,6 +279,7 @@ fn onchain_fail() {
     test_roundtrip(&LedgerOperation::OnchainFail {
         deposit_id: did(),
         withdrawal_id: h32(),
+        commitment: None,
     });
 }
 
@@ -281,6 +291,7 @@ fn onchain_fulfill() {
         amount: 50_000_000,
         txid: h32(),
         destination_address: "bcrt1qdest".into(),
+        commitment: None,
     });
 }
 
@@ -298,6 +309,7 @@ fn transfer_lock() {
         nonce: 0,
         expiry: u32::MAX,
         witness: wit(),
+        commitment: None,
     });
 }
 
@@ -306,6 +318,8 @@ fn transfer_complete() {
     test_roundtrip(&LedgerOperation::TransferComplete {
         transfer_id: h32(),
         script_witness: wit(),
+        commitment: None,
+        dest_commitment: None,
     });
 }
 
@@ -315,6 +329,7 @@ fn transfer_fail() {
         transfer_id: h32(),
         block_hash: h32(),
         reason: 1,
+        commitment: None,
     });
 }
 
@@ -364,6 +379,7 @@ fn fee_collect() {
         deposit_id: did(),
         amount: 1000,
         block_height: 500,
+        commitment: None,
     });
 }
 

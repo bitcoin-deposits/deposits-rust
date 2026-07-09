@@ -42,6 +42,7 @@ fn open_deposit(ledger: &mut Ledger, descriptor: &str) -> [u8; 16] {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
     deposit_id
@@ -56,6 +57,7 @@ fn credit_deposit(ledger: &mut Ledger, deposit_id: [u8; 16], amount_msats: u64) 
             invoice_id: "test".to_string(),
             sequence_number: ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 }

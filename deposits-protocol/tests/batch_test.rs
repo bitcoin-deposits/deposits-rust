@@ -34,6 +34,7 @@ fn open_deposit_op(descriptor: &str) -> LedgerOperation {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     }
 }
 
@@ -45,6 +46,7 @@ fn credit_op(descriptor: &str, amount: u64, seq: u64, hash_byte: u8) -> LedgerOp
         invoice_id: format!("inv-{}", seq),
         sequence_number: seq,
         wallet_authorization: None,
+        commitment: None,
     }
 }
 

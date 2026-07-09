@@ -111,6 +111,7 @@ fn attack_double_credit_same_payment() {
             invoice_id: "dup".to_string(),
             sequence_number: 99,
             wallet_authorization: None,
+            commitment: None,
         });
 
     assert!(result.is_err(), "Double credit must be rejected");
@@ -139,6 +140,7 @@ fn attack_withdraw_exceeds_balance() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
         .expect("OnchainLock signs via dep-17 preimage");
@@ -179,6 +181,7 @@ fn attack_forged_invoice_witness() {
         timeout_height: None,
         fee: None,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &attacker_key.secret_key)
         .expect("InvoiceLock signs via dep-17 preimage");
@@ -236,6 +239,7 @@ fn attack_operate_during_dispute() {
             invoice_id: "steal".to_string(),
             sequence_number: 99,
             wallet_authorization: None,
+            commitment: None,
         });
     assert!(result.is_err(), "Credits must be blocked during dispute");
 
@@ -255,6 +259,7 @@ fn attack_operate_during_dispute() {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         });
     assert!(
         result.is_err(),
@@ -358,6 +363,7 @@ fn attack_drain_via_overlapping_locks() {
         timeout_height: None,
         fee: None,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
         .expect("InvoiceLock signs via dep-17 preimage");
@@ -406,6 +412,7 @@ fn attack_replay_old_credit() {
             invoice_id: "replay".to_string(),
             sequence_number: 999, // different sequence
             wallet_authorization: None,
+            commitment: None,
         });
 
     assert!(

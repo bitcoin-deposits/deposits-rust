@@ -88,6 +88,7 @@ async fn submit_transfer_lock(
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, source_sk)
         .ok_or("sign_op failed: unsignable variant")?;
@@ -207,8 +208,7 @@ async fn watch_for_reveal(
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                 if let LedgerOperation::TransferComplete {
                     transfer_id: tid,
-                    script_witness,
-                } = op
+                    script_witness, .. } = op
                 {
                     if tid == transfer_id {
                         if let Some(preimage_bytes) = script_witness.stack.first() {

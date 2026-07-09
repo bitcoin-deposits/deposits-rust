@@ -551,6 +551,7 @@ impl ProtocolSim {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
 
         if self.propose(proposer, open_op) != Outcome::Applied {
@@ -568,6 +569,7 @@ impl ProtocolSim {
             invoice_id: format!("wallet_{}_{}", proposer, depositor_seed),
             sequence_number: self.operators[proposer].ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         };
 
         if self.propose(proposer, credit_op) != Outcome::Applied {
@@ -695,7 +697,7 @@ fn validate_per_op_as_cosigner(
         LedgerOperation::DepositOpen {
             deposit_id, fees, ..
         } => op_val::validate_deposit_add_by_id(&ledger, deposit_id, fees.as_ref()).is_ok(),
-        LedgerOperation::DepositClose { deposit_id } => {
+        LedgerOperation::DepositClose { deposit_id, .. } => {
             op_val::validate_deposit_close_by_id(&ledger, deposit_id).is_ok()
         }
         LedgerOperation::FeeChange {
@@ -751,8 +753,7 @@ fn validate_per_op_as_cosigner(
         LedgerOperation::FeeCollect {
             deposit_id,
             amount,
-            block_height,
-        } => {
+            block_height, .. } => {
             op_val::validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height).is_ok()
         }
         LedgerOperation::LedgerClose => op_val::validate_ledger_close(&ledger).is_ok(),
@@ -997,6 +998,7 @@ fn build_onchain_lock(
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     deposits_core::signing::sign_op(proto, source_sk)
         .expect("OnchainLock signs via dep-17 preimage")
@@ -1023,6 +1025,7 @@ fn build_invoice_lock(
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, source_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
@@ -1063,6 +1066,7 @@ fn build_transfer_lock(
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, source_sk)
         .expect("TransferLock signs via dep-17 preimage");
@@ -1097,6 +1101,7 @@ fn gen_deposit_open(
         fee_change_after_blocks: Some(50),
         fee_change_notice_blocks: Some(20),
         fee_change_limit_bps: Some(1000), // 10% per change
+        commitment: None,
     };
     (op, deposit_id, descriptor, seed, dsk)
 }
@@ -1169,6 +1174,7 @@ fn gen_honest_fee_collect(
         deposit_id: did,
         amount,
         block_height,
+        commitment: None,
     })
 }
 
@@ -1192,6 +1198,7 @@ fn gen_adversary_fee_collect(
         deposit_id: did,
         amount,
         block_height: block,
+        commitment: None,
     })
 }
 
@@ -1236,7 +1243,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             }
         }) {
             return Some(GeneratedOp {
-                op: LedgerOperation::DepositClose { deposit_id: did },
+                op: LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
@@ -1256,6 +1263,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 transfer_id: tid,
                 block_hash,
                 reason: 1,
+                commitment: None,
             },
             record_deposit: None,
             record_pending: None,
@@ -1386,11 +1394,13 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 amount,
                 txid,
                 destination_address: dest,
+                commitment: None,
             }
         } else {
             LedgerOperation::OnchainFail {
                 deposit_id: did,
                 withdrawal_id: wid,
+                commitment: None,
             }
         };
         return Some(GeneratedOp {
@@ -1414,6 +1424,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 deposit_id: did,
                 amount,
                 funding_address: format!("bcrt1q_funding_{}", proposer),
+                commitment: None,
             },
             record_deposit: None,
             record_pending: None,
@@ -1447,6 +1458,8 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 script_witness: DescriptorWitness {
                     stack: vec![pre.to_vec()],
                 },
+                commitment: None,
+                dest_commitment: None,
             };
             Some(GeneratedOp {
                 op: o,
@@ -1536,12 +1549,14 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 sequence_number: op.ledger.state.sequence + 1,
                 witness,
                 preimage,
+                commitment: None,
             }
         } else {
             LedgerOperation::InvoiceFail {
                 deposit_id: source.0,
                 payment_id: pid,
                 sequence_number: op.ledger.state.sequence + 1,
+                commitment: None,
             }
         };
         Some(GeneratedOp {
@@ -1598,6 +1613,7 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             invoice_id: format!("h_{}_{}", proposer, op.ledger.state.sequence),
             sequence_number: op.ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -1623,7 +1639,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
         // DepositClose on a deposit with non-zero balance → rejected.
         let (did, _, _) = pick_deposit(op, rng)?;
         return Some(GeneratedOp {
-            op: LedgerOperation::DepositClose { deposit_id: did },
+            op: LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
@@ -1684,6 +1700,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 transfer_id: tid,
                 block_hash: [0xBA; 32],
                 reason: 0,
+                commitment: None,
             },
             record_deposit: None,
             record_pending: None,
@@ -1711,6 +1728,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 deposit_id: did,
                 amount,
                 funding_address: String::new(),
+                commitment: None,
             },
             record_deposit: None,
             record_pending: None,
@@ -1792,6 +1810,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             LedgerOperation::OnchainFail {
                 deposit_id: did,
                 withdrawal_id: wid,
+                commitment: None,
             }
         } else {
             LedgerOperation::OnchainFulfill {
@@ -1800,6 +1819,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 amount: rng.range(1_000_000),
                 txid: [0xBE; 32],
                 destination_address: "bcrt1q_bogus_x".to_string(),
+                commitment: None,
             }
         };
         return Some(GeneratedOp {
@@ -1911,6 +1931,8 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             script_witness: DescriptorWitness {
                 stack: vec![garbage.to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -1969,6 +1991,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 stack: vec![vec![0u8; 64]],
             }, // garbage sig
             preimage: bad_preimage,
+            commitment: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -2043,6 +2066,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
             invoice_id: format!("a_{}_{}", proposer, op.ledger.state.sequence),
             sequence_number: op.ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         };
         Some(GeneratedOp {
             op: o,
@@ -2178,6 +2202,7 @@ fn step1_honest_cosigners_block_over_reserve_credit() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     };
     assert_eq!(sim.propose(0, open_op), Outcome::Applied);
 
@@ -2190,6 +2215,7 @@ fn step1_honest_cosigners_block_over_reserve_credit() {
         invoice_id: "over_credit".to_string(),
         sequence_number: sim.operators[0].ledger.state.sequence + 1,
         wallet_authorization: None,
+        commitment: None,
     };
 
     // Op 0's quorum = [1, 2, 3]. Member 1 is adversary, 2 & 3 are honest.
@@ -2479,6 +2505,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             })
             .unwrap();
     }
@@ -2492,6 +2519,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             invoice_id: "c1".to_string(),
             sequence_number: ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
     assert_eq!(ledger.state.total_deposit_balance(), 100_000);
@@ -2520,6 +2548,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             invoice_id: "c2".to_string(),
             sequence_number: ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
     assert_eq!(ledger.state.total_deposit_balance(), reserves_amount);
@@ -2539,6 +2568,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             transfer_id,
             block_hash: [0x33; 32],
             reason: 1,
+            commitment: None,
         })
         .unwrap();
 
@@ -2947,6 +2977,7 @@ fn dispute_full_flow_produces_single_winner() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     };
     assert_eq!(sim.propose(0, open), Outcome::Applied);
 

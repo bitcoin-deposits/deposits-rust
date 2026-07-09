@@ -275,6 +275,7 @@ fn tier5_1_signature_malleability() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &sk).expect("sign_op");
 
@@ -307,6 +308,7 @@ fn tier5_1_signature_malleability() {
                 timeout_height: None,
                 fee: None,
                 witness: DescriptorWitness { stack },
+                commitment: None,
             },
             _ => unreachable!(),
         }
@@ -352,6 +354,7 @@ fn tier5_1_signature_malleability() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![sig_bytes.clone()] },
+        commitment: None,
     };
     assert!(
         !authorizer.authorize(&descriptor, &wrong_proto),
@@ -701,6 +704,7 @@ fn tier2_4_proof_hash_embedding() {
             timeout_height: None,
             fee: None,
             witness: deposits_protocol::types::DescriptorWitness::new(),
+            commitment: None,
         };
         deposits_core::dep16::operations::operation_sighash(&op)
             .expect("InvoiceLock has a dep-17 preimage")

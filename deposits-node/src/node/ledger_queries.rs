@@ -501,6 +501,7 @@ impl Node {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             };
 
             let message_bytes = operation.tlv_encode();

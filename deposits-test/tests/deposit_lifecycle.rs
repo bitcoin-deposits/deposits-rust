@@ -64,6 +64,7 @@ fn deposit_duplicate_credit_rejected() {
         invoice_id: "dup".to_string(),
         sequence_number: 99,
         wallet_authorization: None,
+        commitment: None,
     };
     let result = net.op_mut("alice").ledger.apply_operation(&op);
     assert!(result.is_err());
@@ -132,7 +133,7 @@ fn deposit_close_requires_zero_balance() {
         .credit_deposit(deposit_id, 100_000, [0xAA; 32]);
 
     // Close should fail with non-zero balance
-    let close_op = deposits_protocol::LedgerOperation::DepositClose { deposit_id };
+    let close_op = deposits_protocol::LedgerOperation::DepositClose { deposit_id, commitment: None, };
     let result = net.op_mut("alice").ledger.apply_operation(&close_op);
     assert!(result.is_err());
 }

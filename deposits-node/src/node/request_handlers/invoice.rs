@@ -752,6 +752,7 @@ impl Node {
             timeout_height: Some(timeout_height),
             fee: fee_field,
             witness: witness.clone(),
+            commitment: None,
         };
 
         // Commit the lock operation via staged flow
@@ -831,6 +832,7 @@ impl Node {
                     sequence_number: fulfill_sequence,
                     witness: witness.clone(),
                     preimage,
+                    commitment: None,
                 };
 
                 if let Err(e) = self.commit_operation(ledger_id, fulfill_operation).await {
@@ -859,6 +861,7 @@ impl Node {
                     // flow lands (task #177), every operator-side credit is
                     // deterrence-only — fraud-proof recourse covers it.
                     wallet_authorization: None,
+                    commitment: None,
                 };
 
                 if let Err(e) = self.commit_operation(ledger_id, credit_operation).await {
@@ -935,6 +938,7 @@ impl Node {
                         deposit_id,
                         payment_id,
                         sequence_number: fail_sequence,
+                        commitment: None,
                     };
                     if let Err(e2) = self.commit_operation(ledger_id, fail_operation).await {
                         tracing::error!("Failed to commit fail: {}", e2);
@@ -1103,6 +1107,7 @@ impl Node {
                     sequence_number: fulfill_sequence,
                     witness: lock_witness,
                     preimage,
+                    commitment: None,
                 };
                 if let Err(e) = self.commit_operation(ledger_id, fulfill_op).await {
                     return (
@@ -1136,6 +1141,7 @@ impl Node {
                     deposit_id,
                     payment_id,
                     sequence_number: fail_sequence,
+                    commitment: None,
                 };
                 if let Err(e) = self.commit_operation(ledger_id, fail_op).await {
                     tracing::error!("Failed to commit InvoiceFail: {}", e);

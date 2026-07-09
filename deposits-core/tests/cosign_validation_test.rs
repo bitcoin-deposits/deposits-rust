@@ -42,6 +42,7 @@ fn open_deposit(ledger: &mut Ledger, descriptor: &str) -> [u8; 16] {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
     deposit_id
@@ -56,6 +57,7 @@ fn credit_deposit(ledger: &mut Ledger, deposit_id: [u8; 16], amount: u64) {
             invoice_id: "test".to_string(),
             sequence_number: 0,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 }
@@ -84,6 +86,7 @@ fn cosign_rejects_invoice_lock_insufficient_balance() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     });
     assert!(result.is_err(), "Should reject lock exceeding balance");
 }
@@ -107,6 +110,7 @@ fn cosign_accepts_invoice_lock_within_balance() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     });
     assert!(result.is_ok(), "Should accept lock within balance");
 }
@@ -132,6 +136,7 @@ fn cosign_rejects_double_lock_exceeding_available() {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness { stack: vec![] },
+            commitment: None,
         })
         .unwrap();
 
@@ -146,6 +151,7 @@ fn cosign_rejects_double_lock_exceeding_available() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     });
     assert!(
         result.is_err(),
@@ -172,6 +178,7 @@ fn cosign_rejects_lock_on_nonexistent_deposit() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     });
     assert!(result.is_err(), "Should reject lock on nonexistent deposit");
 }
@@ -198,6 +205,7 @@ fn cosign_rejects_duplicate_deposit_open() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     });
     assert!(result.is_err(), "Should reject duplicate deposit open");
 }
@@ -213,7 +221,7 @@ fn cosign_rejects_close_with_balance() {
 
     let result = ledger
         .state
-        .apply(&LedgerOperation::DepositClose { deposit_id: dep });
+        .apply(&LedgerOperation::DepositClose { deposit_id: dep, commitment: None, });
     assert!(result.is_err(), "Should reject close with non-zero balance");
 }
 
@@ -247,6 +255,7 @@ fn cosign_rejects_transfer_lock_insufficient_balance() {
         nonce: 0,
         expiry: u32::MAX,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     });
     assert!(
         result.is_err(),
@@ -273,6 +282,7 @@ fn cosign_rejects_fee_collect_exceeding_balance() {
         deposit_id: dep,
         amount: 2000,
         block_height: 810_000,
+        commitment: None,
     });
     // FeeCollect uses saturating_sub so it doesn't error, but the cosigner
     // should flag this as non-conforming in a real implementation.
@@ -307,6 +317,7 @@ fn open_invoice_locks_tracked_through_lifecycle() {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness { stack: vec![] },
+            commitment: None,
         })
         .unwrap();
 
@@ -326,6 +337,7 @@ fn open_invoice_locks_tracked_through_lifecycle() {
             sequence_number: 1,
             witness: DescriptorWitness { stack: vec![] },
             preimage: [0u8; 32],
+            commitment: None,
         })
         .unwrap();
 
@@ -357,6 +369,7 @@ fn open_invoice_lock_cleared_on_fail() {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness { stack: vec![] },
+            commitment: None,
         })
         .unwrap();
 
@@ -368,6 +381,7 @@ fn open_invoice_lock_cleared_on_fail() {
             deposit_id: dep,
             payment_id,
             sequence_number: 1,
+            commitment: None,
         })
         .unwrap();
 
@@ -411,6 +425,7 @@ fn cosign_data_contains_decodable_operation() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     };
 
     // Build cosign_data the same way the protocol does
@@ -456,6 +471,7 @@ fn cosign_data_invalid_operation_rejected() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness { stack: vec![] },
+        commitment: None,
     };
 
     let message_bytes = operation.tlv_encode();

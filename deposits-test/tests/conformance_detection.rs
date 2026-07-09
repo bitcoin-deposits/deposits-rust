@@ -128,6 +128,7 @@ fn watcher_detects_bad_invoice_witness() {
         witness: deposits_protocol::DescriptorWitness {
             stack: vec![vec![0xFF; 64]], // garbage signature
         },
+        commitment: None,
     };
     net.op_mut("alice").ledger.append_operation(bad_op).unwrap();
 

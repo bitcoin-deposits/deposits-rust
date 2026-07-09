@@ -282,6 +282,7 @@ impl Node {
                     deposit_id,
                     amount,
                     block_height: current_block,
+                    commitment: None,
                 };
 
                 if let Err(e) = self.commit_operation(&ledger_id, operation).await {
@@ -377,6 +378,7 @@ impl Node {
                     transfer_id,
                     block_hash,
                     reason: 1,
+                    commitment: None,
                 };
 
                 if let Err(e) = self.commit_operation(&ledger_id, operation).await {
@@ -603,6 +605,7 @@ impl Node {
                         deposit_id: lock.deposit_id,
                         payment_id,
                         sequence_number: sequence,
+                        commitment: None,
                     };
                     match self.commit_operation(&ledger_id, op).await {
                         Ok(_) => tracing::warn!(
@@ -786,6 +789,7 @@ impl Node {
                         sequence_number: sequence,
                         witness: lock.witness.clone(),
                         preimage,
+                        commitment: None,
                     };
 
                     match self.commit_operation(&ledger_id, op).await {
@@ -820,6 +824,7 @@ impl Node {
                         deposit_id: lock.deposit_id,
                         payment_id,
                         sequence_number: sequence,
+                        commitment: None,
                     };
 
                     match self.commit_operation(&ledger_id, op).await {
@@ -858,6 +863,7 @@ impl Node {
                             deposit_id: lock.deposit_id,
                             payment_id,
                             sequence_number: sequence,
+                            commitment: None,
                         };
                         match self.commit_operation(&ledger_id, op).await {
                             Ok(_) => tracing::warn!(

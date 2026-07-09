@@ -76,6 +76,7 @@ fn scaling_reserve_backing() {
                     invoice_id: "over".into(),
                     sequence_number: 99,
                     wallet_authorization: None,
+                    commitment: None,
                 },
                 &deposits_protocol::types::AllowAll,
                 0,
@@ -186,6 +187,7 @@ fn scaling_dispute_state_gate() {
                 invoice_id: "x".into(),
                 sequence_number: 99,
                 wallet_authorization: None,
+                commitment: None,
             })
             .is_err();
 
@@ -236,6 +238,7 @@ fn scaling_witness_verification() {
             witness: DescriptorWitness {
                 stack: vec![vec![0xFF; 64]],
             },
+            commitment: None,
         };
 
         let (_, violations) = net

@@ -48,6 +48,7 @@ fn open_deposit_with_change_params(
                 fee_change_after_blocks: after_blocks,
                 fee_change_notice_blocks: notice_blocks,
                 fee_change_limit_bps: limit_bps,
+                commitment: None,
             },
             block_height,
             [0u8; 32],
@@ -339,6 +340,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
             invoice_id: "fund".to_string(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -357,6 +359,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
             deposit_id: did,
             amount: 10,
             block_height: 400,
+            commitment: None,
         })
         .unwrap();
     let deposit = ledger.state.deposits.get(&did).unwrap();
@@ -369,6 +372,7 @@ fn fee_collect_applies_pending_change_at_effective_block() {
             deposit_id: did,
             amount: 10,
             block_height: 500,
+            commitment: None,
         })
         .unwrap();
     let deposit = ledger.state.deposits.get(&did).unwrap();
@@ -542,6 +546,7 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
             invoice_id: "fund".to_string(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -561,6 +566,7 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
                 deposit_id: did,
                 amount: 1,
                 block_height: block,
+                commitment: None,
             })
             .unwrap();
         let d = ledger.state.deposits.get(&did).unwrap();
@@ -582,6 +588,7 @@ fn pending_fee_change_survives_multiple_fee_collects_before_effective() {
             deposit_id: did,
             amount: 1,
             block_height: 500,
+            commitment: None,
         })
         .unwrap();
     let d = ledger.state.deposits.get(&did).unwrap();

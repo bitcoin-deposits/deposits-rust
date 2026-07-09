@@ -642,6 +642,7 @@ fn invoice_lock_preimage(deposit_id: [u8; 16], payment_id: [u8; 32], amount: u64
         timeout_height: None,
         fee: None,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     deposits_core::dep16::operations::operation_sighash(&op)
         .expect("InvoiceLock has a dep-17 preimage")
@@ -668,6 +669,7 @@ fn transfer_lock_preimage(
         nonce: 0,
         expiry: u32::MAX,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     deposits_core::dep16::operations::operation_sighash(&op)
         .expect("TransferLock has a dep-17 preimage")
@@ -689,6 +691,7 @@ fn withdrawal_preimage(
         nonce: 0,
         expiry: u32::MAX,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     deposits_core::dep16::operations::operation_sighash(&op)
         .expect("OnchainLock has a dep-17 preimage")

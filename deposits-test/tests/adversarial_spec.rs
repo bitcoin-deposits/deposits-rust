@@ -49,6 +49,7 @@ fn attack_fee_overflow() {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -61,6 +62,7 @@ fn attack_fee_overflow() {
             invoice_id: "big".into(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -70,6 +72,7 @@ fn attack_fee_overflow() {
         deposit_id: did,
         amount: u64::MAX / 4, // large fee
         block_height: 52560,
+        commitment: None,
     });
 
     // The fee should be applied via saturating_sub — shouldn't panic or wrap

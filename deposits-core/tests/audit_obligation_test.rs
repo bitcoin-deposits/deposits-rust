@@ -162,6 +162,7 @@ fn delivery_embed_no_state_changes() {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
 

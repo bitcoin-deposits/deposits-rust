@@ -506,6 +506,7 @@ impl Node {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -565,6 +566,7 @@ impl Node {
             deposit_id,
             amount: amount_msats,
             funding_address,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -622,6 +624,7 @@ impl Node {
             sequence_number,
             // Deterrence-only until the wallet-cosign flow lands (#177).
             wallet_authorization: None,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -698,6 +701,7 @@ impl Node {
             // Legacy helper (not the depositor pay path); amount-only lock.
             fee: None,
             witness,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -760,6 +764,7 @@ impl Node {
             deposit_id,
             payment_id,
             sequence_number,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -828,6 +833,7 @@ impl Node {
             preimage,
             sequence_number,
             witness,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -926,6 +932,7 @@ impl Node {
             nonce: op_nonce,
             expiry: op_expiry,
             witness: witness_for_lock,
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;
@@ -1022,6 +1029,7 @@ impl Node {
             amount: withdrawal.amount_sats * 1000,
             txid: txid_bytes,
             destination_address: withdrawal.destination_address.clone(),
+            commitment: None,
         };
 
         self.commit_operation(ledger_id, operation).await?;

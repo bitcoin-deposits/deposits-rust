@@ -754,6 +754,7 @@ mod dispatch {
             expiry: u32::MAX,
             nonce: 0,
             witness: Default::default(),
+            commitment: None,
         }
     }
 
@@ -989,6 +990,7 @@ mod dispatch {
             invoice_id: "x".into(),
             sequence_number: 30,
             wallet_authorization: None,
+            commitment: None,
         };
         let id = broadcast.embedding.ledger_id.clone();
         let v = histories.get_mut(&id).unwrap();
@@ -1550,6 +1552,7 @@ mod uncredited_lightning {
             nonce: 0,
             expiry: u32::MAX,
             witness: Default::default(),
+            commitment: None,
         }
     }
 
@@ -1628,6 +1631,7 @@ mod uncredited_lightning {
             invoice_id: "test".to_string(),
             sequence_number: 30,
             wallet_authorization: None,
+            commitment: None,
         };
         let history = vec![
             fixture_update(30, credit_op),
@@ -1653,6 +1657,7 @@ mod uncredited_lightning {
             sequence_number: 30,
             witness: Default::default(),
             preimage,
+            commitment: None,
         };
         let history = vec![
             fixture_update(30, fulfill_op),
@@ -1693,6 +1698,7 @@ mod uncredited_lightning {
             invoice_id: "test".to_string(),
             sequence_number: 60,
             wallet_authorization: None,
+            commitment: None,
         };
         let history = vec![
             fixture_update(50, dummy_op()),
@@ -2005,6 +2011,7 @@ mod uncredited_onchain {
             nonce: 0,
             expiry: u32::MAX,
             witness: Default::default(),
+            commitment: None,
         }
     }
 
@@ -2174,6 +2181,7 @@ mod uncredited_onchain {
             deposit_id: deposits_protocol::DepositId::default(),
             amount: 100_000,
             funding_address: "bcrt1qtest".to_string(),
+            commitment: None,
         };
         let history = vec![
             fixture_update(40, [0xCC; 32], credit_op),
@@ -2197,6 +2205,7 @@ mod uncredited_onchain {
             deposit_id: deposits_protocol::DepositId::default(),
             amount: 100_000,
             funding_address: "bcrt1qother".to_string(),
+            commitment: None,
         };
         let history = vec![
             fixture_update(40, [0xCC; 32], credit_op),
@@ -2328,6 +2337,7 @@ mod embedding {
             expiry: u32::MAX,
             nonce: 0,
             witness: Default::default(),
+            commitment: None,
         }
     }
 

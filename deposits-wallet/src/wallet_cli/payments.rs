@@ -123,6 +123,7 @@ pub async fn withdraw(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())
         .ok_or("OnchainLock failed to sign — translation returned None")?;
@@ -357,6 +358,7 @@ pub async fn transfer_lock(args: &[String]) -> Result<(), Box<dyn std::error::Er
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &secret_key)
         .ok_or("sign_op failed: unsignable variant")?;
@@ -939,6 +941,7 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &from_secret)
         .ok_or("sign_op failed: unsignable variant")?;
@@ -1527,6 +1530,7 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         timeout_height: None,
         fee: Some(fee_msats),
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &keypair.secret_key())
         .ok_or("InvoiceLock failed to sign — translation returned None")?;
@@ -2172,6 +2176,7 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &src_sk)
         .ok_or("sign_op failed: unsignable variant")?;
@@ -2623,6 +2628,7 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &src_sk)
         .ok_or("sign_op failed: unsignable variant")?;
@@ -2672,8 +2678,7 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
             use deposits_core::{LedgerOperation, TlvDecode};
             if let Ok(LedgerOperation::TransferComplete {
                 transfer_id: ref tid,
-                ref script_witness,
-            }) = LedgerOperation::tlv_decode(&update.message)
+                ref script_witness, .. }) = LedgerOperation::tlv_decode(&update.message)
             {
                 if *tid == transfer_id {
                     if let Some(bytes) = script_witness.stack.first() {

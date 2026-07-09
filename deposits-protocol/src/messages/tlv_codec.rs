@@ -100,6 +100,16 @@ mod ledger_op_tlv {
     /// per the TLV convention, so pre-fee decoders skip it and a legacy
     /// amount-only lock round-trips byte-identically.
     pub const INVOICE_FEE: u64 = 221;
+    /// Balance commitments (DEP-02 §Balance Commitments). ODD = optional:
+    /// legacy ops carry none and round-trip byte-identically; unknown
+    /// decoders skip them. 223/225 = the op's primary deposit's post-op
+    /// (balance, locked_balance) in msats; 227/229 = TransferComplete's
+    /// destination pair. The pair MUST appear together — decode rejects a
+    /// half-present pair (see `read_commitment`).
+    pub const BALANCE_AFTER: u64 = 223;
+    pub const LOCKED_AFTER: u64 = 225;
+    pub const DEST_BALANCE_AFTER: u64 = 227;
+    pub const DEST_LOCKED_AFTER: u64 = 229;
     pub const TRANSFER_ID: u64 = 220;
     pub const BLOCK_HASH: u64 = 222;
     pub const SCRIPT_WITNESS: u64 = 224;
@@ -169,6 +179,48 @@ mod ledger_op_tlv {
     /// recognizable to old decoders (they see one unknown TLV field and
     /// skip it without crashing).
     pub const BATCH_OPS: u64 = 298; // var-length bytes
+}
+
+/// Write an optional balance commitment as its two flat odd tags. Absent →
+/// nothing written, so legacy encodings stay byte-identical (DEP-02
+/// §Balance Commitments).
+fn write_commitment(
+    builder: TlvBuilder,
+    commitment: &Option<BalanceCommitment>,
+    balance_tag: u64,
+    locked_tag: u64,
+) -> TlvBuilder {
+    match commitment {
+        Some(c) => builder
+            .u64_field(balance_tag, c.balance_after)
+            .u64_field(locked_tag, c.locked_after),
+        None => builder,
+    }
+}
+
+/// Read an optional balance commitment from its two flat odd tags. The pair
+/// MUST appear together (DEP-02): a half-present pair is a decode error, so
+/// a malformed producer can't ship an ambiguous commitment.
+fn read_commitment(
+    reader: &TlvReader,
+    balance_tag: u64,
+    locked_tag: u64,
+) -> TlvResult<Option<BalanceCommitment>> {
+    let balance = reader.read_u64_opt(balance_tag)?;
+    let locked = reader.read_u64_opt(locked_tag)?;
+    match (balance, locked) {
+        (Some(balance_after), Some(locked_after)) => Ok(Some(BalanceCommitment {
+            balance_after,
+            locked_after,
+        })),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(TlvError::MissingRequiredField {
+            field_type: locked_tag,
+        }),
+        (None, Some(_)) => Err(TlvError::MissingRequiredField {
+            field_type: balance_tag,
+        }),
+    }
 }
 
 impl TlvEncode for LedgerOperation {
@@ -251,6 +303,7 @@ impl TlvEncode for LedgerOperation {
                 fee_change_after_blocks,
                 fee_change_notice_blocks,
                 fee_change_limit_bps,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
@@ -282,9 +335,14 @@ impl TlvEncode for LedgerOperation {
                 if let Some(v) = fee_change_limit_bps {
                     builder = builder.u16_field(FEE_CHANGE_LIMIT_BPS, *v);
                 }
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
-            Self::DepositClose { deposit_id } => {
+            Self::DepositClose {
+                deposit_id,
+                commitment,
+            } => {
                 builder = builder.deposit_id_field(DEPOSIT_ID, deposit_id);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::FeeChange {
                 deposit_id,
@@ -317,6 +375,7 @@ impl TlvEncode for LedgerOperation {
                 invoice_id,
                 sequence_number,
                 wallet_authorization,
+                commitment,
             } => {
                 builder = builder
                     .bytes_field(PAYMENT_HASH, payment_hash)
@@ -327,6 +386,7 @@ impl TlvEncode for LedgerOperation {
                 if let Some(sig) = wallet_authorization {
                     builder = builder.bytes_field(INVOICE_CREDIT_WALLET_AUTH, sig);
                 }
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::InvoiceLock {
                 deposit_id,
@@ -338,6 +398,7 @@ impl TlvEncode for LedgerOperation {
                 timeout_height,
                 fee,
                 witness,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
@@ -355,16 +416,19 @@ impl TlvEncode for LedgerOperation {
                 if let Some(f) = fee {
                     builder = builder.u64_field(INVOICE_FEE, *f);
                 }
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::InvoiceFail {
                 deposit_id,
                 payment_id,
                 sequence_number,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .bytes_field(PAYMENT_ID, payment_id)
                     .u64_field(SEQUENCE_NUMBER, *sequence_number);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::InvoiceFulfill {
                 deposit_id,
@@ -373,6 +437,7 @@ impl TlvEncode for LedgerOperation {
                 sequence_number,
                 witness,
                 preimage,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
@@ -381,6 +446,7 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(SEQUENCE_NUMBER, *sequence_number)
                     .witness_field(WITNESS, witness)
                     .bytes_field(PREIMAGE, preimage);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::OnchainCredit {
                 txid,
@@ -388,6 +454,7 @@ impl TlvEncode for LedgerOperation {
                 deposit_id,
                 amount,
                 funding_address,
+                commitment,
             } => {
                 builder = builder
                     .bytes_field(TXID, txid)
@@ -395,6 +462,7 @@ impl TlvEncode for LedgerOperation {
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .string_field(FUNDING_ADDRESS, funding_address);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::OnchainLock {
                 deposit_id,
@@ -405,6 +473,7 @@ impl TlvEncode for LedgerOperation {
                 nonce,
                 expiry,
                 witness,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
@@ -415,14 +484,17 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::OnchainFail {
                 deposit_id,
                 withdrawal_id,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .bytes_field(WITHDRAWAL_ID, withdrawal_id);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::OnchainFulfill {
                 deposit_id,
@@ -430,6 +502,7 @@ impl TlvEncode for LedgerOperation {
                 amount,
                 txid,
                 destination_address,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
@@ -437,6 +510,7 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(AMOUNT, *amount)
                     .bytes_field(TXID, txid)
                     .string_field(DESTINATION_ADDRESS, destination_address);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::TransferLock {
                 transfer_nonce,
@@ -450,6 +524,7 @@ impl TlvEncode for LedgerOperation {
                 nonce,
                 expiry,
                 witness,
+                commitment,
             } => {
                 builder = builder
                     .bytes_field(TRANSFER_NONCE, transfer_nonce)
@@ -463,24 +538,32 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::TransferComplete {
                 transfer_id,
                 script_witness,
+                commitment,
+                dest_commitment,
             } => {
                 builder = builder
                     .bytes_field(TRANSFER_ID, transfer_id)
                     .witness_field(SCRIPT_WITNESS, script_witness);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
+                builder =
+                    write_commitment(builder, dest_commitment, DEST_BALANCE_AFTER, DEST_LOCKED_AFTER);
             }
             Self::TransferFail {
                 transfer_id,
                 block_hash,
                 reason,
+                commitment,
             } => {
                 builder = builder
                     .bytes_field(TRANSFER_ID, transfer_id)
                     .bytes_field(BLOCK_HASH, block_hash)
                     .u8_field(FAIL_REASON, *reason);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::QuorumAddMember {
                 quorum_member,
@@ -577,11 +660,13 @@ impl TlvEncode for LedgerOperation {
                 deposit_id,
                 amount,
                 block_height,
+                commitment,
             } => {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .u64_field(AMOUNT, *amount)
                     .u32_field(BLOCK_HEIGHT, *block_height);
+                builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
             }
             Self::DisputeEnter {
                 last_valid_sequence,
@@ -732,9 +817,11 @@ impl TlvDecode for LedgerOperation {
                 fee_change_after_blocks: reader.read_u32_opt(FEE_CHANGE_AFTER)?,
                 fee_change_notice_blocks: reader.read_u32_opt(FEE_CHANGE_NOTICE)?,
                 fee_change_limit_bps: reader.read_u16_opt(FEE_CHANGE_LIMIT_BPS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             21 => Ok(Self::DepositClose {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             22 => Ok(Self::FeeChange {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -755,6 +842,7 @@ impl TlvDecode for LedgerOperation {
                 invoice_id: reader.read_string(INVOICE_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                 wallet_authorization: reader.read_bytes_opt(INVOICE_CREDIT_WALLET_AUTH)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             31 => Ok(Self::InvoiceLock {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -768,6 +856,7 @@ impl TlvDecode for LedgerOperation {
                 // Absent on legacy ops → None (amount-only lock).
                 fee: reader.read_u64_opt(INVOICE_FEE)?,
                 witness: reader.read_witness(WITNESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             32 => Ok(Self::InvoiceFail {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -776,6 +865,7 @@ impl TlvDecode for LedgerOperation {
                 // are skipped).
                 payment_id: reader.read_bytes(PAYMENT_ID)?,
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             33 => Ok(Self::InvoiceFulfill {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -784,6 +874,7 @@ impl TlvDecode for LedgerOperation {
                 sequence_number: reader.read_u64(SEQUENCE_NUMBER)?,
                 witness: reader.read_witness(WITNESS)?,
                 preimage: reader.read_bytes(PREIMAGE)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             35 => Ok(Self::OnchainCredit {
                 txid: reader.read_bytes(TXID)?,
@@ -791,6 +882,7 @@ impl TlvDecode for LedgerOperation {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 funding_address: reader.read_string(FUNDING_ADDRESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             36 => Ok(Self::OnchainLock {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -801,10 +893,12 @@ impl TlvDecode for LedgerOperation {
                 nonce: reader.read_u64(NONCE)?,
                 expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             37 => Ok(Self::OnchainFail {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 withdrawal_id: reader.read_bytes(WITHDRAWAL_ID)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             38 => Ok(Self::OnchainFulfill {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -812,6 +906,7 @@ impl TlvDecode for LedgerOperation {
                 amount: reader.read_u64(AMOUNT)?,
                 txid: reader.read_bytes(TXID)?,
                 destination_address: reader.read_string(DESTINATION_ADDRESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             70 => Ok(Self::TransferLock {
                 transfer_nonce: reader.read_bytes(TRANSFER_NONCE)?,
@@ -825,15 +920,19 @@ impl TlvDecode for LedgerOperation {
                 nonce: reader.read_u64(NONCE)?,
                 expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             71 => Ok(Self::TransferComplete {
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
                 script_witness: reader.read_witness(SCRIPT_WITNESS)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
+                dest_commitment: read_commitment(&reader, DEST_BALANCE_AFTER, DEST_LOCKED_AFTER)?,
             }),
             72 => Ok(Self::TransferFail {
                 transfer_id: reader.read_bytes(TRANSFER_ID)?,
                 block_hash: reader.read_bytes(BLOCK_HASH)?,
                 reason: reader.read_u8(FAIL_REASON).unwrap_or(1),
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: reader.read_pubkey(QUORUM_MEMBER)?,
@@ -871,6 +970,7 @@ impl TlvDecode for LedgerOperation {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 amount: reader.read_u64(AMOUNT)?,
                 block_height: reader.read_u32(BLOCK_HEIGHT)?,
+                commitment: read_commitment(&reader, BALANCE_AFTER, LOCKED_AFTER)?,
             }),
             54 => Ok(Self::DisputeEnter {
                 last_valid_sequence: reader.read_u64(LAST_VALID_SEQUENCE)?,
@@ -1889,11 +1989,15 @@ mod tests {
 
     #[test]
     fn test_ledger_operation_roundtrip() {
-        // Test non-deposit operations that fully round-trip with BinaryCodec
+        // Test non-deposit operations that fully round-trip with BinaryCodec.
+        // BinaryCodec is legacy + lossy (it drops descriptors and balance
+        // commitments), so only the commitment-less shape round-trips here;
+        // the committed shape round-trips via the TLV codec below.
         let ops = vec![LedgerOperation::FeeCollect {
             deposit_id: crate::types::compute_deposit_id("pk(test)"),
             amount: 500,
             block_height: 800000,
+            commitment: None,
         }];
 
         for op in ops {
@@ -1902,6 +2006,32 @@ mod tests {
             let decoded = LedgerOperation::read_from(&mut &bytes[..]).unwrap();
             assert_eq!(op, decoded);
         }
+
+        // Balance commitments (DEP-02 §Balance Commitments) live on the TLV
+        // wire format: a committed FeeCollect must round-trip losslessly, and
+        // the commitment must actually appear on the wire.
+        let committed = LedgerOperation::FeeCollect {
+            deposit_id: crate::types::compute_deposit_id("pk(test)"),
+            amount: 500,
+            block_height: 800000,
+            commitment: Some(BalanceCommitment {
+                balance_after: 123_456,
+                locked_after: 7_890,
+            }),
+        };
+        let bytes = committed.tlv_encode();
+        assert_eq!(committed, LedgerOperation::tlv_decode(&bytes).unwrap());
+        let legacy = LedgerOperation::FeeCollect {
+            deposit_id: crate::types::compute_deposit_id("pk(test)"),
+            amount: 500,
+            block_height: 800000,
+            commitment: None,
+        };
+        assert_ne!(legacy.tlv_encode(), bytes, "commitment must be on the wire");
+        assert_eq!(
+            legacy,
+            LedgerOperation::tlv_decode(&legacy.tlv_encode()).unwrap()
+        );
 
         // Test DepositOpen separately - BinaryCodec is a legacy format that uses 33-byte
         // legacy pubkey encoding for deposit_id and doesn't preserve the descriptor.
@@ -1923,6 +2053,7 @@ mod tests {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
 
         let mut bytes = Vec::new();
@@ -1952,6 +2083,7 @@ mod tests {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 amount: 500,
                 block_height: 800000,
+                commitment: None,
             },
             sequence_number: 1,
             previous_hash: [0u8; 32],
@@ -2039,9 +2171,11 @@ mod tests {
                 fee_change_after_blocks: Some(52560),
                 fee_change_notice_blocks: Some(2016),
                 fee_change_limit_bps: Some(1000),
+                commitment: None,
             },
             LedgerOperation::DepositClose {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
+                commitment: None,
             },
             LedgerOperation::InvoiceCredit {
                 payment_hash: [0xBB; 32],
@@ -2050,6 +2184,7 @@ mod tests {
                 invoice_id: "inv123".to_string(),
                 sequence_number: 1,
                 wallet_authorization: None,
+                commitment: None,
             },
             LedgerOperation::LedgerClose,
         ];
@@ -2072,6 +2207,7 @@ mod tests {
                 deposit_id: crate::types::compute_deposit_id("pk(test)"),
                 amount: 500,
                 block_height: 800000,
+                commitment: None,
             },
             sequence_number: 1,
             previous_hash: [0u8; 32],
@@ -2273,6 +2409,7 @@ mod tests {
                     invoice_id: "inv123".to_string(),
                     sequence_number: 1,
                     wallet_authorization: None,
+                    commitment: None,
                 },
                 sequence_number: 1,
                 previous_hash: [0xBB; 32],
@@ -2323,6 +2460,7 @@ mod tests {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         };
 
         let mut bytes = Vec::new();
@@ -2370,6 +2508,8 @@ mod tests {
                     [0x11u8; 32].to_vec(), // preimage
                 ],
             },
+            commitment: None,
+            dest_commitment: None,
         };
 
         let mut bytes = Vec::new();
@@ -2378,8 +2518,7 @@ mod tests {
 
         if let LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness,
-        } = decoded
+            script_witness, .. } = decoded
         {
             assert_eq!(transfer_id, [0xCDu8; 32]);
             assert_eq!(script_witness.stack.len(), 1);
@@ -2395,6 +2534,7 @@ mod tests {
             transfer_id: [0xEFu8; 32],
             block_hash: [0x99u8; 32],
             reason: 1,
+            commitment: None,
         };
 
         let mut bytes = Vec::new();
@@ -2423,6 +2563,7 @@ mod tests {
             witness: DescriptorWitness {
                 stack: vec![[0x88u8; 64].to_vec()],
             },
+            commitment: None,
         };
 
         let encoded = op.tlv_encode();
@@ -2465,6 +2606,8 @@ mod tests {
                     vec![5, 6, 7, 8],
                 ],
             },
+            commitment: None,
+            dest_commitment: None,
         };
 
         let encoded = op.tlv_encode();
@@ -2472,8 +2615,7 @@ mod tests {
 
         if let LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness,
-        } = decoded
+            script_witness, .. } = decoded
         {
             assert_eq!(transfer_id, [0xAAu8; 32]);
             assert_eq!(script_witness.stack.len(), 2);
@@ -2490,6 +2632,7 @@ mod tests {
             transfer_id: [0xBBu8; 32],
             block_hash: [0xCCu8; 32],
             reason: 1,
+            commitment: None,
         };
 
         let encoded = op.tlv_encode();
@@ -2515,17 +2658,21 @@ mod tests {
             nonce: 0,
             expiry: u32::MAX,
             witness: DescriptorWitness { stack: vec![] },
+            commitment: None,
         };
 
         let complete = LedgerOperation::TransferComplete {
             transfer_id: [0u8; 32],
             script_witness: DescriptorWitness { stack: vec![] },
+            commitment: None,
+            dest_commitment: None,
         };
 
         let timeout = LedgerOperation::TransferFail {
             transfer_id: [0u8; 32],
             block_hash: [0u8; 32],
             reason: 1,
+            commitment: None,
         };
 
         assert_eq!(lock.discriminant(), 70);

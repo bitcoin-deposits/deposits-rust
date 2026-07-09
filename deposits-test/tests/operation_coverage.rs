@@ -28,6 +28,7 @@ fn onchain_credit_lock_fulfill() {
             deposit_id: did,
             amount: 200_000,
             funding_address: "bcrt1qfund".into(),
+            commitment: None,
         })
         .unwrap();
 
@@ -45,6 +46,7 @@ fn onchain_credit_lock_fulfill() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
         .expect("OnchainLock signs via dep-17 preimage");
@@ -69,6 +71,7 @@ fn onchain_credit_lock_fulfill() {
             withdrawal_id,
             txid: [0x22; 32],
             destination_address: "bcrt1qdest".into(),
+            commitment: None,
         })
         .unwrap();
 
@@ -93,6 +96,7 @@ fn onchain_fail_returns_funds() {
             deposit_id: did,
             amount: 200_000,
             funding_address: "bcrt1qfund".into(),
+            commitment: None,
         })
         .unwrap();
 
@@ -107,6 +111,7 @@ fn onchain_fail_returns_funds() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &user.secret_key)
         .expect("OnchainLock signs via dep-17 preimage");
@@ -126,6 +131,7 @@ fn onchain_fail_returns_funds() {
         .apply_operation(&LedgerOperation::OnchainFail {
             deposit_id: did,
             withdrawal_id,
+            commitment: None,
         })
         .unwrap();
 
@@ -182,6 +188,7 @@ fn invoice_fail_unlocks_funds() {
             deposit_id: did,
             payment_id,
             sequence_number: next_seq,
+            commitment: None,
         })
         .unwrap();
 
@@ -235,6 +242,7 @@ fn fee_change_applied_on_collect() {
             deposit_id: did,
             amount: 100,
             block_height: 600,
+            commitment: None,
         })
         .unwrap();
 
@@ -433,6 +441,7 @@ fn transfer_complete_on_already_completed_ignored() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &sender.secret_key)
         .expect("TransferLock signs via dep-17 preimage");
@@ -446,6 +455,8 @@ fn transfer_complete_on_already_completed_ignored() {
             script_witness: DescriptorWitness {
                 stack: vec![vec![0xAA]],
             },
+            commitment: None,
+            dest_commitment: None,
         })
         .unwrap();
 
@@ -458,6 +469,8 @@ fn transfer_complete_on_already_completed_ignored() {
             script_witness: DescriptorWitness {
                 stack: vec![vec![0xBB]],
             },
+            commitment: None,
+            dest_commitment: None,
         });
     // This should succeed (no-op) or fail gracefully — transfer not found
     // The protocol applies it as a no-op (pending_transfers.remove returns None)

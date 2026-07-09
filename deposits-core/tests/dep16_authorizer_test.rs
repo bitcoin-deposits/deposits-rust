@@ -351,6 +351,7 @@ fn state_with_descriptor(seed: u8) -> (LedgerState, [u8; 16], bitcoin::secp256k1
             invoice_id: "seed".into(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
     (state, did, sk)
@@ -387,6 +388,7 @@ fn sign_op_invoice_lock_authorized_by_dep16() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &sk).expect("InvoiceLock is signable");
     assert_authorizer_accepts(&state, &op, "InvoiceLock");
@@ -404,6 +406,7 @@ fn sign_op_onchain_lock_authorized_by_dep16() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &sk).expect("OnchainLock is signable");
     assert_authorizer_accepts(&state, &op, "OnchainLock");
@@ -430,6 +433,7 @@ fn sign_op_transfer_lock_authorized_by_dep16() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let op = deposits_core::signing::sign_op(proto, &sk).expect("TransferLock is signable");
     assert_authorizer_accepts(&state, &op, "TransferLock");
@@ -471,6 +475,7 @@ fn dep17_invoice_lock_sighash_pinned() {
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     };
     let sighash = deposits_core::dep16::operations::operation_sighash(&op).unwrap();
     assert_eq!(

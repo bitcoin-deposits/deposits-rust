@@ -1154,6 +1154,7 @@ async fn execute_transfer(
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = match deposits_core::signing::sign_op(proto, &sender.keypair.secret_key()) {
         Some(s) => s,

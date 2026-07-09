@@ -347,8 +347,7 @@ pub fn sign_op(
             expiry,
             timeout_height,
             fee,
-            witness: _,
-        } => LedgerOperation::InvoiceLock {
+            witness: _, .. } => LedgerOperation::InvoiceLock {
             deposit_id,
             amount,
             payment_id,
@@ -358,6 +357,7 @@ pub fn sign_op(
             timeout_height,
             fee,
             witness,
+            commitment: None,
         },
         LedgerOperation::OnchainLock {
             deposit_id,
@@ -367,8 +367,7 @@ pub fn sign_op(
             withdrawal_id,
             nonce,
             expiry,
-            witness: _,
-        } => LedgerOperation::OnchainLock {
+            witness: _, .. } => LedgerOperation::OnchainLock {
             deposit_id,
             amount,
             fee_sats,
@@ -377,6 +376,7 @@ pub fn sign_op(
             nonce,
             expiry,
             witness,
+            commitment: None,
         },
         LedgerOperation::TransferLock {
             transfer_nonce,
@@ -389,8 +389,7 @@ pub fn sign_op(
             transfer_id,
             nonce,
             expiry,
-            witness: _,
-        } => LedgerOperation::TransferLock {
+            witness: _, .. } => LedgerOperation::TransferLock {
             transfer_nonce,
             source_deposit_id,
             destination_deposit_id,
@@ -402,6 +401,7 @@ pub fn sign_op(
             nonce,
             expiry,
             witness,
+            commitment: None,
         },
         LedgerOperation::DepositKeyRotate {
             deposit_id,
@@ -418,10 +418,11 @@ pub fn sign_op(
         },
         LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness: _,
-        } => LedgerOperation::TransferComplete {
+            script_witness: _, .. } => LedgerOperation::TransferComplete {
             transfer_id,
             script_witness: witness,
+            commitment: None,
+            dest_commitment: None,
         },
         // operation_sighash returned Some only for signature-bearing variants —
         // unreachable for any other.
@@ -687,6 +688,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let signed = sign_op(proto.clone(), &sk).expect("InvoiceLock is signature-bearing");
         let sighash = crate::dep16::operations::operation_sighash(&proto).unwrap();
@@ -712,6 +714,7 @@ mod tests {
         let (sk, _) = create_test_keypair();
         let close = LedgerOperation::DepositClose {
             deposit_id: [0xde; 16],
+            commitment: None,
         };
         assert!(sign_op(close, &sk).is_none());
     }

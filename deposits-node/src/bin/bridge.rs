@@ -743,8 +743,7 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
         }
         LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness,
-        } => {
+            script_witness, .. } => {
             // Witness stack[0] is the 32-byte preimage for sha256(H) locks.
             let bytes = script_witness.stack.first()?;
             if bytes.len() != 32 {
@@ -1102,6 +1101,7 @@ async fn execute_transfer_lock(
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &source.keypair.secret_key())
         .ok_or("sign_op failed: unsignable variant")?;

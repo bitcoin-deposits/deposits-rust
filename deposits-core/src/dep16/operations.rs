@@ -328,6 +328,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
@@ -357,6 +358,7 @@ mod tests {
             timeout_height: None,
             fee,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
 
         let none = to_dep16(&mk(None)).unwrap();
@@ -387,6 +389,7 @@ mod tests {
             nonce: 4,
             expiry: u32::MAX,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
@@ -415,6 +418,7 @@ mod tests {
             nonce: 11,
             expiry: u32::MAX,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), op_type::SPEND);
@@ -467,6 +471,7 @@ mod tests {
             sequence_number: 7,
             preimage: [0xff; 32],
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         assert!(to_dep16(&invoice_fulfill).is_none());
 
@@ -476,6 +481,7 @@ mod tests {
             amount: 100_000,
             txid: [0xfe; 32],
             destination_address: "bc1qexample".to_string(),
+            commitment: None,
         };
         assert!(to_dep16(&onchain_fulfill).is_none());
     }
@@ -491,6 +497,8 @@ mod tests {
         let op = LedgerOperation::TransferComplete {
             transfer_id: [0x42; 32],
             script_witness: DescriptorWitness::new(),
+            commitment: None,
+            dest_commitment: None,
         };
         let d = to_dep16(&op).expect("descriptor-evaluated");
         assert_eq!(d.op_type.as_str(), "transfer_release");
@@ -504,6 +512,7 @@ mod tests {
     fn administrative_ops_skip_descriptor_evaluation() {
         let close = LedgerOperation::DepositClose {
             deposit_id: dummy_deposit_id(),
+            commitment: None,
         };
         assert!(to_dep16(&close).is_none());
     }
@@ -524,6 +533,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let op_b = LedgerOperation::InvoiceLock {
             deposit_id: common.0,
@@ -535,6 +545,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
         let sh_b = operation_sighash(&op_b).expect("sighash");
@@ -557,6 +568,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let op_b = LedgerOperation::InvoiceLock {
             deposit_id: common.0,
@@ -568,6 +580,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
         let sh_b = operation_sighash(&op_b).expect("sighash");
@@ -590,6 +603,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let op_b = LedgerOperation::InvoiceLock {
             deposit_id: common.0,
@@ -601,6 +615,7 @@ mod tests {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let sh_a = operation_sighash(&op_a).expect("sighash");
         let sh_b = operation_sighash(&op_b).expect("sighash");

@@ -133,6 +133,7 @@ impl Operator {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
         self.ledger.append_operation(op).unwrap();
         deposit_id
@@ -147,6 +148,7 @@ impl Operator {
             invoice_id: hex::encode(&payment_hash[..8]),
             sequence_number: self.ledger.state.sequence + 1,
             wallet_authorization: None,
+            commitment: None,
         };
         self.ledger.append_operation(op).unwrap();
     }
@@ -172,6 +174,7 @@ impl Operator {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let op = deposits_core::signing::sign_op(proto, &depositor.secret_key)
             .expect("InvoiceLock signs via dep-17 preimage");
@@ -200,6 +203,7 @@ impl Operator {
             timeout_height: None,
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         let signed_lock = deposits_core::signing::sign_op(lock_proto, &depositor.secret_key)
             .expect("InvoiceLock signs via dep-17 preimage");
@@ -215,6 +219,7 @@ impl Operator {
             sequence_number: self.ledger.state.sequence + 1,
             witness,
             preimage,
+            commitment: None,
         };
         self.ledger.append_operation(op).unwrap();
     }

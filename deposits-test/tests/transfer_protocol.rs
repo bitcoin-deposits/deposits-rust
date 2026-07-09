@@ -35,6 +35,7 @@ fn transfer_lock_and_complete() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
         .expect("TransferLock signs via dep-17 preimage");
@@ -62,6 +63,8 @@ fn transfer_lock_and_complete() {
         script_witness: deposits_protocol::DescriptorWitness {
             stack: vec![vec![0xDE, 0xAD, 0xBE, 0xEF]],
         },
+        commitment: None,
+        dest_commitment: None,
     };
     net.op_mut("alice")
         .ledger
@@ -111,6 +114,7 @@ fn transfer_fail_returns_funds_to_source() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
         .expect("TransferLock signs via dep-17 preimage");
@@ -124,6 +128,7 @@ fn transfer_fail_returns_funds_to_source() {
         transfer_id,
         block_hash: [0x00; 32],
         reason: 1, // timeout
+        commitment: None,
     };
     net.op_mut("alice")
         .ledger
@@ -168,6 +173,7 @@ fn transfer_insufficient_balance_rejected() {
         nonce: deposits_core::signing::fresh_op_nonce(),
         expiry: u32::MAX,
         witness: deposits_protocol::DescriptorWitness::new(),
+        commitment: None,
     };
     let lock_op = deposits_core::signing::sign_op(proto, &sender.secret_key)
         .expect("TransferLock signs via dep-17 preimage");

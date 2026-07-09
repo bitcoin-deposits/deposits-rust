@@ -213,6 +213,7 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
         timeout_height: None,
         fee: None,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &send_sk)
         .expect("InvoiceLock signs via dep-17 preimage");

@@ -2953,6 +2953,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             sequence_number: latest.sequence_number + 1,
             // Recovery-path crediting is operator-driven; deterrence only.
             wallet_authorization: None,
+            commitment: None,
         };
 
         let message_bytes = operation.tlv_encode();

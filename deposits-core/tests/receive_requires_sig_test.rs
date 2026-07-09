@@ -46,6 +46,7 @@ fn open_deposit_ex(ledger: &mut Ledger, descriptor: &str, receive_requires_sig: 
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap();
     deposit_id
@@ -104,6 +105,7 @@ fn deposit_open_receive_requires_sig_tlv_roundtrip() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     };
 
     let encoded = op.tlv_encode();
@@ -135,6 +137,7 @@ fn deposit_open_without_flag_decodes_as_false() {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     };
 
     let encoded = op.tlv_encode();
@@ -251,6 +254,7 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
             invoice_id: "fund".to_string(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -274,6 +278,7 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         })
         .unwrap();
 
@@ -294,6 +299,8 @@ fn transfer_lock_to_guarded_deposit_applies_state() {
             script_witness: DescriptorWitness {
                 stack: vec![[0x22u8; 64].to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         })
         .unwrap();
 

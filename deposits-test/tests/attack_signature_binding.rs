@@ -47,6 +47,7 @@ fn invoice_lock(
         timeout_height: None,
         fee: None,
         witness: DescriptorWitness::new(),
+        commitment: None,
     }
 }
 
@@ -67,6 +68,7 @@ fn onchain_lock(
         nonce,
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     }
 }
 
@@ -92,6 +94,7 @@ fn transfer_lock(
         nonce,
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
+        commitment: None,
     }
 }
 

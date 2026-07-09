@@ -1450,7 +1450,7 @@ impl Ledger {
                     return Err(DepositsError::DepositAlreadyExists);
                 }
             }
-            LedgerOperation::DepositClose { deposit_id } => {
+            LedgerOperation::DepositClose { deposit_id, .. } => {
                 let deposit = self
                     .state
                     .deposits
@@ -2449,6 +2449,7 @@ mod tests {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             })
             .unwrap();
 
@@ -2463,6 +2464,7 @@ mod tests {
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
                 wallet_authorization: None,
+                commitment: None,
             })
             .unwrap();
 
@@ -2509,6 +2511,7 @@ mod tests {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
         ledger.apply_operation(&deposit_open).unwrap();
 
@@ -2629,6 +2632,7 @@ mod tests {
             witness: DescriptorWitness {
                 stack: vec![[0x11u8; 64].to_vec()],
             },
+            commitment: None,
         };
 
         ledger.apply_operation(&lock_op).unwrap();
@@ -2653,6 +2657,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![[0x22u8; 32].to_vec()],
             }, // preimage
+            commitment: None,
+            dest_commitment: None,
         };
 
         ledger.apply_operation(&complete_op).unwrap();
@@ -2722,6 +2728,7 @@ mod tests {
             witness: DescriptorWitness {
                 stack: vec![[0x33u8; 64].to_vec()],
             },
+            commitment: None,
         };
 
         ledger.apply_operation(&lock_op).unwrap();
@@ -2736,6 +2743,7 @@ mod tests {
             transfer_id,
             block_hash: [0x99u8; 32],
             reason: 1,
+            commitment: None,
         };
 
         ledger.apply_operation(&timeout_op).unwrap();
@@ -3008,6 +3016,7 @@ mod tests {
             timeout_height: Some(current + 1009), // cap is current + 1008
             fee: None,
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         // The cap gate runs before structural validation, so over-cap refuses
         // with exactly this policy violation.

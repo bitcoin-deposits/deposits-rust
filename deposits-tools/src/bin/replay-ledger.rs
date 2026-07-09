@@ -183,7 +183,7 @@ fn format_op(op: &LedgerOperation) -> String {
                 fee_str
             )
         }
-        LedgerOperation::DepositClose { deposit_id } => {
+        LedgerOperation::DepositClose { deposit_id, .. } => {
             format!("DepositClose  id={}", short_deposit_id(deposit_id))
         }
         LedgerOperation::FeeChange {
@@ -264,8 +264,7 @@ fn format_op(op: &LedgerOperation) -> String {
         LedgerOperation::FeeCollect {
             deposit_id,
             amount,
-            block_height,
-        } => format!(
+            block_height, .. } => format!(
             "FeeCollect  id={} {} block={}",
             short_deposit_id(deposit_id),
             format_msats(*amount),

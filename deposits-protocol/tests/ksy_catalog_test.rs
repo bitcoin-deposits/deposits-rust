@@ -779,11 +779,12 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             },
         ),
         (
             "DepositClose",
-            LedgerOperation::DepositClose { deposit_id: did() },
+            LedgerOperation::DepositClose { deposit_id: did(), commitment: None },
         ),
         (
             "FeeChange",
@@ -812,6 +813,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 invoice_id: "bolt11:test".into(),
                 sequence_number: 42,
                 wallet_authorization: None,
+                commitment: None,
             },
         ),
         (
@@ -826,6 +828,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 timeout_height: None,
                 fee: None,
                 witness: wit(),
+                commitment: None,
             },
         ),
         (
@@ -834,6 +837,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 deposit_id: did(),
                 payment_id: h32(),
                 sequence_number: 44,
+                commitment: None,
             },
         ),
         (
@@ -845,6 +849,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 sequence_number: 45,
                 witness: wit(),
                 preimage: h32(),
+                commitment: None,
             },
         ),
         (
@@ -855,6 +860,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 deposit_id: did(),
                 amount: 100_000_000,
                 funding_address: "bcrt1qfund".into(),
+                commitment: None,
             },
         ),
         (
@@ -868,6 +874,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 nonce: 0,
                 expiry: u32::MAX,
                 witness: wit(),
+                commitment: None,
             },
         ),
         (
@@ -875,6 +882,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             LedgerOperation::OnchainFail {
                 deposit_id: did(),
                 withdrawal_id: h32(),
+                commitment: None,
             },
         ),
         (
@@ -885,6 +893,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 amount: 50_000_000,
                 txid: h32(),
                 destination_address: "bcrt1qdest".into(),
+                commitment: None,
             },
         ),
         (
@@ -901,6 +910,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 nonce: 0,
                 expiry: u32::MAX,
                 witness: wit(),
+                commitment: None,
             },
         ),
         (
@@ -908,6 +918,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             LedgerOperation::TransferComplete {
                 transfer_id: h32(),
                 script_witness: wit(),
+                commitment: None,
+                dest_commitment: None,
             },
         ),
         (
@@ -916,6 +928,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 transfer_id: h32(),
                 block_hash: h32(),
                 reason: 1,
+                commitment: None,
             },
         ),
         (
@@ -961,6 +974,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 deposit_id: did(),
                 amount: 1000,
                 block_height: 500,
+                commitment: None,
             },
         ),
         (

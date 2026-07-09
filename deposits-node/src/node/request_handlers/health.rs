@@ -277,6 +277,7 @@ impl Node {
             deposit_id,
             amount: 0,
             block_height,
+            commitment: None,
         };
 
         let start = std::time::Instant::now();

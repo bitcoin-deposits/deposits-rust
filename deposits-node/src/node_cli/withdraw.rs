@@ -120,6 +120,7 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         nonce: op_nonce,
         expiry: op_expiry,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let signed = deposits_core::signing::sign_op(proto, &secret_key)
         .ok_or("OnchainLock failed to sign")?;

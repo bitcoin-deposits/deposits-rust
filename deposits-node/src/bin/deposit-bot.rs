@@ -427,6 +427,7 @@ impl Bot {
             nonce: op_nonce,
             expiry: op_expiry,
             witness: deposits_core::types::DescriptorWitness::new(),
+            commitment: None,
         };
         let signed = deposits_core::signing::sign_op(proto, &self.keypair.secret_key())
             .ok_or("sign_op failed")?;
@@ -625,6 +626,7 @@ impl Bot {
             timeout_height: None,
             fee: Some(fee_msats),
             witness: deposits_core::types::DescriptorWitness::new(),
+            commitment: None,
         };
         let signed = deposits_core::signing::sign_op(proto, &self.keypair.secret_key())
             .ok_or("InvoiceLock sign failed")?;

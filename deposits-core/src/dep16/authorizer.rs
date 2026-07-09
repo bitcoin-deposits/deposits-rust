@@ -638,11 +638,13 @@ mod tests {
             sequence_number: 1,
             preimage: [0xee; 32],
             witness: DescriptorWitness::new(),
+            commitment: None,
         };
         assert!(!auth.authorize(&descriptor, &fulfill));
 
         let close = LedgerOperation::DepositClose {
             deposit_id: dummy_deposit_id(),
+            commitment: None,
         };
         assert!(!auth.authorize(&descriptor, &close));
     }
@@ -665,6 +667,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![preimage_bytes.to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             auth.authorize(&completion_script, &good),
@@ -676,6 +680,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![vec![0xcd; 32]],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             !auth.authorize(&completion_script, &bad),
@@ -685,6 +691,8 @@ mod tests {
         let empty = LedgerOperation::TransferComplete {
             transfer_id: [0x77; 32],
             script_witness: DescriptorWitness::new(),
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             !auth.authorize(&completion_script, &empty),
@@ -706,6 +714,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![sk.secret_bytes().to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             auth.authorize(&completion_script, &good),
@@ -718,6 +728,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![other_sk.secret_bytes().to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             !auth.authorize(&completion_script, &bad),
@@ -743,6 +755,8 @@ mod tests {
         let op_unsigned = LedgerOperation::TransferComplete {
             transfer_id: [0x99; 32],
             script_witness: DescriptorWitness::new(),
+            commitment: None,
+            dest_commitment: None,
         };
         let msg = miniscript::calculus::operation_preimage(
             &operations::to_dep16(&op_unsigned).unwrap(),
@@ -755,6 +769,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![preimage_bytes.to_vec(), sig.0.clone()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             auth.authorize(&script, &both),
@@ -766,6 +782,8 @@ mod tests {
             script_witness: DescriptorWitness {
                 stack: vec![preimage_bytes.to_vec()],
             },
+            commitment: None,
+            dest_commitment: None,
         };
         assert!(
             !auth.authorize(&script, &only_preimage),

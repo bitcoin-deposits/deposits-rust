@@ -161,6 +161,7 @@ impl Node {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         };
 
         let mut nonce = [0u8; 16];
@@ -175,6 +176,7 @@ impl Node {
             // Inner ops carry seq 0; the batch update carries the chain seq.
             sequence_number: 0,
             wallet_authorization: None,
+            commitment: None,
         };
 
         let batch = deposits_core::messages::LedgerOperation::Batch(vec![deposit_open, invoice_credit]);
@@ -264,6 +266,7 @@ impl Node {
             // Operator's own pay; no depositor fee budget on this path.
             fee: None,
             witness: deposits_core::types::DescriptorWitness::new(),
+            commitment: None,
         };
         let lock_sighash = deposits_core::dep16::operations::operation_sighash(&lock_proto)
             .ok_or_else(|| "dep-16 lock sighash failed".to_string())?;
@@ -297,6 +300,7 @@ impl Node {
             timeout_height: None,
             fee: None,
             witness: lock_witness,
+            commitment: None,
         };
         let fulfill_op = deposits_core::messages::LedgerOperation::InvoiceFulfill {
             deposit_id,
@@ -305,6 +309,7 @@ impl Node {
             preimage,
             sequence_number: 0,
             witness: fulfill_witness,
+            commitment: None,
         };
         let batch =
             deposits_core::messages::LedgerOperation::Batch(vec![lock_op, fulfill_op]);

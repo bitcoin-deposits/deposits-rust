@@ -196,6 +196,27 @@ impl QuorumMemberRef {
     }
 }
 
+/// Post-operation absolute balance declaration (DEP-02 §Balance Commitments).
+///
+/// The operator's signed, quorum-verified assertion of a deposit's complete
+/// fund state *after* the operation applies: `balance` and `locked_balance`
+/// in millisatoshis. Carried by every balance-touching operation as a single
+/// optional field so the pair can never appear split; on the wire it encodes
+/// as two flat odd TLV tags (223/225, or 227/229 for TransferComplete's
+/// destination), so legacy encodings are byte-identical when absent.
+///
+/// NOT part of the dep-16 depositor preimage — the wallet signs exactly what
+/// it signs today; verification belongs to the cosigners that replay state.
+/// Conformance: present-but-wrong is `BalanceCommitmentMismatch` under every
+/// ruleset; missing is `MissingBalanceCommitment` under `balance-commit-v4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BalanceCommitment {
+    /// Deposit's `balance` (msats) after this operation applies.
+    pub balance_after: u64,
+    /// Deposit's `locked_balance` (msats) after this operation applies.
+    pub locked_after: u64,
+}
+
 /// All possible ledger operations (29 variants)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerOperation {
@@ -287,9 +308,17 @@ pub enum LedgerOperation {
         fee_change_notice_blocks: Option<u32>,
         /// Maximum fee change per adjustment in basis points of current fee (default 1000 = 10%).
         fee_change_limit_bps: Option<u16>,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Close a deposit
-    DepositClose { deposit_id: DepositId },
+    DepositClose {
+        deposit_id: DepositId,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops. (0, 0) after drain.
+        commitment: Option<BalanceCommitment>,
+    },
     /// Announce a fee change. Takes effect after the notice period.
     /// The new fees must be within fee_change_limit_bps of the current fees.
     FeeChange {
@@ -347,6 +376,9 @@ pub enum LedgerOperation {
         sequence_number: u64,
         /// Optional wallet pre-authorization; see the variant docstring.
         wallet_authorization: Option<[u8; 64]>,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Lock funds for an outgoing invoice payment
     InvoiceLock {
@@ -382,6 +414,9 @@ pub enum LedgerOperation {
         fee: Option<u64>,
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Fail a pending invoice payment. Carries no amount — the released amount
     /// is read from the open lock (`open_invoice_locks[payment_id]`) at apply
@@ -391,6 +426,9 @@ pub enum LedgerOperation {
         deposit_id: DepositId,
         payment_id: [u8; 32],
         sequence_number: u64,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Fulfill a pending invoice payment
     InvoiceFulfill {
@@ -401,6 +439,9 @@ pub enum LedgerOperation {
         /// Witness satisfying the deposit descriptor
         witness: DescriptorWitness,
         preimage: [u8; 32],
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
 
     // ========== Onchain Operations ==========
@@ -411,6 +452,9 @@ pub enum LedgerOperation {
         deposit_id: DepositId,
         amount: u64,
         funding_address: String,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Lock funds for an on-chain withdrawal (outgoing, debits balance)
     OnchainLock {
@@ -426,11 +470,17 @@ pub enum LedgerOperation {
         /// Block height after which a signature over this operation is invalid.
         expiry: u32,
         witness: DescriptorWitness,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Fail a pending on-chain withdrawal (returns funds to deposit)
     OnchainFail {
         deposit_id: DepositId,
         withdrawal_id: [u8; 32],
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Fulfill an on-chain withdrawal (confirmed on-chain)
     OnchainFulfill {
@@ -439,6 +489,9 @@ pub enum LedgerOperation {
         amount: u64,
         txid: [u8; 32],
         destination_address: String,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
 
     // ========== Transfer Operations (3) ==========
@@ -463,11 +516,20 @@ pub enum LedgerOperation {
         /// Block height after which a signature over this operation is invalid.
         expiry: u32,
         witness: DescriptorWitness,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
     /// Complete a transfer by satisfying the completion_script
     TransferComplete {
         transfer_id: [u8; 32],
         script_witness: DescriptorWitness,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
+        /// Destination deposit's post-op declaration (DEP-02); odd TLV
+        /// tags 227/229, absent on legacy ops.
+        dest_commitment: Option<BalanceCommitment>,
     },
     /// Fail a transfer and return funds to source.
     /// Reason 1 = timeout (deadline reached without completion).
@@ -477,6 +539,9 @@ pub enum LedgerOperation {
         block_hash: [u8; 32],
         /// Failure reason: 1 = timeout. 0 is reserved.
         reason: u8,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
 
     // ========== Quorum Membership (2) ==========
@@ -564,6 +629,9 @@ pub enum LedgerOperation {
         deposit_id: DepositId,
         amount: u64,
         block_height: u32,
+        /// Post-op balance declaration (DEP-02 §Balance Commitments); odd
+        /// TLV tags 223/225, absent on legacy ops.
+        commitment: Option<BalanceCommitment>,
     },
 
     // ========== Custody Dispute and Recovery (4) ==========
@@ -850,7 +918,7 @@ impl LedgerOperation {
     pub fn affected_deposit_ids(&self) -> Vec<&crate::types::DepositId> {
         match self {
             Self::DepositOpen { deposit_id, .. }
-            | Self::DepositClose { deposit_id }
+            | Self::DepositClose { deposit_id, .. }
             | Self::FeeChange { deposit_id, .. }
             | Self::DepositKeyRotate { deposit_id, .. }
             | Self::InvoiceCredit { deposit_id, .. }
@@ -1186,7 +1254,7 @@ impl BinaryCodec for LedgerOperation {
                 write_option(w, invoice, |w, s| write_string(w, s))?;
                 write_option(w, cosigner_guarantee_signature, |w, s| write_64(w, s))?;
             }
-            Self::DepositClose { deposit_id } => {
+            Self::DepositClose { deposit_id, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1238,8 +1306,7 @@ impl BinaryCodec for LedgerOperation {
                 // doesn't fit the legacy fixed-shape encoder. The TLV codec
                 // (tlv_codec.rs) carries it; legacy consumers see the same
                 // shape they always did.
-                wallet_authorization: _,
-            } => {
+                wallet_authorization: _, .. } => {
                 write_32(w, payment_hash)?;
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
@@ -1281,8 +1348,7 @@ impl BinaryCodec for LedgerOperation {
             Self::InvoiceFail {
                 deposit_id,
                 payment_id,
-                sequence_number,
-            } => {
+                sequence_number, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1296,8 +1362,7 @@ impl BinaryCodec for LedgerOperation {
                 payment_id,
                 sequence_number,
                 witness,
-                preimage,
-            } => {
+                preimage, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1324,8 +1389,7 @@ impl BinaryCodec for LedgerOperation {
                 vout,
                 deposit_id,
                 amount,
-                funding_address,
-            } => {
+                funding_address, .. } => {
                 write_32(w, txid)?;
                 write_u32(w, *vout)?;
                 let mut legacy_bytes = [0u8; 33];
@@ -1368,8 +1432,7 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::OnchainFail {
                 deposit_id,
-                withdrawal_id,
-            } => {
+                withdrawal_id, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1381,8 +1444,7 @@ impl BinaryCodec for LedgerOperation {
                 withdrawal_id,
                 amount,
                 txid,
-                destination_address,
-            } => {
+                destination_address, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1435,8 +1497,7 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::TransferComplete {
                 transfer_id,
-                script_witness,
-            } => {
+                script_witness, .. } => {
                 write_32(w, transfer_id)?;
                 // Write witness stack length and elements
                 write_u16(w, script_witness.stack.len() as u16)?;
@@ -1448,8 +1509,7 @@ impl BinaryCodec for LedgerOperation {
             Self::TransferFail {
                 transfer_id,
                 block_hash,
-                reason,
-            } => {
+                reason, .. } => {
                 write_32(w, transfer_id)?;
                 write_32(w, block_hash)?;
                 write_u8(w, *reason)?;
@@ -1488,8 +1548,7 @@ impl BinaryCodec for LedgerOperation {
             Self::FeeCollect {
                 deposit_id,
                 amount,
-                block_height,
-            } => {
+                block_height, .. } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1647,13 +1706,14 @@ impl BinaryCodec for LedgerOperation {
                     fee_change_after_blocks: None,
                     fee_change_notice_blocks: None,
                     fee_change_limit_bps: None,
+                    commitment: None,
                 })
             }
             21 => {
                 let legacy_bytes = read_33(r)?;
                 let mut deposit_id = [0u8; 16];
                 deposit_id.copy_from_slice(&legacy_bytes[1..17]);
-                Ok(Self::DepositClose { deposit_id })
+                Ok(Self::DepositClose { deposit_id, commitment: None })
             }
             22 => {
                 let legacy_bytes = read_33(r)?;
@@ -1701,6 +1761,7 @@ impl BinaryCodec for LedgerOperation {
                     // a credit decoded via the legacy path has no atomic
                     // authorization (it's by definition pre-tiered).
                     wallet_authorization: None,
+                    commitment: None,
                 })
             }
             31 => {
@@ -1726,6 +1787,7 @@ impl BinaryCodec for LedgerOperation {
                     witness: crate::types::DescriptorWitness {
                         stack: vec![sig.to_vec()],
                     },
+                    commitment: None,
                 })
             }
             32 => {
@@ -1736,6 +1798,7 @@ impl BinaryCodec for LedgerOperation {
                     deposit_id,
                     payment_id: read_32(r)?,
                     sequence_number: read_u64(r)?,
+                    commitment: None,
                 })
             }
             33 => {
@@ -1756,6 +1819,7 @@ impl BinaryCodec for LedgerOperation {
                         stack: vec![sig.to_vec()],
                     },
                     preimage,
+                    commitment: None,
                 })
             }
             // Onchain operations (35-38)
@@ -1771,6 +1835,7 @@ impl BinaryCodec for LedgerOperation {
                     deposit_id,
                     amount: read_u64(r)?,
                     funding_address: read_string(r)?,
+                    commitment: None,
                 })
             }
             36 => {
@@ -1793,6 +1858,7 @@ impl BinaryCodec for LedgerOperation {
                     witness: DescriptorWitness {
                         stack: vec![sig_bytes.to_vec()],
                     },
+                    commitment: None,
                 })
             }
             37 => {
@@ -1802,6 +1868,7 @@ impl BinaryCodec for LedgerOperation {
                 Ok(Self::OnchainFail {
                     deposit_id,
                     withdrawal_id: read_32(r)?,
+                    commitment: None,
                 })
             }
             38 => {
@@ -1814,6 +1881,7 @@ impl BinaryCodec for LedgerOperation {
                     amount: read_u64(r)?,
                     txid: read_32(r)?,
                     destination_address: read_string(r)?,
+                    commitment: None,
                 })
             }
             // Transfer operations (70-72)
@@ -1845,6 +1913,7 @@ impl BinaryCodec for LedgerOperation {
                     witness: DescriptorWitness {
                         stack: vec![sig_bytes.to_vec()],
                     },
+                    commitment: None,
                 })
             }
             71 => {
@@ -1860,12 +1929,15 @@ impl BinaryCodec for LedgerOperation {
                 Ok(Self::TransferComplete {
                     transfer_id,
                     script_witness: DescriptorWitness { stack },
+                    commitment: None,
+                    dest_commitment: None,
                 })
             }
             72 => Ok(Self::TransferFail {
                 transfer_id: read_32(r)?,
                 block_hash: read_32(r)?,
                 reason: read_u8(r).unwrap_or(1),
+                commitment: None,
             }),
             43 => Ok(Self::QuorumAddMember {
                 quorum_member: read_pubkey(r)?,
@@ -1907,6 +1979,7 @@ impl BinaryCodec for LedgerOperation {
                     deposit_id,
                     amount: read_u64(r)?,
                     block_height: read_u32(r)?,
+                    commitment: None,
                 })
             }
             // DisputeEnter (54)

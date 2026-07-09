@@ -38,6 +38,7 @@ fn make_deposit_open(descriptor: &str) -> LedgerOperation {
         fee_change_after_blocks: None,
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
+        commitment: None,
     }
 }
 

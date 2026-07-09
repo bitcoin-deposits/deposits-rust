@@ -40,6 +40,7 @@ fn open_deposit(state: &LedgerState, descriptor: &str) -> LedgerState {
             fee_change_after_blocks: None,
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
+            commitment: None,
         })
         .unwrap()
 }
@@ -63,6 +64,7 @@ fn credit_within_reserves_is_conforming() {
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
                 wallet_authorization: None,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -92,6 +94,7 @@ fn credit_exceeding_reserves_is_non_conforming() {
                 invoice_id: "test".to_string(),
                 sequence_number: 1,
                 wallet_authorization: None,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -132,6 +135,7 @@ fn onchain_credit_exceeding_reserves_is_non_conforming() {
                 deposit_id,
                 amount: 5_000_000,
                 funding_address: "bcrt1qfund".to_string(),
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -161,6 +165,7 @@ fn multiple_credits_accumulate_correctly() {
                 invoice_id: "inv1".to_string(),
                 sequence_number: 1,
                 wallet_authorization: None,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -178,6 +183,7 @@ fn multiple_credits_accumulate_correctly() {
                 invoice_id: "inv2".to_string(),
                 sequence_number: 2,
                 wallet_authorization: None,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -217,6 +223,7 @@ fn deposit_open_is_conforming() {
                 fee_change_after_blocks: None,
                 fee_change_notice_blocks: None,
                 fee_change_limit_bps: None,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -241,6 +248,7 @@ fn fee_collect_is_conforming() {
             invoice_id: "test".to_string(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -254,6 +262,7 @@ fn fee_collect_is_conforming() {
                 deposit_id,
                 amount: 1_000,
                 block_height: 2016,
+                commitment: None,
             },
             &AllowAll,
             0,
@@ -281,6 +290,7 @@ fn fee_collect_over_one_period_is_rejected() {
             invoice_id: "test".to_string(),
             sequence_number: 1,
             wallet_authorization: None,
+            commitment: None,
         })
         .unwrap();
 
@@ -292,6 +302,7 @@ fn fee_collect_over_one_period_is_rejected() {
         deposit_id,
         amount,
         block_height: 955_504,
+        commitment: None,
     };
     let exceeds = |vs: &[ConformanceViolation]| {
         vs.iter()

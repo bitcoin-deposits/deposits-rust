@@ -769,6 +769,7 @@ async fn lightning_send(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // Operator CLI pay (operator signs directly); amount-only lock.
         fee: None,
         witness: deposits_core::types::DescriptorWitness::new(),
+        commitment: None,
     };
     let lock_signed = deposits_core::signing::sign_op(lock_proto, &secret_key)
         .ok_or("sign_op failed: unsignable variant")?;
