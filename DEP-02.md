@@ -388,8 +388,11 @@ A **balance-touching operation** is any operation that mutates a deposit's
 the deposit's `balance` and `locked_balance` in millisatoshis **after** the
 operation is applied. The pair MUST always appear together: a single update
 then states the deposit's complete fund state, which is the recovery property
-this section exists for. Operations that do not touch a pair (DepositKeyRotate,
-FeeChange, quorum/dispute/delivery ops) carry no commitment fields.
+this section exists for. **A decoder MUST reject a half-present pair** (one of
+223/225 present without the other, or 227/229) as a malformed operation — this
+makes an ambiguous commitment unrepresentable on the wire, not merely
+discouraged. Operations that do not touch a pair (DepositKeyRotate, FeeChange,
+quorum/dispute/delivery ops) carry no commitment fields.
 
 Inside a `Batch`, commitments ride the inner operations and are evaluated
 sequentially against the transactional replay: each inner op's declared pair is
@@ -432,6 +435,16 @@ A cosigned update whose commitments are wrong is fraud under the existing
 DEP-06 machinery — `NonConformingCosignature` (the quorum signed a
 non-conforming update) or `NonConformingUpdate` (operator-only signature) —
 and grounds confiscation. No new fraud-proof type is required.
+
+**Operator population is unconditional.** A conforming operator emits the
+commitment on every balance-touching op it builds, regardless of the ledger's
+active ruleset — a *correct* commitment is conforming everywhere, so this is
+safe to ship ahead of any `balance-commit-v4` upgrade (DEP-18 §"second example:
+dep-02 balance commitments"). Because `content_hash` is computed over the raw
+`message` bytes, a cosigner running pre-commitment code re-derives the identical
+`content_hash` while skipping the (odd) commitment tags — so mixed old/new
+fleets cosign the same update without divergence. Emitting always also means the
+require-presence rule is already satisfied the moment a ledger upgrades.
 
 ### Ruleset
 
