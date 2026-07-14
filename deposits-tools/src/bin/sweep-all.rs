@@ -842,6 +842,86 @@ fn parse_persisted_tree(entry: &serde_json::Value) -> Option<PersistedTree> {
     })
 }
 
+/// Build a `LedgerSummary` purely from a per-ledger `taproot_reserves.json`
+/// snapshot — no `.jsonl` history required. This is what lets sweep-all reap a
+/// vault whose history was compacted/wedged off disk (the fork case) as long as
+/// the self-describing reserves snapshot survives. `ledger_id` comes from the
+/// snapshot's containing directory name.
+///
+/// Returns `Ok(None)` if the snapshot isn't self-describing (no persisted tier
+/// tree) — without the tree there's nothing to spend through, and the jsonl
+/// rebuild path (which this function deliberately avoids) is the only recourse.
+fn summarize_from_snapshot(
+    snapshot: &Path,
+    ledger_id: [u8; 32],
+) -> Result<Option<LedgerSummary>, String> {
+    let raw = std::fs::read_to_string(snapshot)
+        .map_err(|e| format!("read {:?}: {}", snapshot, e))?;
+    let v: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("parse {:?}: {}", snapshot, e))?;
+
+    // The self-describing tree is the whole point; without it, skip.
+    let persisted_tree = match parse_persisted_tree(&v) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let operator_key = v
+        .get("operator")
+        .and_then(|x| x.as_str())
+        .and_then(|s| s.parse::<bitcoin::secp256k1::PublicKey>().ok())
+        .ok_or("snapshot missing/invalid `operator`")?;
+    let reserves_id = v
+        .get("address")
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let quorum_members: Vec<bitcoin::secp256k1::PublicKey> = v
+        .get("quorum_members")
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|m| m.as_str())
+                .filter_map(|s| s.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    let ledger_hash = v
+        .get("ledger_hash")
+        .and_then(|x| x.as_str())
+        .and_then(|s| hex::decode(s).ok())
+        .and_then(|b| <[u8; 32]>::try_from(b).ok())
+        .unwrap_or([0u8; 32]);
+    let ruleset_name = v
+        .get("ruleset_name")
+        .and_then(|x| x.as_str())
+        .unwrap_or("legacy")
+        .to_string();
+    let quorum_expiry = v.get("quorum_expiry").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    let outpoint = match (
+        v.get("outpoint_txid").and_then(|x| x.as_str()),
+        v.get("outpoint_vout").and_then(|x| x.as_u64()),
+    ) {
+        (Some(t), Some(vout)) => t
+            .parse::<bitcoin::Txid>()
+            .ok()
+            .map(|txid| (txid, vout as u32)),
+        _ => None,
+    };
+
+    Ok(Some(LedgerSummary {
+        ledger_id,
+        operator_key,
+        reserves_id,
+        quorum_members,
+        ledger_hash,
+        ruleset_name,
+        quorum_expiry,
+        outpoint,
+        persisted_tree: Some(persisted_tree),
+    }))
+}
+
 /// Fetch the scriptpubkey of a specific outpoint via esplora, plus the
 /// derived address for the configured network. Returns `None` if the txid
 /// can't be retrieved or the vout doesn't exist.
@@ -1932,6 +2012,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             let _ = summary;
+        }
+    }
+
+    // ===== Snapshot-driven reserves discovery =====
+    // The pass above discovers a vault via its `.jsonl` history and only sweeps
+    // ledgers this operator OWNS. A vault whose history was compacted or wedged
+    // off disk (a fork) is invisible there — but its self-describing
+    // `taproot_reserves.json` snapshot (outpoint + tier tapscript) is all
+    // sweep-all needs to spend it. Reap any owned vault with a snapshot that the
+    // history pass didn't already cover; dedup via `swept_ledgers`.
+    for op in &operators {
+        let ledgers_dir = op.data_dir.join("wallet/ledgers");
+        let entries = match std::fs::read_dir(&ledgers_dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let snapshot = dir.join("taproot_reserves.json");
+            if !snapshot.exists() {
+                continue;
+            }
+            // ledger_id is the containing directory's name.
+            let ledger_id = match dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|s| hex::decode(s).ok())
+                .and_then(|b| <[u8; 32]>::try_from(b).ok())
+            {
+                Some(id) => id,
+                None => continue,
+            };
+            if swept_ledgers.contains(&ledger_id) {
+                continue;
+            }
+            let summary = match summarize_from_snapshot(&snapshot, ledger_id) {
+                Ok(Some(s)) => s,
+                Ok(None) => continue,
+                Err(e) => {
+                    println!("  skip snapshot {:?}: {}", snapshot, e);
+                    continue;
+                }
+            };
+            // Sweep from the vault's OWNER (matches the history pass). The
+            // snapshot is only written by the owning node, so this is the
+            // expected case; the keyring still holds every operator seed the
+            // tier-0 leaf needs.
+            if summary.operator_key != op.operator_pubkey {
+                continue;
+            }
+            if !swept_ledgers.insert(ledger_id) {
+                continue;
+            }
+            println!(
+                "[{}] reserves (snapshot-only, no usable history): ledger {}…",
+                op.name,
+                hex::encode(&ledger_id[..8]),
+            );
+            reserves_attempted += 1;
+            if let Err(e) = sweep_ledger(
+                &summary,
+                &keyring,
+                &destination_script,
+                args.network,
+                &args.esplora,
+                args.dry_run,
+            ) {
+                println!("    ERROR: {}", e);
+                reserves_errors += 1;
+            }
         }
     }
 
