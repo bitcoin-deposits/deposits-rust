@@ -75,6 +75,8 @@ struct SweepArgs {
     esplora: String,
     network: Network,
     dry_run: bool,
+    /// Fee rate in sat/vB for the sweep tx (default 2).
+    fee_rate: u64,
     /// Extra ledger_hash candidates for off-history rotation reconstruction,
     /// supplied by the operator (e.g. the `ledger.hash()` line from
     /// `deposits-node reserves list`). Tried alongside {snapshot, replayed-tip}
@@ -90,6 +92,7 @@ fn parse_args() -> Result<SweepArgs, String> {
     let mut esplora = "https://mempool.space/api".to_string();
     let mut network = Network::Bitcoin;
     let mut dry_run = false;
+    let mut fee_rate: u64 = 2;
     let mut extra_ledger_hashes: Vec<[u8; 32]> = Vec::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -122,6 +125,15 @@ fn parse_args() -> Result<SweepArgs, String> {
                 dry_run = true;
                 i += 1;
             }
+            "--fee-rate" if i + 1 < args.len() => {
+                fee_rate = args[i + 1]
+                    .parse()
+                    .map_err(|_| format!("invalid --fee-rate: {}", args[i + 1]))?;
+                if fee_rate == 0 {
+                    return Err("--fee-rate must be > 0".to_string());
+                }
+                i += 2;
+            }
             "--extra-ledger-hash" if i + 1 < args.len() => {
                 let raw = hex::decode(args[i + 1].trim())
                     .map_err(|e| format!("--extra-ledger-hash not hex: {}", e))?;
@@ -145,6 +157,7 @@ fn parse_args() -> Result<SweepArgs, String> {
                      --esplora <url>      Esplora HTTP API (default: mempool.space)\n  \
                      --network <name>     bitcoin|testnet|signet|regtest (default bitcoin)\n  \
                      --dry-run            Build + sign but don't broadcast\n  \
+                     --fee-rate <n>       Fee rate in sat/vB (default 2)\n  \
                      --extra-ledger-hash <hex>  Extra ledger_hash candidate for off-history\n                       \
                      rotation recovery (repeatable; pass the ledger.hash() from\n                       \
                      `deposits-node reserves list`). Safe to pass all ledgers' tips."
@@ -160,6 +173,7 @@ fn parse_args() -> Result<SweepArgs, String> {
         esplora,
         network,
         dry_run,
+        fee_rate,
         extra_ledger_hashes,
     })
 }
@@ -1257,6 +1271,7 @@ fn sweep_ledger(
     network: Network,
     esplora: &str,
     dry_run: bool,
+    fee_rate: u64,
     extra_ledger_hashes: &[[u8; 32]],
 ) -> Result<(), String> {
     // Reconstruct the on-chain Taproot output.
@@ -1561,7 +1576,7 @@ fn sweep_ledger(
         reserves_amount: amount,
         destination_script: destination_script.clone(),
         splits: Vec::new(),
-        fee_rate_sat_vbyte: 2,
+        fee_rate_sat_vbyte: fee_rate,
         lock_time: 0,
     };
     let mut tx = ReservesSpendBuilder::build_spend_transaction(&params, &reserves_script)
@@ -2052,6 +2067,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.network,
                 &args.esplora,
                 args.dry_run,
+                args.fee_rate,
                 &args.extra_ledger_hashes,
             ) {
                 println!("    ERROR: {}", e);
@@ -2261,6 +2277,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.network,
                 &args.esplora,
                 args.dry_run,
+                args.fee_rate,
                 &args.extra_ledger_hashes,
             ) {
                 println!("    ERROR: {}", e);
