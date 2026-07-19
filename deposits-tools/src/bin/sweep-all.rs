@@ -426,6 +426,16 @@ struct LedgerSummary {
     reserves_id: String,
     quorum_members: Vec<bitcoin::secp256k1::PublicKey>,
     ledger_hash: [u8; 32],
+    /// The chain-tip hash of the *replayed* local history — i.e. `ledger.hash()`
+    /// at the end of what this node knows. A reserves rotation commits
+    /// `ledger.hash()` (the tip BEFORE the rotation op) into the new vault's
+    /// commitment leaf. When a rotation's `QuorumBegin` is missing from local
+    /// history (lost on redeploy / relay pruning), local history ends exactly at
+    /// that pre-rotation tip, so THIS value — not the snapshot's stale
+    /// `ledger_hash` — is the hash the lost rotation baked into the new vault.
+    /// Reconstruction tries it as a candidate. Falls back to `ledger_hash` when
+    /// there's no replayable history (snapshot-only discovery).
+    replayed_tip_hash: [u8; 32],
     ruleset_name: String,
     quorum_expiry: u32,
     /// (txid, vout) of the actual on-chain reserves UTXO the daemon's
@@ -513,6 +523,11 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
 
     let mut state = LedgerState::new(op_initial, reserves_initial.clone(), genesis_block);
     let mut latest_qb: Option<(String, Vec<_>, [u8; 32], Option<String>, u32)> = None;
+    // `ledger.hash()` == chain_tip_hash == the content_hash of the most recent
+    // applied update. A rotation bakes this (as of just before the rotation op)
+    // into the new vault. Track it so reconstruction can offer it as a
+    // ledger_hash candidate when the rotation's QuorumBegin is missing locally.
+    let mut replayed_tip_hash: [u8; 32] = [0u8; 32];
 
     for u in &updates {
         // We only follow the operator-of-the-moment's chain (DisputeAcquire
@@ -545,7 +560,10 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         match state.apply(&op) {
             Ok(next) => {
                 state = next;
-                // chain_tip_hash bookkeeping isn't needed for the summary.
+                // `state.apply` takes the bare op, so it doesn't carry the
+                // hash chain; the update's own content_hash IS chain_tip_hash
+                // after this op, so track it directly.
+                replayed_tip_hash = u.content_hash;
             }
             Err(_) => continue, // best-effort replay
         }
@@ -731,6 +749,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         persisted_tree,
         quorum_members,
         ledger_hash,
+        replayed_tip_hash,
         ruleset_name,
         quorum_expiry,
     }))
@@ -915,6 +934,9 @@ fn summarize_from_snapshot(
         reserves_id,
         quorum_members,
         ledger_hash,
+        // Snapshot-only discovery has no replayable history, so there's no
+        // distinct pre-rotation tip to offer — fall back to the snapshot hash.
+        replayed_tip_hash: ledger_hash,
         ruleset_name,
         quorum_expiry,
         outpoint,
@@ -1159,31 +1181,39 @@ fn broadcast_tx(esplora: &str, tx: &bitcoin::Transaction) -> Result<bitcoin::Txi
 /// the merkle root → the output key. So a single-variable search over expiry
 /// re-derives the exact tree behind an observed scriptpubkey.
 ///
-/// Returns the matching expiry, or `None` if nothing in the window reproduces
-/// `target` — which itself is diagnostic: the rotation then changed more than
-/// expiry (ledger_hash or the quorum set), and the true params must come from
-/// the daemon log / relay rather than a rebuild.
+/// Returns the matching `(ledger_hash, expiry)`, or `None` if no candidate in
+/// the search space reproduces `target` — which itself is diagnostic: the
+/// rotation then changed the quorum set (or used an unrelated hash), and the
+/// true params must come from the daemon log / relay rather than a rebuild.
+///
+/// `ledger_hash_candidates` are tried in order. The important two are the
+/// snapshot's recorded hash and the *replayed local tip* — a rotation commits
+/// `ledger.hash()` (the pre-rotation tip), which when the rotation's QuorumBegin
+/// is missing locally equals the last-applied update's content_hash, NOT the
+/// snapshot's stale value.
 #[allow(clippy::too_many_arguments)]
 fn reconstruct_expiry(
     voter_set: &VoterSet,
     factory: fn(usize, u32) -> ThresholdConfig,
     total_voters: usize,
-    ledger_hash: [u8; 32],
+    ledger_hash_candidates: &[[u8; 32]],
     network: Network,
     target: &bitcoin::ScriptBuf,
     base_expiry: u32,
-) -> Option<u32> {
+) -> Option<([u8; 32], u32)> {
     // A rotation extends the lifetime; scan a couple weeks below (in case a
     // repair shortened it) up to ~2 years above the current expiry.
     let lo = base_expiry.saturating_sub(2_016);
     let hi = base_expiry.saturating_add(110_000);
     for expiry in lo..=hi {
-        let config = factory(total_voters, expiry);
-        let builder =
-            TapscriptReservesBuilder::new(voter_set.clone(), config, network, ledger_hash);
-        if let Ok(out) = builder.build() {
-            if out.script_pubkey() == *target {
-                return Some(expiry);
+        for &ledger_hash in ledger_hash_candidates {
+            let config = factory(total_voters, expiry);
+            let builder =
+                TapscriptReservesBuilder::new(voter_set.clone(), config, network, ledger_hash);
+            if let Ok(out) = builder.build() {
+                if out.script_pubkey() == *target {
+                    return Some((ledger_hash, expiry));
+                }
             }
         }
     }
@@ -1386,23 +1416,30 @@ fn sweep_ledger(
                     );
                     if addr != reserves_address {
                         // Off-history rotation: the funds moved to a vault our
-                        // snapshot params don't rebuild. Everything is fixed
-                        // across a reserves rotation except quorum_expiry —
-                        // search it until the rebuilt scriptpubkey matches the
-                        // on-chain output, then sign against THAT tree.
+                        // snapshot params don't rebuild. Across a rotation the
+                        // voter set + ruleset are fixed; the free variables are
+                        // quorum_expiry (shifts tier CLTVs) and the committed
+                        // ledger_hash. Try both plausible hashes — the snapshot's
+                        // and the replayed local tip (`ledger.hash()` the lost
+                        // rotation baked in) — across the expiry window, and sign
+                        // against whichever tree reproduces the on-chain output.
                         let target = addr.script_pubkey();
+                        let mut hash_candidates = vec![summary.ledger_hash];
+                        if summary.replayed_tip_hash != summary.ledger_hash {
+                            hash_candidates.push(summary.replayed_tip_hash);
+                        }
                         match reconstruct_expiry(
                             &voter_set,
                             ruleset.tier_config_factory,
                             total_voters,
-                            summary.ledger_hash,
+                            &hash_candidates,
                             network,
                             &target,
                             summary.quorum_expiry,
                         ) {
-                            Some(found) => {
+                            Some((found_hash, found_expiry)) => {
                                 let new_config =
-                                    (ruleset.tier_config_factory)(total_voters, found);
+                                    (ruleset.tier_config_factory)(total_voters, found_expiry);
                                 tier0 = new_config
                                     .tiers
                                     .first()
@@ -1412,25 +1449,35 @@ fn sweep_ledger(
                                     voter_set.clone(),
                                     new_config,
                                     network,
-                                    summary.ledger_hash,
+                                    found_hash,
                                 );
                                 taproot_output = builder
                                     .build()
                                     .map_err(|e| format!("rebuild taproot: {:?}", e))?;
                                 reserves_script = taproot_output.script_pubkey();
                                 reconstructed = true;
+                                let which = if found_hash == summary.ledger_hash {
+                                    "snapshot"
+                                } else {
+                                    "replayed-tip"
+                                };
                                 println!(
-                                    "    RECONSTRUCTED: quorum_expiry {} → {} reproduces this \
-                                     exact scriptpubkey; signing tier-0 against the rebuilt tree",
-                                    summary.quorum_expiry, found
+                                    "    RECONSTRUCTED: ledger_hash={}… ({}) + quorum_expiry \
+                                     {} → {} reproduces this exact scriptpubkey; signing tier-0 \
+                                     against the rebuilt tree",
+                                    hex::encode(&found_hash[..8]),
+                                    which,
+                                    summary.quorum_expiry,
+                                    found_expiry
                                 );
                             }
                             None => {
                                 println!(
-                                    "    address differs from rebuild {} and no quorum_expiry \
-                                     within [-2016,+110000] of {} reproduces it — rotation \
-                                     changed more than expiry (ledger_hash or quorum set); \
-                                     need the QuorumBegin params from daemon log / relay; skipping",
+                                    "    address differs from rebuild {} and no (ledger_hash ∈ \
+                                     {{snapshot, replayed-tip}}, quorum_expiry ∈ [-2016,+110000] \
+                                     of {}) reproduces it — rotation changed the quorum set or \
+                                     used an unrelated hash; need the QuorumBegin params from \
+                                     daemon log / relay; skipping",
                                     reserves_address, summary.quorum_expiry
                                 );
                                 return Ok(());
@@ -2244,12 +2291,16 @@ mod reconstruct_tests {
         assert_ne!(stale, target, "precondition: stale rebuild differs from on-chain");
 
         let found = reconstruct_expiry(
-            &voter_set, factory, total, ledger_hash, network, &target, base_expiry,
+            &voter_set, factory, total, &[ledger_hash], network, &target, base_expiry,
         );
-        assert_eq!(found, Some(new_expiry), "must recover the exact rotation expiry");
+        assert_eq!(
+            found,
+            Some((ledger_hash, new_expiry)),
+            "must recover the exact rotation (ledger_hash, expiry)"
+        );
 
         // And the rebuilt tree at the found expiry matches on-chain exactly.
-        let cfg = factory(total, found.unwrap());
+        let cfg = factory(total, found.unwrap().1);
         let rebuilt = TapscriptReservesBuilder::new(voter_set, cfg, network, ledger_hash)
             .build()
             .unwrap()
@@ -2281,8 +2332,49 @@ mod reconstruct_tests {
                 .script_pubkey()
         };
         let found = reconstruct_expiry(
-            &voter_set, factory, total, [7u8; 32], network, &target, base_expiry,
+            &voter_set, factory, total, &[[7u8; 32]], network, &target, base_expiry,
         );
         assert_eq!(found, None, "must not fabricate a match when ledger_hash differs");
+    }
+
+    /// The real recovery case: the snapshot's ledger_hash is stale, but the
+    /// replayed local tip is the hash the lost rotation actually committed.
+    /// Passing both as candidates recovers via the tip hash.
+    #[test]
+    fn recovers_via_replayed_tip_hash() {
+        let op = key(1);
+        let others = vec![key(2), key(3), key(4)];
+        let voter_set = VoterSet::new(op, others);
+        let total = voter_set.all_voters().len();
+        let network = Network::Bitcoin;
+        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let factory = ruleset.tier_config_factory;
+        let base_expiry = 957_999u32;
+        let new_expiry = base_expiry + 743; // current_block + 1000 style
+
+        let snapshot_hash = [0x11u8; 32]; // stale — what the old vault committed
+        let tip_hash = [0x22u8; 32]; // what the lost rotation actually committed
+
+        // On-chain vault built from the TIP hash (+ new expiry).
+        let target = {
+            let cfg = factory(total, new_expiry);
+            TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, tip_hash)
+                .build()
+                .unwrap()
+                .script_pubkey()
+        };
+
+        // Snapshot hash alone can't reproduce it…
+        assert_eq!(
+            reconstruct_expiry(&voter_set, factory, total, &[snapshot_hash], network, &target, base_expiry),
+            None
+        );
+        // …but snapshot + replayed-tip does, and reports the tip hash.
+        assert_eq!(
+            reconstruct_expiry(
+                &voter_set, factory, total, &[snapshot_hash, tip_hash], network, &target, base_expiry
+            ),
+            Some((tip_hash, new_expiry)),
+        );
     }
 }
