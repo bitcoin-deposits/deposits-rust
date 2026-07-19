@@ -67,6 +67,68 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
         println!("    Ledger Hash: {}", hex::encode(&info.ledger_hash[..8]));
         println!("    Confirmed: {}", info.confirmed);
 
+        // Authoritative live ledger state — the snapshot above can lag the
+        // on-chain reality when a rotation's QuorumBegin was lost from local
+        // history. `ledger.hash()` (chain tip) is exactly what a rotation
+        // commits into the new vault's tree; next_quorum_members is who it
+        // rotates to. Dumped in full so an off-history rotation can be
+        // reconstructed from the true build inputs.
+        if let Some(arc) = node
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .cloned()
+        {
+            let l = arc.read().unwrap();
+            println!();
+            println!("    === Live Ledger State (for off-history recovery) ===");
+            println!(
+                "    ledger.hash() (chain tip): {}",
+                hex::encode(l.state.chain_tip_hash)
+            );
+            println!("    sequence:                  {}", l.state.sequence);
+            println!("    active_ruleset:            {}", l.state.active_ruleset_name);
+            println!("    operator:                  {}", hex::encode(l.state.operator_key.serialize()));
+            println!("    quorum_members ({}):", l.state.quorum_members.len());
+            for m in &l.state.quorum_members {
+                println!("      - {}", hex::encode(m.pubkey.serialize()));
+            }
+            println!(
+                "    next_quorum_members ({}):",
+                l.state.next_quorum_members.len()
+            );
+            for m in &l.state.next_quorum_members {
+                println!("      - {}", hex::encode(m.pubkey.serialize()));
+            }
+            use deposits_core::messages::LedgerOperation;
+            use deposits_core::TlvDecode;
+            let mut qb_count = 0usize;
+            let mut last_qb: Option<(String, [u8; 32], u32, usize)> = None;
+            for u in &l.history {
+                if let Ok(LedgerOperation::QuorumBegin {
+                    reserves_id,
+                    ledger_hash,
+                    quorum_expiry,
+                    quorum_members,
+                    ..
+                }) = LedgerOperation::tlv_decode(&u.message)
+                {
+                    qb_count += 1;
+                    last_qb =
+                        Some((reserves_id, ledger_hash, quorum_expiry, quorum_members.len()));
+                }
+            }
+            println!("    QuorumBegins in local history: {}", qb_count);
+            if let Some((rid, lh, exp, nm)) = last_qb {
+                println!("      latest QB reserves_id:   {}", rid);
+                println!("      latest QB ledger_hash:   {}", hex::encode(lh));
+                println!("      latest QB quorum_expiry: {}", exp);
+                println!("      latest QB members:       {}", nm);
+            }
+        }
+
         println!();
         println!("    === Taproot Script Details ===");
         println!("    Internal Key: {}", info.taproot_output.internal_key());
