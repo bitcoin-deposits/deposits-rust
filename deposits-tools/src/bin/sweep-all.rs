@@ -75,6 +75,13 @@ struct SweepArgs {
     esplora: String,
     network: Network,
     dry_run: bool,
+    /// Extra ledger_hash candidates for off-history rotation reconstruction,
+    /// supplied by the operator (e.g. the `ledger.hash()` line from
+    /// `deposits-node reserves list`). Tried alongside {snapshot, replayed-tip}
+    /// for EVERY ledger — a wrong-ledger hash simply never matches, so passing
+    /// all four ledgers' tips at once is safe. Needed when sweep-all can't
+    /// replay a ledger's history (snapshot-only discovery, e.g. a wedged fork).
+    extra_ledger_hashes: Vec<[u8; 32]>,
 }
 
 fn parse_args() -> Result<SweepArgs, String> {
@@ -83,6 +90,7 @@ fn parse_args() -> Result<SweepArgs, String> {
     let mut esplora = "https://mempool.space/api".to_string();
     let mut network = Network::Bitcoin;
     let mut dry_run = false;
+    let mut extra_ledger_hashes: Vec<[u8; 32]> = Vec::new();
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut i = 0;
@@ -114,6 +122,20 @@ fn parse_args() -> Result<SweepArgs, String> {
                 dry_run = true;
                 i += 1;
             }
+            "--extra-ledger-hash" if i + 1 < args.len() => {
+                let raw = hex::decode(args[i + 1].trim())
+                    .map_err(|e| format!("--extra-ledger-hash not hex: {}", e))?;
+                if raw.len() != 32 {
+                    return Err(format!(
+                        "--extra-ledger-hash must be 32 bytes, got {}",
+                        raw.len()
+                    ));
+                }
+                let mut a = [0u8; 32];
+                a.copy_from_slice(&raw);
+                extra_ledger_hashes.push(a);
+                i += 2;
+            }
             "--help" | "-h" => {
                 eprintln!(
                     "Usage: sweep-all --root <dir> --destination <addr> [options]\n\n\
@@ -122,7 +144,10 @@ fn parse_args() -> Result<SweepArgs, String> {
                      --destination <addr> Sweep target address\n  \
                      --esplora <url>      Esplora HTTP API (default: mempool.space)\n  \
                      --network <name>     bitcoin|testnet|signet|regtest (default bitcoin)\n  \
-                     --dry-run            Build + sign but don't broadcast"
+                     --dry-run            Build + sign but don't broadcast\n  \
+                     --extra-ledger-hash <hex>  Extra ledger_hash candidate for off-history\n                       \
+                     rotation recovery (repeatable; pass the ledger.hash() from\n                       \
+                     `deposits-node reserves list`). Safe to pass all ledgers' tips."
                 );
                 std::process::exit(0);
             }
@@ -135,6 +160,7 @@ fn parse_args() -> Result<SweepArgs, String> {
         esplora,
         network,
         dry_run,
+        extra_ledger_hashes,
     })
 }
 
@@ -536,6 +562,15 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         if u.operator_id != state.parent_pubkey && u.sequence_number != 0 {
             continue; // fork-branch update; skip
         }
+        // This update is on the canonical chain, so its content_hash IS
+        // chain_tip_hash after it — the authoritative ledger tip == ledger.hash(),
+        // which a rotation commits into the new vault. Capture it here, BEFORE
+        // the bare-op decode/apply below: those are best-effort (this replay
+        // can't reconstruct verifier context for every op on a long-lived
+        // ledger), but the tip hash is recorded in the jsonl independently, so
+        // tying its capture to a successful apply (as before) made a
+        // partially-replayable ledger report a stale tip.
+        replayed_tip_hash = u.content_hash;
         let op = match LedgerOperation::tlv_decode(&u.message) {
             Ok(o) => o,
             Err(_) => continue,
@@ -558,14 +593,8 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
             ));
         }
         match state.apply(&op) {
-            Ok(next) => {
-                state = next;
-                // `state.apply` takes the bare op, so it doesn't carry the
-                // hash chain; the update's own content_hash IS chain_tip_hash
-                // after this op, so track it directly.
-                replayed_tip_hash = u.content_hash;
-            }
-            Err(_) => continue, // best-effort replay
+            Ok(next) => state = next,
+            Err(_) => continue, // best-effort replay; tip already captured above
         }
     }
 
@@ -1220,6 +1249,7 @@ fn reconstruct_expiry(
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 fn sweep_ledger(
     summary: &LedgerSummary,
     keyring: &HashMap<bitcoin::secp256k1::PublicKey, [u8; 32]>,
@@ -1227,6 +1257,7 @@ fn sweep_ledger(
     network: Network,
     esplora: &str,
     dry_run: bool,
+    extra_ledger_hashes: &[[u8; 32]],
 ) -> Result<(), String> {
     // Reconstruct the on-chain Taproot output.
     let other_voters: Vec<bitcoin::secp256k1::PublicKey> = summary
@@ -1427,6 +1458,16 @@ fn sweep_ledger(
                         let mut hash_candidates = vec![summary.ledger_hash];
                         if summary.replayed_tip_hash != summary.ledger_hash {
                             hash_candidates.push(summary.replayed_tip_hash);
+                        }
+                        // Operator-supplied `ledger.hash()` values (from
+                        // `deposits-node reserves list`) — authoritative when our
+                        // own replay can't reach the tip (snapshot-only fork) or
+                        // diverges. Safe to include all ledgers' tips: a
+                        // non-matching one is simply skipped.
+                        for h in extra_ledger_hashes {
+                            if !hash_candidates.contains(h) {
+                                hash_candidates.push(*h);
+                            }
                         }
                         match reconstruct_expiry(
                             &voter_set,
@@ -2011,6 +2052,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.network,
                 &args.esplora,
                 args.dry_run,
+                &args.extra_ledger_hashes,
             ) {
                 println!("    ERROR: {}", e);
                 reserves_errors += 1;
@@ -2219,6 +2261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.network,
                 &args.esplora,
                 args.dry_run,
+                &args.extra_ledger_hashes,
             ) {
                 println!("    ERROR: {}", e);
                 reserves_errors += 1;
