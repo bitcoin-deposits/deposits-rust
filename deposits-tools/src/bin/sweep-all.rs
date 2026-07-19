@@ -51,7 +51,7 @@ use bitcoin::{
 };
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tapscript_reserves::{
-    ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, VoterSet,
+    ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, ThresholdConfig, VoterSet,
 };
 use deposits_core::tlv::TlvDecode;
 use deposits_core::types::LedgerState;
@@ -1148,6 +1148,48 @@ fn broadcast_tx(esplora: &str, tx: &bitcoin::Transaction) -> Result<bitcoin::Txi
     Ok(txid)
 }
 
+/// Recover the `quorum_expiry` of an off-history reserves rotation.
+///
+/// When a vault's funds move via a Tier-0 majority spend that was NEVER
+/// committed as a `QuorumBegin` (no node's snapshot or ledger history records
+/// the new tree), the new output is still fully determined by the SAME inputs
+/// as the old one — NUMS internal key (fixed), voter keys, ruleset tier
+/// offsets, and (for a quiescent ledger with no deposits) the ledger_hash —
+/// EXCEPT `quorum_expiry`, which shifts the Tier-1/2/3 absolute CLTVs and thus
+/// the merkle root → the output key. So a single-variable search over expiry
+/// re-derives the exact tree behind an observed scriptpubkey.
+///
+/// Returns the matching expiry, or `None` if nothing in the window reproduces
+/// `target` — which itself is diagnostic: the rotation then changed more than
+/// expiry (ledger_hash or the quorum set), and the true params must come from
+/// the daemon log / relay rather than a rebuild.
+#[allow(clippy::too_many_arguments)]
+fn reconstruct_expiry(
+    voter_set: &VoterSet,
+    factory: fn(usize, u32) -> ThresholdConfig,
+    total_voters: usize,
+    ledger_hash: [u8; 32],
+    network: Network,
+    target: &bitcoin::ScriptBuf,
+    base_expiry: u32,
+) -> Option<u32> {
+    // A rotation extends the lifetime; scan a couple weeks below (in case a
+    // repair shortened it) up to ~2 years above the current expiry.
+    let lo = base_expiry.saturating_sub(2_016);
+    let hi = base_expiry.saturating_add(110_000);
+    for expiry in lo..=hi {
+        let config = factory(total_voters, expiry);
+        let builder =
+            TapscriptReservesBuilder::new(voter_set.clone(), config, network, ledger_hash);
+        if let Ok(out) = builder.build() {
+            if out.script_pubkey() == *target {
+                return Some(expiry);
+            }
+        }
+    }
+    None
+}
+
 fn sweep_ledger(
     summary: &LedgerSummary,
     keyring: &HashMap<bitcoin::secp256k1::PublicKey, [u8; 32]>,
@@ -1167,22 +1209,26 @@ fn sweep_ledger(
     let total_voters = voter_set.all_voters().len();
     let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&summary.ruleset_name));
     let config = (ruleset.tier_config_factory)(total_voters, summary.quorum_expiry);
-    let tier0 = config
+    let mut tier0 = config
         .tiers
         .first()
         .cloned()
         .ok_or("ruleset has no tier 0")?;
-    let builder = TapscriptReservesBuilder::new(
+    let mut builder = TapscriptReservesBuilder::new(
         voter_set.clone(),
         config,
         network,
         summary.ledger_hash,
     );
-    let taproot_output = builder
+    let mut taproot_output = builder
         .build()
         .map_err(|e| format!("build taproot: {:?}", e))?;
     let mut reserves_script = taproot_output.script_pubkey();
     let mut reserves_address = taproot_output.address.clone();
+    // Set when we recover an off-history rotation by rebuilding the tree at a
+    // different quorum_expiry: the persisted snapshot then describes the OLD
+    // (spent) vault, so we must sign against the reconstructed tree instead.
+    let mut reconstructed = false;
 
     // If the snapshot carries a self-describing tree (post-2026-05-29
     // format), trust IT over the rebuild. The rebuild's purpose is to
@@ -1339,12 +1385,57 @@ fn sweep_ledger(
                         val, addr
                     );
                     if addr != reserves_address {
-                        println!(
-                            "    address differs from our rebuild {} — rotation \
-                             happened off-state, can't sign blindly; skipping",
-                            reserves_address
-                        );
-                        return Ok(());
+                        // Off-history rotation: the funds moved to a vault our
+                        // snapshot params don't rebuild. Everything is fixed
+                        // across a reserves rotation except quorum_expiry —
+                        // search it until the rebuilt scriptpubkey matches the
+                        // on-chain output, then sign against THAT tree.
+                        let target = addr.script_pubkey();
+                        match reconstruct_expiry(
+                            &voter_set,
+                            ruleset.tier_config_factory,
+                            total_voters,
+                            summary.ledger_hash,
+                            network,
+                            &target,
+                            summary.quorum_expiry,
+                        ) {
+                            Some(found) => {
+                                let new_config =
+                                    (ruleset.tier_config_factory)(total_voters, found);
+                                tier0 = new_config
+                                    .tiers
+                                    .first()
+                                    .cloned()
+                                    .ok_or("reconstructed config has no tier 0")?;
+                                builder = TapscriptReservesBuilder::new(
+                                    voter_set.clone(),
+                                    new_config,
+                                    network,
+                                    summary.ledger_hash,
+                                );
+                                taproot_output = builder
+                                    .build()
+                                    .map_err(|e| format!("rebuild taproot: {:?}", e))?;
+                                reserves_script = taproot_output.script_pubkey();
+                                reconstructed = true;
+                                println!(
+                                    "    RECONSTRUCTED: quorum_expiry {} → {} reproduces this \
+                                     exact scriptpubkey; signing tier-0 against the rebuilt tree",
+                                    summary.quorum_expiry, found
+                                );
+                            }
+                            None => {
+                                println!(
+                                    "    address differs from rebuild {} and no quorum_expiry \
+                                     within [-2016,+110000] of {} reproduces it — rotation \
+                                     changed more than expiry (ledger_hash or quorum set); \
+                                     need the QuorumBegin params from daemon log / relay; skipping",
+                                    reserves_address, summary.quorum_expiry
+                                );
+                                return Ok(());
+                            }
+                        }
                     }
                     (op, val, addr)
                 }
@@ -1389,7 +1480,7 @@ fn sweep_ledger(
         .map_err(|e| format!("build spend tx: {:?}", e))?;
     // Prefer the persisted tier-0 leaf when a self-describing snapshot is
     // present. Same fallback story: rebuild only if we have to.
-    let leaf_script = if let Some(p) = &summary.persisted_tree {
+    let leaf_script = if let Some(p) = summary.persisted_tree.as_ref().filter(|_| !reconstructed) {
         p.tier_leaves
             .iter()
             .find(|t| t.tier_index == 0)
@@ -1434,7 +1525,7 @@ fn sweep_ledger(
     // Assemble witness. Stack order: sigs in reverse-sorted-voter order,
     // then leaf_script, then control_block.
     let sorted = voter_set.sorted_x_only_pubkeys();
-    let control_block = if let Some(p) = &summary.persisted_tree {
+    let control_block = if let Some(p) = summary.persisted_tree.as_ref().filter(|_| !reconstructed) {
         p.tier_leaves
             .iter()
             .find(|t| t.tier_index == 0)
@@ -2104,4 +2195,94 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod reconstruct_tests {
+    use super::*;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+
+    fn key(byte: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        let sk = SecretKey::from_slice(&[byte; 32]).unwrap();
+        PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    /// An off-history rotation that only shifted `quorum_expiry` is recovered
+    /// exactly: `reconstruct_expiry` finds the new expiry and the tree it
+    /// rebuilds reproduces the observed scriptpubkey bit-for-bit.
+    #[test]
+    fn recovers_shifted_expiry() {
+        let op = key(1);
+        let others = vec![key(2), key(3), key(4)];
+        let voter_set = VoterSet::new(op, others);
+        let total = voter_set.all_voters().len();
+        let ledger_hash = [7u8; 32];
+        let network = Network::Bitcoin;
+
+        // balance-commit-v4 shares cltv-offset-v2's tier factory (same family
+        // as the live mainnet vaults).
+        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let factory = ruleset.tier_config_factory;
+
+        let base_expiry = 957_999u32;
+        let new_expiry = base_expiry + 52_560; // a ~1yr lifetime extension
+
+        // The "on-chain" output the rotation produced.
+        let target = {
+            let cfg = factory(total, new_expiry);
+            let b = TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, ledger_hash);
+            b.build().unwrap().script_pubkey()
+        };
+
+        // Snapshot still says base_expiry → its rebuild does NOT match.
+        let stale = {
+            let cfg = factory(total, base_expiry);
+            let b = TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, ledger_hash);
+            b.build().unwrap().script_pubkey()
+        };
+        assert_ne!(stale, target, "precondition: stale rebuild differs from on-chain");
+
+        let found = reconstruct_expiry(
+            &voter_set, factory, total, ledger_hash, network, &target, base_expiry,
+        );
+        assert_eq!(found, Some(new_expiry), "must recover the exact rotation expiry");
+
+        // And the rebuilt tree at the found expiry matches on-chain exactly.
+        let cfg = factory(total, found.unwrap());
+        let rebuilt = TapscriptReservesBuilder::new(voter_set, cfg, network, ledger_hash)
+            .build()
+            .unwrap()
+            .script_pubkey();
+        assert_eq!(rebuilt, target);
+    }
+
+    /// A change beyond expiry (here: a different ledger_hash) is NOT silently
+    /// "recovered" — the search returns None so the tool bails loudly instead
+    /// of signing against the wrong tree.
+    #[test]
+    fn refuses_when_more_than_expiry_changed() {
+        let op = key(1);
+        let others = vec![key(2), key(3), key(4)];
+        let voter_set = VoterSet::new(op, others);
+        let total = voter_set.all_voters().len();
+        let network = Network::Bitcoin;
+        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let factory = ruleset.tier_config_factory;
+        let base_expiry = 957_999u32;
+
+        // Target built with a DIFFERENT ledger_hash → no expiry reproduces it
+        // under the snapshot's ledger_hash.
+        let target = {
+            let cfg = factory(total, base_expiry + 1000);
+            TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, [0x99; 32])
+                .build()
+                .unwrap()
+                .script_pubkey()
+        };
+        let found = reconstruct_expiry(
+            &voter_set, factory, total, [7u8; 32], network, &target, base_expiry,
+        );
+        assert_eq!(found, None, "must not fabricate a match when ledger_hash differs");
+    }
 }
