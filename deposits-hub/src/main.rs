@@ -84,6 +84,9 @@ COMMANDS:
               [--data-dir <DIR>]          delete bootstrap state + node/treasury workspaces.
               [--force]                   Keeps hub-master-seed unless network is regtest or
                                           --force is given (the seed is the keys — guarded).
+    treasury [--esplora <URL>]   Print the hub treasury address and (with esplora) its
+              [--data-dir <DIR>]          confirmed + unconfirmed balance. Survives --reset;
+                                          check it before a (re)bootstrap self-funds.
     help                         Show this message
 
 OPTIONS:
@@ -185,6 +188,13 @@ fn main() -> ExitCode {
             let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string());
             match rt {
                 Ok(rt) => rt.block_on(deposits_hub::bootstrap::run(rest)),
+                Err(e) => Err(e),
+            }
+        }
+        "treasury" => {
+            let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string());
+            match rt {
+                Ok(rt) => rt.block_on(deposits_hub::bootstrap::treasury(rest)),
                 Err(e) => Err(e),
             }
         }

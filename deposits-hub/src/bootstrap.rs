@@ -663,6 +663,128 @@ async fn confirmed_sats(esplora: &str, address: &str) -> Result<u64, String> {
         .sum())
 }
 
+/// Confirmed + unconfirmed balance (sats) for `address` from esplora's
+/// address-stats endpoint, as `(confirmed, mempool_delta)`.
+async fn address_balance(esplora: &str, address: &str) -> Result<(i64, i64), String> {
+    let body = esplora_get(esplora, &format!("/address/{}", address)).await?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("address stats parse: {}", e))?;
+    let net = |s: &serde_json::Value| -> i64 {
+        s["funded_txo_sum"].as_i64().unwrap_or(0) - s["spent_txo_sum"].as_i64().unwrap_or(0)
+    };
+    Ok((net(&v["chain_stats"]), net(&v["mempool_stats"])))
+}
+
+/// `deposits-hub treasury [--data-dir <DIR>] [--esplora <URL>]`
+///
+/// Print the hub treasury address and — when an esplora endpoint is available
+/// (via `--esplora` or the one bootstrap recorded) — its confirmed and
+/// unconfirmed balance. The treasury key derives from hub-master-seed and
+/// survives `bootstrap --reset`, so this is how you confirm funds are in place
+/// before a (re)bootstrap self-funds the cluster.
+pub async fn treasury(rest: &[String]) -> Result<(), String> {
+    let mut data_dir: Option<PathBuf> = None;
+    let mut esplora: Option<String> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--data-dir" if i + 1 < rest.len() => {
+                data_dir = Some(PathBuf::from(&rest[i + 1]));
+                i += 2;
+            }
+            "--esplora" if i + 1 < rest.len() => {
+                esplora = Some(rest[i + 1].clone());
+                i += 2;
+            }
+            "-h" | "--help" => {
+                println!("Usage: deposits-hub treasury [--data-dir <DIR>] [--esplora <URL>]");
+                return Ok(());
+            }
+            other => return Err(format!("unknown arg: {}", other)),
+        }
+    }
+    let data_dir = data_dir.unwrap_or_else(|| dirs_home().join(".deposits-hub"));
+    let st = BootstrapState::load(&data_dir);
+
+    // Prefer the recorded address; else derive it from the treasury seed
+    // (works even before the first funding step).
+    let address = match st.treasury_address.clone() {
+        Some(a) => a,
+        None => {
+            let treasury_dir = data_dir.join("bootstrap-treasury");
+            let seed = seed_file_for(&treasury_dir);
+            if !seed.exists() {
+                return Err(format!(
+                    "no treasury_address in {} and no seed at {} — has `bootstrap` run in this data-dir?",
+                    BootstrapState::path(&data_dir).display(),
+                    seed.display()
+                ));
+            }
+            let network = if st.network.is_empty() {
+                "bitcoin".to_string()
+            } else {
+                st.network.clone()
+            };
+            let node_bin = st
+                .node_bin
+                .clone()
+                .unwrap_or_else(|| "deposits-node".to_string());
+            let mut c = tokio::process::Command::new(&node_bin);
+            c.args(["address", "--name", "treasury", "--network", &network])
+                .arg("--seed-file")
+                .arg(&seed)
+                .arg("--data-dir")
+                .arg(&treasury_dir);
+            if !st.esplora.is_empty() {
+                c.arg("--esplora").arg(&st.esplora);
+            }
+            let out = c
+                .output()
+                .await
+                .map_err(|e| format!("spawn {}: {}", node_bin, e))?;
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            extract_address(&combined)
+                .ok_or_else(|| format!("could not derive treasury address:\n{}", combined))?
+        }
+    };
+
+    println!("treasury address: {}", address);
+
+    let esplora = esplora.or_else(|| {
+        let e = st.esplora.clone();
+        (!e.is_empty()).then_some(e)
+    });
+    let Some(esplora) = esplora else {
+        println!(
+            "(no --esplora given and none recorded in bootstrap-state.json; balance unknown)"
+        );
+        return Ok(());
+    };
+
+    match address_balance(&esplora, &address).await {
+        Ok((confirmed, mempool)) => {
+            println!(
+                "confirmed:   {} sats ({:.8} BTC)",
+                confirmed,
+                confirmed as f64 / 1e8
+            );
+            if mempool != 0 {
+                println!(
+                    "unconfirmed: {} sats ({:.8} BTC, in mempool)",
+                    mempool,
+                    mempool as f64 / 1e8
+                );
+            }
+        }
+        Err(e) => println!("balance lookup failed via {}: {}", esplora, e),
+    }
+    Ok(())
+}
+
 pub async fn run(rest: &[String]) -> Result<(), String> {
     // `--reset` is handled before the normal arg parse: it doesn't need
     // --relay/--esplora and short-circuits the whole pipeline.
