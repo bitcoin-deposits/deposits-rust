@@ -49,3 +49,9 @@ deposits-web/explorer/playwright-report/
 /deposits-audit/Cargo.lock
 /deposits-audit-wasm/Cargo.lock
 deposits-web/explorer/tlv-catalog.js
+
+# Test/signet key material — never publish, even test seeds. Kept on disk
+# for local regtest/test tooling, but untracked.
+deposits-tools/treasury/
+# Stray local relay binary (build artifact).
+/strfry
