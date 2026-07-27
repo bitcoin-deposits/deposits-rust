@@ -4,7 +4,7 @@ Collateral-secured verifiable ledgers for off-chain Bitcoin custody.
 
 Operators maintain append-only hash chains of signed updates tracking deposits, transfers, and fees. Each operator's UTXO is split into reserves (deposit capacity) and collateral (security bond), both held in the same Taproot output controlled by the quorum. If the operator misbehaves, the quorum confiscates the collateral.
 
-See the [DEP specifications](DEP-01.md) for protocol details and [PROPOSAL.md](PROPOSAL.md) for the collateral model rationale.
+See the [DEP specifications](https://github.com/bitcoin-deposits/deposits) (protocol specs, whitepaper) for protocol details and [PROPOSAL.md](PROPOSAL.md) for the collateral model rationale.
 
 ## Crates
 

@@ -28,7 +28,7 @@ Each peer needs:
    running the wizard.
 
 If you haven't opened a ledger yet, do that first: `deposits-node ledger open`
-(see [SKILLS-operator.md](../../SKILLS-operator.md) §7).
+(see [SKILLS-operator.md](https://github.com/bitcoin-deposits/deposits/blob/main/SKILLS-operator.md) §7).
 
 ## Step 1 — every peer shares their identity
 
@@ -148,7 +148,7 @@ window. Operators can refresh via `quorum refresh` before expiry
 
 If a member doesn't refresh in time, the quorum can rotate via Tier-1
 recovery flows after the timeout. See
-[SKILLS-operator.md](../../SKILLS-operator.md) §7 for the quorum
+[SKILLS-operator.md](https://github.com/bitcoin-deposits/deposits/blob/main/SKILLS-operator.md) §7 for the quorum
 lifecycle.
 
 ## Troubleshooting
@@ -190,5 +190,5 @@ Once `form-with --begin` succeeds, your ledger is now quorum-protected:
 - New deposits are admissible against this ledger via the
   `deposits-wallet` flow.
 
-See [SKILLS-operator.md](../../SKILLS-operator.md) for ongoing
+See [SKILLS-operator.md](https://github.com/bitcoin-deposits/deposits/blob/main/SKILLS-operator.md) for ongoing
 operational concerns (monitoring, dispute handling, quorum refresh).
