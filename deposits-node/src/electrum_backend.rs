@@ -1,7 +1,7 @@
 //! [`ChainBackend`] impl talking to an Electrum server (electrs / fulcrum /
 //! ElectrumX) over its plain-TCP JSON-RPC protocol.
 //!
-//! Per PACKAGING_PLAN.md Tier 1b. Covers operators who already run electrs
+//! Covers operators who already run electrs
 //! (or fulcrum) for other apps and don't want to also expose bitcoind RPC.
 //!
 //! ## Protocol

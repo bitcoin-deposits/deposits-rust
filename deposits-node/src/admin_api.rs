@@ -1,6 +1,6 @@
 //! Operator admin HTTP API + embedded frontend.
 //!
-//! Per PACKAGING_PLAN.md Tier 5. Runs alongside the metrics server on a
+//! Runs alongside the metrics server on a
 //! separate port (`--admin-bind`, default `127.0.0.1:9210`), serves a
 //! single-page vanilla-JS frontend that reads from a small JSON API.
 //!

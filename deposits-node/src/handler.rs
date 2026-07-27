@@ -84,8 +84,7 @@ pub struct DepositsHandler {
 
     /// Signer abstraction. `LocalSigner` today; `RemoteSigner` in v1.
     /// All operator-protocol signing flows through this — the daemon does
-    /// not retain the operator secret as a separate field. See
-    /// `PLAN-remote-signer.md`.
+    /// not retain the operator secret as a separate field.
     pub(crate) signer: Arc<dyn Signer>,
 
     /// Shared secp256k1 context

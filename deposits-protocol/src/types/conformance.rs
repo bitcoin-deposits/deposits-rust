@@ -115,8 +115,7 @@ pub enum ConformanceViolation {
     /// `seen_nonces`. Replay protection for the dep-16 operation preimage: the
     /// same nonce can be reused once `current_height` has passed every expiry
     /// the nonce was ever paired with (`ExpiryPassed` catches the original
-    /// signed op in that case, so reuse is safe). See PLAN-dep16-integration.md
-    /// phase 5c.
+    /// signed op in that case, so reuse is safe).
     NonceReplay {
         operation: &'static str,
         actual: u64,
@@ -125,8 +124,7 @@ pub enum ConformanceViolation {
     /// A signature-bearing op supplied an `expiry` block height that the
     /// chain has already buried. Signatures over the dep-16 operation
     /// preimage bind to a specific expiry; the protocol rejects after that
-    /// height regardless of any other signal. See PLAN-dep16-integration.md
-    /// phase 3.
+    /// height regardless of any other signal.
     ExpiryPassed {
         operation: &'static str,
         expiry: u32,

@@ -8,8 +8,7 @@
 //!
 //! Every frame on the socket is `[len: u32 big-endian][payload]`. The payload
 //! is JSON for v1. After the [`Auth`] step completes, payloads are AEAD-sealed
-//! under a session key derived from the two transport keypairs (see
-//! `PLAN-remote-signer.md` §wire). Phase-4a defines the message shapes; the
+//! under a session key derived from the two transport keypairs. Phase-4a defines the message shapes; the
 //! binary in phase-4b layers the framing + encryption on top.
 //!
 //! ## Sequence

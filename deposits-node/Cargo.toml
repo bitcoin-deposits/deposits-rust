@@ -82,7 +82,7 @@ lightning-invoice = "0.32"
 # HTTP client for lightning payments
 reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"], default-features = false }
 
-# HTTP server for the operator admin UI (PACKAGING_PLAN Tier 5).
+# HTTP server for the operator admin UI.
 # Pairs with the embedded vanilla-JS frontend served from
 # deposits-node/admin-ui/. Pin to a stable axum 0.7.x so the bearer-token
 # middleware shape doesn't shift under us.

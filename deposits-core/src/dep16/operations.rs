@@ -14,7 +14,7 @@
 //! spend-side discriminator). Variants that aren't descriptor-evaluated (`InvoiceFulfill`,
 //! `OnchainFulfill`, administrative ops) translate to `None`.
 //!
-//! See PLAN-dep16-integration.md §"What the descriptor sees" for the design. This phase covers
+//! This phase covers
 //! the mapping for variants the protocol already has fields for; variants needing protocol
 //! changes (uniform per-deposit nonce + `expiry`, the `DepositDescriptorUpdate` rename, the
 //! `release_descriptor` arg in `TransferLock`) are marked with explicit TODOs and carry

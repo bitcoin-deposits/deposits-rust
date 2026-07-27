@@ -10,7 +10,7 @@
 //! Shells out to the `ldk-server-cli` binary for each operation; the CLI
 //! handles protobuf encoding and HMAC authentication against the ldk-server
 //! HTTP API. Sibling impls (`LndBackend`, `ClnBackend`) land per
-//! PACKAGING_PLAN.md Tier 1a; the trait surface stays unchanged.
+//! The trait surface stays unchanged.
 
 use serde::Deserialize;
 use std::process::Command;
@@ -499,7 +499,7 @@ pub struct PaymentInfo {
 //
 // Adapts the LDK-shaped response types above to the neutral types the
 // `LightningBackend` trait declares. See deposits-node/src/lightning_backend.rs
-// for the design rationale; per PACKAGING_PLAN.md Tier 1 this is the first
+// for the design rationale; this is the first
 // of three backends (LDK, LND, CLN) the daemon will eventually swap between
 // at startup. The inherent methods on `LdkBackend` stay so existing callers
 // don't break; the trait impl just forwards and converts.

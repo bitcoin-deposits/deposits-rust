@@ -22,7 +22,7 @@ sha2 = "0.10"
 # modules our fork adds on top of upstream miniscript 12.3.6 — the dep-16
 # authorization language, dep-17 canonical encodings, real-crypto ECDSA
 # + Schnorr verifiers, witness-monotone admission, and the fraud-proof
-# bundle. See PLAN-dep16-integration.md.
+# bundle.
 miniscript = { version = "12", features = ["serde", "dep16"] }
 
 # Serialization

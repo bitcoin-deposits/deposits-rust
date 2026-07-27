@@ -13,7 +13,7 @@ use std::sync::Arc;
 pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     // Parse --metrics-port, --admin-bind, --admin-disabled separately
     // (before parse_config since they're run-specific). Defaults match
-    // PACKAGING_PLAN Tier 5: the admin UI binds 127.0.0.1:8765 unless
+    // The admin UI binds 127.0.0.1:8765 unless
     // disabled. Loopback-only by default — operators terminate TLS
     // upstream (caddy/nginx) before exposing to the public internet.
     let mut metrics_port: Option<u16> = None;
@@ -87,7 +87,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     tracing::info!("Node ID: {}", node.node_id);
 
-    // Start the operator admin UI (PACKAGING_PLAN Tier 5) as early as
+    // Start the operator admin UI as early as
     // possible — before sync, before nostr subscribe, before the main
     // event loop. That way if any of those fail, the operator can
     // still load the UI and see *why* (signer tab will report the

@@ -1,6 +1,6 @@
 # Single-operator deployment for deposits-node.
 #
-# Per PACKAGING_PLAN.md Tier 2. Designed to slot in next to an operator's
+# Designed to slot in next to an operator's
 # existing Bitcoin + Lightning infrastructure — no bundled bitcoind, no
 # bundled electrs, no bundled Lightning node. The operator configures
 # which backend talks to what via .env.

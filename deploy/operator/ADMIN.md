@@ -2,7 +2,7 @@
 
 The daemon embeds a read-only browser UI for ops visibility — what
 ledgers exist, who's quorumed-up, recent ledger operations, and
-whether the signer is reachable. PACKAGING_PLAN.md Tier 5.
+whether the signer is reachable.
 
 It's **read-only by design**: no buttons that move money, no quorum
 formation, no signer config. Those live in CLI subcommands precisely

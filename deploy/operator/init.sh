@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# deposits-node operator setup wizard. Per PACKAGING_PLAN.md Tier 2.
+# deposits-node operator setup wizard.
 #
 # Interactive prompts walk you through:
 #   1. operator seed (generate or import)
@@ -13,7 +13,7 @@
 # Idempotent — safe to re-run. Already-set values in .env are kept as
 # the default for each prompt.
 #
-# Acceptance (per PACKAGING_PLAN.md Tier 2): a clean Ubuntu VPS with
+# Acceptance: a clean Ubuntu VPS with
 # bitcoind + LND already running can install and bring up an operator
 # in 5 minutes following README.md and running this script.
 

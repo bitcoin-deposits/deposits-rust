@@ -1,6 +1,6 @@
 //! [`ChainBackend`] impl talking directly to a bitcoind node via JSON-RPC.
 //!
-//! Per PACKAGING_PLAN.md Tier 1b. The audience payoff is biggest here:
+//! The audience payoff is biggest here:
 //! every Umbrel/Start9/self-host operator already has a `bitcoind`
 //! running, so this backend lets them skip electrs/esplora entirely.
 //!
@@ -19,8 +19,8 @@
 //! - `-server=1` (RPC enabled)
 //! - `-txindex=1` for `get_tx` on arbitrary txids. Without `txindex`,
 //!   `getrawtransaction` only finds wallet-owned txs, which won't cover
-//!   fraud-proof verification. Document this requirement in
-//!   PACKAGING_PLAN.md's Tier 2 docs.
+//!   fraud-proof verification. Document this requirement in the operator
+//!   deployment docs.
 //!
 //! No ZMQ required for the trait's surface — that's only useful for
 //! sub-second mempool notifications, which we don't currently need.

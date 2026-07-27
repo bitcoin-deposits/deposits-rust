@@ -438,7 +438,7 @@ types:
   #   72  = withdrawal_id (32 bytes)
   #   74  = funding_address (string, OnchainCredit)
   #
-  # dep-16 per-deposit replay protection (phase 3 of PLAN-dep16-integration.md):
+  # dep-16 per-deposit replay protection (phase 3):
   #   288 = nonce (u64, per-deposit monotonic counter; InvoiceLock / OnchainLock /
   #         TransferLock / DepositKeyRotate)
   #   290 = expiry (u32, block height after which the signature is invalid; same

@@ -12,8 +12,7 @@ together** using the deposits-node CLI. It's the "private" flow — peers
 who know each other (out of band) and want to be in a quorum together.
 
 The "public" flow (advertise on a relay, accept strangers) is on the
-roadmap but not yet implemented. See [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md)
-Tier 3.
+roadmap but not yet implemented.
 
 ## Prerequisites
 

@@ -1074,7 +1074,7 @@ fn lottery_output_includes_all_expected_leaves() {
 // no-op), Taproot key-path equivocation (NUMS prevents it), or the
 // confiscation TX path that lands the lottery output on chain.
 // Those need bitcoind regtest — see the Tier-3 follow-up in
-// CUSTODY_LOTTERY_PLAN.md "Tier-3 integration test target".
+// Tier-3 integration test target.
 
 /// Drive a full N=15 lottery: every disputant reveals, the winner is
 /// computed via `calculate_winner`, and the constructed claim

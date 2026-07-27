@@ -2,7 +2,7 @@
 
 `deposits-signer` is a separate process that holds the operator/identity seed and answers BIP-340 / ECDSA / ECDH requests over a Unix socket. The daemon never sees the seed once `deposits-signer` is provisioned with it — it talks to the signer via a small RPC, gets back signatures and ECDH shared secrets, and constructs the rest itself.
 
-This doc covers what the signer is, how to operate it, the wire it speaks, and what's wired vs. still pending. For the original design rationale + phasing, see [PLAN-remote-signer.md](PLAN-remote-signer.md).
+This doc covers what the signer is, how to operate it, the wire it speaks, and what's wired vs. still pending.
 
 ---
 
@@ -226,7 +226,7 @@ Every operator gets its own signer process (separate process, same host, signer 
 
 `deposits-tools/bin/test-signer.sh` is a fast smoke test that exercises the signer-spawn + handshake plumbing without needing the full cluster (no bitcoin / relays / esplora). Useful for CI and iteration.
 
-A second blocker: the wallet (BDK) constructs its descriptor from the seed and uses internal key knowledge for PSBT signing. To run the daemon entirely without the seed, BDK needs a watch-only descriptor + per-input external sighash signing. See `PLAN-remote-signer.md` §Phase-3 finish state cluster 4.
+A second blocker: the wallet (BDK) constructs its descriptor from the seed and uses internal key knowledge for PSBT signing. To run the daemon entirely without the seed, BDK needs a watch-only descriptor + per-input external sighash signing.
 
 ---
 
@@ -268,7 +268,7 @@ This is a small wallet-side update, not a DEP. Tracked as a depositor-facing fol
 - **Hole-punched transport.** Same wire protocol, network framing instead of Unix socket. AEAD sealing of post-handshake frames lands at the same time.
 - **Hot-spare daemon coordination.** Multiple daemons sharing one signer: leader election layer on the daemon side. Anti-equivocation on the signer is the safety net that makes the configuration viable; coordination keeps it from being noisy.
 - **Wallet-side advertisement protocol update.** Depositor-facing change: parse `operator_pubkey` from advertisement content, encrypt DMs to the event's `pubkey` (Nostr key), verify `operator_signature` against `operator_pubkey`. Out of scope for the signer crates; lands in `deposits-wallet` / `deposits-tools/wallet/` / `deposits-web/wallet/`.
-- **`KeyPath` / depositor-key extension on the trait.** `admin.rs` lock/fulfill sigs and `node_cli/{lightning,withdraw}.rs` flows currently derive depositor keys via the daemon's master seed. Migrating them through the signer needs a `Signer::bip340_sign_at(KeyPath, ...)` extension; documented in `PLAN-remote-signer.md` §Open follow-ups.
+- **`KeyPath` / depositor-key extension on the trait.** `admin.rs` lock/fulfill sigs and `node_cli/{lightning,withdraw}.rs` flows currently derive depositor keys via the daemon's master seed. Migrating them through the signer needs a `Signer::bip340_sign_at(KeyPath, ...)` extension.
 
 ---
 

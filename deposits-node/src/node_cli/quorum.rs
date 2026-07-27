@@ -964,7 +964,7 @@ async fn quorum_refresh(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 /// Form a quorum with N named peers in one shot.
 ///
-/// Per PACKAGING_PLAN.md Tier 3 "private flow": operators who know each
+/// Private flow: operators who know each
 /// other's pubkeys + ledger IDs out-of-band (via the show-identity
 /// command + a side channel) form a quorum with a single command instead
 /// of running `quorum add` N times manually.

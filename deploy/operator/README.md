@@ -1,8 +1,7 @@
 # Single-operator deployment
 
 Run a deposits-node operator next to your existing Bitcoin + Lightning
-infrastructure. Designed for the audience [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md)
-calls out: self-custody Bitcoiners who already run a Lightning node
+infrastructure. Designed for self-custody Bitcoiners who already run a Lightning node
 (Alby Hub, Umbrel + LDK/LND/CLN, Start9, plain Linux) and want to add
 the deposits-operator role on top.
 
@@ -255,5 +254,4 @@ machinery.
 The deliberate minimalism is the point: drop deposits-node into an
 already-running self-hosted stack, configure what it talks to, run it.
 Bundling more would either fight your existing setup or force a parallel
-one. See [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md) for the bigger
-picture.
+one.

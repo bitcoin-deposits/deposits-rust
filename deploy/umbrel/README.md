@@ -1,8 +1,8 @@
 # Umbrel community-apps package for deposits-node
 
-The Umbrel-shaped wrap of [`deploy/operator/`](../operator/). Per
-PACKAGING_PLAN.md Tier 4 — once Tiers 1 + 2 + 3 landed, the app-store
-manifest is mostly mechanical.
+The Umbrel-shaped wrap of [`deploy/operator/`](../operator/). Once the
+operator deployment is in place, the app-store manifest is mostly
+mechanical.
 
 ## What's in this directory
 
@@ -98,6 +98,6 @@ host.
 The mechanical translation to other community-app formats (Start9
 `.s9pk`, Citadel community-apps, MyNode add-ons) is left as a
 per-store follow-on. Same compose, different manifest format and
-review process for each. Per PACKAGING_PLAN.md the recommendation is
+review process for each. The recommendation is
 Umbrel first (largest user base), then Start9 (polished UX warrants
 the heavier manifest), then others as demand surfaces.

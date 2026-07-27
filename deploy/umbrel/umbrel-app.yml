@@ -1,5 +1,5 @@
 # Umbrel community-apps manifest for deposits-node.
-# Per PACKAGING_PLAN.md Tier 4 — wraps deploy/operator's compose +
+# Wraps deploy/operator's compose +
 # wizard in the Umbrel App Store's manifest format.
 #
 # To submit:

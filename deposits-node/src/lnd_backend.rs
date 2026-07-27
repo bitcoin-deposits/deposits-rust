@@ -1,6 +1,6 @@
 //! [`LightningBackend`] impl talking to LND via its REST API.
 //!
-//! Per PACKAGING_PLAN.md Tier 1a. LND's gRPC interface is the recommended
+//! LND's gRPC interface is the recommended
 //! one upstream, but REST is sufficient for everything the trait needs and
 //! avoids dragging tonic + lnrpc generated bindings into deposits-node.
 //!

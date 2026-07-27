@@ -1414,7 +1414,7 @@ impl LedgerState {
         // GC happens lazily here: entries whose expiry is below current_height
         // can't be replayed anyway (ExpiryPassed would catch them) so they're
         // dropped before the uniqueness check. On accept, apply() inserts the new
-        // (nonce, expiry) pair into the set. See PLAN-dep16-integration.md phase 5c.
+        // (nonce, expiry) pair into the set.
         //
         // The check needs the deposit's pre-state because apply() has already
         // inserted into seen_nonces by the time conformance runs; comparing against
@@ -1590,7 +1590,7 @@ impl LedgerState {
             } => {
                 // Phase 5: descriptor evaluation dropped (the lock was already
                 // authorized at InvoiceLock time; re-evaluating at fulfill time would be
-                // unsound — see PLAN-dep16-integration.md's "two carve-outs"). Only the
+                // unsound — see the two carve-outs). Only the
                 // preimage→payment_id binding stays: the preimage IS the release
                 // condition, and it must match the hash the original lock committed to.
                 let hash = sha256::Hash::hash(preimage).to_byte_array();
@@ -1865,7 +1865,6 @@ mod replay_protection_tests {
     //!   * Entries with `expiry < current_height` are GC'd lazily on each check —
     //!     the corresponding signature can't be applied anyway (ExpiryPassed catches
     //!     it), so the nonce becomes safe to reuse.
-    //! See PLAN-dep16-integration.md phase 5c.
 
     use super::*;
     use crate::messages::LedgerOperation;

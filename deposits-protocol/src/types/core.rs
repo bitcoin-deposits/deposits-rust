@@ -430,7 +430,7 @@ pub struct Deposit {
     ///
     /// Storage is bounded by O(ops × expiry-window): for a wallet that picks `expiry =
     /// current_height + 144`, ops within the most recent ~144 blocks stay tracked. GC
-    /// happens lazily on each conformance check. See PLAN-dep16-integration.md phase 5c.
+    /// happens lazily on each conformance check.
     #[serde(default)]
     pub seen_nonces: std::collections::BTreeSet<(u64, u32)>,
 }

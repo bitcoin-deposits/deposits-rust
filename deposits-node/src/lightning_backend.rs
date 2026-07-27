@@ -6,7 +6,7 @@
 //! a trait that captures every Lightning operation the daemon currently
 //! performs, with implementations swappable at runtime via config.
 //!
-//! Per [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md) Tier 1: the trait
+//! The trait
 //! lands first, [`crate::ldk_backend::LdkBackend`] becomes the first impl, then
 //! `LndBackend` / `ClnBackend` follow as separate commits without touching
 //! the trait surface.

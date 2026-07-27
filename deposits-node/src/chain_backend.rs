@@ -7,7 +7,7 @@
 //! `bitcoind` (Umbrel/Start9 default) or `electrs` (common in larger
 //! self-host stacks). This module is the structural fix.
 //!
-//! Per [PACKAGING_PLAN.md](../../PACKAGING_PLAN.md) Tier 1b: the trait
+//! The trait
 //! lands first as the EsploraBackend impl wrapping current behaviour, then
 //! `BitcoindRpcBackend` / `ElectrumBackend` follow as separate commits.
 //!

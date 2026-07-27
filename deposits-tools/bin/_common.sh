@@ -889,8 +889,7 @@ start_node() {
     # Lightning backend wiring. Default (or LIGHTNING_BACKEND=ldk) wires the
     # shared LDK self-pay node. `=lnd` extracts the macaroon from the lnd
     # container and points operators at its REST endpoint. `=cln` exposes
-    # CLN's lightning-rpc Unix socket via the bind-mounted host path. See
-    # PACKAGING_PLAN.md Tier 1a for the trait surface this exercises.
+    # CLN's lightning-rpc Unix socket via the bind-mounted host path.
     case "${LIGHTNING_BACKEND:-ldk}" in
         ldk)
             # All operators share a single LDK node via self-pay wrapper.

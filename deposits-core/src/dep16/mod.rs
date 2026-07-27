@@ -13,7 +13,7 @@
 //! reaching into the miniscript crate's submodules, and provides the [`ProtocolLedgerState`]
 //! adapter that future phases will populate with real protocol bookkeeping.
 //!
-//! See `PLAN-dep16-integration.md` for the broader integration plan. Phase 1 was the wiring
+//! Phase 1 was the wiring
 //! (this module's re-exports + the [`ProtocolLedgerState`] adapter); phase 2 ([`operations`])
 //! defines the per-operation translation. Phases 3 onward fill in the per-deposit nonce/expiry
 //! plumbing, the `Authorizer` trait, and the call-site switchover.

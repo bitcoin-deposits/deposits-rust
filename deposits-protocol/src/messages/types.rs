@@ -336,8 +336,7 @@ pub enum LedgerOperation {
         deposit_id: DepositId,
         new_descriptor: String,
         /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
-        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
-        /// PLAN-dep16-integration.md phase 3.
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage (phase 3).
         nonce: u64,
         /// Block height after which a signature over this operation is invalid.
         expiry: u32,
@@ -388,8 +387,7 @@ pub enum LedgerOperation {
         sequence_number: u64,
         /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
         /// `last_op_nonce`. Plumbed into the dep-16 operation preimage; binds the witness
-        /// signature against replay across deposit operations. See PLAN-dep16-integration.md
-        /// phase 3.
+        /// signature against replay across deposit operations (phase 3).
         nonce: u64,
         /// Block height after which a signature over this operation is invalid. Plumbed into
         /// the dep-16 operation preimage; protocol rejects on apply if `current_height > expiry`.
@@ -464,8 +462,7 @@ pub enum LedgerOperation {
         destination_address: String,
         withdrawal_id: [u8; 32],
         /// Per-deposit monotonic nonce — must be strictly greater than the deposit's
-        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
-        /// PLAN-dep16-integration.md phase 3.
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage (phase 3).
         nonce: u64,
         /// Block height after which a signature over this operation is invalid.
         expiry: u32,
@@ -510,8 +507,7 @@ pub enum LedgerOperation {
         timeout_height: u32,
         transfer_id: [u8; 32],
         /// Per-deposit monotonic nonce — must be strictly greater than the source deposit's
-        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage. See
-        /// PLAN-dep16-integration.md phase 3.
+        /// `last_op_nonce`. Plumbed into the dep-16 operation preimage (phase 3).
         nonce: u64,
         /// Block height after which a signature over this operation is invalid.
         expiry: u32,

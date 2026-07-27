@@ -7,8 +7,6 @@
 //! - `RemoteSigner` (in `deposits-node`) — talks to the `deposits-signer` binary
 //!   over a Unix socket; the daemon never sees the seed.
 //!
-//! See `PLAN-remote-signer.md` for the full design.
-//!
 //! # Why callers pre-hash for BIP-340
 //!
 //! The trait takes a 32-byte digest, not a payload. Two reasons:

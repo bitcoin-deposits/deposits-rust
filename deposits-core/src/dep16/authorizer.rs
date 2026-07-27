@@ -12,7 +12,7 @@
 //! operation via [`super::operations::to_dep16`], converts the byte-stack witness into the
 //! dep-16 keyed `Witness` shape (by trying each stack signature against each key the
 //! descriptor mentions), and evaluates. Currently used by `DepositKeyRotate`'s conformance
-//! check — phases 5 and 6 of `PLAN-dep16-integration.md` extend it to the lock-side
+//! check — later phases extend it to the lock-side
 //! variants and remove the old `WitnessVerifier` path.
 //!
 //! v1 scope: the descriptor's keys are read as 33-byte compressed secp256k1 pubkeys

@@ -38,7 +38,7 @@ services:
         "-rest",
         "-txindex",
         # ZMQ publish endpoints — required by the lnd and cln services
-        # (PACKAGING_PLAN.md Tier 1a end-to-end test). Bind to 0.0.0.0
+        # (LN-backend end-to-end test). Bind to 0.0.0.0
         # so siblings on the regtest network can subscribe. Additive;
         # no impact on the default LDK path.
         "-zmqpubrawblock=tcp://0.0.0.0:28332",

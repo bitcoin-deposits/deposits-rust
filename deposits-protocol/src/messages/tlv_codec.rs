@@ -73,7 +73,7 @@ mod ledger_op_tlv {
     /// QuorumBegin protocol-ruleset name. Optional; absent →
     /// `legacy` (matches every pre-versioned QuorumBegin on chain).
     pub const PROTOCOL_VERSION: u64 = 286;
-    // Per-deposit dep-16 replay-protection fields (phase 3 of PLAN-dep16-integration.md)
+    // Per-deposit dep-16 replay-protection fields (phase 3)
     pub const NONCE: u64 = 288; // u64, per-deposit monotonic nonce
     pub const EXPIRY: u64 = 290; // u32, block height after which the signature is invalid
     // Quorum/Collateral ledger binding fields

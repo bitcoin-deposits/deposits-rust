@@ -1,7 +1,7 @@
 //! [`LightningBackend`] impl talking to Core Lightning (CLN) via its
 //! Unix-socket JSON-RPC.
 //!
-//! Per PACKAGING_PLAN.md Tier 1a. CLN's primary interface is a Unix socket
+//! CLN's primary interface is a Unix socket
 //! (`lightning-rpc`) speaking JSON-RPC 2.0 — newline-delimited, no auth (the
 //! filesystem permission on the socket IS the auth, same trust model as
 //! deposits-signer). The `clnrest` plugin exposes an HTTP variant but it's

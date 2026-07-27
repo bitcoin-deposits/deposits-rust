@@ -2,7 +2,7 @@
 
 ## What this is
 
-A capture of the contemplation around partial-reveal under tr / modification-replay, surfaced during the dep-16 integration design (see [`PLAN-dep16-integration.md`](PLAN-dep16-integration.md)). The integration ships in v1 without partial-reveal machinery; this doc names the design space so the v1 choices don't paint v2 into a corner.
+A capture of the contemplation around partial-reveal under tr / modification-replay, surfaced during the dep-16 integration design. The integration ships in v1 without partial-reveal machinery; this doc names the design space so the v1 choices don't paint v2 into a corner.
 
 Out of scope for the v1 lift.
 
@@ -80,4 +80,4 @@ The v1 design explicitly does not foreclose any of these. It also doesn't pre-im
 
 - A commitment to ever shipping any of this. It's possible the property is best gained another way (e.g., the protocol gets multi-operator and partial-reveal moves up the priority list, and we make different choices then).
 - A spec. There's no encoding here, no algorithm, no proof. It's a placeholder for future design with the boundaries marked.
-- A blocker for the v1 integration. The integration plan (see [`PLAN-dep16-integration.md`](PLAN-dep16-integration.md)) proceeds under Position A with full reveal.
+- A blocker for the v1 integration. The integration proceeds under Position A with full reveal.
