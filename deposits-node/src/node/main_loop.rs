@@ -579,9 +579,7 @@ impl Node {
                     page_min_ts = Some(ts);
                 }
                 if let Ok(tlv) = BASE64.decode(&event.content) {
-                    if let Ok(u) =
-                        deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv)
-                    {
+                    if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
                         if seen.insert(u.content_hash) {
                             all.push(u);
                             fresh += 1;
@@ -1395,10 +1393,8 @@ impl Node {
                                 // (e.g. via a peer's resync request)
                                 // will pin to this timestamp and the
                                 // relay will dedupe on event id.
-                                let res = node
-                                    .nostr
-                                    .broadcast_ledger_update_at(&update, None)
-                                    .await;
+                                let res =
+                                    node.nostr.broadcast_ledger_update_at(&update, None).await;
                                 match &res {
                                     Ok((_event_id, used_ts)) => {
                                         // Record + persist the minted timestamp so a
@@ -1423,9 +1419,8 @@ impl Node {
                                     ),
                                 }
                                 if let Some(reply) = reply {
-                                    let _ = reply.send(
-                                        res.map(|(id, _ts)| id).map_err(|e| e.to_string()),
-                                    );
+                                    let _ = reply
+                                        .send(res.map(|(id, _ts)| id).map_err(|e| e.to_string()));
                                 }
                             });
                         }
@@ -1470,10 +1465,8 @@ impl Node {
                                             &lid[..16.min(lid.len())],
                                             attempts,
                                         );
-                                        tokio::time::sleep(
-                                            tokio::time::Duration::from_secs(8),
-                                        )
-                                        .await;
+                                        tokio::time::sleep(tokio::time::Duration::from_secs(8))
+                                            .await;
                                         result = node
                                             .request_cosign(&lid, &update)
                                             .await
@@ -1893,7 +1886,9 @@ impl Node {
                         let r = if reconnected || backstop_due {
                             last_sub_refresh = tokio::time::Instant::now();
                             if reconnected {
-                                tracing::info!("relay reconnected — refreshing global subscription");
+                                tracing::info!(
+                                    "relay reconnected — refreshing global subscription"
+                                );
                             }
                             tokio::time::timeout(
                                 std::time::Duration::from_secs(5),
@@ -1909,7 +1904,9 @@ impl Node {
                         };
                         match r {
                             Ok(Err(e)) => tracing::debug!("Global subscribe failed: {}", e),
-                            Err(_) => tracing::error!("subscribe/refresh global timed out after 5s"),
+                            Err(_) => {
+                                tracing::error!("subscribe/refresh global timed out after 5s")
+                            }
                             _ => {}
                         }
                     }

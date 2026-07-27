@@ -139,7 +139,9 @@ pub fn op_seed(i: usize) -> String {
 /// adapter. Overridable via `DEPOSITS_DATA_ROOT` for ad-hoc clusters
 /// (matches setup.sh's `DATA_ROOT`).
 pub fn op_data_dir(i: usize) -> PathBuf {
-    data_root().join("bootstrap-nodes").join(format!("node{}", i))
+    data_root()
+        .join("bootstrap-nodes")
+        .join(format!("node{}", i))
 }
 
 /// True iff node `i` exists in the bootstrapped cluster (its seed.hex is
@@ -176,8 +178,8 @@ pub fn op_operator_secret(i: usize) -> bitcoin::secp256k1::SecretKey {
     use std::str::FromStr;
     let seed_bytes = hex::decode(op_seed(i)).expect("op seed hex");
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes)
-        .expect("xpriv");
+    let xpriv =
+        bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes).expect("xpriv");
     let path = bitcoin::bip32::DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
     xpriv.derive_priv(&secp, &path).expect("derive").private_key
 }
@@ -206,8 +208,8 @@ pub fn derive_deposit_secret(
 
     let xpriv = Xpriv::new_master(network, seed).expect("xpriv from seed");
     let secp = Secp256k1::new();
-    let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", key_index))
-        .expect("derivation path");
+    let path =
+        DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", key_index)).expect("derivation path");
     xpriv
         .derive_priv(&secp, &path)
         .expect("derive_priv")
@@ -257,8 +259,8 @@ pub fn read_ledger_history(
     let path = data_dir
         .join("wallet/ledgers")
         .join(format!("{}.jsonl", ledger_id));
-    let file = std::fs::File::open(&path)
-        .unwrap_or_else(|e| panic!("opening {}: {}", path.display(), e));
+    let file =
+        std::fs::File::open(&path).unwrap_or_else(|e| panic!("opening {}: {}", path.display(), e));
     let reader = BufReader::new(file);
     let mut updates = Vec::new();
     for line in reader.lines() {
@@ -299,8 +301,7 @@ fn bootstrap_state() -> serde_json::Value {
             e
         )
     });
-    serde_json::from_str(&raw)
-        .unwrap_or_else(|e| panic!("parsing {}: {}", path.display(), e))
+    serde_json::from_str(&raw).unwrap_or_else(|e| panic!("parsing {}: {}", path.display(), e))
 }
 
 /// node{i}'s activated ledger id from `bootstrap-state.json`.
@@ -433,11 +434,7 @@ pub fn operator_credit_deposit(
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(
-        out.status.success(),
-        "deposit credit failed:\n{}",
-        combined
-    );
+    assert!(out.status.success(), "deposit credit failed:\n{}", combined);
     combined
 }
 
@@ -452,7 +449,14 @@ pub fn wallet_route(
     to_alias: &str,
     amount_sats: u64,
 ) -> (bool, String) {
-    wallet_route_inner(data_dir, nsec_path, from_alias, to_alias, amount_sats, false)
+    wallet_route_inner(
+        data_dir,
+        nsec_path,
+        from_alias,
+        to_alias,
+        amount_sats,
+        false,
+    )
 }
 
 /// `wallet route --ptlc` — point-locked variant (DEP-13 §"Courier PTLC pattern").
@@ -477,12 +481,7 @@ fn wallet_route_inner(
     ptlc: bool,
 ) -> (bool, String) {
     let mut cmd = Command::new(wallet_bin());
-    cmd.args([
-        "route",
-        from_alias,
-        to_alias,
-        &amount_sats.to_string(),
-    ]);
+    cmd.args(["route", from_alias, to_alias, &amount_sats.to_string()]);
     if ptlc {
         cmd.arg("--ptlc");
     }
@@ -504,8 +503,7 @@ fn wallet_route_inner(
 /// deposits.json is missing. Useful for tests that need to credit the
 /// agent's destination deposit before triggering a route.
 pub fn htlc_agent_deposit_pubkey(ledger_id: &str) -> Option<String> {
-    let path = repo_root()
-        .join("deposits-tools/data/htlc-agent/deposits.json");
+    let path = repo_root().join("deposits-tools/data/htlc-agent/deposits.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
     for d in deposits {
@@ -519,9 +517,9 @@ pub fn htlc_agent_deposit_pubkey(ledger_id: &str) -> Option<String> {
         }
         if let Some(pk) = d.get("deposit_pubkey").and_then(|v| v.as_str()) {
             let descriptor = format!("pk({})", pk);
-            return Some(hex::encode(
-                deposits_core::types::compute_deposit_id(&descriptor),
-            ));
+            return Some(hex::encode(deposits_core::types::compute_deposit_id(
+                &descriptor,
+            )));
         }
     }
     None
@@ -532,10 +530,7 @@ pub fn htlc_agent_deposit_pubkey(ledger_id: &str) -> Option<String> {
 /// is `0` for a deposit that hasn't been funded yet. Returns `None`
 /// if no deposit with that alias is present, or if the record is
 /// missing both `deposit_id` and `deposit_pubkey`.
-pub fn wallet_lookup_deposit(
-    data_dir: &Path,
-    alias: &str,
-) -> Option<(String, u64)> {
+pub fn wallet_lookup_deposit(data_dir: &Path, alias: &str) -> Option<(String, u64)> {
     let path = data_dir.join("deposits.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
@@ -637,7 +632,12 @@ pub fn embed_proof_hash(
     let data_dir = op_data_dir(op_idx);
     let name = op_name(op_idx);
     let out = Command::new(node_bin)
-        .args(["recovery", "embed-hash", ledger_id, &hex::encode(proof_hash)])
+        .args([
+            "recovery",
+            "embed-hash",
+            ledger_id,
+            &hex::encode(proof_hash),
+        ])
         .args(["--seed", &seed])
         .args(["--name", &name])
         .args(["--network", "regtest"])
@@ -704,11 +704,16 @@ pub fn publish_fraud_broadcast(
     let json_path = std::env::temp_dir().join(format!(
         "fp_broadcast_op{}_{}.json",
         op_idx,
-        broadcast.proof.proof_hash().iter().take(4).fold(String::new(), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{:02x}", b);
-            s
-        })
+        broadcast
+            .proof
+            .proof_hash()
+            .iter()
+            .take(4)
+            .fold(String::new(), |mut s, b| {
+                use std::fmt::Write;
+                let _ = write!(s, "{:02x}", b);
+                s
+            })
     ));
     std::fs::write(&json_path, &json).unwrap();
     let out = Command::new(node_bin)
@@ -779,8 +784,8 @@ pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> Option<bitc
     // Mirror derive_operator_secret: `m/86'/0'/0'/0/0` from seed.
     let seed_bytes = hex::decode(&seed).expect("op seed hex");
     let secp = Secp256k1::new();
-    let xpriv = bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes)
-        .expect("xpriv");
+    let xpriv =
+        bitcoin::bip32::Xpriv::new_master(bitcoin::Network::Regtest, &seed_bytes).expect("xpriv");
     let path = bitcoin::bip32::DerivationPath::from_str("m/86'/0'/0'/0/0").unwrap();
     let derived = xpriv.derive_priv(&secp, &path).expect("derive");
     let op_pubkey = PublicKey::from_secret_key(&secp, &derived.private_key);
@@ -789,7 +794,11 @@ pub fn fund_operator_key_address(op_idx: usize, amount_sats: u64) -> Option<bitc
 
     // Convert sats to BTC (bitcoin-cli sendtoaddress takes BTC). Use 8
     // decimal places to avoid float precision issues for sub-sat amounts.
-    let btc_str = format!("{}.{:08}", amount_sats / 100_000_000, amount_sats % 100_000_000);
+    let btc_str = format!(
+        "{}.{:08}",
+        amount_sats / 100_000_000,
+        amount_sats % 100_000_000
+    );
     let out = Command::new("docker")
         .args([
             "exec",
@@ -848,7 +857,12 @@ pub fn wait_for_daemon_chain_tip(op_idx: usize, target_height: u32, timeout: Dur
     let mut last_tip = 0u32;
     while std::time::Instant::now() < deadline {
         let out = Command::new("curl")
-            .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
+            .args([
+                "-s",
+                "-H",
+                &format!("Authorization: Bearer {}", token),
+                &url,
+            ])
             .output();
         if let Ok(out) = out {
             let body = String::from_utf8_lossy(&out.stdout);
@@ -905,7 +919,9 @@ pub fn wait_for_quorum_begin(op_idx: usize, ledger_id: &str, timeout: Duration) 
     panic!(
         "op{}'s view of ledger {} never contained QuorumBegin within {:?} — \
          daemon may still be ingesting from the relay, or quorum-begin failed",
-        op_idx, &ledger_id[..16.min(ledger_id.len())], timeout
+        op_idx,
+        &ledger_id[..16.min(ledger_id.len())],
+        timeout
     );
 }
 
@@ -918,10 +934,18 @@ pub fn wait_for_quorum_begin(op_idx: usize, ledger_id: &str, timeout: Duration) 
 /// learned its expiry.
 pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
     let token_path = op_data_dir(op_idx).join("admin-token");
-    let token = std::fs::read_to_string(&token_path).ok()?.trim().to_string();
+    let token = std::fs::read_to_string(&token_path)
+        .ok()?
+        .trim()
+        .to_string();
     let url = format!("http://127.0.0.1:{}/api/lifecycle", admin_port(op_idx));
     let out = Command::new("curl")
-        .args(["-s", "-H", &format!("Authorization: Bearer {}", token), &url])
+        .args([
+            "-s",
+            "-H",
+            &format!("Authorization: Bearer {}", token),
+            &url,
+        ])
         .output()
         .ok()?;
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
@@ -929,7 +953,10 @@ pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
     let prefix = &ledger_id[..16];
     let mut best: Option<(u32, u32)> = None;
     for entry in arr {
-        let lid = entry.get("ledger_id").and_then(|x| x.as_str()).unwrap_or("");
+        let lid = entry
+            .get("ledger_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
         // /api/lifecycle truncates the ledger_id to 16 hex chars.
         if !(lid == ledger_id || lid == prefix) {
             continue;
@@ -994,7 +1021,9 @@ pub fn find_clean_healthy_setup_ledger(min_headroom_blocks: u32) -> Option<(usiz
         let mut any_disputed = false;
         for peer in 0..16 {
             let ledgers_dir = op_data_dir(peer).join("wallet/ledgers");
-            let Ok(entries) = std::fs::read_dir(&ledgers_dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&ledgers_dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with(&ledger_id[..]) && name.len() == fork_name_len {
@@ -1166,10 +1195,12 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
                 }
             })
         })
-        .unwrap_or_else(|| panic!(
-            "no QuorumBegin found anywhere for ledger {} — cannot derive reserves address",
-            &ledger_id[..16]
-        ));
+        .unwrap_or_else(|| {
+            panic!(
+                "no QuorumBegin found anywhere for ledger {} — cannot derive reserves address",
+                &ledger_id[..16]
+            )
+        });
 
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
@@ -1181,7 +1212,9 @@ pub fn poll_confiscation_marker(ledger_id: &str, timeout: Duration) -> usize {
     panic!(
         "reserves address {} for ledger {} still has an unspent output after {:?} — \
          confiscation TX never landed",
-        reserves_addr, &ledger_id[..16], timeout
+        reserves_addr,
+        &ledger_id[..16],
+        timeout
     );
 }
 
@@ -1249,8 +1282,7 @@ pub fn poll_confiscation_txid(ledger_id: &str, timeout: Duration) -> (usize, Str
 pub fn find_spending_txid_for_address(address_str: &str) -> Option<String> {
     use bitcoin::hashes::{sha256, Hash};
 
-    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        address_str.parse().ok()?;
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = address_str.parse().ok()?;
     let address = address.require_network(bitcoin::Network::Regtest).ok()?;
     let script_hex = hex::encode(address.script_pubkey().as_bytes());
     let script_hash = sha256::Hash::hash(address.script_pubkey().as_bytes());
@@ -1277,7 +1309,10 @@ pub fn find_spending_txid_for_address(address_str: &str) -> Option<String> {
                 .and_then(|s| s.as_str())
                 .unwrap_or("");
             if prev_spk == script_hex {
-                return t.get("txid").and_then(|x| x.as_str()).map(|s| s.to_string());
+                return t
+                    .get("txid")
+                    .and_then(|x| x.as_str())
+                    .map(|s| s.to_string());
             }
         }
     }
@@ -1291,11 +1326,10 @@ pub fn find_spending_txid_for_address(address_str: &str) -> Option<String> {
 fn is_address_fully_spent(address_str: &str) -> bool {
     use bitcoin::hashes::{sha256, Hash};
 
-    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        match address_str.parse() {
-            Ok(a) => a,
-            Err(_) => return false,
-        };
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = match address_str.parse() {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
     let address = match address.require_network(bitcoin::Network::Regtest) {
         Ok(a) => a,
         Err(_) => return false,
@@ -1551,8 +1585,8 @@ pub fn derive_xonly_pubkey(secret_hex: &str) -> Result<String, String> {
 /// verifier's xonly pubkey (hex).
 pub fn verifier_pubkey_xonly() -> Result<String, String> {
     let path = repo_root().join("deposits-tools/secrets/verify_nsec");
-    let sec = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let sec =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     derive_xonly_pubkey(&sec)
 }
 
@@ -1564,11 +1598,17 @@ pub fn nip05_register(username: &str, xonly_pubkey: &str) -> Result<(), String> 
     // All operations happen inside the container where /data is
     // root-owned, side-stepping host sudo.
     let read = Command::new("docker")
-        .args(["exec", "lnaddr-attest", "sh", "-c", "cat /data/nostr.json 2>/dev/null || echo '{\"names\":{}}'"])
+        .args([
+            "exec",
+            "lnaddr-attest",
+            "sh",
+            "-c",
+            "cat /data/nostr.json 2>/dev/null || echo '{\"names\":{}}'",
+        ])
         .output()
         .map_err(|e| format!("docker exec (read): {}", e))?;
-    let current: serde_json::Value = serde_json::from_slice(&read.stdout)
-        .unwrap_or_else(|_| serde_json::json!({"names": {}}));
+    let current: serde_json::Value =
+        serde_json::from_slice(&read.stdout).unwrap_or_else(|_| serde_json::json!({"names": {}}));
     let mut names = current
         .get("names")
         .and_then(|v| v.as_object())
@@ -1581,7 +1621,14 @@ pub fn nip05_register(username: &str, xonly_pubkey: &str) -> Result<(), String> 
     let merged = serde_json::json!({ "names": names }).to_string();
 
     let write = Command::new("docker")
-        .args(["exec", "-i", "lnaddr-attest", "sh", "-c", "cat > /data/nostr.json"])
+        .args([
+            "exec",
+            "-i",
+            "lnaddr-attest",
+            "sh",
+            "-c",
+            "cat > /data/nostr.json",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1789,11 +1836,7 @@ pub fn wallet_open(
 /// Each open lands one update (a `DepositOpen` that gets cosigned).
 /// Returns the new chain tip sequence as observed from the
 /// `peer_op_idx` (any quorum member of `ledger_id` works).
-pub fn extend_chain_past_qb(
-    ledger_id: &str,
-    peer_op_idx: usize,
-    n: usize,
-) -> u64 {
+pub fn extend_chain_past_qb(ledger_id: &str, peer_op_idx: usize, n: usize) -> u64 {
     use std::time::Instant;
 
     let wdir = tempdir();
@@ -1958,7 +2001,10 @@ impl Drop for Op0AccessControl {
     fn drop(&mut self) {
         kill_op0();
         restore_file(&allowlist_path(), self.allowlist_backup.as_deref());
-        restore_file(&domain_allowlist_path(), self.domain_allowlist_backup.as_deref());
+        restore_file(
+            &domain_allowlist_path(),
+            self.domain_allowlist_backup.as_deref(),
+        );
         spawn_op0(&[]);
     }
 }
@@ -1993,13 +2039,20 @@ fn restore_file(path: &Path, backup: Option<&[u8]>) {
 /// against operator `i`'s data dir + seed.
 pub fn op_cli_args(i: usize) -> Vec<String> {
     vec![
-        "--seed".into(), op_seed(i),
-        "--name".into(), op_name(i),
-        "--data-dir".into(), op_data_dir(i).to_string_lossy().into_owned(),
-        "--network".into(), "regtest".into(),
-        "--esplora".into(), ELECTRS_URL.into(),
-        "--relay".into(), relay_ledgers().to_string(),
-        "--relay".into(), relay_messaging().to_string(),
+        "--seed".into(),
+        op_seed(i),
+        "--name".into(),
+        op_name(i),
+        "--data-dir".into(),
+        op_data_dir(i).to_string_lossy().into_owned(),
+        "--network".into(),
+        "regtest".into(),
+        "--esplora".into(),
+        ELECTRS_URL.into(),
+        "--relay".into(),
+        relay_ledgers().to_string(),
+        "--relay".into(),
+        relay_messaging().to_string(),
     ]
 }
 
@@ -2014,7 +2067,9 @@ pub fn run_op_node(node: &Path, op_idx: usize, subcmd_args: &[&str]) -> String {
         cmd.arg(a);
     }
     cmd.env("RUST_LOG", "warn");
-    let out = cmd.output().expect("deposits-node invocation failed to spawn");
+    let out = cmd
+        .output()
+        .expect("deposits-node invocation failed to spawn");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
@@ -2029,13 +2084,23 @@ pub fn run_op_node(node: &Path, op_idx: usize, subcmd_args: &[&str]) -> String {
 /// Send `amount_sats` from the regtest faucet to `address`.
 /// Mirrors `setup.sh`'s `bitcoin_cli ... sendtoaddress`.
 pub fn faucet_send(address: &str, amount_sats: u64) -> String {
-    let btc_str = format!("{}.{:08}", amount_sats / 100_000_000, amount_sats % 100_000_000);
+    let btc_str = format!(
+        "{}.{:08}",
+        amount_sats / 100_000_000,
+        amount_sats % 100_000_000
+    );
     let out = Command::new("docker")
         .args([
-            "exec", "bitcoind", "bitcoin-cli", "-regtest",
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
             "-rpcwallet=faucet",
-            "-rpcuser=user", "-rpcpassword=pass",
-            "sendtoaddress", address, &btc_str,
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "sendtoaddress",
+            address,
+            &btc_str,
         ])
         .output()
         .expect("docker exec bitcoin-cli sendtoaddress");
@@ -2123,14 +2188,16 @@ pub fn open_victim_quorum_ledger(
 
     // ── 1. Open the victim ──
     let open_out = run_op_node(node, owner_op_idx, &["ledger", "open"]);
-    let victim = open_out
-        .lines()
-        .find_map(|l| {
-            l.strip_prefix("  Ledger ID: ")
-                .or_else(|| l.strip_prefix("Ledger ID: "))
-                .map(str::to_string)
-        })?;
-    eprintln!("[victim] op{} opened victim ledger: {}…", owner_op_idx, &victim[..16]);
+    let victim = open_out.lines().find_map(|l| {
+        l.strip_prefix("  Ledger ID: ")
+            .or_else(|| l.strip_prefix("Ledger ID: "))
+            .map(str::to_string)
+    })?;
+    eprintln!(
+        "[victim] op{} opened victim ledger: {}…",
+        owner_op_idx,
+        &victim[..16]
+    );
 
     // ── 2. Fund the victim's per-ledger wallet ──
     let address_out = run_op_node(node, owner_op_idx, &["ledger", "address", &victim]);
@@ -2148,11 +2215,18 @@ pub fn open_victim_quorum_ledger(
     // BDK wallet poller can lag the chain tip; give it one fast-poll
     // cycle to ingest the new UTXO.
     std::thread::sleep(Duration::from_secs(45));
-    let _ = run_op_node(node, owner_op_idx, &[
-        "ledger", "advertise",
-        "--name", &op_name(owner_op_idx),
-        "--advertise-relay", relay_ledgers(),
-    ]);
+    let _ = run_op_node(
+        node,
+        owner_op_idx,
+        &[
+            "ledger",
+            "advertise",
+            "--name",
+            &op_name(owner_op_idx),
+            "--advertise-relay",
+            relay_ledgers(),
+        ],
+    );
 
     // ── 3. Add Q healthy cosigners ──
     let members = find_healthy_members(member_count, owner_op_idx);
@@ -2165,9 +2239,11 @@ pub fn open_victim_quorum_ledger(
         return None;
     }
     for (op_idx, member_pk, member_ledger) in &members {
-        run_op_node(node, owner_op_idx, &[
-            "quorum", "add", &victim, member_pk, member_ledger,
-        ]);
+        run_op_node(
+            node,
+            owner_op_idx,
+            &["quorum", "add", &victim, member_pk, member_ledger],
+        );
         eprintln!("[victim] op{} added as cosigner", op_idx);
     }
 
@@ -2177,7 +2253,8 @@ pub fn open_victim_quorum_ledger(
         expiry_blocks
     );
     let mut begin_cmd = Command::new(node);
-    begin_cmd.args(["quorum", "begin", &victim])
+    begin_cmd
+        .args(["quorum", "begin", &victim])
         .args(["--amount-sats", "99999000"])
         .args(["--collateral-ratio", "0.6"])
         .args(["--protocol-version", "cltv-offset-v2"])
@@ -2218,8 +2295,9 @@ pub fn open_victim_quorum_ledger(
     let history = read_ledger_history(&op_data_dir(owner_op_idx), &victim);
     let mut quorum_expiry: Option<u32> = None;
     for u in history.iter().rev() {
-        if let Ok(LedgerOperation::QuorumBegin { quorum_expiry: qe, .. }) =
-            LedgerOperation::tlv_decode(&u.message)
+        if let Ok(LedgerOperation::QuorumBegin {
+            quorum_expiry: qe, ..
+        }) = LedgerOperation::tlv_decode(&u.message)
         {
             quorum_expiry = Some(qe);
             break;

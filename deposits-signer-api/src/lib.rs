@@ -56,10 +56,7 @@ pub enum SigRole {
 
     /// We are signing the `content_hash` of *our own* ledger update at `seq`.
     /// Anti-equivocation policy: refuse `seq <= last_seq_signed[ledger_id]`.
-    OperatorUpdate {
-        ledger_id: [u8; 32],
-        seq: u64,
-    },
+    OperatorUpdate { ledger_id: [u8; 32], seq: u64 },
 
     /// We are signing a cosignature on *another operator's* ledger at `seq`,
     /// committing to our own ledger head `member_ledger_hash`.
@@ -138,9 +135,7 @@ pub enum KeyPath {
     Operator,
     /// Internal-deposit key at `m/84'/0'/0'/0/{index}`. Same derivation
     /// `derive_deposit_key_at(index)` produces in `node_cli/keys.rs`.
-    Deposit {
-        index: u32,
-    },
+    Deposit { index: u32 },
     /// Per-ledger BDK wallet key at `m/86'/0'/<account>'/<change>/<index>`.
     /// Used by the watch-only on-chain signing path: the daemon holds an
     /// xpub at `m/86'/0'/<account>'` and asks the signer to sign each
@@ -155,10 +150,7 @@ pub enum KeyPath {
     /// `m/<change>/<index>`. The daemon holds the *master* xpub
     /// (via [`Signer::master_xpub`]) and embeds it in a watch-only
     /// descriptor; signing routes back through the signer here.
-    NodeWallet {
-        change: u8,
-        index: u32,
-    },
+    NodeWallet { change: u8, index: u32 },
 }
 
 impl Default for KeyPath {
@@ -274,11 +266,7 @@ pub trait Signer: Send + Sync {
     ///
     /// `ctx.role` and `ctx.purpose` carry context for audit and (later)
     /// signer-side policy. Phase-2 `LocalSigner` ignores both.
-    fn bip340_sign(
-        &self,
-        ctx: &SignContext,
-        digest: &[u8; 32],
-    ) -> Result<[u8; 64], SignerError>;
+    fn bip340_sign(&self, ctx: &SignContext, digest: &[u8; 32]) -> Result<[u8; 64], SignerError>;
 
     /// ECDSA sign a sighash. Used by the legacy P2WSH single-sig path in
     /// `wallet.rs:1134`. The returned signature does not include the sighash

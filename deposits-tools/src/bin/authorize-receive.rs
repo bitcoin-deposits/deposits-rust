@@ -72,7 +72,10 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let deposit_id_bytes = match deposit_id_hex.as_deref().map(|s| parse_hex_bytes(s, 16, "deposit-id")) {
+    let deposit_id_bytes = match deposit_id_hex
+        .as_deref()
+        .map(|s| parse_hex_bytes(s, 16, "deposit-id"))
+    {
         Some(Ok(b)) => b,
         Some(Err(e)) => {
             eprintln!("{}", e);

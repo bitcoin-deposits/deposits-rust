@@ -32,12 +32,8 @@ fn attack_nums_keypath_spend_attempt() {
     let config = ThresholdConfig::default_for_voter_count(4);
     let ledger_hash = [0xAB; 32];
 
-    let builder = TapscriptReservesBuilder::new(
-        voter_set,
-        config,
-        bitcoin::Network::Regtest,
-        ledger_hash,
-    );
+    let builder =
+        TapscriptReservesBuilder::new(voter_set, config, bitcoin::Network::Regtest, ledger_hash);
     let output = builder.build().unwrap();
 
     // Step 1: The internal key IS the operator's key (tie-breaker).

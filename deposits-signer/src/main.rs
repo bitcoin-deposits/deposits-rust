@@ -131,11 +131,7 @@ fn parse_args(args: &[String]) -> Result<CommonArgs, String> {
             }
             "--hub-pubkey" => {
                 i += 1;
-                out.hub_pubkey = Some(
-                    args.get(i)
-                        .ok_or("--hub-pubkey needs a value")?
-                        .to_string(),
-                );
+                out.hub_pubkey = Some(args.get(i).ok_or("--hub-pubkey needs a value")?.to_string());
             }
             "--hub-relay" => {
                 i += 1;
@@ -144,11 +140,7 @@ fn parse_args(args: &[String]) -> Result<CommonArgs, String> {
             }
             "--hub-label" => {
                 i += 1;
-                out.hub_label = Some(
-                    args.get(i)
-                        .ok_or("--hub-label needs a value")?
-                        .to_string(),
-                );
+                out.hub_label = Some(args.get(i).ok_or("--hub-label needs a value")?.to_string());
             }
             other if other.starts_with("--") => {
                 return Err(format!("unknown flag {:?}", other));
@@ -161,10 +153,7 @@ fn parse_args(args: &[String]) -> Result<CommonArgs, String> {
 }
 
 fn require_data_dir(c: &CommonArgs) -> Result<DataDir, String> {
-    let p = c
-        .data_dir
-        .clone()
-        .ok_or("missing --data-dir".to_string())?;
+    let p = c.data_dir.clone().ok_or("missing --data-dir".to_string())?;
     Ok(DataDir::new(p))
 }
 
@@ -172,7 +161,10 @@ fn read_seed_file(path: &PathBuf) -> Result<[u8; 32], String> {
     let s = std::fs::read_to_string(path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     let bytes = hex::decode(s.trim()).map_err(|e| format!("hex parse seed file: {}", e))?;
     if bytes.len() != 32 {
-        return Err(format!("seed file must contain 32 bytes hex, got {}", bytes.len()));
+        return Err(format!(
+            "seed file must contain 32 bytes hex, got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -189,9 +181,7 @@ fn cmd_init(args: &[String]) -> Result<(), String> {
     } else {
         None
     };
-    let key = dd
-        .init(seed.as_ref())
-        .map_err(|e| e.to_string())?;
+    let key = dd.init(seed.as_ref()).map_err(|e| e.to_string())?;
     println!("data dir: {}", dd.root.display());
     println!("transport pubkey: {}", hex::encode(key.public.serialize()));
     if seed.is_some() {
@@ -267,7 +257,10 @@ fn cmd_trust(args: &[String]) -> Result<(), String> {
 fn cmd_run(args: &[String]) -> Result<(), String> {
     let c = parse_args(args)?;
     let dd = require_data_dir(&c)?;
-    let socket_path = c.socket.clone().ok_or_else(|| "missing --socket".to_string())?;
+    let socket_path = c
+        .socket
+        .clone()
+        .ok_or_else(|| "missing --socket".to_string())?;
 
     let transport = dd.load_transport().map_err(|e| e.to_string())?;
     let allowlist = dd.load_allowlist().map_err(|e| e.to_string())?;
@@ -330,14 +323,9 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             let transport_pubkey = transport_pubkey_hex.clone();
             let label = c.hub_label.clone();
             tokio::spawn(async move {
-                if let Err(e) = deposits_signer::hub::run(
-                    secret,
-                    hub_pubkey,
-                    relays,
-                    transport_pubkey,
-                    label,
-                )
-                .await
+                if let Err(e) =
+                    deposits_signer::hub::run(secret, hub_pubkey, relays, transport_pubkey, label)
+                        .await
                 {
                     tracing::warn!("hub loop exited: {}", e);
                 }

@@ -203,18 +203,30 @@ mod tests {
         let p = SeqPolicy::load(&path).unwrap();
         let lid = [0xAB; 32];
 
-        p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 1 })
-            .unwrap();
-        p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 2 })
-            .unwrap();
+        p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 1,
+        })
+        .unwrap();
+        p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 2,
+        })
+        .unwrap();
 
         let same = p
-            .check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 2 })
+            .check_and_record(&SigRole::OperatorUpdate {
+                ledger_id: lid,
+                seq: 2,
+            })
             .unwrap_err();
         assert!(matches!(same, PolicyError::SeqRegression { .. }));
 
         let regress = p
-            .check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 1 })
+            .check_and_record(&SigRole::OperatorUpdate {
+                ledger_id: lid,
+                seq: 1,
+            })
             .unwrap_err();
         assert!(matches!(regress, PolicyError::SeqRegression { .. }));
 
@@ -250,8 +262,11 @@ mod tests {
         let lid = [0x33; 32];
 
         // Sign as operator at seq=5.
-        p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 5 })
-            .unwrap();
+        p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 5,
+        })
+        .unwrap();
         // Sign as cosigner at seq=1 on the *same* ledger — different role,
         // not blocked by the operator entry.
         p.check_and_record(&SigRole::CosignUpdate {
@@ -280,19 +295,28 @@ mod tests {
 
         {
             let p = SeqPolicy::load(&path).unwrap();
-            p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 10 })
-                .unwrap();
+            p.check_and_record(&SigRole::OperatorUpdate {
+                ledger_id: lid,
+                seq: 10,
+            })
+            .unwrap();
         }
 
         let p2 = SeqPolicy::load(&path).unwrap();
         // After reload, repeating seq=10 must still be refused.
         let err = p2
-            .check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 10 })
+            .check_and_record(&SigRole::OperatorUpdate {
+                ledger_id: lid,
+                seq: 10,
+            })
             .unwrap_err();
         assert!(matches!(err, PolicyError::SeqRegression { .. }));
         // But seq=11 is accepted — and the stored state contains it.
-        p2.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 11 })
-            .unwrap();
+        p2.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 11,
+        })
+        .unwrap();
         assert_eq!(
             p2.snapshot_for_test().operator.get(&hex::encode(lid)),
             Some(&11)
@@ -307,14 +331,22 @@ mod tests {
         let p = SeqPolicy::load(&path).unwrap();
         let lid = [0x55; 32];
 
-        p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 10 })
-            .unwrap();
+        p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 10,
+        })
+        .unwrap();
         // Refused requests do not bump the recorded max.
-        let _ = p
-            .check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 5 });
+        let _ = p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 5,
+        });
         // Going from 10 → 11 still works.
-        p.check_and_record(&SigRole::OperatorUpdate { ledger_id: lid, seq: 11 })
-            .unwrap();
+        p.check_and_record(&SigRole::OperatorUpdate {
+            ledger_id: lid,
+            seq: 11,
+        })
+        .unwrap();
         assert_eq!(
             p.snapshot_for_test().operator.get(&hex::encode(lid)),
             Some(&11)

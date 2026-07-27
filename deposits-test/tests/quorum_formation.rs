@@ -2,8 +2,8 @@
 
 use bitcoin::secp256k1::{PublicKey, SecretKey};
 use deposits_core::ledger::Ledger;
-use deposits_test::*;
 use deposits_protocol::types::QuorumState;
+use deposits_test::*;
 
 #[test]
 fn add_quorum_member_appears_in_next_members() {

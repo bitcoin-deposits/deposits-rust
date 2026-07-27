@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::{parse_config, send_daemon_request};
-use bitcoin::secp256k1::PublicKey;
 use crate::Node;
+use bitcoin::secp256k1::PublicKey;
 use std::str::FromStr;
 
 pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,9 +19,13 @@ pub async fn quorum_command(args: &[String]) -> Result<(), Box<dyn std::error::E
         eprintln!("  remove         Remove a quorum member from our ledger");
         eprintln!("  join           Record that we joined another operator's quorum");
         eprintln!("  begin          Activate quorum-based Taproot spending");
-        eprintln!("  upgrade        Off-chain consensus-version bump (DEP-18; same reserves family)");
+        eprintln!(
+            "  upgrade        Off-chain consensus-version bump (DEP-18; same reserves family)"
+        );
         eprintln!("  repair         Re-establish quorum past `quorum_expiry` via the DEP-05 §Lifecycle cascade");
-        eprintln!("  refresh        Re-add active members and rotate when all responded (idempotent)");
+        eprintln!(
+            "  refresh        Re-add active members and rotate when all responded (idempotent)"
+        );
         eprintln!("  request        Request a peer to join our quorum");
         eprintln!("  list           List quorum relationships");
         eprintln!("  form-with      Form a quorum with N named peers in one shot (add + begin)");
@@ -68,14 +72,15 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 "--collateral-ratio" if i + 1 < args.len() => {
                     let raw = &args[i + 1];
                     let ratio: f64 = raw.parse().map_err(|_| {
-                        format!("Invalid --collateral-ratio value: {} (expected float in [0, 1])", raw)
-                    })?;
-                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
-                        return Err(format!(
-                            "--collateral-ratio {} must be in [0.0, 1.0]",
+                        format!(
+                            "Invalid --collateral-ratio value: {} (expected float in [0, 1])",
                             raw
                         )
-                        .into());
+                    })?;
+                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+                        return Err(
+                            format!("--collateral-ratio {} must be in [0.0, 1.0]", raw).into()
+                        );
                     }
                     collateral_bps = Some((ratio * 10_000.0).round() as u32);
                     i += 1;
@@ -83,7 +88,10 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 "--amount-sats" if i + 1 < args.len() => {
                     let raw = &args[i + 1];
                     let v: u64 = raw.parse().map_err(|_| {
-                        format!("Invalid --amount-sats value: {} (expected positive integer)", raw)
+                        format!(
+                            "Invalid --amount-sats value: {} (expected positive integer)",
+                            raw
+                        )
                     })?;
                     amount_sats = Some(v);
                     i += 1;
@@ -347,14 +355,24 @@ async fn quorum_repair(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             operator_signature: [0u8; 64],
         };
         let req = cosign_requirement(&l.state, &probe, chain_tip);
-        (req.tier, req.required_sigs, l.state.quorum_members.len(), l.state.quorum_expiry)
+        (
+            req.tier,
+            req.required_sigs,
+            l.state.quorum_members.len(),
+            l.state.quorum_expiry,
+        )
     };
     drop(node);
 
     println!("Ledger {}", &ledger_id);
     match (expiry_block, tier) {
-        (None, _) => return Err("No quorum_expiry set — this ledger has no active quorum to repair. \
-                                  Use `quorum begin` instead.".into()),
+        (None, _) => {
+            return Err(
+                "No quorum_expiry set — this ledger has no active quorum to repair. \
+                                  Use `quorum begin` instead."
+                    .into(),
+            )
+        }
         (Some(_), LifecycleTier::Tier0) => {
             return Err(format!(
                 "Ledger is at Tier 0 (active period, before quorum_expiry={}). \
@@ -850,7 +868,10 @@ async fn quorum_refresh(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("  Active members:        {}", active_members.len());
     println!("  Current block:         {}", current_block);
     println!("  New membership_until:  {}", new_membership_until);
-    println!("  Stale threshold:       current + {} blocks", threshold_blocks);
+    println!(
+        "  Stale threshold:       current + {} blocks",
+        threshold_blocks
+    );
     println!();
 
     // Per-member state: is the active member already represented in
@@ -873,10 +894,7 @@ async fn quorum_refresh(args: &[String]) -> Result<(), Box<dyn std::error::Error
         } else {
             let why = match pending_match {
                 None => "not in pending".to_string(),
-                Some(p) => format!(
-                    "stale (pending until {})",
-                    p.membership_until.unwrap_or(0)
-                ),
+                Some(p) => format!("stale (pending until {})", p.membership_until.unwrap_or(0)),
             };
             println!("  ⟳ {}... needs refresh — {}", prefix, why);
             stale_members.push(m.clone());
@@ -1006,9 +1024,11 @@ async fn quorum_form_with(args: &[String]) -> Result<(), Box<dyn std::error::Err
                 i += 1;
             }
             "--amount-sats" if i + 1 < args.len() => {
-                amount_sats = Some(args[i + 1].parse().map_err(|_| {
-                    format!("Invalid --amount-sats value: {}", args[i + 1])
-                })?);
+                amount_sats = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid --amount-sats value: {}", args[i + 1]))?,
+                );
                 i += 2;
             }
             // Pass-through for daemon-config flags like --relay, --data-dir
@@ -1025,18 +1045,13 @@ async fn quorum_form_with(args: &[String]) -> Result<(), Box<dyn std::error::Err
         }
     }
 
-    let our_ledger_id = our_ledger_id.ok_or(
-        "--ledger-id required (use `quorum show-identity` to list your ledger IDs)",
-    )?;
+    let our_ledger_id = our_ledger_id
+        .ok_or("--ledger-id required (use `quorum show-identity` to list your ledger IDs)")?;
     if members.is_empty() {
         return Err("at least one --member required".into());
     }
     if !super::is_ledger_id(&our_ledger_id) {
-        return Err(format!(
-            "--ledger-id must be 64 hex chars; got: {}",
-            our_ledger_id
-        )
-        .into());
+        return Err(format!("--ledger-id must be 64 hex chars; got: {}", our_ledger_id).into());
     }
     if do_begin && amount_sats.is_none() {
         return Err("--begin requires --amount-sats <N>".into());
@@ -1047,11 +1062,7 @@ async fn quorum_form_with(args: &[String]) -> Result<(), Box<dyn std::error::Err
         PublicKey::from_str(pk_str)
             .map_err(|e| format!("invalid member pubkey {}: {}", pk_str, e))?;
         if !super::is_ledger_id(lid) {
-            return Err(format!(
-                "member's ledger_id must be 64 hex chars; got: {}",
-                lid
-            )
-            .into());
+            return Err(format!("member's ledger_id must be 64 hex chars; got: {}", lid).into());
         }
     }
 
@@ -1081,10 +1092,7 @@ async fn quorum_form_with(args: &[String]) -> Result<(), Box<dyn std::error::Err
             "member_pubkey": pk_str,
             "member_ledger_id": member_ledger_id,
         });
-        print!(
-            "  adding {}... ",
-            &pk_str[..16.min(pk_str.len())]
-        );
+        print!("  adding {}... ", &pk_str[..16.min(pk_str.len())]);
         match send_daemon_request(&config, &our_ledger_id, "quorum_add", params).await {
             Ok(_) => {
                 println!("✓");
@@ -1266,7 +1274,11 @@ async fn quorum_candidate_add(args: &[String]) -> Result<(), Box<dyn std::error:
         },
     )?;
     if added {
-        println!("Enqueued candidate: {}:{}", &pubkey[..16], &member_ledger_id[..16]);
+        println!(
+            "Enqueued candidate: {}:{}",
+            &pubkey[..16],
+            &member_ledger_id[..16]
+        );
         println!("  Queue now has {} candidate(s)", queue.entries.len());
     } else {
         println!("Candidate already in queue: {}", &pubkey[..16]);
@@ -1281,7 +1293,10 @@ async fn quorum_candidate_list(args: &[String]) -> Result<(), Box<dyn std::error
         println!("Queue is empty.");
         return Ok(());
     }
-    println!("{} candidate(s) in queue (FIFO order):", queue.entries.len());
+    println!(
+        "{} candidate(s) in queue (FIFO order):",
+        queue.entries.len()
+    );
     for (i, c) in queue.entries.iter().enumerate() {
         println!(
             "  {}: pubkey={} ledger={} added_at={}",
@@ -1315,9 +1330,15 @@ async fn quorum_candidate_remove(args: &[String]) -> Result<(), Box<dyn std::err
     let config = parse_config(&config_args)?;
     let mut queue = crate::candidate_queue::CandidateQueue::load(&config.data_dir);
     if queue.drain(&config.data_dir, &pubkey)? {
-        println!("Removed candidate {} from queue.", &pubkey[..16.min(pubkey.len())]);
+        println!(
+            "Removed candidate {} from queue.",
+            &pubkey[..16.min(pubkey.len())]
+        );
     } else {
-        println!("Candidate {} not in queue.", &pubkey[..16.min(pubkey.len())]);
+        println!(
+            "Candidate {} not in queue.",
+            &pubkey[..16.min(pubkey.len())]
+        );
     }
     Ok(())
 }

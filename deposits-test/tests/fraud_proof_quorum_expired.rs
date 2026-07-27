@@ -203,8 +203,7 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     let (op_idx, txid_str) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(180));
     eprintln!(
         "[ok] verified QuorumExpired drove confiscation: tx {} (observed via op{})",
-        &txid_str,
-        op_idx
+        &txid_str, op_idx
     );
 
     // ── 7. Assert the on-chain confiscation tx is bifurcated ──

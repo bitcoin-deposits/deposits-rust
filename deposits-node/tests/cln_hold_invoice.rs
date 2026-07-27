@@ -60,7 +60,9 @@ fn spawn_payer_pay(
         });
         let mut bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         bytes.push(b'\n');
-        stream.write_all(&bytes).map_err(|e| format!("write pay: {}", e))?;
+        stream
+            .write_all(&bytes)
+            .map_err(|e| format!("write pay: {}", e))?;
         let mut line = String::new();
         BufReader::new(&stream)
             .read_line(&mut line)
@@ -134,7 +136,11 @@ fn cln_hold_invoice_settle_and_cancel() {
 
     // Before payment: Open (state "unpaid", no HTLCs).
     let state = backend.lookup_hold_invoice(&hash_hex).expect("lookup");
-    assert_eq!(state, HoldInvoiceState::Open, "expected Open before payment");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Open,
+        "expected Open before payment"
+    );
 
     // Payer pays in the background — blocks while HTLCs are parked.
     let pay_handle = spawn_payer_pay(&payer_socket, &bolt11);
@@ -160,7 +166,11 @@ fn cln_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Settled
     });
-    assert_eq!(state, HoldInvoiceState::Settled, "expected Settled after settle");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Settled,
+        "expected Settled after settle"
+    );
     eprintln!("[settle]  invoice settled");
 
     // The payer's blocking `pay` must now complete, carrying our preimage —
@@ -200,7 +210,11 @@ fn cln_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash2_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Canceled
     });
-    assert_eq!(state, HoldInvoiceState::Canceled, "expected Canceled after cancel");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Canceled,
+        "expected Canceled after cancel"
+    );
 
     // The payer's `pay` must fail — HTLCs released, no funds moved.
     let pay2_result = pay2_handle.join().expect("payer thread");

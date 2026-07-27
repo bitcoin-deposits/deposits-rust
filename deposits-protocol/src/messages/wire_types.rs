@@ -383,7 +383,6 @@ impl DepositsMessage {
     }
 }
 
-
 // CoordinationMsg codec
 impl BinaryCodec for CoordinationMsg {
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {

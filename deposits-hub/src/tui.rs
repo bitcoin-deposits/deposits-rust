@@ -52,7 +52,9 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph, Tabs, Wrap,
+};
 use ratatui::Terminal;
 use std::collections::HashMap;
 use std::io::Stdout;
@@ -187,9 +189,8 @@ impl WizardState {
 
     pub fn save(&self, dir: &std::path::Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
-        let raw = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let raw = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(Self::path(dir), raw)
     }
 }
@@ -294,11 +295,7 @@ const HB_WARN_SECS: u64 = 120;
 const HB_CRIT_SECS: u64 = 300;
 
 impl App {
-    pub fn new(
-        data_dir: PathBuf,
-        state: Arc<Mutex<HubState>>,
-        transport: HubTransport,
-    ) -> Self {
+    pub fn new(data_dir: PathBuf, state: Arc<Mutex<HubState>>, transport: HubTransport) -> Self {
         Self::new_with_relays(data_dir, state, transport, Vec::new())
     }
 
@@ -472,9 +469,7 @@ impl App {
         // operators don't accidentally trigger underlying-tab actions.
         if self.address_view_idx.is_some() {
             match (k.code, k.modifiers) {
-                (KeyCode::Esc, _)
-                | (KeyCode::Char('a'), _)
-                | (KeyCode::Char('q'), _) => {
+                (KeyCode::Esc, _) | (KeyCode::Char('a'), _) | (KeyCode::Char('q'), _) => {
                     self.address_view_idx = None;
                 }
                 (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
@@ -552,15 +547,13 @@ impl App {
             }
             // ── Setup wizard keys ──
             (KeyCode::Char('s'), _)
-                if self.tab == Tab::Setup
-                    && self.wizard.stage == WizardStage::SpawnSigner =>
+                if self.tab == Tab::Setup && self.wizard.stage == WizardStage::SpawnSigner =>
             {
                 self.spawn_signer_in_process().await;
                 return false;
             }
             (KeyCode::Char('o'), _)
-                if self.tab == Tab::Setup
-                    && self.wizard.stage == WizardStage::OpenLedger =>
+                if self.tab == Tab::Setup && self.wizard.stage == WizardStage::OpenLedger =>
             {
                 self.admin_ledger_open().await;
                 return false;
@@ -579,8 +572,7 @@ impl App {
                 return false;
             }
             (KeyCode::Down, _) | (KeyCode::Char('j'), _)
-                if self.tab == Tab::Setup
-                    && self.wizard.stage == WizardStage::PickPeers =>
+                if self.tab == Tab::Setup && self.wizard.stage == WizardStage::PickPeers =>
             {
                 let n = self.discovered_peers.as_ref().map(|p| p.len()).unwrap_or(0);
                 if n > 0 {
@@ -589,21 +581,22 @@ impl App {
                 return false;
             }
             (KeyCode::Up, _) | (KeyCode::Char('k'), _)
-                if self.tab == Tab::Setup
-                    && self.wizard.stage == WizardStage::PickPeers =>
+                if self.tab == Tab::Setup && self.wizard.stage == WizardStage::PickPeers =>
             {
                 self.peer_cursor = self.peer_cursor.saturating_sub(1);
                 return false;
             }
             (KeyCode::Char(' '), _)
-                if self.tab == Tab::Setup
-                    && self.wizard.stage == WizardStage::PickPeers =>
+                if self.tab == Tab::Setup && self.wizard.stage == WizardStage::PickPeers =>
             {
                 if let Some(peers) = self.discovered_peers.as_ref() {
                     if let Some(peer) = peers.get(self.peer_cursor) {
                         let pk = peer.operator_pubkey.clone();
-                        if let Some(pos) =
-                            self.wizard.selected_peer_pubkeys.iter().position(|p| *p == pk)
+                        if let Some(pos) = self
+                            .wizard
+                            .selected_peer_pubkeys
+                            .iter()
+                            .position(|p| *p == pk)
                         {
                             self.wizard.selected_peer_pubkeys.remove(pos);
                         } else {
@@ -788,18 +781,12 @@ impl App {
     /// so closing the TUI cleans up the process.
     async fn spawn_signer_in_process(&mut self) {
         let name = self.wizard.signer_name.clone();
-        if self
-            .spawned_signers
-            .iter()
-            .any(|h| h.name == name)
-        {
+        if self.spawned_signers.iter().any(|h| h.name == name) {
             self.flash(format!("signer '{}' already spawned", name));
             return;
         }
         if self.hub_relays.is_empty() {
-            self.flash(
-                "can't spawn — hub launched without --relay; restart with one".into(),
-            );
+            self.flash("can't spawn — hub launched without --relay; restart with one".into());
             return;
         }
         // Look up the hub pubkey for the Spawner config.
@@ -948,9 +935,17 @@ impl App {
             Tab::Setup => 2,
         };
         let tabs = Tabs::new(titles)
-            .block(Block::default().borders(Borders::ALL).title(" deposits-hub "))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" deposits-hub "),
+            )
             .select(selected)
-            .highlight_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD));
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            );
         f.render_widget(tabs, chunks[0]);
 
         // Body — clone the inventory under a brief lock so we can hand
@@ -1000,10 +995,14 @@ impl App {
             "[j/k] node  [Esc] back  [q] quit"
         } else {
             match self.tab {
-                Tab::Dashboard => "[j/k] select  [Enter] details  [a] address  [1/2/3] tabs  [q] quit",
+                Tab::Dashboard => {
+                    "[j/k] select  [Enter] details  [a] address  [1/2/3] tabs  [q] quit"
+                }
                 Tab::Pending => "[a] approve  [x] reject  [j/k] move  [Tab] switch  [q] quit",
                 Tab::Setup => match self.wizard.stage {
-                    WizardStage::PickPeers => "[j/k] move  [space] toggle  [r] refresh  [n] next  [Tab] switch  [q] quit",
+                    WizardStage::PickPeers => {
+                        "[j/k] move  [space] toggle  [r] refresh  [n] next  [Tab] switch  [q] quit"
+                    }
                     _ => "[n] next  [p] prev  [Tab] switch  [q] quit",
                 },
             }
@@ -1078,7 +1077,9 @@ impl App {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     addr.to_string(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 if let Some(s) = stats {
                     lines.push(Line::from(""));
@@ -1211,19 +1212,15 @@ impl App {
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                vec![
-                    Span::styled(label.to_string(), style),
-                    Span::raw("  "),
-                ]
+                vec![Span::styled(label.to_string(), style), Span::raw("  ")]
             })
             .collect();
-        let crumbs = Paragraph::new(Line::from(breadcrumb))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .padding(Padding::horizontal(1))
-                    .title(" bootstrap "),
-            );
+        let crumbs = Paragraph::new(Line::from(breadcrumb)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" bootstrap "),
+        );
         f.render_widget(crumbs, chunks[0]);
 
         // Body — per-stage view
@@ -1269,8 +1266,10 @@ impl App {
             }
             (Some(peers), false) => {
                 for (i, p) in peers.iter().enumerate() {
-                    let selected =
-                        self.wizard.selected_peer_pubkeys.contains(&p.operator_pubkey);
+                    let selected = self
+                        .wizard
+                        .selected_peer_pubkeys
+                        .contains(&p.operator_pubkey);
                     let marker = if selected { "[x]" } else { "[ ]" };
                     let cursor = if i == self.peer_cursor { ">" } else { " " };
                     // Self-chosen ad names can collide or impersonate;
@@ -1316,9 +1315,12 @@ impl App {
                 )));
             }
         }
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" peers "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" peers "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1352,9 +1354,12 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" drip "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" drip "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1375,7 +1380,9 @@ impl App {
                 "[s] spawn '{}' locally — hub forks the signer as a child process",
                 self.wizard.signer_name
             ),
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
         )));
         if let Some(h) = self
             .spawned_signers
@@ -1433,7 +1440,9 @@ impl App {
         //    operator can copy it into <daemon-data-dir>/admin.npub.
         lines.push(Line::from(Span::styled(
             "── one-time daemon trust setup ──",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
         let hub_pk = self
@@ -1464,9 +1473,12 @@ impl App {
             Style::default().fg(Color::DarkGray),
         )));
 
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" signer "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" signer "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1488,7 +1500,9 @@ impl App {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
                     "[o] call ledger_open on the daemon (hub admin RPC)",
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 lines.push(Line::from(Span::styled(
                     "    Requires the daemon to trust this hub's pubkey via admin.npub —",
@@ -1520,9 +1534,12 @@ impl App {
             "[o] open via admin RPC   [n] continue   [p] back",
             Style::default().fg(Color::DarkGray),
         )));
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" ledger "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" ledger "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1552,9 +1569,12 @@ impl App {
                 Style::default().fg(Color::DarkGray),
             )),
         ];
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" fund "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" fund "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1593,9 +1613,12 @@ impl App {
             "[n] mark done   [p] back",
             Style::default().fg(Color::DarkGray),
         )));
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" quorum "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" quorum "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1605,12 +1628,12 @@ impl App {
             Line::from(""),
             Line::from(Span::styled(
                 "✓ bootstrap complete",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
-            Line::from(
-                "Your hub is paired with a signer, your daemon owns at least one ledger,",
-            ),
+            Line::from("Your hub is paired with a signer, your daemon owns at least one ledger,"),
             Line::from("and your quorum is activating on-chain."),
             Line::from(""),
             Line::from(Span::styled(
@@ -1633,9 +1656,12 @@ impl App {
             cw,
             Style::default().fg(Color::Yellow),
         ));
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" done "));
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" done "),
+        );
         f.render_widget(p, area);
     }
 
@@ -1708,7 +1734,11 @@ impl App {
                             kind: "quorum expiry",
                             node: node.clone(),
                             scope: scope.clone(),
-                            detail: format!("EXPIRED {} ago — tier {} cascade", blocks_eta(-b), lh.tier),
+                            detail: format!(
+                                "EXPIRED {} ago — tier {} cascade",
+                                blocks_eta(-b),
+                                lh.tier
+                            ),
                             blocks_left: Some(b),
                         });
                     } else {
@@ -1746,8 +1776,11 @@ impl App {
                             ),
                             blocks_left: None,
                         });
-                    } else if lh.obligations_sats.saturating_mul(10) >= lh.reserves_sats.saturating_mul(9) {
-                        let pct = (lh.obligations_sats as f64 / lh.reserves_sats as f64 * 100.0) as u64;
+                    } else if lh.obligations_sats.saturating_mul(10)
+                        >= lh.reserves_sats.saturating_mul(9)
+                    {
+                        let pct =
+                            (lh.obligations_sats as f64 / lh.reserves_sats as f64 * 100.0) as u64;
                         out.push(Concern {
                             severity: Severity::Warn,
                             kind: "reserves",
@@ -1783,9 +1816,11 @@ impl App {
             }
         }
         out.sort_by(|a, b| {
-            a.severity
-                .cmp(&b.severity)
-                .then(a.blocks_left.unwrap_or(i64::MAX).cmp(&b.blocks_left.unwrap_or(i64::MAX)))
+            a.severity.cmp(&b.severity).then(
+                a.blocks_left
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.blocks_left.unwrap_or(i64::MAX)),
+            )
         });
         out
     }
@@ -1835,7 +1870,10 @@ impl App {
                 lines.push(Line::from(vec![
                     Span::styled(format!("{} ", glyph), Style::default().fg(color)),
                     Span::styled(format!("{:<13} ", c.kind), Style::default().fg(color)),
-                    Span::styled(format!("{}{}", c.node, scope), Style::default().fg(Color::White)),
+                    Span::styled(
+                        format!("{}{}", c.node, scope),
+                        Style::default().fg(Color::White),
+                    ),
                     Span::raw("  "),
                     Span::styled(c.detail.clone(), Style::default().fg(Color::Gray)),
                 ]));
@@ -1852,8 +1890,12 @@ impl App {
         } else {
             format!(" needs attention ({}) ", concerns.len())
         };
-        let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(title));
+        let p = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(title),
+        );
         f.render_widget(p, area);
     }
 
@@ -1865,7 +1907,11 @@ impl App {
         let concerns = self.collect_concerns(st, now);
         let shown = concerns.len().min(8);
         let overflow = usize::from(concerns.len() > 8);
-        let att_rows = if concerns.is_empty() { 1 } else { shown + overflow } as u16;
+        let att_rows = if concerns.is_empty() {
+            1
+        } else {
+            shown + overflow
+        } as u16;
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(att_rows + 2), Constraint::Min(0)])
@@ -1975,8 +2021,12 @@ impl App {
         // disappeared, its old "signer=…  hb …" tail showed through
         // the new shorter "Nodes (0)" line.)
         f.render_widget(Clear, body);
-        let p = Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" inventory "));
+        let p = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(" inventory "),
+        );
         f.render_widget(p, body);
     }
 
@@ -1984,17 +2034,17 @@ impl App {
     /// (length, deposits, liabilities, reserves, quorum + members), and a
     /// "serving on" section for the partner quorums it co-signs. All
     /// read-only, from the latest status push.
-    fn render_node_details(
-        &self,
-        st: &HubState,
-        pk: &str,
-        area: Rect,
-        f: &mut ratatui::Frame,
-    ) {
+    fn render_node_details(&self, st: &HubState, pk: &str, area: Rect, f: &mut ratatui::Frame) {
         let muted = Style::default().fg(Color::DarkGray);
-        let head = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let head = Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD);
         let accent = Style::default().fg(Color::Cyan);
-        let label = st.nodes.get(pk).map(|r| r.label.clone()).unwrap_or_else(|| short_pk(pk));
+        let label = st
+            .nodes
+            .get(pk)
+            .map(|r| r.label.clone())
+            .unwrap_or_else(|| short_pk(pk));
         let stats = self.node_stats.get(pk);
 
         // Compact "expires in / EXPIRED" rendering shared by both sections.
@@ -2045,7 +2095,10 @@ impl App {
                 match &s.ln_error {
                     None => lines.push(Line::from(Span::styled("lightning: OK", muted))),
                     Some(err) => lines.push(Line::from(Span::styled(
-                        format!("lightning: OFFLINE — {}", err.lines().next().unwrap_or("unreachable")),
+                        format!(
+                            "lightning: OFFLINE — {}",
+                            err.lines().next().unwrap_or("unreachable")
+                        ),
                         Style::default().fg(Color::Red),
                     ))),
                 }
@@ -2063,8 +2116,16 @@ impl App {
                     lines.push(Line::from(vec![
                         Span::styled(format!("  {} ", short_tag(&lh.ledger_id)), accent),
                         Span::styled(
-                            format!("tier {}{}", lh.tier, if lh.value_moving_allowed { "" } else { " ⚠" }),
-                            if lh.value_moving_allowed { muted } else { Style::default().fg(Color::Yellow) },
+                            format!(
+                                "tier {}{}",
+                                lh.tier,
+                                if lh.value_moving_allowed { "" } else { " ⚠" }
+                            ),
+                            if lh.value_moving_allowed {
+                                muted
+                            } else {
+                                Style::default().fg(Color::Yellow)
+                            },
                         ),
                     ]));
                     lines.push(Line::from(Span::styled(
@@ -2078,7 +2139,11 @@ impl App {
                         Style::default().fg(Color::Gray),
                     )));
                     lines.push(Line::from(Span::styled(
-                        format!("      quorum Q={}  ·  {}", lh.members.len(), expiry_str(lh.blocks_to_expiry, lh.quorum_expiry)),
+                        format!(
+                            "      quorum Q={}  ·  {}",
+                            lh.members.len(),
+                            expiry_str(lh.blocks_to_expiry, lh.quorum_expiry)
+                        ),
                         Style::default().fg(Color::Gray),
                     )));
                     // Begin entry + duration, when the QuorumBegin location
@@ -2086,7 +2151,9 @@ impl App {
                     if let Some(begin) = lh.quorum_begin_block {
                         let dur = lh
                             .quorum_expiry
-                            .map(|e| format!("  ·  duration {}", blocks_eta(e as i64 - begin as i64)))
+                            .map(|e| {
+                                format!("  ·  duration {}", blocks_eta(e as i64 - begin as i64))
+                            })
                             .unwrap_or_default();
                         let seq = lh
                             .quorum_begin_sequence
@@ -2148,14 +2215,12 @@ impl App {
         }
 
         f.render_widget(Clear, area);
-        let p = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .padding(Padding::horizontal(1))
-                    .title(format!(" node details · {} ", label)),
-            );
+        let p = Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .padding(Padding::horizontal(1))
+                .title(format!(" node details · {} ", label)),
+        );
         f.render_widget(p, area);
     }
 
@@ -2165,8 +2230,15 @@ impl App {
 
         if entries.is_empty() {
             f.render_widget(Clear, area);
-            let p = Paragraph::new("(no pending registrations — peers waiting for approval show up here)")
-                .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" pending "));
+            let p = Paragraph::new(
+                "(no pending registrations — peers waiting for approval show up here)",
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(" pending "),
+            );
             f.render_widget(p, area);
             self.pending_cursor.select(None);
             return;
@@ -2189,8 +2261,10 @@ impl App {
                 let label = e.suggested_label.as_deref().unwrap_or("(unnamed)");
                 // pending_key is "<role>:<pk>" — strip the role prefix
                 // for display since the role is already shown next to it.
-                let pk_only =
-                    pending_key.splitn(2, ':').nth(1).unwrap_or(pending_key.as_str());
+                let pk_only = pending_key
+                    .splitn(2, ':')
+                    .nth(1)
+                    .unwrap_or(pending_key.as_str());
                 ListItem::new(format!(
                     "{:<6} {:<24} from {}  v{}  waiting {}s",
                     role,
@@ -2203,8 +2277,17 @@ impl App {
             .collect();
         f.render_widget(Clear, area);
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).padding(Padding::horizontal(1)).title(" pending "))
-            .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .padding(Padding::horizontal(1))
+                    .title(" pending "),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("> ");
         f.render_stateful_widget(list, area, &mut self.pending_cursor);
     }
@@ -2315,7 +2398,11 @@ fn command_lines(cmd: &str, usable_width: u16, style: Style) -> Vec<Line<'static
     let mut cur = String::from(HEAD);
     let mut started = false; // a token already sits on the current line
     for tok in cmd.split_whitespace() {
-        let added = if started { 1 + tok.chars().count() } else { tok.chars().count() };
+        let added = if started {
+            1 + tok.chars().count()
+        } else {
+            tok.chars().count()
+        };
         if started && cur.chars().count() + added > limit {
             cur.push_str(" \\");
             lines.push(Line::from(Span::styled(std::mem::take(&mut cur), style)));
@@ -2659,22 +2746,37 @@ mod tests {
         let lines = command_lines(cmd, width, Style::default());
         let texts: Vec<String> = lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>())
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
             .collect();
         assert!(texts.len() > 1, "a long command should wrap: {texts:?}");
         for (i, t) in texts.iter().enumerate() {
-            assert!(t.chars().count() <= width as usize, "line over width: {t:?}");
+            assert!(
+                t.chars().count() <= width as usize,
+                "line over width: {t:?}"
+            );
             if i + 1 == texts.len() {
                 assert!(!t.ends_with('\\'), "final line must not continue: {t:?}");
             } else {
-                assert!(t.ends_with(" \\"), "non-final line must end in ' \\': {t:?}");
+                assert!(
+                    t.ends_with(" \\"),
+                    "non-final line must end in ' \\': {t:?}"
+                );
             }
         }
         // Stripping the indents + trailing backslashes recovers the exact
         // token sequence — wrapping is purely cosmetic, never lossy.
         let joined: Vec<String> = texts
             .iter()
-            .flat_map(|t| t.trim_end_matches('\\').split_whitespace().map(String::from))
+            .flat_map(|t| {
+                t.trim_end_matches('\\')
+                    .split_whitespace()
+                    .map(String::from)
+            })
             .collect();
         let original: Vec<String> = cmd.split_whitespace().map(String::from).collect();
         assert_eq!(joined, original, "tokens must survive wrapping");
@@ -2686,12 +2788,21 @@ mod tests {
         assert_eq!(lines.len(), 1, "short command stays on one line");
         let t: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!t.ends_with('\\'), "single line has no continuation: {t:?}");
-        assert!(t.starts_with("  deposits-node"), "two-space head indent: {t:?}");
+        assert!(
+            t.starts_with("  deposits-node"),
+            "two-space head indent: {t:?}"
+        );
     }
 
     // ── needs-attention concerns ─────────────────────────────────────
 
-    fn health(b_expiry: Option<i64>, value_moving: bool, reserves: u64, obligations: u64, disputes: u32) -> LedgerHealth {
+    fn health(
+        b_expiry: Option<i64>,
+        value_moving: bool,
+        reserves: u64,
+        obligations: u64,
+        disputes: u32,
+    ) -> LedgerHealth {
         LedgerHealth {
             ledger_id: "ab".repeat(32),
             tier: if value_moving { 0 } else { 1 },
@@ -2734,35 +2845,64 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = node_state("node-a");
         let mut app = test_app(dir.path(), st.clone());
-        app.node_stats.insert(pk(1), NodeStats { ledgers: healths, ..Default::default() });
+        app.node_stats.insert(
+            pk(1),
+            NodeStats {
+                ledgers: healths,
+                ..Default::default()
+            },
+        );
         app.collect_concerns(&st, 0)
     }
 
     #[test]
     fn healthy_fleet_has_no_concerns() {
         let c = concerns_for(vec![health(Some(5000), true, 100, 10, 0)]);
-        assert!(c.is_empty(), "all-healthy should be quiet: {c:?}", c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert!(
+            c.is_empty(),
+            "all-healthy should be quiet: {c:?}",
+            c = c.iter().map(|x| x.kind).collect::<Vec<_>>()
+        );
     }
 
     #[test]
     fn quorum_expiry_crosses_warn_then_critical_then_expired() {
-        assert!(concerns_for(vec![health(Some(2000), true, 100, 10, 0)]).is_empty(), ">1wk = quiet");
+        assert!(
+            concerns_for(vec![health(Some(2000), true, 100, 10, 0)]).is_empty(),
+            ">1wk = quiet"
+        );
         let warn = concerns_for(vec![health(Some(500), true, 100, 10, 0)]);
-        assert_eq!((warn[0].kind, warn[0].severity), ("quorum expiry", Severity::Warn));
+        assert_eq!(
+            (warn[0].kind, warn[0].severity),
+            ("quorum expiry", Severity::Warn)
+        );
         let crit = concerns_for(vec![health(Some(100), true, 100, 10, 0)]);
-        assert_eq!((crit[0].kind, crit[0].severity), ("quorum expiry", Severity::Critical));
+        assert_eq!(
+            (crit[0].kind, crit[0].severity),
+            ("quorum expiry", Severity::Critical)
+        );
         let expired = concerns_for(vec![health(Some(-288), false, 100, 10, 0)]);
         assert_eq!(expired[0].severity, Severity::Critical);
-        assert!(expired[0].detail.contains("EXPIRED"), "{:?}", expired[0].detail);
+        assert!(
+            expired[0].detail.contains("EXPIRED"),
+            "{:?}",
+            expired[0].detail
+        );
     }
 
     #[test]
     fn reserves_warn_and_critical() {
         // expiry healthy (>1wk) so the only concern is reserves.
         let crit = concerns_for(vec![health(Some(5000), true, 100, 100, 0)]);
-        assert_eq!((crit.len(), crit[0].kind, crit[0].severity), (1, "reserves", Severity::Critical));
+        assert_eq!(
+            (crit.len(), crit[0].kind, crit[0].severity),
+            (1, "reserves", Severity::Critical)
+        );
         let warn = concerns_for(vec![health(Some(5000), true, 100, 95, 0)]);
-        assert_eq!((warn[0].kind, warn[0].severity), ("reserves", Severity::Warn));
+        assert_eq!(
+            (warn[0].kind, warn[0].severity),
+            ("reserves", Severity::Warn)
+        );
     }
 
     #[test]
@@ -2770,15 +2910,22 @@ mod tests {
         // One ledger that is both critically near expiry AND insolvent:
         // critical-with-deadline must precede the clockless reserves crit.
         let c = concerns_for(vec![health(Some(100), true, 100, 100, 0)]);
-        assert_eq!(c[0].kind, "quorum expiry", "deadline concern first: {c:?}",
-            c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert_eq!(
+            c[0].kind,
+            "quorum expiry",
+            "deadline concern first: {c:?}",
+            c = c.iter().map(|x| x.kind).collect::<Vec<_>>()
+        );
         assert_eq!(c[1].kind, "reserves", "clockless concern after");
         // Across two ledgers, the soonest critical deadline wins.
         let c = concerns_for(vec![
-            health(Some(500), true, 1000, 1, 0),  // warn, b=500
-            health(Some(50), true, 1000, 1, 0),   // critical, b=50
+            health(Some(500), true, 1000, 1, 0), // warn, b=500
+            health(Some(50), true, 1000, 1, 0),  // critical, b=50
         ]);
-        assert_eq!((c[0].severity, c[0].blocks_left), (Severity::Critical, Some(50)));
+        assert_eq!(
+            (c[0].severity, c[0].blocks_left),
+            (Severity::Critical, Some(50))
+        );
     }
 
     #[test]
@@ -2788,8 +2935,12 @@ mod tests {
         let mut app = test_app(dir.path(), st.clone());
         app.last_heartbeat.insert(pk(1), 0); // last seen at epoch
         let c = app.collect_concerns(&st, 1000); // now = 1000s → age > crit
-        assert!(c.iter().any(|x| x.kind == "offline" && x.severity == Severity::Critical),
-            "stale node should be flagged offline: {c:?}", c = c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert!(
+            c.iter()
+                .any(|x| x.kind == "offline" && x.severity == Severity::Critical),
+            "stale node should be flagged offline: {c:?}",
+            c = c.iter().map(|x| x.kind).collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -2798,16 +2949,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let st = node_state("node-a");
         let mut app = test_app(dir.path(), st);
-        app.node_stats.insert(pk(1), NodeStats { ledgers: vec![health(Some(-288), false, 100, 10, 0)], ..Default::default() });
+        app.node_stats.insert(
+            pk(1),
+            NodeStats {
+                ledgers: vec![health(Some(-288), false, 100, 10, 0)],
+                ..Default::default()
+            },
+        );
         let out = render_to_string(&mut app, 100, 24);
         assert!(out.contains("needs attention"), "panel title: {out}");
-        assert!(out.contains("quorum expiry") && out.contains("EXPIRED"), "concern row: {out}");
+        assert!(
+            out.contains("quorum expiry") && out.contains("EXPIRED"),
+            "concern row: {out}"
+        );
 
         // Quiet fleet collapses to all-clear.
         let dir = tempfile::tempdir().unwrap();
         let mut app = test_app(dir.path(), node_state("node-a"));
         let out = render_to_string(&mut app, 100, 24);
-        assert!(out.contains("all clear"), "quiet fleet shows all-clear: {out}");
+        assert!(
+            out.contains("all clear"),
+            "quiet fleet shows all-clear: {out}"
+        );
     }
 
     // ── node details pane ─────────────────────────────────────────────
@@ -2822,7 +2985,10 @@ mod tests {
             deposit_count: 7,
             obligations_sats: 250_000_000,
             reserves_sats: 100_000_000,
-            members: vec![QuorumMemberInfo { pubkey: "22".repeat(33), ledger_id: "dd".repeat(8) }],
+            members: vec![QuorumMemberInfo {
+                pubkey: "22".repeat(33),
+                ledger_id: "dd".repeat(8),
+            }],
         }
     }
 
@@ -2833,7 +2999,11 @@ mod tests {
         app.tab = Tab::Dashboard;
         assert!(app.details_node.is_none());
         app.handle_key(code(KeyCode::Enter)).await;
-        assert_eq!(app.details_node.as_deref(), Some(pk(1).as_str()), "Enter drills in");
+        assert_eq!(
+            app.details_node.as_deref(),
+            Some(pk(1).as_str()),
+            "Enter drills in"
+        );
         app.handle_key(code(KeyCode::Esc)).await;
         assert!(app.details_node.is_none(), "Esc returns to inventory");
     }
@@ -2880,10 +3050,16 @@ mod tests {
         let out = render_to_string(&mut app, 100, 30);
         assert!(out.contains("node details"), "title: {out}");
         assert!(out.contains("own ledgers (1)"), "own section: {out}");
-        assert!(out.contains("len 412") && out.contains("12 deposits"), "ledger metrics: {out}");
+        assert!(
+            out.contains("len 412") && out.contains("12 deposits"),
+            "ledger metrics: {out}"
+        );
         assert!(out.contains("serving on (1)"), "serving section: {out}");
         assert!(out.contains("members:"), "members listed: {out}");
-        assert!(out.contains("began @100") && out.contains("duration"), "quorum begin + duration: {out}");
+        assert!(
+            out.contains("began @100") && out.contains("duration"),
+            "quorum begin + duration: {out}"
+        );
     }
 
     #[test]
@@ -2900,13 +3076,25 @@ mod tests {
         );
         let c = app.collect_concerns(&st, 0);
         let ln = c.iter().find(|x| x.kind == "lightning offline");
-        assert!(ln.is_some(), "LN offline must be surfaced: {:?}",
-            c.iter().map(|x| x.kind).collect::<Vec<_>>());
+        assert!(
+            ln.is_some(),
+            "LN offline must be surfaced: {:?}",
+            c.iter().map(|x| x.kind).collect::<Vec<_>>()
+        );
         assert_eq!(ln.unwrap().severity, Severity::Critical);
         // Healthy LN (ln_error None) raises nothing.
         let mut app2 = test_app(dir.path(), st.clone());
-        app2.node_stats.insert(pk(1), NodeStats { ln_error: None, ..Default::default() });
-        assert!(app2.collect_concerns(&st, 0).iter().all(|x| x.kind != "lightning offline"));
+        app2.node_stats.insert(
+            pk(1),
+            NodeStats {
+                ln_error: None,
+                ..Default::default()
+            },
+        );
+        assert!(app2
+            .collect_concerns(&st, 0)
+            .iter()
+            .all(|x| x.kind != "lightning offline"));
     }
 
     #[test]

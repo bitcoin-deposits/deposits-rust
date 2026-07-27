@@ -5,9 +5,9 @@
 
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
 use deposits_core::ledger::Ledger;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
+use deposits_test::*;
 
 // =========================================================================
 // OnchainCredit / OnchainLock / OnchainFulfill / OnchainFail

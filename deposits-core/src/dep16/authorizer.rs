@@ -99,8 +99,14 @@ impl Dep16Authorizer {
         transfer_id: Option<&[u8]>,
         receive_witness: &ReceiveWitness,
     ) -> bool {
-        authorize_receive_inner(&self.verifier, descriptor, deposit_id, transfer_id, receive_witness)
-            .unwrap_or(false)
+        authorize_receive_inner(
+            &self.verifier,
+            descriptor,
+            deposit_id,
+            transfer_id,
+            receive_witness,
+        )
+        .unwrap_or(false)
     }
 }
 
@@ -290,9 +296,7 @@ fn stack_to_keyed(
 }
 
 /// Collect every literal hash referenced by a `hashlock(H)` obligation.
-fn collect_hashlock_targets(
-    t: &BTerm<PublicKey>,
-) -> Vec<miniscript::calculus::HashValue> {
+fn collect_hashlock_targets(t: &BTerm<PublicKey>) -> Vec<miniscript::calculus::HashValue> {
     use miniscript::calculus::ast::VTerm;
     use miniscript::calculus::Value;
     let mut out = Vec::new();
@@ -469,9 +473,7 @@ mod tests {
             new_descriptor: format!("wsh(prove(pk({})))", keypair(0x22).1),
             nonce: 1,
             expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.0],
-            },
+            witness: DescriptorWitness { stack: vec![sig.0] },
         };
 
         assert!(
@@ -506,9 +508,7 @@ mod tests {
             new_descriptor: format!("wsh(prove(pk({})))", keypair(0x22).1),
             nonce: 1,
             expiry: u32::MAX,
-            witness: DescriptorWitness {
-                stack: vec![sig.0],
-            },
+            witness: DescriptorWitness { stack: vec![sig.0] },
         };
         assert!(
             !auth.authorize(&descriptor, &op_signed),
@@ -534,7 +534,8 @@ mod tests {
             expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
-        let preimage_a = miniscript::calculus::operation_preimage(&operations::to_dep16(&op_a).unwrap());
+        let preimage_a =
+            miniscript::calculus::operation_preimage(&operations::to_dep16(&op_a).unwrap());
         let verifier = EcdsaVerifier::new();
         let sig_a = verifier.sign(&sk, &preimage_a);
 
@@ -576,7 +577,8 @@ mod tests {
             expiry: u32::MAX,
             witness: DescriptorWitness::new(),
         };
-        let preimage = miniscript::calculus::operation_preimage(&operations::to_dep16(&op).unwrap());
+        let preimage =
+            miniscript::calculus::operation_preimage(&operations::to_dep16(&op).unwrap());
         let verifier = EcdsaVerifier::new();
         let sig_a = verifier.sign(&sk_a, &preimage);
         let sig_b = verifier.sign(&sk_b, &preimage);
@@ -758,9 +760,8 @@ mod tests {
             commitment: None,
             dest_commitment: None,
         };
-        let msg = miniscript::calculus::operation_preimage(
-            &operations::to_dep16(&op_unsigned).unwrap(),
-        );
+        let msg =
+            miniscript::calculus::operation_preimage(&operations::to_dep16(&op_unsigned).unwrap());
         let verifier = EcdsaVerifier::new();
         let sig = verifier.sign(&sk, &msg);
 

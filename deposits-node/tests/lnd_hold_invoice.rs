@@ -56,7 +56,9 @@ fn spawn_payer_pay(
         });
         let mut bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         bytes.push(b'\n');
-        stream.write_all(&bytes).map_err(|e| format!("write pay: {}", e))?;
+        stream
+            .write_all(&bytes)
+            .map_err(|e| format!("write pay: {}", e))?;
         let mut line = String::new();
         BufReader::new(&stream)
             .read_line(&mut line)
@@ -101,7 +103,10 @@ fn lnd_hold_invoice_settle_and_cancel() {
     let backend = LndBackend::from_env().expect("LndBackend::from_env");
 
     // ── 1. Probe ────────────────────────────────────────────────────────────
-    assert!(backend.supports_hold_invoices(), "LND always supports hold invoices");
+    assert!(
+        backend.supports_hold_invoices(),
+        "LND always supports hold invoices"
+    );
     eprintln!("[probe]   invoicesrpc available");
 
     // ── 2-4. Happy path: create → pay → accepted → settle ──────────────────
@@ -124,7 +129,11 @@ fn lnd_hold_invoice_settle_and_cancel() {
 
     // Before payment: OPEN.
     let state = backend.lookup_hold_invoice(&hash_hex).expect("lookup");
-    assert_eq!(state, HoldInvoiceState::Open, "expected Open before payment");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Open,
+        "expected Open before payment"
+    );
 
     let pay_handle = spawn_payer_pay(&payer_socket, &bolt11);
 
@@ -153,9 +162,14 @@ fn lnd_hold_invoice_settle_and_cancel() {
     assert!(
         (160..=220).contains(&headroom),
         "requested 200-block hold window, measured headroom {} (expiry {} - tip {})",
-        headroom, expiry, tip
+        headroom,
+        expiry,
+        tip
     );
-    eprintln!("[hold]    HTLCs parked, expiry_height={} (headroom {} of 200 requested)", expiry, headroom);
+    eprintln!(
+        "[hold]    HTLCs parked, expiry_height={} (headroom {} of 200 requested)",
+        expiry, headroom
+    );
 
     backend
         .settle_hold_invoice(&preimage_hex)
@@ -163,7 +177,11 @@ fn lnd_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Settled
     });
-    assert_eq!(state, HoldInvoiceState::Settled, "expected Settled after settle");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Settled,
+        "expected Settled after settle"
+    );
     eprintln!("[settle]  invoice settled");
 
     let pay_result = pay_handle.join().expect("payer thread").expect("pay rpc");
@@ -200,7 +218,11 @@ fn lnd_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash2_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Canceled
     });
-    assert_eq!(state, HoldInvoiceState::Canceled, "expected Canceled after cancel");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Canceled,
+        "expected Canceled after cancel"
+    );
 
     let pay2_result = pay2_handle.join().expect("payer thread");
     match pay2_result {

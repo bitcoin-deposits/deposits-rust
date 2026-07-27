@@ -116,8 +116,7 @@ fn fraud_proof_uncredited_lightning_triggers_confiscation() {
     // quorum-membership for the cosigner — any keypair would pass.
     let cosigner_secret = derive_operator_secret_for_op(peer_op_idx);
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let cosigner_keypair =
-        bitcoin::secp256k1::Keypair::from_secret_key(&secp, &cosigner_secret);
+    let cosigner_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &cosigner_secret);
     let cosigner_pubkey = cosigner_keypair.public_key();
     let cosigner_pubkey_hex = hex::encode(cosigner_pubkey.serialize());
 
@@ -129,7 +128,9 @@ fn fraud_proof_uncredited_lightning_triggers_confiscation() {
         &cosigner_ledger_hash,
     );
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let cosign_signature = secp.sign_schnorr_no_aux_rand(&msg, &cosigner_keypair).serialize();
+    let cosign_signature = secp
+        .sign_schnorr_no_aux_rand(&msg, &cosigner_keypair)
+        .serialize();
     eprintln!(
         "[cosig]    cosigner={}…  sig={}…",
         &cosigner_pubkey_hex[..16],

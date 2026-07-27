@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::parse_config;
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use crate::Node;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
 
 /// Handle reserves subcommands
 pub async fn reserves_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -89,8 +89,14 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 hex::encode(l.state.chain_tip_hash)
             );
             println!("    sequence:                  {}", l.state.sequence);
-            println!("    active_ruleset:            {}", l.state.active_ruleset_name);
-            println!("    operator:                  {}", hex::encode(l.state.operator_key.serialize()));
+            println!(
+                "    active_ruleset:            {}",
+                l.state.active_ruleset_name
+            );
+            println!(
+                "    operator:                  {}",
+                hex::encode(l.state.operator_key.serialize())
+            );
             println!("    quorum_members ({}):", l.state.quorum_members.len());
             for m in &l.state.quorum_members {
                 println!("      - {}", hex::encode(m.pubkey.serialize()));
@@ -116,8 +122,12 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
                 }) = LedgerOperation::tlv_decode(&u.message)
                 {
                     qb_count += 1;
-                    last_qb =
-                        Some((reserves_id, ledger_hash, quorum_expiry, quorum_members.len()));
+                    last_qb = Some((
+                        reserves_id,
+                        ledger_hash,
+                        quorum_expiry,
+                        quorum_members.len(),
+                    ));
                 }
             }
             println!("    QuorumBegins in local history: {}", qb_count);
@@ -194,11 +204,11 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let mut ledger_id_arg: Option<String> = None;
     let mut tier: usize = 0;
     let mut fee_rate: u64 = 2; // sat/vb default
-    // `--split <addr>:<sats>` fixed-amount outputs that come before the
-    // change output (positional `dest_address`). With one or more `--split`
-    // entries, the positional dest receives `reserves − Σsplits − fee` as
-    // change rather than the whole UTXO. Single-positional callers without
-    // any `--split` get the original 1-output behavior unchanged.
+                               // `--split <addr>:<sats>` fixed-amount outputs that come before the
+                               // change output (positional `dest_address`). With one or more `--split`
+                               // entries, the positional dest receives `reserves − Σsplits − fee` as
+                               // change rather than the whole UTXO. Single-positional callers without
+                               // any `--split` get the original 1-output behavior unchanged.
     let mut splits_raw: Vec<String> = Vec::new();
     let mut dry_run = false;
 
@@ -256,7 +266,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
          [--dry-run]\n\n\
          With one or more `--split <addr>:<sats>`, each split is a separate output and \
          `dest_address` becomes the change output receiving `reserves − Σsplits − fee`. \
-         Pass `--dry-run` to print the decoded tx + hex without broadcasting."
+         Pass `--dry-run` to print the decoded tx + hex without broadcasting.",
     )?;
 
     if keys.is_empty() && seed_dir.is_none() {
@@ -416,8 +426,8 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 qb_ruleset = protocol_version;
             }
         }
-        let reserves_id = qb_reserves_id
-            .ok_or_else(|| format!("Ledger {} has no QuorumBegin yet", ledger_id))?;
+        let reserves_id =
+            qb_reserves_id.ok_or_else(|| format!("Ledger {} has no QuorumBegin yet", ledger_id))?;
         let qb_recorded_hash = qb_ledger_hash.expect("ledger_hash set alongside reserves_id");
 
         // Prefer the legacy `wallet/taproot_reserves.json` snapshot if it
@@ -427,20 +437,16 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // (apparently the ledger state hash, not the commitment value)
         // and at least one production rotation has them diverge.
         let ledger_hash = {
-            let json_path = std::path::Path::new(&config.data_dir)
-                .join("wallet/taproot_reserves.json");
+            let json_path =
+                std::path::Path::new(&config.data_dir).join("wallet/taproot_reserves.json");
             let mut found: Option<[u8; 32]> = None;
             if json_path.exists() {
                 if let Ok(raw) = std::fs::read_to_string(&json_path) {
-                    if let Ok(arr) =
-                        serde_json::from_str::<serde_json::Value>(&raw)
-                    {
+                    if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) {
                         if let Some(entries) = arr.as_array() {
                             for entry in entries {
-                                let addr = entry
-                                    .get("address")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("");
+                                let addr =
+                                    entry.get("address").and_then(|x| x.as_str()).unwrap_or("");
                                 if addr == reserves_id {
                                     if let Some(h) = entry
                                         .get("ledger_hash")
@@ -489,7 +495,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
             .find_utxo_for_script(&reserves_script)
             .map_err(|e| format!("esplora reserves lookup: {}", e))?
             .ok_or_else(|| {
-                format!("reserves UTXO not found at {} (already spent?)", reserves_id)
+                format!(
+                    "reserves UTXO not found at {} (already spent?)",
+                    reserves_id
+                )
             })?;
         let (outpoint, amount) = utxo;
 
@@ -509,24 +518,18 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         // tie-breaker's x-only pubkey as the internal key instead of
         // NUMS — necessary for any production ledger whose
         // QuorumBegin tx predates that fix.
-        let tie_breaker_xonly = voter_set
-            .tie_breaker()
-            .map(|v| v.x_only());
+        let tie_breaker_xonly = voter_set.tie_breaker().map(|v| v.x_only());
         let try_ruleset_and_key = |name: &str,
-                                   internal_key: Option<
-            bitcoin::secp256k1::XOnlyPublicKey,
-        >|
-         -> Option<deposits_core::tapscript_reserves::TaprootReservesOutput> {
+                                   internal_key: Option<bitcoin::secp256k1::XOnlyPublicKey>|
+         -> Option<
+            deposits_core::tapscript_reserves::TaprootReservesOutput,
+        > {
             let rs = deposits_core::ruleset::lookup(name)?;
             let cfg = (rs.tier_config_factory)(voter_count, qb_expiry);
-            let out = TapscriptReservesBuilder::new(
-                voter_set.clone(),
-                cfg,
-                config.network,
-                ledger_hash,
-            )
-            .build_with_internal_key(internal_key)
-            .ok()?;
+            let out =
+                TapscriptReservesBuilder::new(voter_set.clone(), cfg, config.network, ledger_hash)
+                    .build_with_internal_key(internal_key)
+                    .ok()?;
             if out.script_pubkey() == reserves_script {
                 Some(out)
             } else {
@@ -582,7 +585,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
             eprintln!("  network:              {:?}", config.network);
             eprintln!("  ledger_hash:          {}", hex::encode(ledger_hash));
             eprintln!("  quorum_expiry:        {}", qb_expiry);
-            eprintln!("  original_operator:    {}", hex::encode(original_operator.serialize()));
+            eprintln!(
+                "  original_operator:    {}",
+                hex::encode(original_operator.serialize())
+            );
             eprintln!("  quorum_members ({}):", qb_members.len());
             for m in &qb_members {
                 eprintln!("    - {}", hex::encode(m.serialize()));
@@ -608,16 +614,12 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         )
                         .build_with_internal_key(key);
                         match built {
-                            Ok(out) => eprintln!(
-                                "    {:>14} × {:>11}  → {}",
-                                name,
-                                desc,
-                                out.address
-                            ),
-                            Err(e) => eprintln!(
-                                "    {:>14} × {:>11}  → BUILD ERROR: {:?}",
-                                name, desc, e
-                            ),
+                            Ok(out) => {
+                                eprintln!("    {:>14} × {:>11}  → {}", name, desc, out.address)
+                            }
+                            Err(e) => {
+                                eprintln!("    {:>14} × {:>11}  → BUILD ERROR: {:?}", name, desc, e)
+                            }
                         }
                     }
                 }
@@ -634,7 +636,13 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         })?;
         let resolved_ruleset = matched_name.unwrap_or_else(|| "legacy".to_string());
 
-        (outpoint, amount, taproot_output, ledger_hash, Some(resolved_ruleset))
+        (
+            outpoint,
+            amount,
+            taproot_output,
+            ledger_hash,
+            Some(resolved_ruleset),
+        )
     };
 
     // Bridge: downstream code reads `reserves.taproot_output` / `.outpoint`
@@ -730,9 +738,9 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
     // Parse `--split <addr>:<sats>` into (ScriptBuf, u64) outputs.
     let mut splits: Vec<(bitcoin::ScriptBuf, u64)> = Vec::with_capacity(splits_raw.len());
     for raw in &splits_raw {
-        let (addr_s, amt_s) = raw.split_once(':').ok_or_else(|| {
-            format!("Invalid --split {:?}: expected <addr>:<sats>", raw)
-        })?;
+        let (addr_s, amt_s) = raw
+            .split_once(':')
+            .ok_or_else(|| format!("Invalid --split {:?}: expected <addr>:<sats>", raw))?;
         let addr = addr_s
             .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             .map_err(|e| format!("Invalid split address {:?}: {}", addr_s, e))?
@@ -744,7 +752,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         splits.push((addr.script_pubkey(), amt));
     }
     if !splits.is_empty() {
-        println!("  Splits:      {} extra output(s) before change", splits.len());
+        println!(
+            "  Splits:      {} extra output(s) before change",
+            splits.len()
+        );
         for (i, (script, amt)) in splits.iter().enumerate() {
             println!(
                 "    [{}] {} sats → {}",
@@ -757,7 +768,10 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         }
         let total_splits: u64 = splits.iter().map(|(_, n)| *n).sum();
         println!("    Σ splits:    {} sats", total_splits);
-        println!("    change to:   {} (gets reserves − Σsplits − fee)", destination);
+        println!(
+            "    change to:   {} (gets reserves − Σsplits − fee)",
+            destination
+        );
     }
 
     let params = deposits_core::tapscript_reserves::SpendTxParams {

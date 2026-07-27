@@ -46,8 +46,8 @@ use bitcoin::hashes::Hash;
 use bitcoin::secp256k1::{ecdsa, Keypair, Message, Secp256k1, SecretKey};
 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
 use bitcoin::{
-    Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence,
-    Transaction, TxIn, TxOut, Witness,
+    Address, Amount, CompressedPublicKey, Network, OutPoint, ScriptBuf, Sequence, Transaction,
+    TxIn, TxOut, Witness,
 };
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tapscript_reserves::{
@@ -180,8 +180,7 @@ fn parse_args() -> Result<SweepArgs, String> {
 
 fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey, String> {
     let secp = Secp256k1::new();
-    let xpriv =
-        Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
+    let xpriv = Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
     let path = DerivationPath::from_str("m/86'/0'/0'/0/0")
         .map_err(|e| format!("derivation path: {}", e))?;
     let derived = xpriv
@@ -199,8 +198,7 @@ fn derive_node_wallet_secret(
     network: Network,
 ) -> Result<SecretKey, String> {
     let secp = Secp256k1::new();
-    let xpriv =
-        Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
+    let xpriv = Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
     let path = DerivationPath::from(vec![
         ChildNumber::Normal { index: change },
         ChildNumber::Normal { index },
@@ -223,8 +221,7 @@ fn derive_ledger_wallet_secret(
     network: Network,
 ) -> Result<SecretKey, String> {
     let secp = Secp256k1::new();
-    let xpriv =
-        Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
+    let xpriv = Xpriv::new_master(network, seed).map_err(|e| format!("master xpriv: {}", e))?;
     let path = DerivationPath::from(vec![
         ChildNumber::Hardened { index: 86 },
         ChildNumber::Hardened { index: 0 },
@@ -368,10 +365,7 @@ where
     Ok(found)
 }
 
-fn fetch_address_utxos(
-    address: &Address,
-    esplora: &str,
-) -> Result<Vec<(OutPoint, u64)>, String> {
+fn fetch_address_utxos(address: &Address, esplora: &str) -> Result<Vec<(OutPoint, u64)>, String> {
     let url = format!("{}/address/{}/utxo", esplora, address);
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(15))
@@ -549,17 +543,16 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
         Some(u) => u,
         None => return Ok(None),
     };
-    let (op_initial, reserves_initial, genesis_block) = match LedgerOperation::tlv_decode(
-        &seq0.message,
-    ) {
-        Ok(LedgerOperation::LedgerOpen {
-            operator_id,
-            reserves_id,
-            genesis_block,
-            ..
-        }) => (operator_id, reserves_id, genesis_block),
-        _ => return Ok(None),
-    };
+    let (op_initial, reserves_initial, genesis_block) =
+        match LedgerOperation::tlv_decode(&seq0.message) {
+            Ok(LedgerOperation::LedgerOpen {
+                operator_id,
+                reserves_id,
+                genesis_block,
+                ..
+            }) => (operator_id, reserves_id, genesis_block),
+            _ => return Ok(None),
+        };
 
     let mut state = LedgerState::new(op_initial, reserves_initial.clone(), genesis_block);
     let mut latest_qb: Option<(String, Vec<_>, [u8; 32], Option<String>, u32)> = None;
@@ -673,14 +666,10 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                                 }
                             }
                         }
-                        if let Some(qe) =
-                            v.get("quorum_expiry").and_then(|x| x.as_u64())
-                        {
+                        if let Some(qe) = v.get("quorum_expiry").and_then(|x| x.as_u64()) {
                             quorum_expiry = qe as u32;
                         }
-                        if let Some(rs) =
-                            v.get("ruleset_name").and_then(|x| x.as_str())
-                        {
+                        if let Some(rs) = v.get("ruleset_name").and_then(|x| x.as_str()) {
                             ruleset_name = rs.to_string();
                         }
                         if let (Some(txid_str), Some(vout)) = (
@@ -716,18 +705,11 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
             if let Ok(arr) = serde_json::from_str::<serde_json::Value>(&raw) {
                 if let Some(entries) = arr.as_array() {
                     for entry in entries {
-                        let addr = entry
-                            .get("address")
-                            .and_then(|x| x.as_str())
-                            .unwrap_or("");
+                        let addr = entry.get("address").and_then(|x| x.as_str()).unwrap_or("");
                         let address_match = addr == reserves_id;
                         let identity_match = !address_match
                             && entry.get("script_pubkey").is_some()
-                            && entry_identity_matches(
-                                entry,
-                                &state.operator_key,
-                                &quorum_members,
-                            );
+                            && entry_identity_matches(entry, &state.operator_key, &quorum_members);
                         if !address_match && !identity_match {
                             continue;
                         }
@@ -753,14 +735,10 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                                 }
                             }
                         }
-                        if let Some(qe) =
-                            entry.get("quorum_expiry").and_then(|x| x.as_u64())
-                        {
+                        if let Some(qe) = entry.get("quorum_expiry").and_then(|x| x.as_u64()) {
                             quorum_expiry = qe as u32;
                         }
-                        if let Some(rs) =
-                            entry.get("ruleset_name").and_then(|x| x.as_str())
-                        {
+                        if let Some(rs) = entry.get("ruleset_name").and_then(|x| x.as_str()) {
                             // Skip null (legacy entries have no ruleset_name);
                             // the default we set above stays "legacy", matching
                             // deposits-node's `default_ruleset_name`.
@@ -807,7 +785,10 @@ fn fetch_utxo(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("http client: {}", e))?;
-    let resp = client.get(&url).send().map_err(|e| format!("GET {}: {}", url, e))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("GET {}: {}", url, e))?;
     if !resp.status().is_success() {
         return Err(format!("esplora {}: status {}", url, resp.status()));
     }
@@ -883,8 +864,7 @@ fn parse_persisted_tree(entry: &serde_json::Value) -> Option<PersistedTree> {
     for tl in tier_leaves_val {
         let tier_index = tl.get("tier_index").and_then(|v| v.as_u64())? as u32;
         let script_bytes = hex::decode(tl.get("script_hex").and_then(|v| v.as_str())?).ok()?;
-        let cb_bytes =
-            hex::decode(tl.get("control_block_hex").and_then(|v| v.as_str())?).ok()?;
+        let cb_bytes = hex::decode(tl.get("control_block_hex").and_then(|v| v.as_str())?).ok()?;
         let leaf_script = bitcoin::ScriptBuf::from_bytes(script_bytes);
         let control_block = bitcoin::taproot::ControlBlock::decode(&cb_bytes).ok()?;
         tier_leaves.push(PersistedTierLeaf {
@@ -917,8 +897,8 @@ fn summarize_from_snapshot(
     snapshot: &Path,
     ledger_id: [u8; 32],
 ) -> Result<Option<LedgerSummary>, String> {
-    let raw = std::fs::read_to_string(snapshot)
-        .map_err(|e| format!("read {:?}: {}", snapshot, e))?;
+    let raw =
+        std::fs::read_to_string(snapshot).map_err(|e| format!("read {:?}: {}", snapshot, e))?;
     let v: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("parse {:?}: {}", snapshot, e))?;
 
@@ -1069,37 +1049,42 @@ fn chase_reserves_chain(
         if !resp.status().is_success() {
             return Err(format!("esplora {}: status {}", url, resp.status()));
         }
-        let txs: Vec<serde_json::Value> =
-            resp.json().map_err(|e| format!("json: {}", e))?;
+        let txs: Vec<serde_json::Value> = resp.json().map_err(|e| format!("json: {}", e))?;
 
         let cur_str = current.to_string();
         let spending = txs.iter().find(|tx| {
-            tx.get("vin").and_then(|v| v.as_array()).map_or(false, |vin| {
-                vin.iter().any(|i| {
-                    i.get("prevout")
-                        .and_then(|p| p.get("scriptpubkey_address"))
-                        .and_then(|v| v.as_str())
-                        == Some(cur_str.as_str())
+            tx.get("vin")
+                .and_then(|v| v.as_array())
+                .map_or(false, |vin| {
+                    vin.iter().any(|i| {
+                        i.get("prevout")
+                            .and_then(|p| p.get("scriptpubkey_address"))
+                            .and_then(|v| v.as_str())
+                            == Some(cur_str.as_str())
+                    })
                 })
-            })
         });
         let tx = match spending {
             Some(t) => t,
             None => {
-                println!(
-                    "      hop {}: no spending tx found from {}",
-                    hop, current
-                );
+                println!("      hop {}: no spending tx found from {}", hop, current);
                 return Ok(None);
             }
         };
         let txid = tx.get("txid").and_then(|v| v.as_str()).unwrap_or("");
-        println!("      hop {}: spent in {} — picking largest vout", hop, txid);
+        println!(
+            "      hop {}: spent in {} — picking largest vout",
+            hop, txid
+        );
 
         // Largest taproot-shape (bc1p) output of the spending tx. If none,
         // try the largest output regardless of shape — the rotation may
         // have used a different address class in some old code paths.
-        let vout = tx.get("vout").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let vout = tx
+            .get("vout")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let mut candidate: Option<(usize, u64, Address)> = None;
         for (idx, v) in vout.iter().enumerate() {
             let value = match v.get("value").and_then(|x| x.as_u64()) {
@@ -1125,9 +1110,7 @@ fn chase_reserves_chain(
             }
             match &candidate {
                 None => candidate = Some((idx, value, addr)),
-                Some((_, best, _)) if value > *best => {
-                    candidate = Some((idx, value, addr))
-                }
+                Some((_, best, _)) if value > *best => candidate = Some((idx, value, addr)),
                 _ => {}
             }
         }
@@ -1187,7 +1170,9 @@ fn fetch_tx_block_height(esplora: &str, txid: &bitcoin::Txid) -> Result<Option<u
     if v.get("confirmed").and_then(|c| c.as_bool()) != Some(true) {
         return Ok(None);
     }
-    Ok(v.get("block_height").and_then(|h| h.as_u64()).map(|h| h as u32))
+    Ok(v.get("block_height")
+        .and_then(|h| h.as_u64())
+        .map(|h| h as u32))
 }
 
 fn broadcast_tx(esplora: &str, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, String> {
@@ -1290,12 +1275,8 @@ fn sweep_ledger(
         .first()
         .cloned()
         .ok_or("ruleset has no tier 0")?;
-    let mut builder = TapscriptReservesBuilder::new(
-        voter_set.clone(),
-        config,
-        network,
-        summary.ledger_hash,
-    );
+    let mut builder =
+        TapscriptReservesBuilder::new(voter_set.clone(), config, network, summary.ledger_hash);
     let mut taproot_output = builder
         .build()
         .map_err(|e| format!("build taproot: {:?}", e))?;
@@ -1411,9 +1392,7 @@ fn sweep_ledger(
                             return Ok(()); // rebuild matched but UTXO at a different op — also bail
                         }
                         None => {
-                            println!(
-                                "    UTXO at recorded outpoint is already spent."
-                            );
+                            println!("    UTXO at recorded outpoint is already spent.");
                         }
                     }
                 }
@@ -1456,10 +1435,7 @@ fn sweep_ledger(
             );
             match chase_reserves_chain(&reserves_address, network, esplora, 10)? {
                 Some((op, val, addr)) => {
-                    println!(
-                        "    chain leaf: {} sats at {}",
-                        val, addr
-                    );
+                    println!("    chain leaf: {} sats at {}", val, addr);
                     if addr != reserves_address {
                         // Off-history rotation: the funds moved to a vault our
                         // snapshot params don't rebuild. Across a rotation the
@@ -1544,9 +1520,7 @@ fn sweep_ledger(
                 }
                 None => {
                     // (3) give up.
-                    println!(
-                        "    no unspent UTXO downstream — funds left this address tree"
-                    );
+                    println!("    no unspent UTXO downstream — funds left this address tree");
                     return Ok(());
                 }
             }
@@ -1594,14 +1568,9 @@ fn sweep_ledger(
             .build_threshold_leaf(&tier0)
             .map_err(|e| format!("build tier-0 leaf: {:?}", e))?
     };
-    let sighash = ReservesSpendBuilder::compute_sighash(
-        &tx,
-        0,
-        amount,
-        &reserves_script,
-        &leaf_script,
-    )
-    .map_err(|e| format!("compute sighash: {:?}", e))?;
+    let sighash =
+        ReservesSpendBuilder::compute_sighash(&tx, 0, amount, &reserves_script, &leaf_script)
+            .map_err(|e| format!("compute sighash: {:?}", e))?;
     let sighash_bytes: [u8; 32] = *sighash.as_ref();
     let msg = Message::from_digest(sighash_bytes);
 
@@ -1628,7 +1597,8 @@ fn sweep_ledger(
     // Assemble witness. Stack order: sigs in reverse-sorted-voter order,
     // then leaf_script, then control_block.
     let sorted = voter_set.sorted_x_only_pubkeys();
-    let control_block = if let Some(p) = summary.persisted_tree.as_ref().filter(|_| !reconstructed) {
+    let control_block = if let Some(p) = summary.persisted_tree.as_ref().filter(|_| !reconstructed)
+    {
         p.tier_leaves
             .iter()
             .find(|t| t.tier_index == 0)
@@ -1716,8 +1686,7 @@ fn sweep_lottery_recovery_for_ledger(
             None => continue,
         };
         obj.remove("type");
-        if let Ok(u) =
-            serde_json::from_value::<SignedLedgerUpdate>(serde_json::Value::Object(obj))
+        if let Ok(u) = serde_json::from_value::<SignedLedgerUpdate>(serde_json::Value::Object(obj))
         {
             updates.push(u);
         }
@@ -1731,9 +1700,7 @@ fn sweep_lottery_recovery_for_ledger(
     let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
     for u in &updates {
         match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::LedgerOpen { operator_id, .. })
-                if original_operator.is_none() =>
-            {
+            Ok(LedgerOperation::LedgerOpen { operator_id, .. }) if original_operator.is_none() => {
                 original_operator = Some(operator_id);
             }
             Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) => {
@@ -1841,11 +1808,13 @@ fn sweep_lottery_recovery_for_ledger(
         // Map x-only → full pubkey so we can look up the seed in the keyring
         // (keyring is keyed on full secp256k1::PublicKey, but the lottery
         // recovery leaf works in x-only).
-        let xonly_to_full: HashMap<bitcoin::secp256k1::XOnlyPublicKey, bitcoin::secp256k1::PublicKey> =
-            voter_full_pks
-                .iter()
-                .map(|pk| (pk.x_only_public_key().0, *pk))
-                .collect();
+        let xonly_to_full: HashMap<
+            bitcoin::secp256k1::XOnlyPublicKey,
+            bitcoin::secp256k1::PublicKey,
+        > = voter_full_pks
+            .iter()
+            .map(|pk| (pk.x_only_public_key().0, *pk))
+            .collect();
 
         let chosen = recovery_leaves.iter().find(|(csv, threshold, _)| {
             if confirmations < *csv {
@@ -1883,8 +1852,9 @@ fn sweep_lottery_recovery_for_ledger(
             fee_rate_sat_vbyte: 2,
             lock_time: 0,
         };
-        let mut tx = ReservesSpendBuilder::build_spend_transaction(&params, &lottery.script_pubkey())
-            .map_err(|e| format!("build spend tx: {:?}", e))?;
+        let mut tx =
+            ReservesSpendBuilder::build_spend_transaction(&params, &lottery.script_pubkey())
+                .map_err(|e| format!("build spend tx: {:?}", e))?;
         tx.input[0].sequence = Sequence::from_height(csv_blocks as u16);
 
         let sighash = ReservesSpendBuilder::compute_sighash(
@@ -2147,9 +2117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => continue,
             };
             // Only consider hex-looking 64-char ledger IDs.
-            if ledger_id_str.len() != 64
-                || !ledger_id_str.bytes().all(|b| b.is_ascii_hexdigit())
-            {
+            if ledger_id_str.len() != 64 || !ledger_id_str.bytes().all(|b| b.is_ascii_hexdigit()) {
                 continue;
             }
             // Confirm operator ownership via the jsonl summary (cheap re-replay).
@@ -2348,10 +2316,19 @@ mod reconstruct_tests {
             let b = TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, ledger_hash);
             b.build().unwrap().script_pubkey()
         };
-        assert_ne!(stale, target, "precondition: stale rebuild differs from on-chain");
+        assert_ne!(
+            stale, target,
+            "precondition: stale rebuild differs from on-chain"
+        );
 
         let found = reconstruct_expiry(
-            &voter_set, factory, total, &[ledger_hash], network, &target, base_expiry,
+            &voter_set,
+            factory,
+            total,
+            &[ledger_hash],
+            network,
+            &target,
+            base_expiry,
         );
         assert_eq!(
             found,
@@ -2392,9 +2369,18 @@ mod reconstruct_tests {
                 .script_pubkey()
         };
         let found = reconstruct_expiry(
-            &voter_set, factory, total, &[[7u8; 32]], network, &target, base_expiry,
+            &voter_set,
+            factory,
+            total,
+            &[[7u8; 32]],
+            network,
+            &target,
+            base_expiry,
         );
-        assert_eq!(found, None, "must not fabricate a match when ledger_hash differs");
+        assert_eq!(
+            found, None,
+            "must not fabricate a match when ledger_hash differs"
+        );
     }
 
     /// The real recovery case: the snapshot's ledger_hash is stale, but the
@@ -2426,13 +2412,27 @@ mod reconstruct_tests {
 
         // Snapshot hash alone can't reproduce it…
         assert_eq!(
-            reconstruct_expiry(&voter_set, factory, total, &[snapshot_hash], network, &target, base_expiry),
+            reconstruct_expiry(
+                &voter_set,
+                factory,
+                total,
+                &[snapshot_hash],
+                network,
+                &target,
+                base_expiry
+            ),
             None
         );
         // …but snapshot + replayed-tip does, and reports the tip hash.
         assert_eq!(
             reconstruct_expiry(
-                &voter_set, factory, total, &[snapshot_hash, tip_hash], network, &target, base_expiry
+                &voter_set,
+                factory,
+                total,
+                &[snapshot_hash, tip_hash],
+                network,
+                &target,
+                base_expiry
             ),
             Some((tip_hash, new_expiry)),
         );

@@ -360,10 +360,7 @@ impl Operator {
         let mut all_violations = Vec::new();
         for update in &self.ledger.history {
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                if let Ok(violations) = watcher.apply_and_check(
-                    &op,
-                    update.block_height,
-                ) {
+                if let Ok(violations) = watcher.apply_and_check(&op, update.block_height) {
                     all_violations.extend(violations);
                 }
                 watcher.state.sequence = update.sequence_number;

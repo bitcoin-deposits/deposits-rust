@@ -188,11 +188,17 @@ impl QuorumMemberRef {
     /// fall back to QuorumAddMember-history derivation when this is
     /// the empty string.
     pub fn pubkey_only(pubkey: PublicKey) -> Self {
-        Self { pubkey, member_ledger_id: String::new() }
+        Self {
+            pubkey,
+            member_ledger_id: String::new(),
+        }
     }
 
     pub fn new(pubkey: PublicKey, member_ledger_id: impl Into<String>) -> Self {
-        Self { pubkey, member_ledger_id: member_ledger_id.into() }
+        Self {
+            pubkey,
+            member_ledger_id: member_ledger_id.into(),
+        }
     }
 }
 
@@ -1302,7 +1308,9 @@ impl BinaryCodec for LedgerOperation {
                 // doesn't fit the legacy fixed-shape encoder. The TLV codec
                 // (tlv_codec.rs) carries it; legacy consumers see the same
                 // shape they always did.
-                wallet_authorization: _, .. } => {
+                wallet_authorization: _,
+                ..
+            } => {
                 write_32(w, payment_hash)?;
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
@@ -1344,7 +1352,9 @@ impl BinaryCodec for LedgerOperation {
             Self::InvoiceFail {
                 deposit_id,
                 payment_id,
-                sequence_number, .. } => {
+                sequence_number,
+                ..
+            } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1358,7 +1368,9 @@ impl BinaryCodec for LedgerOperation {
                 payment_id,
                 sequence_number,
                 witness,
-                preimage, .. } => {
+                preimage,
+                ..
+            } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1385,7 +1397,9 @@ impl BinaryCodec for LedgerOperation {
                 vout,
                 deposit_id,
                 amount,
-                funding_address, .. } => {
+                funding_address,
+                ..
+            } => {
                 write_32(w, txid)?;
                 write_u32(w, *vout)?;
                 let mut legacy_bytes = [0u8; 33];
@@ -1428,7 +1442,9 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::OnchainFail {
                 deposit_id,
-                withdrawal_id, .. } => {
+                withdrawal_id,
+                ..
+            } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1440,7 +1456,9 @@ impl BinaryCodec for LedgerOperation {
                 withdrawal_id,
                 amount,
                 txid,
-                destination_address, .. } => {
+                destination_address,
+                ..
+            } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1493,7 +1511,9 @@ impl BinaryCodec for LedgerOperation {
             }
             Self::TransferComplete {
                 transfer_id,
-                script_witness, .. } => {
+                script_witness,
+                ..
+            } => {
                 write_32(w, transfer_id)?;
                 // Write witness stack length and elements
                 write_u16(w, script_witness.stack.len() as u16)?;
@@ -1505,7 +1525,9 @@ impl BinaryCodec for LedgerOperation {
             Self::TransferFail {
                 transfer_id,
                 block_hash,
-                reason, .. } => {
+                reason,
+                ..
+            } => {
                 write_32(w, transfer_id)?;
                 write_32(w, block_hash)?;
                 write_u8(w, *reason)?;
@@ -1544,7 +1566,9 @@ impl BinaryCodec for LedgerOperation {
             Self::FeeCollect {
                 deposit_id,
                 amount,
-                block_height, .. } => {
+                block_height,
+                ..
+            } => {
                 let mut legacy_bytes = [0u8; 33];
                 legacy_bytes[0] = 0x02;
                 legacy_bytes[1..17].copy_from_slice(deposit_id);
@@ -1709,7 +1733,10 @@ impl BinaryCodec for LedgerOperation {
                 let legacy_bytes = read_33(r)?;
                 let mut deposit_id = [0u8; 16];
                 deposit_id.copy_from_slice(&legacy_bytes[1..17]);
-                Ok(Self::DepositClose { deposit_id, commitment: None })
+                Ok(Self::DepositClose {
+                    deposit_id,
+                    commitment: None,
+                })
             }
             22 => {
                 let legacy_bytes = read_33(r)?;
@@ -2007,10 +2034,12 @@ impl BinaryCodec for LedgerOperation {
                         vout: read_u32(r)?,
                         amount: read_u64(r)?,
                     }),
-                    Ok(v) => return Err(CodecError::InvalidData(format!(
-                        "invalid replacement_collateral flag: {}",
-                        v
-                    ))),
+                    Ok(v) => {
+                        return Err(CodecError::InvalidData(format!(
+                            "invalid replacement_collateral flag: {}",
+                            v
+                        )))
+                    }
                     Err(_) => None,
                 };
                 Ok(Self::DisputeArmed {

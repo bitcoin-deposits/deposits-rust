@@ -72,12 +72,11 @@ async fn ringsig_via_wallet_binary() {
             return;
         }
     };
-    let verifier_nsec_hex = std::fs::read_to_string(
-        repo_root().join("deposits-tools/secrets/verify_nsec"),
-    )
-    .expect("read verify_nsec")
-    .trim()
-    .to_string();
+    let verifier_nsec_hex =
+        std::fs::read_to_string(repo_root().join("deposits-tools/secrets/verify_nsec"))
+            .expect("read verify_nsec")
+            .trim()
+            .to_string();
     let verifier_keys = Keys::new(SecretKey::from_hex(&verifier_nsec_hex).expect("nsec hex"));
     let verifier_npub = verifier_keys.public_key().to_bech32().expect("npub bech32");
 
@@ -99,9 +98,7 @@ async fn ringsig_via_wallet_binary() {
     std::fs::write(&wallet_nsec, hex::encode(wallet_sk.secret_bytes())).unwrap();
 
     let decoys: Vec<String> = (0..4)
-        .map(|_| {
-            hex::encode(&SecpSk::new(&mut OsRng).public_key(&secp).serialize()[1..])
-        })
+        .map(|_| hex::encode(&SecpSk::new(&mut OsRng).public_key(&secp).serialize()[1..]))
         .collect();
 
     // ── Publish kind:3 from the verifier ───────────────────────────
@@ -181,7 +178,10 @@ async fn ringsig_via_wallet_binary() {
             last_seen.join(", "),
         );
     }
-    eprintln!("[setup] kind:3 (id={}…) confirmed on relay", &kind3_id[..16]);
+    eprintln!(
+        "[setup] kind:3 (id={}…) confirmed on relay",
+        &kind3_id[..16]
+    );
 
     // ── Wait for the verifier to ingest our kind:3 + republish ────
     //

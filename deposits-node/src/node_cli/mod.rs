@@ -27,10 +27,10 @@ pub mod withdraw;
 #[cfg(feature = "dangerous-testing")]
 pub mod danger;
 
+use crate::{Node, NodeConfig};
 use bitcoin::bip32::{DerivationPath, Xpriv};
 use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use bitcoin::Network;
-use crate::{Node, NodeConfig};
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -38,10 +38,7 @@ use std::str::FromStr;
 /// Matches what the Wallet does, ensuring consistent key usage across
 /// the codebase. Shared by all node_cli subcommands that need to
 /// reconstruct the operator's signing key from the seed.
-pub fn derive_operator_secret(
-    seed: &[u8; 32],
-    network: Network,
-) -> Result<SecretKey, String> {
+pub fn derive_operator_secret(seed: &[u8; 32], network: Network) -> Result<SecretKey, String> {
     let secp = Secp256k1::new();
     let xpriv = Xpriv::new_master(network, seed)
         .map_err(|e| format!("Failed to create master key: {}", e))?;
@@ -70,9 +67,8 @@ pub fn signer_from_config(
     match &config.signer {
         None => Ok(std::sync::Arc::new(LocalSigner::new(secret))),
         Some(sig_cfg) => {
-            let transport_secret =
-                crate::Node::load_or_init_transport_secret(&config.data_dir)
-                    .map_err(|e| format!("transport secret: {}", e))?;
+            let transport_secret = crate::Node::load_or_init_transport_secret(&config.data_dir)
+                .map_err(|e| format!("transport secret: {}", e))?;
             let remote = crate::remote_signer::RemoteSigner::connect(
                 &sig_cfg.socket_path,
                 transport_secret,
@@ -609,8 +605,8 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                 if i >= args.len() {
                     return Err("--signer-pubkey requires a 33-byte hex".to_string());
                 }
-                let bytes = hex::decode(&args[i])
-                    .map_err(|e| format!("--signer-pubkey hex: {}", e))?;
+                let bytes =
+                    hex::decode(&args[i]).map_err(|e| format!("--signer-pubkey hex: {}", e))?;
                 signer_pubkey = Some(
                     bitcoin::secp256k1::PublicKey::from_slice(&bytes)
                         .map_err(|e| format!("--signer-pubkey: {}", e))?,
@@ -680,9 +676,8 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
                             hex.len()
                         ));
                     }
-                    let bytes = hex::decode(hex).map_err(|e| {
-                        format!("Invalid hex in {}: {}", auto.display(), e)
-                    })?;
+                    let bytes = hex::decode(hex)
+                        .map_err(|e| format!("Invalid hex in {}: {}", auto.display(), e))?;
                     let mut arr = [0u8; 32];
                     arr.copy_from_slice(&bytes);
                     tracing::info!("Using seed from {}", auto.display());
@@ -723,12 +718,10 @@ pub fn parse_config(args: &[String]) -> Result<NodeConfig, String> {
     // Both --signer-socket and --signer-pubkey must be supplied together,
     // or neither. Half-configured is a typo and should fail loudly.
     let signer = match (signer_socket, signer_pubkey) {
-        (Some(socket_path), Some(signer_pubkey)) => {
-            Some(crate::node::RemoteSignerConfig {
-                socket_path,
-                signer_pubkey,
-            })
-        }
+        (Some(socket_path), Some(signer_pubkey)) => Some(crate::node::RemoteSignerConfig {
+            socket_path,
+            signer_pubkey,
+        }),
         (None, None) => None,
         (Some(_), None) => {
             return Err("--signer-socket requires --signer-pubkey".to_string());
@@ -951,11 +944,7 @@ impl FeeScheduleArgs {
     /// accepts a fee schedule (`ledger open`, `ledger advertise`,
     /// `nostr request deposit_open`) sees the same flag set with the
     /// same names — no surface-specific aliases.
-    pub fn try_consume(
-        &mut self,
-        args: &[String],
-        i: &mut usize,
-    ) -> Result<bool, String> {
+    pub fn try_consume(&mut self, args: &[String], i: &mut usize) -> Result<bool, String> {
         if *i + 1 >= args.len() {
             return Ok(false);
         }
@@ -1237,8 +1226,7 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
             ledgers
                 .get(&ledger_id)
                 .map(|arc| {
-                    arc.read().unwrap().state.quorum_state
-                        == deposits_core::QuorumState::Active
+                    arc.read().unwrap().state.quorum_state == deposits_core::QuorumState::Active
                 })
                 .unwrap_or(false)
         };
@@ -1574,7 +1562,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
-                ..
+                    ..
                 } => (
                     "DisputeEnter",
                     format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),
@@ -1613,11 +1601,19 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 } => {
                     let pk_bytes = new_custodian.serialize();
                     let txid_hex = hex::encode(claim_txid);
-                    ("DisputeAcquire", format!("to:{:02x}{:02x}{:02x}{:02x}  claim_txid:{}..  reserves:{}..{}",
-                        pk_bytes[0], pk_bytes[1], pk_bytes[2], pk_bytes[3],
-                        &txid_hex[..8],
-                        &new_reserves_address[..10.min(new_reserves_address.len())],
-                        &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]))
+                    (
+                        "DisputeAcquire",
+                        format!(
+                            "to:{:02x}{:02x}{:02x}{:02x}  claim_txid:{}..  reserves:{}..{}",
+                            pk_bytes[0],
+                            pk_bytes[1],
+                            pk_bytes[2],
+                            pk_bytes[3],
+                            &txid_hex[..8],
+                            &new_reserves_address[..10.min(new_reserves_address.len())],
+                            &new_reserves_address[new_reserves_address.len().saturating_sub(6)..]
+                        ),
+                    )
                 }
                 LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
                 LedgerOperation::DeliveryEmbed {

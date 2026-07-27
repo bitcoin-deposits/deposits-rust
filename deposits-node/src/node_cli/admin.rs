@@ -128,9 +128,7 @@ async fn buffer_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             }
             _ => {
                 config_args.push(args[i].clone());
-                if args[i].starts_with("--")
-                    && i + 1 < args.len()
-                    && !args[i + 1].starts_with("--")
+                if args[i].starts_with("--") && i + 1 < args.len() && !args[i + 1].starts_with("--")
                 {
                     config_args.push(args[i + 1].clone());
                     i += 1;
@@ -174,7 +172,10 @@ async fn buffer_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         });
         let fill_result =
             send_admin_daemon_request(&config, "admin_buffer_fill", fill_params).await?;
-        if let Some(b) = fill_result.get("new_balance_msats").and_then(|v| v.as_u64()) {
+        if let Some(b) = fill_result
+            .get("new_balance_msats")
+            .and_then(|v| v.as_u64())
+        {
             println!();
             println!("Filled to {} sats ({} msats).", b / 1000, b);
         }
@@ -231,15 +232,18 @@ async fn buffer_fill_or_drain(
         .unwrap_or(0);
     println!(
         "{} buffer {}. New balance: {} sats ({} msats).",
-        verb, index, new_balance / 1000, new_balance
+        verb,
+        index,
+        new_balance / 1000,
+        new_balance
     );
     Ok(())
 }
 
 async fn buffer_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let config = parse_config(args)?;
-    let result = send_admin_daemon_request(&config, "admin_buffer_list", serde_json::json!({}))
-        .await?;
+    let result =
+        send_admin_daemon_request(&config, "admin_buffer_list", serde_json::json!({})).await?;
     let buffers = result
         .get("buffers")
         .and_then(|v| v.as_array())

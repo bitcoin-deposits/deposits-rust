@@ -115,8 +115,7 @@ impl BootstrapState {
     fn save(&self, dir: &Path) {
         let tmp = Self::path(dir).with_extension("json.tmp");
         if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&tmp, json)
-                .and_then(|_| std::fs::rename(&tmp, Self::path(dir)));
+            let _ = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, Self::path(dir)));
         }
     }
 }
@@ -140,10 +139,7 @@ pub fn persisted_esplora(dir: &Path) -> String {
 /// dashboard from the cluster bootstrap stood up, instead of waiting for each
 /// daemon to re-register over Nostr.
 pub fn persisted_node_ids(dir: &Path) -> Vec<(String, String)> {
-    BootstrapState::load(dir)
-        .node_ids
-        .into_iter()
-        .collect()
+    BootstrapState::load(dir).node_ids.into_iter().collect()
 }
 
 #[cfg(test)]
@@ -200,7 +196,12 @@ mod arg_persistence_tests {
         st.save(dir.path());
 
         let mut argv = dd(dir.path());
-        argv.extend(["--nodes".into(), "6".into(), "--relay".into(), "wss://new".into()]);
+        argv.extend([
+            "--nodes".into(),
+            "6".into(),
+            "--relay".into(),
+            "wss://new".into(),
+        ]);
         let args = parse_args(&argv).unwrap();
 
         assert_eq!(args.nodes, 6); // CLI wins
@@ -230,8 +231,14 @@ mod arg_persistence_tests {
         let mut argv = vec!["restart".to_string()];
         argv.extend(dd(dir.path()));
         let a = parse_args(&argv).unwrap();
-        assert_eq!(a.daemon_env.get("LDK_HOST").map(String::as_str), Some("10.0.0.1"));
-        assert_eq!(a.daemon_env.get("LDK_PORT").map(String::as_str), Some("3001"));
+        assert_eq!(
+            a.daemon_env.get("LDK_HOST").map(String::as_str),
+            Some("10.0.0.1")
+        );
+        assert_eq!(
+            a.daemon_env.get("LDK_PORT").map(String::as_str),
+            Some("3001")
+        );
 
         // CLI override for one key; the other persists.
         let mut argv = dd(dir.path());
@@ -242,8 +249,14 @@ mod arg_persistence_tests {
             "LDK_CLI=/usr/local/bin/ldk-server-cli".into(),
         ]);
         let a = parse_args(&argv).unwrap();
-        assert_eq!(a.daemon_env.get("LDK_PORT").map(String::as_str), Some("9999")); // CLI wins
-        assert_eq!(a.daemon_env.get("LDK_HOST").map(String::as_str), Some("10.0.0.1")); // persisted
+        assert_eq!(
+            a.daemon_env.get("LDK_PORT").map(String::as_str),
+            Some("9999")
+        ); // CLI wins
+        assert_eq!(
+            a.daemon_env.get("LDK_HOST").map(String::as_str),
+            Some("10.0.0.1")
+        ); // persisted
         assert_eq!(
             a.daemon_env.get("LDK_CLI").map(String::as_str),
             Some("/usr/local/bin/ldk-server-cli")
@@ -255,7 +268,12 @@ mod arg_persistence_tests {
     fn missing_relay_without_state_errors() {
         let dir = tempfile::tempdir().unwrap();
         let mut argv = dd(dir.path());
-        argv.extend(["--esplora".into(), "https://e".into(), "--node-bin".into(), "deposits-node".into()]);
+        argv.extend([
+            "--esplora".into(),
+            "https://e".into(),
+            "--node-bin".into(),
+            "deposits-node".into(),
+        ]);
         let err = parse_args(&argv).unwrap_err();
         assert!(err.contains("--relay"), "got: {}", err);
     }
@@ -334,7 +352,11 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
                 i += 1;
             }
             "--fee-rate" => {
-                fee_rate = Some(rest[i + 1].parse().map_err(|e| format!("--fee-rate: {}", e))?);
+                fee_rate = Some(
+                    rest[i + 1]
+                        .parse()
+                        .map_err(|e| format!("--fee-rate: {}", e))?,
+                );
                 i += 1;
             }
             "--node-bin" => {
@@ -358,9 +380,7 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
             // (LDK_CLI / LDK_HOST / LDK_PORT / LDK_API_KEY / LDK_TLS_CERT, or
             // LIGHTNING_BACKEND=lnd|cln + that backend's vars).
             "--daemon-env" => {
-                let kv = rest
-                    .get(i + 1)
-                    .ok_or("--daemon-env needs KEY=VALUE")?;
+                let kv = rest.get(i + 1).ok_or("--daemon-env needs KEY=VALUE")?;
                 let (k, v) = kv
                     .split_once('=')
                     .ok_or_else(|| format!("--daemon-env expects KEY=VALUE, got '{}'", kv))?;
@@ -419,8 +439,8 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
             "at least one --relay is required (run a full bootstrap once to record it)".into(),
         );
     }
-    let esplora = esplora
-        .ok_or("--esplora is required (run a full bootstrap once to record it)")?;
+    let esplora =
+        esplora.ok_or("--esplora is required (run a full bootstrap once to record it)")?;
     let node_bin = node_bin
         .or_else(|| std::env::var("DEPOSITS_NODE").ok().map(PathBuf::from))
         .or_else(|| {
@@ -450,7 +470,6 @@ pub fn parse_args(rest: &[String]) -> Result<BootstrapArgs, String> {
     })
 }
 
-
 /// Pull a bitcoin address out of CLI output that may be interleaved with
 /// tracing lines. Last plausible token wins.
 fn extract_address(out: &str) -> Option<String> {
@@ -468,7 +487,9 @@ fn extract_address(out: &str) -> Option<String> {
 }
 
 fn dirs_home() -> PathBuf {
-    std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."))
+    std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("."))
 }
 
 fn node_name(i: u32) -> String {
@@ -561,7 +582,9 @@ fn reset(rest: &[String]) -> Result<(), String> {
     while i < rest.len() {
         match rest[i].as_str() {
             "--data-dir" => {
-                data_dir = Some(PathBuf::from(rest.get(i + 1).ok_or("--data-dir needs a value")?));
+                data_dir = Some(PathBuf::from(
+                    rest.get(i + 1).ok_or("--data-dir needs a value")?,
+                ));
                 i += 1;
             }
             "--force" => force = true,
@@ -633,18 +656,27 @@ fn reset(rest: &[String]) -> Result<(), String> {
                  The next bootstrap will reuse these keys. To wipe the seed too, \
                  re-run with --force (only if no real funds depend on it).",
                 seed.display(),
-                if network.is_empty() { "unknown" } else { &network }
+                if network.is_empty() {
+                    "unknown"
+                } else {
+                    &network
+                }
             );
         }
     }
 
-    println!("reset: done — next `bootstrap` on {} starts clean", data_dir.display());
+    println!(
+        "reset: done — next `bootstrap` on {} starts clean",
+        data_dir.display()
+    );
     Ok(())
 }
 
 async fn esplora_get(esplora: &str, path: &str) -> Result<String, String> {
     let url = format!("{}{}", esplora.trim_end_matches('/'), path);
-    let resp = reqwest::get(&url).await.map_err(|e| format!("GET {}: {}", url, e))?;
+    let resp = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("GET {}: {}", url, e))?;
     if !resp.status().is_success() {
         return Err(format!("GET {} -> {}", url, resp.status()));
     }
@@ -759,9 +791,7 @@ pub async fn treasury(rest: &[String]) -> Result<(), String> {
         (!e.is_empty()).then_some(e)
     });
     let Some(esplora) = esplora else {
-        println!(
-            "(no --esplora given and none recorded in bootstrap-state.json; balance unknown)"
-        );
+        println!("(no --esplora given and none recorded in bootstrap-state.json; balance unknown)");
         return Ok(());
     };
 
@@ -808,7 +838,10 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     println!("       — node binary {}", args.node_bin.display());
     match node_binary_version(&args.node_bin) {
         Ok(v) => println!("       — {}", v),
-        Err(e) => println!("       — WARNING: could not read node binary version: {}", e),
+        Err(e) => println!(
+            "       — WARNING: could not read node binary version: {}",
+            e
+        ),
     }
 
     let master = state::HubState::load_or_init_master_seed(&args.data_dir)
@@ -844,7 +877,10 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     st.save(&args.data_dir);
 
     // ── Phase 1: seeds ──────────────────────────────────────────────────
-    println!("[1/7] seeds — deriving treasury + {} node keys from hub-master-seed", args.nodes);
+    println!(
+        "[1/7] seeds — deriving treasury + {} node keys from hub-master-seed",
+        args.nodes
+    );
     let treasury_dir = args.data_dir.join("bootstrap-treasury");
     std::fs::create_dir_all(&treasury_dir).map_err(|e| e.to_string())?;
     let t_seed = state::derive_signer_seed(&master, TREASURY_INDEX)
@@ -929,8 +965,11 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     // reads 0 confirmed and a naive funding poll would wait forever for
     // money that's already downstream.
     if st.disbursement_txid.is_some() {
-        println!("[3/7] funding — already disbursed ({}), skipping",
-            &st.disbursement_txid.as_deref().unwrap_or("")[..16.min(st.disbursement_txid.as_deref().unwrap_or("").len())]);
+        println!(
+            "[3/7] funding — already disbursed ({}), skipping",
+            &st.disbursement_txid.as_deref().unwrap_or("")
+                [..16.min(st.disbursement_txid.as_deref().unwrap_or("").len())]
+        );
     } else {
         let required_sats = args.per_ledger_sats * args.nodes as u64
             + disbursement_fee_sats(args.nodes, args.fee_rate);
@@ -949,7 +988,11 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
             st.save(&args.data_dir);
         }
         let treasury_addr = st.treasury_address.clone().unwrap();
-        println!("[3/7] funding — send AT LEAST {} sats ({:.8} BTC) to:", required_sats, required_sats as f64 / 1e8);
+        println!(
+            "[3/7] funding — send AT LEAST {} sats ({:.8} BTC) to:",
+            required_sats,
+            required_sats as f64 / 1e8
+        );
         println!();
         println!("    {}", treasury_addr);
         println!();
@@ -1024,7 +1067,8 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
                         restart_daemon(&args, i)?;
                         // Give the fresh daemon time to connect + subscribe.
                         tokio::time::sleep(Duration::from_secs(15)).await;
-                        out = node_cli(&args, &seed_file_for(&dir), &dir, &name, &build_cmd()).await;
+                        out =
+                            node_cli(&args, &seed_file_for(&dir), &dir, &name, &build_cmd()).await;
                         attempts += 1;
                     }
                     Err(_) => break,
@@ -1035,18 +1079,26 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
                 .lines()
                 .find_map(|l| l.split("Ledger ID:").nth(1))
                 .map(|s| s.trim().to_string())
-                .ok_or_else(|| format!("{}: no Ledger ID in `ledger open` output:\n{}", name, out))?;
+                .ok_or_else(|| {
+                    format!("{}: no Ledger ID in `ledger open` output:\n{}", name, out)
+                })?;
             println!("  {} ledger {}…", name, &lid[..16.min(lid.len())]);
             st.ledgers.insert(name.clone(), lid);
             st.save(&args.data_dir);
         }
         if !st.ledger_addresses.contains_key(&name) {
             let lid = st.ledgers[&name].clone();
-            let out =
-                node_cli(&args, &seed_file_for(&dir), &dir, &name, &["ledger", "address", &lid])
-                    .await?;
-            let addr = extract_address(&out)
-                .ok_or_else(|| format!("{}: no address in `ledger address` output:\n{}", name, out))?;
+            let out = node_cli(
+                &args,
+                &seed_file_for(&dir),
+                &dir,
+                &name,
+                &["ledger", "address", &lid],
+            )
+            .await?;
+            let addr = extract_address(&out).ok_or_else(|| {
+                format!("{}: no address in `ledger address` output:\n{}", name, out)
+            })?;
             st.ledger_addresses.insert(name, addr);
             st.save(&args.data_dir);
         }
@@ -1059,7 +1111,8 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
             .map(|i| {
                 format!(
                     "{}:{}",
-                    st.ledger_addresses[&node_name(i)], args.per_ledger_sats
+                    st.ledger_addresses[&node_name(i)],
+                    args.per_ledger_sats
                 )
             })
             .collect();
@@ -1287,7 +1340,10 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
                     name
                 );
             }
-            Err(e) => println!("  {} begin returned '{}' — polling for Active anyway", name, e),
+            Err(e) => println!(
+                "  {} begin returned '{}' — polling for Active anyway",
+                name, e
+            ),
         }
     }
 
@@ -1352,18 +1408,23 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
     }
 
     println!();
-    println!("bootstrap complete: {} nodes, {} ledgers, Q={}", args.nodes, args.nodes, Q);
+    println!(
+        "bootstrap complete: {} nodes, {} ledgers, Q={}",
+        args.nodes, args.nodes, Q
+    );
     for i in 0..args.nodes {
         let name = node_name(i);
         // Display handle derives from the Node ID — same words on every
         // surface, no naming coordination (the dir name nodeN is just a
         // filesystem detail).
-        let display =
-            deposits_protocol::display_name::pubkey_display_name_hex(&st.node_ids[&name]);
+        let display = deposits_protocol::display_name::pubkey_display_name_hex(&st.node_ids[&name]);
         println!("  {}  {}  ledger {}", name, display, st.ledgers[&name]);
     }
-    println!("on-chain: 1 funding tx + 1 disbursement ({}) + {} activations",
-        st.disbursement_txid.as_deref().unwrap_or("?"), args.nodes);
+    println!(
+        "on-chain: 1 funding tx + 1 disbursement ({}) + {} activations",
+        st.disbursement_txid.as_deref().unwrap_or("?"),
+        args.nodes
+    );
     Ok(())
 }
 

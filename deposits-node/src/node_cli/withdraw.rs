@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::parse_config;
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use crate::Node;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use std::str::FromStr;
 
 /// Handle withdraw subcommands
@@ -122,8 +122,8 @@ async fn withdraw_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
         witness: deposits_core::types::DescriptorWitness::new(),
         commitment: None,
     };
-    let signed = deposits_core::signing::sign_op(proto, &secret_key)
-        .ok_or("OnchainLock failed to sign")?;
+    let signed =
+        deposits_core::signing::sign_op(proto, &secret_key).ok_or("OnchainLock failed to sign")?;
     let depositor_witness = match &signed {
         deposits_core::messages::LedgerOperation::OnchainLock { witness, .. } => witness.clone(),
         _ => unreachable!(),

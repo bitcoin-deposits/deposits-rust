@@ -67,9 +67,8 @@ pub fn ensure_token(data_dir: &Path) -> Result<String, Error> {
             .map_err(|e| Error::Wallet(format!("read admin-token {}: {}", path.display(), e)))?;
         return Ok(s.trim().to_string());
     }
-    std::fs::create_dir_all(data_dir).map_err(|e| {
-        Error::Wallet(format!("create data_dir {}: {}", data_dir.display(), e))
-    })?;
+    std::fs::create_dir_all(data_dir)
+        .map_err(|e| Error::Wallet(format!("create data_dir {}: {}", data_dir.display(), e)))?;
     let mut buf = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut buf);
     let token = hex::encode(buf);
@@ -106,7 +105,10 @@ pub async fn serve(config: AdminConfig, node: Arc<Node>) -> Result<(), Error> {
             "/candidate-queue",
             get(get_candidate_queue).post(post_candidate_queue),
         )
-        .route("/candidate-queue/:pubkey", delete(delete_candidate_queue_entry))
+        .route(
+            "/candidate-queue/:pubkey",
+            delete(delete_candidate_queue_entry),
+        )
         .route("/liquidity-drips", get(get_liquidity_drips))
         .with_state(node)
         .route_layer(middleware::from_fn_with_state(
@@ -207,12 +209,7 @@ async fn get_ledgers(State(node): State<Arc<Node>>) -> Json<Vec<LedgerSummary>> 
     for (ledger_id, arc) in ledgers.iter() {
         let l = arc.read().unwrap();
         let is_ours = l.operator_key() == node.node_id;
-        let deposits_total: u128 = l
-            .state
-            .deposits
-            .values()
-            .map(|d| d.balance as u128)
-            .sum();
+        let deposits_total: u128 = l.state.deposits.values().map(|d| d.balance as u128).sum();
         out.push(LedgerSummary {
             ledger_id: ledger_id.clone(),
             role: if is_ours { "operator" } else { "partner" },
@@ -435,7 +432,11 @@ async fn get_activity(State(node): State<Arc<Node>>) -> Json<Vec<ActivityEntry>>
         }
     }
     // Newest first across ledgers.
-    out.sort_by(|a, b| b.block_height.cmp(&a.block_height).then(b.sequence.cmp(&a.sequence)));
+    out.sort_by(|a, b| {
+        b.block_height
+            .cmp(&a.block_height)
+            .then(b.sequence.cmp(&a.sequence))
+    });
     out.truncate(100);
     Json(out)
 }
@@ -626,11 +627,8 @@ struct DripPlanView {
     stage: &'static str,
 }
 
-async fn get_liquidity_drips(
-    State(node): State<Arc<Node>>,
-) -> Json<Vec<DripPlanView>> {
-    let registry = crate::operator_drips::DripRegistry::load(node.data_dir())
-        .unwrap_or_default();
+async fn get_liquidity_drips(State(node): State<Arc<Node>>) -> Json<Vec<DripPlanView>> {
+    let registry = crate::operator_drips::DripRegistry::load(node.data_dir()).unwrap_or_default();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

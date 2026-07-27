@@ -106,13 +106,12 @@ impl Node {
         // reach threshold. `recovery_voters_from_updates` is the SAME
         // canonical derivation the on-chain confiscation voter set uses.
         let (recovery_voters_xonly, _threshold) =
-            crate::node::dispute::recovery_voters_from_updates(&all_updates)
-                .ok_or_else(|| {
-                    Error::Protocol(
-                        "cannot derive recovery quorum: no canonical QuorumBegin in history"
-                            .to_string(),
-                    )
-                })?;
+            crate::node::dispute::recovery_voters_from_updates(&all_updates).ok_or_else(|| {
+                Error::Protocol(
+                    "cannot derive recovery quorum: no canonical QuorumBegin in history"
+                        .to_string(),
+                )
+            })?;
         let recovery_xonly: std::collections::HashSet<_> =
             recovery_voters_xonly.iter().copied().collect();
         // Map the canonical x-only voters back to the full compressed pubkeys
@@ -120,18 +119,23 @@ impl Node {
         // QuorumMemberRef carry 33-byte keys. Always include our own key.
         let mut quorum_members: Vec<PublicKey> = Vec::new();
         let mut seen: std::collections::HashSet<[u8; 33]> = std::collections::HashSet::new();
-        let mut consider = |pk: PublicKey, out: &mut Vec<PublicKey>, seen: &mut std::collections::HashSet<[u8; 33]>| {
-            if pk == our_pubkey || recovery_xonly.contains(&pk.x_only_public_key().0) {
-                if seen.insert(pk.serialize()) {
-                    out.push(pk);
+        let mut consider =
+            |pk: PublicKey,
+             out: &mut Vec<PublicKey>,
+             seen: &mut std::collections::HashSet<[u8; 33]>| {
+                if pk == our_pubkey || recovery_xonly.contains(&pk.x_only_public_key().0) {
+                    if seen.insert(pk.serialize()) {
+                        out.push(pk);
+                    }
                 }
-            }
-        };
+            };
         consider(our_pubkey, &mut quorum_members, &mut seen);
         for update in &all_updates {
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                 match op {
-                    LedgerOperation::QuorumBegin { quorum_members: qm, .. } => {
+                    LedgerOperation::QuorumBegin {
+                        quorum_members: qm, ..
+                    } => {
                         for m in qm {
                             consider(m.pubkey, &mut quorum_members, &mut seen);
                         }
@@ -203,11 +207,8 @@ impl Node {
         // will route through the active ruleset's factory once
         // QuorumBegin carries `protocol_version`.
         let _ = quorum_expiry;
-        let tapscript_builder = TapscriptReservesBuilder::with_defaults(
-            voter_set,
-            self.wallet.network(),
-            ledger_hash,
-        );
+        let tapscript_builder =
+            TapscriptReservesBuilder::with_defaults(voter_set, self.wallet.network(), ledger_hash);
 
         let taproot_output = tapscript_builder
             .build()
@@ -311,10 +312,12 @@ impl Node {
             ledger_hash,
             quorum_members: quorum_members
                 .iter()
-                .map(|pk| deposits_core::messages::QuorumMemberRef::new(
-                    *pk,
-                    member_ledger_ids.get(pk).cloned().unwrap_or_default(),
-                ))
+                .map(|pk| {
+                    deposits_core::messages::QuorumMemberRef::new(
+                        *pk,
+                        member_ledger_ids.get(pk).cloned().unwrap_or_default(),
+                    )
+                })
                 .collect(),
             collateral_amount: collateral_msats,
             protocol_version: None,
@@ -1223,9 +1226,8 @@ impl Node {
                 .reserves_amount
                 .saturating_add(l.state.collateral_amount);
             if prev_total > 0 {
-                let collateral =
-                    (l.state.collateral_amount as u128 * total_msats as u128 / prev_total as u128)
-                        as u64;
+                let collateral = (l.state.collateral_amount as u128 * total_msats as u128
+                    / prev_total as u128) as u64;
                 (total_msats.saturating_sub(collateral), collateral)
             } else {
                 // Defensive: no prior amounts to anchor a ratio.
@@ -1341,15 +1343,16 @@ impl Node {
 
         // Build the *new* Taproot output (rotated keys). This is what the
         // refresh rotates *to*.
-        let new_others: Vec<PublicKey> =
-            new_members.iter().filter(|pk| **pk != operator_key).copied().collect();
+        let new_others: Vec<PublicKey> = new_members
+            .iter()
+            .filter(|pk| **pk != operator_key)
+            .copied()
+            .collect();
         let new_voter_set = VoterSet::new(operator_key, new_others);
         let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(new_ruleset_name));
         let new_first_expiry = *new_expiries.iter().min().unwrap_or(&0);
-        let new_config = (ruleset.tier_config_factory)(
-            new_voter_set.all_voters().len(),
-            new_first_expiry,
-        );
+        let new_config =
+            (ruleset.tier_config_factory)(new_voter_set.all_voters().len(), new_first_expiry);
         let new_taproot_output = TapscriptReservesBuilder::new(
             new_voter_set,
             new_config,
@@ -1370,8 +1373,7 @@ impl Node {
             .copied()
             .collect();
         let cur_voter_set = VoterSet::new(existing.operator, cur_voters_others);
-        let cur_ruleset =
-            deposits_core::ruleset::resolve_or_legacy(Some(&existing.ruleset_name));
+        let cur_ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&existing.ruleset_name));
         let cur_config = (cur_ruleset.tier_config_factory)(
             cur_voter_set.all_voters().len(),
             existing.quorum_expiry,
@@ -1387,7 +1389,8 @@ impl Node {
         // of the operator key, handled by `operator_alone` below.
         let current_height = self.wallet.get_block_height().unwrap_or(0);
         let (tier_index, tier) = {
-            let mut chosen: Option<(usize, deposits_core::tapscript_reserves::ThresholdTier)> = None;
+            let mut chosen: Option<(usize, deposits_core::tapscript_reserves::ThresholdTier)> =
+                None;
             for (idx, t) in cur_config.tiers.iter().enumerate() {
                 if current_height < t.timelock_blocks {
                     continue; // CLTV not yet satisfied
@@ -1419,11 +1422,9 @@ impl Node {
             lock_time: tier_lock_time,
         };
         let prev_script_pubkey = existing.taproot_output.script_pubkey();
-        let rotation_tx = ReservesSpendBuilder::build_spend_transaction(
-            &params,
-            &prev_script_pubkey,
-        )
-        .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
+        let rotation_tx =
+            ReservesSpendBuilder::build_spend_transaction(&params, &prev_script_pubkey)
+                .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
         let new_amount = rotation_tx.output[0].value.to_sat();
         let new_txid = rotation_tx.compute_txid();
 
@@ -1524,120 +1525,122 @@ impl Node {
         // Poll relay for responses tagged with our request_id (skip for
         // operator-alone path).
         if !operator_alone {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-        let active_set: std::collections::HashSet<PublicKey> =
-            existing.quorum_members.iter().copied().collect();
-        while std::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+            let active_set: std::collections::HashSet<PublicKey> =
+                existing.quorum_members.iter().copied().collect();
+            while std::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            let since = nostr_sdk::Timestamp::now() - 120;
-            let filter = Filter::new()
-                .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
-                .since(since);
-            // Responses are KIND_LEDGER_RESPONSE (ephemeral 20102); they
-            // arrive on the fast (main) relay, not the slow/durable one.
-            // Using fetch_client() would silently miss every response.
-            let events = self
-                .nostr
-                .client()
-                .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
-                .await
-                .map_err(|e| Error::Protocol(format!("fetch rotation_sign responses: {}", e)))?;
+                let since = nostr_sdk::Timestamp::now() - 120;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
+                    .since(since);
+                // Responses are KIND_LEDGER_RESPONSE (ephemeral 20102); they
+                // arrive on the fast (main) relay, not the slow/durable one.
+                // Using fetch_client() would silently miss every response.
+                let events = self
+                    .nostr
+                    .client()
+                    .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                    .await
+                    .map_err(|e| {
+                        Error::Protocol(format!("fetch rotation_sign responses: {}", e))
+                    })?;
 
-            for event in events.iter() {
-                let mut matches_request = false;
-                for tag in event.tags.iter() {
-                    if tag.kind()
-                        == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
-                    {
-                        if let Some(v) = tag.content() {
-                            if v == request_id {
-                                matches_request = true;
-                                break;
+                for event in events.iter() {
+                    let mut matches_request = false;
+                    for tag in event.tags.iter() {
+                        if tag.kind()
+                            == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
+                        {
+                            if let Some(v) = tag.content() {
+                                if v == request_id {
+                                    matches_request = true;
+                                    break;
+                                }
                             }
                         }
                     }
-                }
-                if !matches_request {
-                    continue;
-                }
-                let resp: crate::nostr::LedgerResponse =
-                    match serde_json::from_str(&event.content) {
-                        Ok(r) => r,
+                    if !matches_request {
+                        continue;
+                    }
+                    let resp: crate::nostr::LedgerResponse =
+                        match serde_json::from_str(&event.content) {
+                            Ok(r) => r,
+                            Err(_) => continue,
+                        };
+                    if !resp.success {
+                        tracing::info!(
+                            "auto_rotation: cosigner refused: {}",
+                            resp.error
+                                .clone()
+                                .unwrap_or_else(|| "no reason".to_string())
+                        );
+                        continue;
+                    }
+                    let result = match resp.result.as_ref() {
+                        Some(r) => r,
+                        None => continue,
+                    };
+                    let signer_hex = match result.get("signer").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let sig_hex = match result.get("signature").and_then(|v| v.as_str()) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let signer_pk: PublicKey = match signer_hex.parse() {
+                        Ok(pk) => pk,
                         Err(_) => continue,
                     };
-                if !resp.success {
+                    if !active_set.contains(&signer_pk) {
+                        continue; // ignore non-members
+                    }
+                    if sigs.contains_key(&signer_pk) {
+                        continue;
+                    }
+                    let sig_bytes = match hex::decode(sig_hex) {
+                        Ok(b) if b.len() == 64 => b,
+                        _ => continue,
+                    };
+                    let mut arr = [0u8; 64];
+                    arr.copy_from_slice(&sig_bytes);
+                    sigs.insert(signer_pk, arr);
                     tracing::info!(
-                        "auto_rotation: cosigner refused: {}",
-                        resp.error.clone().unwrap_or_else(|| "no reason".to_string())
+                        "auto_rotation: collected sig from {}... ({}/{})",
+                        &signer_pk.to_string()[..16],
+                        sigs.len() - 1, // exclude operator
+                        cosigner_threshold
                     );
-                    continue;
                 }
-                let result = match resp.result.as_ref() {
-                    Some(r) => r,
-                    None => continue,
-                };
-                let signer_hex = match result.get("signer").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let sig_hex = match result.get("signature").and_then(|v| v.as_str()) {
-                    Some(s) => s,
-                    None => continue,
-                };
-                let signer_pk: PublicKey = match signer_hex.parse() {
-                    Ok(pk) => pk,
-                    Err(_) => continue,
-                };
-                if !active_set.contains(&signer_pk) {
-                    continue; // ignore non-members
-                }
-                if sigs.contains_key(&signer_pk) {
-                    continue;
-                }
-                let sig_bytes = match hex::decode(sig_hex) {
-                    Ok(b) if b.len() == 64 => b,
-                    _ => continue,
-                };
-                let mut arr = [0u8; 64];
-                arr.copy_from_slice(&sig_bytes);
-                sigs.insert(signer_pk, arr);
-                tracing::info!(
-                    "auto_rotation: collected sig from {}... ({}/{})",
-                    &signer_pk.to_string()[..16],
-                    sigs.len() - 1, // exclude operator
-                    cosigner_threshold
-                );
-            }
 
-            // We need majority of all voters (operator + cosigners). The
-            // operator already signed; check we have ≥ cosigner_threshold
-            // from cosigners.
-            if sigs.len() - 1 >= cosigner_threshold {
-                break;
+                // We need majority of all voters (operator + cosigners). The
+                // operator already signed; check we have ≥ cosigner_threshold
+                // from cosigners.
+                if sigs.len() - 1 >= cosigner_threshold {
+                    break;
+                }
             }
-        }
-        tracing::info!(
-            "auto_rotation: polling exited for request {} — {} cosigner sigs collected",
-            &request_id[..16.min(request_id.len())],
-            sigs.len() - 1
-        );
-        if sigs.len() - 1 < cosigner_threshold {
-            return Err(Error::Protocol(format!(
-                "rotation cosign timeout: got {}/{} cosigner sigs",
-                sigs.len() - 1,
-                cosigner_threshold
-            )));
-        }
+            tracing::info!(
+                "auto_rotation: polling exited for request {} — {} cosigner sigs collected",
+                &request_id[..16.min(request_id.len())],
+                sigs.len() - 1
+            );
+            if sigs.len() - 1 < cosigner_threshold {
+                return Err(Error::Protocol(format!(
+                    "rotation cosign timeout: got {}/{} cosigner sigs",
+                    sigs.len() - 1,
+                    cosigner_threshold
+                )));
+            }
         } // end if !operator_alone
 
         // Assemble the witness, shape depending on the tier we picked.
         let control_block = existing
             .taproot_output
             .control_block_for_tier(tier_index)
-            .ok_or_else(|| {
-                Error::Protocol(format!("no control block for tier {}", tier_index))
-            })?;
+            .ok_or_else(|| Error::Protocol(format!("no control block for tier {}", tier_index)))?;
 
         let mut witness = Witness::new();
         if operator_alone {
@@ -2226,7 +2229,10 @@ impl Node {
             if let Some(npub) = content.get("allowlist_npub").and_then(|v| v.as_str()) {
                 let npub_lower = npub.to_lowercase();
                 if allowed_pubkeys.contains(&npub_lower) {
-                    return Some(format!("allowlist_npub={}", &npub_lower[..16.min(npub_lower.len())]));
+                    return Some(format!(
+                        "allowlist_npub={}",
+                        &npub_lower[..16.min(npub_lower.len())]
+                    ));
                 }
             }
 
@@ -2791,10 +2797,7 @@ impl Node {
     /// the same (`next_quorum_members` first, else active) order
     /// `rotate_reserves_to_quorum` uses to build the activation tx. Used by
     /// the `recovery adopt-vault` path to re-derive a lost taproot record.
-    pub fn quorum_snapshot(
-        &self,
-        ledger_id: &str,
-    ) -> Result<(Vec<PublicKey>, [u8; 32]), Error> {
+    pub fn quorum_snapshot(&self, ledger_id: &str) -> Result<(Vec<PublicKey>, [u8; 32]), Error> {
         let ledgers = self.handler.ledgers.lock().unwrap();
         let l = ledgers
             .get(ledger_id)

@@ -64,7 +64,7 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
         spending_txid: [0u8; 32],
         new_outpoint_txid: [0xAA; 32],
         new_outpoint_vout: 0,
-        amount: 1_000_000_000,        // msats
+        amount: 1_000_000_000, // msats
         quorum_expiry: 900_000,
         ledger_hash: [0u8; 32],
         quorum_members: staged_pks
@@ -189,7 +189,9 @@ fn first_quorum_begin_with_insufficient_cosigs_is_rejected() {
     // Directly exercise verify_cosign_signatures the way the validator does.
     let staged: Vec<PublicKey> = [m1_pk, m2_pk, m3_pk].to_vec();
     let threshold = staged.len() / 2 + 1; // 2
-    let err = update.verify_cosign_signatures(&staged, threshold).unwrap_err();
+    let err = update
+        .verify_cosign_signatures(&staged, threshold)
+        .unwrap_err();
     assert!(
         err.contains("Insufficient cosignatures"),
         "expected insufficient-cosigs error, got: {}",
@@ -215,7 +217,9 @@ fn first_quorum_begin_with_nonmember_cosig_is_rejected() {
 
     let staged = vec![m1_pk, m2_pk];
     let threshold = 2;
-    let err = update.verify_cosign_signatures(&staged, threshold).unwrap_err();
+    let err = update
+        .verify_cosign_signatures(&staged, threshold)
+        .unwrap_err();
     assert!(
         err.contains("not in quorum"),
         "expected not-in-quorum error, got: {}",
@@ -245,9 +249,9 @@ fn first_quorum_begin_with_majority_cosigs_is_accepted() {
 
     let staged = vec![m1_pk, m2_pk, m3_pk];
     let threshold = staged.len() / 2 + 1; // 2
-    update.verify_cosign_signatures(&staged, threshold).expect(
-        "majority staged-member cosigs should verify for first QuorumBegin",
-    );
+    update
+        .verify_cosign_signatures(&staged, threshold)
+        .expect("majority staged-member cosigs should verify for first QuorumBegin");
 }
 
 // =========================================================================
@@ -267,9 +271,7 @@ fn quorum_begin_with_empty_staged_set_is_rejected_by_validator() {
     // Either empty_quorum fires, or (more likely) an earlier signature check
     // fails first. We just want to assert acceptance is impossible.
     assert!(
-        s.contains("empty_quorum")
-            || s.contains("signature")
-            || s.contains("invalid_signature"),
+        s.contains("empty_quorum") || s.contains("signature") || s.contains("invalid_signature"),
         "expected rejection, got: {}",
         s
     );

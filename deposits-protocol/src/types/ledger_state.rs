@@ -409,9 +409,7 @@ impl LedgerState {
                 if chosen_ruleset != default_ruleset_name() {
                     let unsupported: Vec<String> = promoted
                         .iter()
-                        .filter(|m| {
-                            !m.supported_rulesets.iter().any(|s| s == &chosen_ruleset)
-                        })
+                        .filter(|m| !m.supported_rulesets.iter().any(|s| s == &chosen_ruleset))
                         .map(|m| hex::encode(m.pubkey.serialize()))
                         .collect();
                     if !unsupported.is_empty() {
@@ -674,7 +672,9 @@ impl LedgerState {
             }
             LedgerOperation::OnchainFail {
                 withdrawal_id,
-                deposit_id, .. } => {
+                deposit_id,
+                ..
+            } => {
                 // Ensure the named deposit exists (mirrors prior behavior).
                 next.deposits
                     .get(deposit_id)
@@ -728,7 +728,9 @@ impl LedgerState {
             LedgerOperation::FeeCollect {
                 deposit_id,
                 amount,
-                block_height, .. } => {
+                block_height,
+                ..
+            } => {
                 if let Some(deposit) = next.deposits.get_mut(deposit_id) {
                     if let Some((new_fees, effective)) = deposit.pending_fee_change.take() {
                         if *block_height >= effective {
@@ -1010,8 +1012,7 @@ impl LedgerState {
         current_height: u32,
     ) -> crate::DepositsResult<(Self, Vec<ConformanceViolation>)> {
         let next = self.apply(operation)?;
-        let violations =
-            next.check_conformance(operation, Some(self), authorizer, current_height);
+        let violations = next.check_conformance(operation, Some(self), authorizer, current_height);
         Ok((next, violations))
     }
 
@@ -1057,23 +1058,75 @@ impl LedgerState {
             }
         };
         match &mut op {
-            Op::DepositOpen { deposit_id, commitment, .. }
-            | Op::DepositClose { deposit_id, commitment, .. }
-            | Op::FeeCollect { deposit_id, commitment, .. }
-            | Op::InvoiceCredit { deposit_id, commitment, .. }
-            | Op::InvoiceLock { deposit_id, commitment, .. }
-            | Op::InvoiceFail { deposit_id, commitment, .. }
-            | Op::InvoiceFulfill { deposit_id, commitment, .. }
-            | Op::OnchainCredit { deposit_id, commitment, .. }
-            | Op::OnchainLock { deposit_id, commitment, .. }
-            | Op::OnchainFail { deposit_id, commitment, .. }
-            | Op::OnchainFulfill { deposit_id, commitment, .. } => {
+            Op::DepositOpen {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::DepositClose {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::FeeCollect {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::InvoiceCredit {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::InvoiceLock {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::InvoiceFail {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::InvoiceFulfill {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::OnchainCredit {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::OnchainLock {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::OnchainFail {
+                deposit_id,
+                commitment,
+                ..
+            }
+            | Op::OnchainFulfill {
+                deposit_id,
+                commitment,
+                ..
+            } => {
                 *commitment = Some(pair(deposit_id));
             }
-            Op::TransferLock { source_deposit_id, commitment, .. } => {
+            Op::TransferLock {
+                source_deposit_id,
+                commitment,
+                ..
+            } => {
                 *commitment = Some(pair(source_deposit_id));
             }
-            Op::TransferFail { transfer_id, commitment, .. } => {
+            Op::TransferFail {
+                transfer_id,
+                commitment,
+                ..
+            } => {
                 if let Some(pt) = self.pending_transfers.get(transfer_id) {
                     *commitment = Some(pair(&pt.source_deposit_id));
                 }
@@ -1255,7 +1308,8 @@ impl LedgerState {
                 ..
             }) = LedgerOperation::tlv_decode(&update.message)
             {
-                let derived = Self::compute_ledger_id(&update.operator_id, &reserves_id, genesis_block);
+                let derived =
+                    Self::compute_ledger_id(&update.operator_id, &reserves_id, genesis_block);
                 if derived != update.ledger_id {
                     return Err(crate::DepositsError::ProtocolViolation {
                         violation_type: "ledger_id_derivation".to_string(),
@@ -1318,9 +1372,7 @@ impl LedgerState {
         current_height: u32,
     ) -> Vec<ConformanceViolation> {
         match self.apply(operation) {
-            Ok(next) => {
-                next.check_conformance(operation, Some(self), authorizer, current_height)
-            }
+            Ok(next) => next.check_conformance(operation, Some(self), authorizer, current_height),
             Err(e) => vec![ConformanceViolation::StateMachineRejected {
                 detail: format!("{:?}", e),
             }],
@@ -1422,18 +1474,40 @@ impl LedgerState {
         // (it's available on every apply_with_verifier* / apply_signed* path).
         if let Some(pre) = pre_state {
             let (op_name, deposit_id, op_nonce, op_expiry) = match operation {
-                LedgerOperation::InvoiceLock { deposit_id, nonce, expiry, .. } => {
-                    ("InvoiceLock", Some(deposit_id), Some(*nonce), Some(*expiry))
-                }
-                LedgerOperation::OnchainLock { deposit_id, nonce, expiry, .. } => {
-                    ("OnchainLock", Some(deposit_id), Some(*nonce), Some(*expiry))
-                }
-                LedgerOperation::TransferLock { source_deposit_id, nonce, expiry, .. } => {
-                    ("TransferLock", Some(source_deposit_id), Some(*nonce), Some(*expiry))
-                }
-                LedgerOperation::DepositKeyRotate { deposit_id, nonce, expiry, .. } => {
-                    ("DepositKeyRotate", Some(deposit_id), Some(*nonce), Some(*expiry))
-                }
+                LedgerOperation::InvoiceLock {
+                    deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => ("InvoiceLock", Some(deposit_id), Some(*nonce), Some(*expiry)),
+                LedgerOperation::OnchainLock {
+                    deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => ("OnchainLock", Some(deposit_id), Some(*nonce), Some(*expiry)),
+                LedgerOperation::TransferLock {
+                    source_deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => (
+                    "TransferLock",
+                    Some(source_deposit_id),
+                    Some(*nonce),
+                    Some(*expiry),
+                ),
+                LedgerOperation::DepositKeyRotate {
+                    deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => (
+                    "DepositKeyRotate",
+                    Some(deposit_id),
+                    Some(*nonce),
+                    Some(*expiry),
+                ),
                 _ => ("", None, None, None),
             };
             if let (Some(deposit_id), Some(op_nonce), Some(op_expiry)) =
@@ -1450,12 +1524,13 @@ impl LedgerState {
                 }
                 // (b) Replay check, with lazy GC.
                 if let Some(prev_deposit) = pre.deposits.get(deposit_id) {
-                    let nonce_replayed = prev_deposit
-                        .seen_nonces
-                        .iter()
-                        .any(|(seen_nonce, seen_expiry)| {
-                            *seen_expiry >= current_height && *seen_nonce == op_nonce
-                        });
+                    let nonce_replayed =
+                        prev_deposit
+                            .seen_nonces
+                            .iter()
+                            .any(|(seen_nonce, seen_expiry)| {
+                                *seen_expiry >= current_height && *seen_nonce == op_nonce
+                            });
                     if nonce_replayed {
                         violations.push(ConformanceViolation::NonceReplay {
                             operation: op_name,
@@ -1509,7 +1584,9 @@ impl LedgerState {
         if let LedgerOperation::FeeCollect {
             deposit_id,
             amount,
-            block_height, .. } = operation
+            block_height,
+            ..
+        } = operation
         {
             if let Some(pre) = pre_state {
                 if let Some(deposit) = pre.deposits.get(deposit_id) {
@@ -1611,7 +1688,9 @@ impl LedgerState {
                     }
                 }
             }
-            LedgerOperation::TransferLock { source_deposit_id, .. } => {
+            LedgerOperation::TransferLock {
+                source_deposit_id, ..
+            } => {
                 // Look up descriptor from the state BEFORE this operation was applied.
                 // Since apply() already consumed the balance, we check against current state
                 // where the deposit still exists.
@@ -1648,9 +1727,7 @@ impl LedgerState {
                     }
                 }
             }
-            LedgerOperation::DepositKeyRotate {
-                deposit_id, ..
-            } => {
+            LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
                 // The witness must satisfy the OLD descriptor (proving authorization to
                 // rotate). apply() already updated the descriptor, so we use pre_state to get
                 // the old one.
@@ -1695,43 +1772,71 @@ impl LedgerState {
             let mut obligations: Vec<(DepositId, &Option<BalanceCommitment>, &'static str)> =
                 Vec::new();
             match operation {
-                Op::DepositOpen { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "DepositOpen"))
-                }
-                Op::DepositClose { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "DepositClose"))
-                }
-                Op::FeeCollect { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "FeeCollect"))
-                }
-                Op::InvoiceCredit { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "InvoiceCredit"))
-                }
-                Op::InvoiceLock { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "InvoiceLock"))
-                }
-                Op::InvoiceFail { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "InvoiceFail"))
-                }
-                Op::InvoiceFulfill { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "InvoiceFulfill"))
-                }
-                Op::OnchainCredit { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "OnchainCredit"))
-                }
-                Op::OnchainLock { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "OnchainLock"))
-                }
-                Op::OnchainFail { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "OnchainFail"))
-                }
-                Op::OnchainFulfill { deposit_id, commitment, .. } => {
-                    obligations.push((*deposit_id, commitment, "OnchainFulfill"))
-                }
-                Op::TransferLock { source_deposit_id, commitment, .. } => {
-                    obligations.push((*source_deposit_id, commitment, "TransferLock"))
-                }
-                Op::TransferFail { transfer_id, commitment, .. } => {
+                Op::DepositOpen {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "DepositOpen")),
+                Op::DepositClose {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "DepositClose")),
+                Op::FeeCollect {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "FeeCollect")),
+                Op::InvoiceCredit {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "InvoiceCredit")),
+                Op::InvoiceLock {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "InvoiceLock")),
+                Op::InvoiceFail {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "InvoiceFail")),
+                Op::InvoiceFulfill {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "InvoiceFulfill")),
+                Op::OnchainCredit {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "OnchainCredit")),
+                Op::OnchainLock {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "OnchainLock")),
+                Op::OnchainFail {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "OnchainFail")),
+                Op::OnchainFulfill {
+                    deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*deposit_id, commitment, "OnchainFulfill")),
+                Op::TransferLock {
+                    source_deposit_id,
+                    commitment,
+                    ..
+                } => obligations.push((*source_deposit_id, commitment, "TransferLock")),
+                Op::TransferFail {
+                    transfer_id,
+                    commitment,
+                    ..
+                } => {
                     if let Some(pt) = pre_state.and_then(|p| p.pending_transfers.get(transfer_id)) {
                         obligations.push((pt.source_deposit_id, commitment, "TransferFail"));
                     }
@@ -1744,8 +1849,11 @@ impl LedgerState {
                 } => {
                     if let Some(pt) = pre_state.and_then(|p| p.pending_transfers.get(transfer_id)) {
                         obligations.push((pt.source_deposit_id, commitment, "TransferComplete"));
-                        obligations
-                            .push((pt.destination_deposit_id, dest_commitment, "TransferComplete"));
+                        obligations.push((
+                            pt.destination_deposit_id,
+                            dest_commitment,
+                            "TransferComplete",
+                        ));
                     }
                 }
                 _ => {}
@@ -1959,7 +2067,11 @@ mod replay_protection_tests {
         let (state, did) = state_with_one_deposit(); // balance 1000
         let pid = [0x11u8; 32];
 
-        let (s1, _) = apply(&state, &invoice_lock_with_fee(did, 800, Some(100), pid), 100);
+        let (s1, _) = apply(
+            &state,
+            &invoice_lock_with_fee(did, 800, Some(100), pid),
+            100,
+        );
         let d = &s1.deposits[&did];
         assert_eq!(d.balance, 1000, "lock doesn't move balance, only locks it");
         assert_eq!(d.available_balance(), 100, "800+100 locked out of 1000");
@@ -1986,7 +2098,11 @@ mod replay_protection_tests {
         let (state, did) = state_with_one_deposit(); // balance 1000, default fixed fee 2
         let pid = [0x22u8; 32];
 
-        let (s1, _) = apply(&state, &invoice_lock_with_fee(did, 800, Some(100), pid), 100);
+        let (s1, _) = apply(
+            &state,
+            &invoice_lock_with_fee(did, 800, Some(100), pid),
+            100,
+        );
         let fail = LedgerOperation::InvoiceFail {
             deposit_id: did,
             payment_id: pid,
@@ -1997,7 +2113,10 @@ mod replay_protection_tests {
         let d = &s2.deposits[&did];
         assert_eq!(d.balance, 998, "only the fixed dust fee (2) is kept");
         assert_eq!(d.available_balance(), 998, "amount+fee fully released");
-        assert_eq!(s2.fees_accumulated, 2, "fixed dust fee only; fee budget refunded");
+        assert_eq!(
+            s2.fees_accumulated, 2,
+            "fixed dust fee only; fee budget refunded"
+        );
     }
 
     /// A first op against a fresh deposit (seen_nonces empty) is accepted; the
@@ -2008,10 +2127,11 @@ mod replay_protection_tests {
         let op = invoice_lock(did, 50, [0xab; 32], 42, 1000);
         let (next, violations) = apply(&state, &op, 500);
         assert!(
-            !violations
-                .iter()
-                .any(|v| matches!(v, ConformanceViolation::NonceReplay { .. }
-                    | ConformanceViolation::ExpiryPassed { .. })),
+            !violations.iter().any(|v| matches!(
+                v,
+                ConformanceViolation::NonceReplay { .. }
+                    | ConformanceViolation::ExpiryPassed { .. }
+            )),
             "first op must not raise replay/expiry: {:?}",
             violations,
         );
@@ -2028,10 +2148,9 @@ mod replay_protection_tests {
         let op2 = invoice_lock(did, 50, [0xcd; 32], 42, 1000); // same nonce
         let (_, violations) = apply(&state, &op2, 500);
         assert!(
-            violations.iter().any(|v| matches!(
-                v,
-                ConformanceViolation::NonceReplay { actual: 42, .. }
-            )),
+            violations
+                .iter()
+                .any(|v| matches!(v, ConformanceViolation::NonceReplay { actual: 42, .. })),
             "replayed nonce must raise NonceReplay: got {:?}",
             violations,
         );
@@ -2092,7 +2211,9 @@ mod replay_protection_tests {
                     .iter()
                     .any(|v| matches!(v, ConformanceViolation::NonceReplay { .. })),
                 "non-monotonic op {} (nonce={}) raised NonceReplay: {:?}",
-                idx, nonce, violations,
+                idx,
+                nonce,
+                violations,
             );
             assert!(next.deposits[&did].seen_nonces.contains(&(*nonce, 10_000)));
             state = next;
@@ -2198,7 +2319,10 @@ mod balance_cache_tests {
         let c = [3u8; 16];
         open(&mut state, c);
         state
-            .apply_in_place(&LedgerOperation::DepositClose { deposit_id: c, commitment: None })
+            .apply_in_place(&LedgerOperation::DepositClose {
+                deposit_id: c,
+                commitment: None,
+            })
             .unwrap();
         assert_eq!(state.total_deposit_balance(), 1000);
         assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());
@@ -2211,7 +2335,11 @@ mod balance_cache_tests {
         d.balance = 777;
         let did = d.deposit_id;
         state.deposits.insert(did, d); // bypasses apply_in_place
-        assert_eq!(state.total_deposit_balance(), 0, "cache stale before rebuild");
+        assert_eq!(
+            state.total_deposit_balance(),
+            0,
+            "cache stale before rebuild"
+        );
         state.rebuild_balance_cache();
         assert_eq!(state.total_deposit_balance(), 777);
         assert_eq!(state.total_deposit_balance(), state.fold_deposit_balance());

@@ -35,32 +35,19 @@ impl Node {
         use deposits_core::{SignedLedgerUpdate, TlvDecode};
         use deposits_signer_api::{SigPurpose, SignContext};
 
-        let ledger_prefix = &request.ledger_id
-            [..16.min(request.ledger_id.len())];
+        let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
 
         // 1. Parse required params: unsigned_tx (hex), input_index (u64),
         //    sighash (hex).
-        let unsigned_tx_hex = match request
-            .params
-            .get("unsigned_tx")
-            .and_then(|v| v.as_str())
-        {
+        let unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
             Some(h) => h,
             None => return (false, None, Some("missing unsigned_tx".into())),
         };
-        let input_index = match request
-            .params
-            .get("input_index")
-            .and_then(|v| v.as_u64())
-        {
+        let input_index = match request.params.get("input_index").and_then(|v| v.as_u64()) {
             Some(i) => i as usize,
             None => return (false, None, Some("missing input_index".into())),
         };
-        let claimed_sighash_hex = match request
-            .params
-            .get("sighash")
-            .and_then(|v| v.as_str())
-        {
+        let claimed_sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
             Some(h) => h,
             None => return (false, None, Some("missing sighash".into())),
         };
@@ -121,13 +108,7 @@ impl Node {
         };
         let our_fork_key = match self.handler.find_our_fork(&main_ledger_id) {
             Some(k) => k,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("no fork-branch for this ledger".into()),
-                )
-            }
+            None => return (false, None, Some("no fork-branch for this ledger".into())),
         };
         let (is_armed, reserves_addr_str) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -155,8 +136,7 @@ impl Node {
                 reserves_addr_str.parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
             {
                 if let Ok(addr) = addr.require_network(self.wallet.network()) {
-                    let script_hash =
-                        sha256::Hash::hash(addr.script_pubkey().as_bytes());
+                    let script_hash = sha256::Hash::hash(addr.script_pubkey().as_bytes());
                     let url = format!(
                         "{}/scripthash/{}",
                         self.wallet.electrum_url(),
@@ -266,10 +246,9 @@ impl Node {
                     ));
                 }
                 if let Some(rc) = replacement_collateral {
-                    let txid =
-                        bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(
-                            rc.txid,
-                        ));
+                    let txid = bitcoin::Txid::from_raw_hash(
+                        bitcoin::hashes::Hash::from_byte_array(rc.txid),
+                    );
                     rc_by_outpoint.insert((txid, rc.vout), (u.operator_id, rc.amount));
                 }
             }
@@ -348,10 +327,7 @@ impl Node {
                     return (
                         false,
                         None,
-                        Some(format!(
-                            "inputs not sorted by (txid,vout) at index {}",
-                            i
-                        )),
+                        Some(format!("inputs not sorted by (txid,vout) at index {}", i)),
                     );
                 }
             }
@@ -365,13 +341,7 @@ impl Node {
         let output_value = proposed_tx.output[0].value.to_sat();
         let actual_fee = match total_input_value.checked_sub(output_value) {
             Some(f) => f,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("output exceeds inputs".into()),
-                )
-            }
+            None => return (false, None, Some("output exceeds inputs".into())),
         };
         if actual_fee != expected_fee {
             return (
@@ -388,18 +358,16 @@ impl Node {
         //    map to OUR operator pubkey via the RC declaration.
         let our_pk = self.node_id;
         let our_input = &proposed_tx.input[input_index];
-        let our_rc = match rc_by_outpoint
-            .get(&(our_input.previous_output.txid, our_input.previous_output.vout))
-        {
+        let our_rc = match rc_by_outpoint.get(&(
+            our_input.previous_output.txid,
+            our_input.previous_output.vout,
+        )) {
             Some(rc) => rc,
             None => {
                 return (
                     false,
                     None,
-                    Some(format!(
-                        "input {} not in our RC table",
-                        input_index
-                    )),
+                    Some(format!("input {} not in our RC table", input_index)),
                 )
             }
         };
@@ -448,13 +416,7 @@ impl Node {
             &sighash_bytes,
         ) {
             Ok(s) => s,
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("ecdsa_sign_sighash: {}", e)),
-                )
-            }
+            Err(e) => return (false, None, Some(format!("ecdsa_sign_sighash: {}", e))),
         };
         let sig_der = sig.serialize_der();
         // Prevout script + amount go alongside for caller convenience

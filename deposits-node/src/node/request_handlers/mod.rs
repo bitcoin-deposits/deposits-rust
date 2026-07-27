@@ -37,21 +37,21 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> Result<String, String> {
-        let (account, sig_hex) =
-            match (&request.subkey_account, &request.subkey_attestation) {
-                (Some(a), Some(s)) => (a, s),
-                (None, None) => return Ok(request.sender.clone()),
-                _ => {
-                    return Err(
-                        "subkey delegation requires BOTH `v` and `va` tags".to_string()
-                    );
-                }
-            };
+        let (account, sig_hex) = match (&request.subkey_account, &request.subkey_attestation) {
+            (Some(a), Some(s)) => (a, s),
+            (None, None) => return Ok(request.sender.clone()),
+            _ => {
+                return Err("subkey delegation requires BOTH `v` and `va` tags".to_string());
+            }
+        };
 
         // Sanity-check hex lengths up front so we can produce a clean
         // error before paying for Schnorr verification / Nostr fetches.
         if account.len() != 64 || !account.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(format!("subkey account `{}` is not 32-byte xonly hex", account));
+            return Err(format!(
+                "subkey account `{}` is not 32-byte xonly hex",
+                account
+            ));
         }
         if sig_hex.len() != 128 || !sig_hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return Err("subkey attestation must be 64-byte hex (Schnorr)".to_string());
@@ -64,12 +64,12 @@ impl Node {
         let digest = sha256::Hash::hash(msg_str.as_bytes());
         let msg = Message::from_digest(digest.to_byte_array());
 
-        let account_bytes = hex::decode(account)
-            .map_err(|e| format!("invalid subkey account hex: {}", e))?;
+        let account_bytes =
+            hex::decode(account).map_err(|e| format!("invalid subkey account hex: {}", e))?;
         let xonly = XOnlyPublicKey::from_slice(&account_bytes)
             .map_err(|e| format!("invalid subkey account xonly: {}", e))?;
-        let sig_bytes = hex::decode(sig_hex)
-            .map_err(|e| format!("invalid subkey attestation hex: {}", e))?;
+        let sig_bytes =
+            hex::decode(sig_hex).map_err(|e| format!("invalid subkey attestation hex: {}", e))?;
         let sig = schnorr::Signature::from_slice(&sig_bytes)
             .map_err(|e| format!("invalid Schnorr signature: {}", e))?;
 
@@ -79,11 +79,10 @@ impl Node {
 
         // ── Policy check: Kind 10301 list must include sender as
         //    active (in inbox_keys) and NOT revoked. ──
-        let (inbox, revoked) = self
-            .nostr
-            .fetch_subkey_list(account)
-            .await
-            .map_err(|e| format!("failed to fetch subkey list for {}: {}", &account[..16], e))?;
+        let (inbox, revoked) =
+            self.nostr.fetch_subkey_list(account).await.map_err(|e| {
+                format!("failed to fetch subkey list for {}: {}", &account[..16], e)
+            })?;
         if revoked.iter().any(|k| k == &request.sender) {
             return Err(format!(
                 "sender {} is revoked on account {}'s subkey list",
@@ -151,5 +150,4 @@ impl Node {
             )),
         ))
     }
-
 }

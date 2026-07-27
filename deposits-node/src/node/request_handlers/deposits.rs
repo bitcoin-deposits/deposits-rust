@@ -17,9 +17,8 @@ pub(super) fn parse_deposit_id_param(
         .get("deposit_id")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "Missing deposit_id parameter".to_string())?;
-    let bytes = hex::decode(s).map_err(|_| {
-        format!("Invalid deposit_id (must be 32-char hex, got {:?})", s)
-    })?;
+    let bytes = hex::decode(s)
+        .map_err(|_| format!("Invalid deposit_id (must be 32-char hex, got {:?})", s))?;
     if bytes.len() != 16 {
         return Err(format!(
             "Invalid deposit_id length: expected 16 bytes, got {}",
@@ -180,8 +179,7 @@ impl Node {
                     // one, no attestation can be trusted. Empty domain
                     // and pubkey allowlists are fine; the ringsig path
                     // doesn't depend on either.
-                    let attestation_possible =
-                        self.attestation_verifier_pubkey.is_some();
+                    let attestation_possible = self.attestation_verifier_pubkey.is_some();
 
                     let authorized = if attestation_possible {
                         self.check_attestation(&effective_sender, &domains, &allowlist)
@@ -214,7 +212,8 @@ impl Node {
                                     err_data["verifier_pubkey"] = serde_json::json!(vk);
                                 }
                                 if !domains.is_empty() {
-                                    let domain_list: Vec<String> = domains.iter().cloned().collect();
+                                    let domain_list: Vec<String> =
+                                        domains.iter().cloned().collect();
                                     err_data["allowed_domains"] = serde_json::json!(domain_list);
                                 }
                             }
@@ -251,8 +250,7 @@ impl Node {
         // before the operator has set deliberate fees. After they have,
         // forgetting CLI flags on a re-advertise no longer silently zeros
         // the enforcement floor.
-        let policy =
-            crate::operator_policy::OperatorPolicy::load(&self.data_dir).unwrap_or(None);
+        let policy = crate::operator_policy::OperatorPolicy::load(&self.data_dir).unwrap_or(None);
 
         let (min_annual_bps, min_fixed_per_period, advertisement) = match policy {
             Some(p) => {
@@ -949,11 +947,7 @@ impl Node {
                     "locked_msats": deposit.locked_balance,
                     "block_height": block_height,
                 });
-                tracing::debug!(
-                    "Balance query: {} -> {} msats",
-                    id_hex,
-                    deposit.balance
-                );
+                tracing::debug!("Balance query: {} -> {} msats", id_hex, deposit.balance);
                 (true, Some(result.to_string()), None)
             }
             None => (
@@ -1128,10 +1122,7 @@ impl Node {
         // can't call broadcast_all_updates here directly: it holds a ledger
         // read-guard across an await, and this handler is invoked from a
         // Send-requiring tokio::spawn in main_loop.
-        self.dirty_ledgers
-            .lock()
-            .unwrap()
-            .insert(ledger_id.clone());
+        self.dirty_ledgers.lock().unwrap().insert(ledger_id.clone());
 
         let result = serde_json::json!({
             "ledger_id": ledger_id,
@@ -1173,11 +1164,7 @@ impl Node {
     ) -> (bool, Option<String>, Option<String>) {
         use deposits_core::messages::LedgerOperation;
 
-        let request_hash_hex = match request
-            .params
-            .get("request_hash")
-            .and_then(|v| v.as_str())
-        {
+        let request_hash_hex = match request.params.get("request_hash").and_then(|v| v.as_str()) {
             Some(s) => s,
             None => {
                 return (
@@ -1228,9 +1215,7 @@ impl Node {
                     return (
                         false,
                         None,
-                        Some(
-                            "target_ledger_id must be 32 bytes (64 hex chars)".to_string(),
-                        ),
+                        Some("target_ledger_id must be 32 bytes (64 hex chars)".to_string()),
                     )
                 }
             },
@@ -1257,9 +1242,7 @@ impl Node {
                 )
             }
         };
-        let target_operator = match target_operator_hex
-            .parse::<bitcoin::secp256k1::PublicKey>()
-        {
+        let target_operator = match target_operator_hex.parse::<bitcoin::secp256k1::PublicKey>() {
             Ok(pk) => pk,
             Err(e) => {
                 return (
@@ -1276,7 +1259,13 @@ impl Node {
             .or_else(|| self.get_ledger_by_reserves_key(&request.ledger_id))
         {
             Some(l) => l,
-            None => return (false, None, Some("Ledger not found on this member".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Ledger not found on this member".to_string()),
+                )
+            }
         };
 
         let operation = LedgerOperation::DeliveryEmbed {
@@ -1292,10 +1281,7 @@ impl Node {
                 // chain. commit_operation has already advanced the
                 // ledger by the time it returns.
                 let (sequence, content_hash) = match self.get_ledger_by_ledger_id(&ledger_id) {
-                    Some((_, l)) => (
-                        l.state.sequence,
-                        hex::encode(l.state.chain_tip_hash),
-                    ),
+                    Some((_, l)) => (l.state.sequence, hex::encode(l.state.chain_tip_hash)),
                     None => (0, String::new()),
                 };
                 tracing::info!(

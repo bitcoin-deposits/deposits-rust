@@ -133,7 +133,8 @@ impl Spawner {
         hub_data_dir: &Path,
         name: &str,
     ) -> Result<Workspace, SpawnError> {
-        self.ensure_initialized_with_seed(hub_data_dir, name, None).await
+        self.ensure_initialized_with_seed(hub_data_dir, name, None)
+            .await
     }
 
     /// Like [`Self::ensure_initialized`], but accept a caller-provided
@@ -160,11 +161,7 @@ impl Spawner {
     /// without losing identity. If it doesn't exist, a fresh seed is
     /// generated, the signer is `init`-ed, and the seed tmpfile is
     /// removed before `run` starts.
-    pub async fn spawn(
-        &self,
-        hub_data_dir: &Path,
-        name: &str,
-    ) -> Result<SpawnHandle, SpawnError> {
+    pub async fn spawn(&self, hub_data_dir: &Path, name: &str) -> Result<SpawnHandle, SpawnError> {
         let ws = self.ensure_initialized(hub_data_dir, name).await?;
         let transport_pubkey_hex = read_transport_pubkey(&ws.data_dir)?;
 

@@ -272,12 +272,7 @@ fn cltv_offset_literal_tier_config(n: usize, _quorum_expiry: u32) -> ThresholdCo
                 720,
                 &format!("{}-of-{} quorum after expiry+5d", minority, n),
             ),
-            ThresholdTier::new(
-                1,
-                false,
-                4032,
-                "Single quorum member after expiry+4w",
-            ),
+            ThresholdTier::new(1, false, 4032, "Single quorum member after expiry+4w"),
             ThresholdTier::new(1, true, 8064, "Operator only after expiry+8w"),
         ]
     };
@@ -351,7 +346,10 @@ mod tests {
         assert_eq!(resolve_or_legacy(None).name, "legacy");
         assert_eq!(resolve_or_legacy(Some("")).name, "legacy");
         assert_eq!(resolve_or_legacy(Some("legacy")).name, "legacy");
-        assert_eq!(resolve_or_legacy(Some("cltv-offset-v2")).name, "cltv-offset-v2");
+        assert_eq!(
+            resolve_or_legacy(Some("cltv-offset-v2")).name,
+            "cltv-offset-v2"
+        );
         // Unknown name falls back to legacy rather than blowing up. The
         // QuorumBegin acceptance path must reject unknown names BEFORE
         // calling this helper; this is just the post-validation

@@ -31,37 +31,24 @@ const DEFAULT_ESPLORA: &str = "https://mempool.space/api";
 #[derive(Debug)]
 enum LedgerVerdict {
     /// All updates apply cleanly through current validation.
-    Pass {
-        seq_count: usize,
-    },
+    Pass { seq_count: usize },
     /// A specific update was rejected. Likely a code-vs-data
     /// regression — the deployment would refuse this ledger.
-    Fail {
-        seq: u64,
-        reason: String,
-    },
+    Fail { seq: u64, reason: String },
     /// The chain has missing sequences. Independent of code: the
     /// ledger isn't fully present on this relay. Surfaces as a
     /// warning rather than a deploy blocker.
-    Gap {
-        first_missing: u64,
-    },
+    Gap { first_missing: u64 },
     /// Multiple updates at the same sequence (equivocation or fork).
     /// Pick the operator's primary chain by seq-0 operator_id and
     /// note the diverging sequence. Independent of code.
-    Fork {
-        seq: u64,
-        operators: Vec<String>,
-    },
+    Fork { seq: u64, operators: Vec<String> },
     /// Couldn't decode any updates from the relay payload.
     NoUpdates,
     /// State machine accepted the chain, but on-chain verification of
     /// a `QuorumBegin`'s reserves UTXO disagreed with the ledger's
     /// recorded amount or spent state.
-    OnchainMismatch {
-        seq: u64,
-        detail: String,
-    },
+    OnchainMismatch { seq: u64, detail: String },
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -171,7 +158,9 @@ async fn run(
 
     let mut sorted: Vec<(String, Vec<SignedLedgerUpdate>)> = Vec::new();
     for lid in &ledger_ids {
-        let updates = fetch_ledger_updates(relay_url, lid).await.unwrap_or_default();
+        let updates = fetch_ledger_updates(relay_url, lid)
+            .await
+            .unwrap_or_default();
         sorted.push((lid.clone(), updates));
     }
 
@@ -197,8 +186,7 @@ async fn run(
         if !skip_onchain {
             if let LedgerVerdict::Pass { .. } = &verdict {
                 if let Some((seq, detail)) =
-                    verify_onchain_anchors(updates, esplora_url, &http, network, verbose)
-                        .await
+                    verify_onchain_anchors(updates, esplora_url, &http, network, verbose).await
                 {
                     verdict = LedgerVerdict::OnchainMismatch { seq, detail };
                 }
@@ -293,12 +281,8 @@ fn validate_ledger(
     let genesis_operators: std::collections::HashSet<_> =
         genesis.iter().map(|u| u.operator_id).collect();
     if genesis_operators.len() > 1 {
-        let operators: Vec<String> =
-            genesis_operators.iter().map(|pk| pk.to_string()).collect();
-        return LedgerVerdict::Fork {
-            seq: 0,
-            operators,
-        };
+        let operators: Vec<String> = genesis_operators.iter().map(|pk| pk.to_string()).collect();
+        return LedgerVerdict::Fork { seq: 0, operators };
     }
     let original_operator = genesis[0].operator_id;
 
@@ -403,11 +387,7 @@ fn validate_ledger(
             Err(e) => {
                 return LedgerVerdict::Fail {
                     seq: u.sequence_number,
-                    reason: format!(
-                        "{} → {:?}",
-                        op.as_ref().map(op_name).unwrap_or("?"),
-                        e
-                    ),
+                    reason: format!("{} → {:?}", op.as_ref().map(op_name).unwrap_or("?"), e),
                 };
             }
         }
@@ -538,17 +518,10 @@ async fn verify_onchain_anchors(
                     Some(r) => r,
                     None => continue,
                 };
-                let cfg = (rs.tier_config_factory)(
-                    voter_set.total_count(),
-                    quorum_expiry,
-                );
-                let out = TapscriptReservesBuilder::new(
-                    voter_set.clone(),
-                    cfg,
-                    network,
-                    ledger_hash,
-                )
-                .build();
+                let cfg = (rs.tier_config_factory)(voter_set.total_count(), quorum_expiry);
+                let out =
+                    TapscriptReservesBuilder::new(voter_set.clone(), cfg, network, ledger_hash)
+                        .build();
                 if let Ok(out) = out {
                     let addr = out.address.to_string();
                     if addr == reserves_id {
@@ -727,16 +700,16 @@ async fn verify_onchain_anchors(
             Err(e) => return Some((*seq, format!("esplora outspend unreachable: {}", e))),
         };
         if !resp.status().is_success() {
-            return Some((
-                *seq,
-                format!("esplora outspend status {}", resp.status()),
-            ));
+            return Some((*seq, format!("esplora outspend status {}", resp.status())));
         }
         let outspend: serde_json::Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => return Some((*seq, format!("esplora outspend parse: {}", e))),
         };
-        let spent = outspend.get("spent").and_then(|v| v.as_bool()).unwrap_or(false);
+        let spent = outspend
+            .get("spent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if i == last_idx {
             // The latest QuorumBegin SHOULD be unspent — that's the

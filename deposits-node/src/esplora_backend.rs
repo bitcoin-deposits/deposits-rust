@@ -55,10 +55,7 @@ impl ChainBackend for EsploraBackend {
             .map_err(|e| Error::Wallet(format!("esplora get_block_hash({}): {}", height, e)))
     }
 
-    fn get_block_height_if_in_best_chain(
-        &self,
-        hash: &BlockHash,
-    ) -> Result<Option<u32>, Error> {
+    fn get_block_height_if_in_best_chain(&self, hash: &BlockHash) -> Result<Option<u32>, Error> {
         match self.client().get_block_status(hash) {
             Ok(status) if status.in_best_chain => Ok(status.height),
             Ok(_) => Ok(None),
@@ -96,10 +93,7 @@ impl ChainBackend for EsploraBackend {
         }
     }
 
-    fn find_unspent_output_at(
-        &self,
-        script: &Script,
-    ) -> Result<Option<UnspentOutput>, Error> {
+    fn find_unspent_output_at(&self, script: &Script) -> Result<Option<UnspentOutput>, Error> {
         // Hit /scripthash/<hash>/txs directly. The esplora-client library
         // would auto-format the hash using bitcoin's {:x} (byte-reversed)
         // which is the Blockstream-public-esplora convention; electrs
@@ -116,9 +110,10 @@ impl ChainBackend for EsploraBackend {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| Error::Wallet(format!("esplora HTTP client: {}", e)))?;
-        let response = http.get(&url).send().map_err(|e| {
-            Error::Wallet(format!("esplora GET {}: {}", url, e))
-        })?;
+        let response = http
+            .get(&url)
+            .send()
+            .map_err(|e| Error::Wallet(format!("esplora GET {}: {}", url, e)))?;
         if !response.status().is_success() {
             return Err(Error::Wallet(format!(
                 "esplora returned status {} for scripthash scan",

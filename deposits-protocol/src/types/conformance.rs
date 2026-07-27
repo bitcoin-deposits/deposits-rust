@@ -65,10 +65,7 @@ pub enum ConformanceViolation {
     /// single `frequency_blocks` period. This bounds the operator: it can never
     /// sweep years of backlog (the block-0 accrual bug) or otherwise over-bill
     /// a deposit beyond the schedule the depositor accepted at open.
-    FeeExceedsAssessment {
-        collected: u64,
-        max_due: u64,
-    },
+    FeeExceedsAssessment { collected: u64, max_due: u64 },
 
     /// QuorumUpgrade (DEP-18) named a ruleset this implementation doesn't know.
     UnknownRuleset { name: String },
@@ -261,11 +258,7 @@ pub trait Authorizer {
     /// in `state`) so callers can authorize a modification against a pre-state
     /// descriptor — `DepositKeyRotate` authorizes against the *old* descriptor
     /// while `apply()` is mid-flight installing the new one.
-    fn authorize(
-        &self,
-        descriptor: &str,
-        operation: &crate::messages::LedgerOperation,
-    ) -> bool;
+    fn authorize(&self, descriptor: &str, operation: &crate::messages::LedgerOperation) -> bool;
 
     /// Parse-check a descriptor string, returning `None` if parseable and
     /// `Some(detail)` otherwise. Used to fail unparseable descriptors at

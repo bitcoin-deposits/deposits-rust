@@ -23,11 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Best-effort: if the relay is down or publish fails, logs a warning
 /// and returns. Local state is always saved first; relay backup is a
 /// belt-and-suspenders convenience for the lost-box scenario.
-pub async fn publish_backup(
-    transport: &HubTransport,
-    state: &HubState,
-    data_dir: &Path,
-) {
+pub async fn publish_backup(transport: &HubTransport, state: &HubState, data_dir: &Path) {
     let hub_json = match serde_json::to_string(state) {
         Ok(j) => j,
         Err(e) => {
@@ -207,7 +203,11 @@ pub fn approve(
 
 /// Drop a pending entry. Caller should follow up with a
 /// `RegisterAck { next_action: Shutdown }` so the peer stops trying.
-pub fn reject(state: &mut HubState, data_dir: &Path, pending_key_or_pk: &str) -> Result<(), String> {
+pub fn reject(
+    state: &mut HubState,
+    data_dir: &Path,
+    pending_key_or_pk: &str,
+) -> Result<(), String> {
     let resolved_key = resolve_pending_key(state, pending_key_or_pk)?;
     if state.pending.remove(&resolved_key).is_none() {
         return Err(format!("no pending entry for {}", resolved_key));
@@ -226,9 +226,7 @@ fn resolve_pending_key(state: &HubState, k: &str) -> Result<String, String> {
     let matches: Vec<&String> = state
         .pending
         .keys()
-        .filter(|key| {
-            key.splitn(2, ':').nth(1) == Some(k)
-        })
+        .filter(|key| key.splitn(2, ':').nth(1) == Some(k))
         .collect();
     match matches.len() {
         0 => Err(format!("no pending entry for {}", k)),
@@ -242,11 +240,7 @@ fn resolve_pending_key(state: &HubState, k: &str) -> Result<String, String> {
 
 /// Send the standard "approved" ack (best-effort — heartbeat retries
 /// snap a missing ack out within a few seconds).
-pub async fn send_accept_ack(
-    transport: &HubTransport,
-    sender_pk: &str,
-    label: &str,
-) {
+pub async fn send_accept_ack(transport: &HubTransport, sender_pk: &str, label: &str) {
     let ack = HubMessage::RegisterAck {
         accepted: true,
         message: format!("approved as '{}'", label),

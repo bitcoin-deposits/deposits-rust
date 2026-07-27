@@ -3,10 +3,10 @@
 //! This models the actual deployment topology: many independent operators
 //! with 3-7 member quorums, not one giant quorum.
 
-use deposits_test::adversarial::*;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
+use deposits_test::adversarial::*;
+use deposits_test::*;
 use std::time::Instant;
 
 fn operator_names(n: usize) -> Vec<String> {

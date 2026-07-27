@@ -690,9 +690,7 @@ mod dispatch {
     }
 
     /// LedgerProvider backed by a HashMap<String, Vec<SignedLedgerUpdate>>.
-    fn provider_from(
-        m: HashMap<String, Vec<SignedLedgerUpdate>>,
-    ) -> impl LedgerProvider {
+    fn provider_from(m: HashMap<String, Vec<SignedLedgerUpdate>>) -> impl LedgerProvider {
         move |id: &str| m.get(id).cloned()
     }
 
@@ -765,18 +763,36 @@ mod dispatch {
     ///     advances at blocks 95/100.
     ///   - Accused operator A cosigns at seq 30 (block 110) declaring H_old.
     ///   - Embedding: a TransferLock at seq 50 on A whose nonce = proof_hash.
-    fn stale_cosig_scenario() -> (
-        FraudBroadcast,
-        HashMap<String, Vec<SignedLedgerUpdate>>,
-    ) {
+    fn stale_cosig_scenario() -> (FraudBroadcast, HashMap<String, Vec<SignedLedgerUpdate>>) {
         let accused_ledger = [0xAA; 32];
         let member_ledger = [0xBB; 32];
 
         // Member history.
         let member_history = vec![
-            update_with(5, member_ledger, dummy_transfer_lock([0; 32]), &[], 90, None),
-            update_with(6, member_ledger, dummy_transfer_lock([1; 32]), &[], 95, None),
-            update_with(7, member_ledger, dummy_transfer_lock([2; 32]), &[], 100, None),
+            update_with(
+                5,
+                member_ledger,
+                dummy_transfer_lock([0; 32]),
+                &[],
+                90,
+                None,
+            ),
+            update_with(
+                6,
+                member_ledger,
+                dummy_transfer_lock([1; 32]),
+                &[],
+                95,
+                None,
+            ),
+            update_with(
+                7,
+                member_ledger,
+                dummy_transfer_lock([2; 32]),
+                &[],
+                100,
+                None,
+            ),
         ];
         let h_old = member_history[0].chain_hash();
         let later_hash = member_history[2].chain_hash();
@@ -891,10 +907,8 @@ mod dispatch {
 
     // ---------------- UncreditedLightning -----------------
 
-    fn uncredited_lightning_scenario() -> (
-        FraudBroadcast,
-        HashMap<String, Vec<SignedLedgerUpdate>>,
-    ) {
+    fn uncredited_lightning_scenario() -> (FraudBroadcast, HashMap<String, Vec<SignedLedgerUpdate>>)
+    {
         let accused_ledger = [0xAA; 32];
         let preimage = [0xBE; 32];
         let payment_hash: [u8; 32] = {
@@ -1001,11 +1015,7 @@ mod dispatch {
             &MockOracle(HashMap::new()),
         )
         .unwrap_err();
-        assert!(
-            err.contains("InvoiceCredit found"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("InvoiceCredit found"), "wrong error: {}", err);
     }
 
     // ---------------- DisputeDereliction -----------------
@@ -1028,8 +1038,14 @@ mod dispatch {
         blocks.insert(member_block, 1000 + elapsed);
 
         let member_pk = pk_from_seed(0xEF);
-        let mut member_active_update =
-            update_with(200, member_ledger, dummy_transfer_lock([0; 32]), &[], 0, None);
+        let mut member_active_update = update_with(
+            200,
+            member_ledger,
+            dummy_transfer_lock([0; 32]),
+            &[],
+            0,
+            None,
+        );
         member_active_update.operator_id = member_pk;
         member_active_update.block_hash = member_block;
 
@@ -1049,8 +1065,14 @@ mod dispatch {
         let proof_hash = proof_template.proof_hash();
 
         // Embedding lives on the accused's ledger.
-        let embedding_update =
-            update_with(50, accused_ledger, dummy_transfer_lock(proof_hash), &[], 0, None);
+        let embedding_update = update_with(
+            50,
+            accused_ledger,
+            dummy_transfer_lock(proof_hash),
+            &[],
+            0,
+            None,
+        );
 
         let mut histories = HashMap::new();
         histories.insert(hex::encode(accused_ledger), vec![embedding_update]);
@@ -1072,23 +1094,15 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_inactive_quorum_member() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(200, 144);
-        verify_fraud_broadcast(
-            &broadcast,
-            &provider_from(histories),
-            &MockOracle(blocks),
-        )
-        .unwrap();
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks)).unwrap();
     }
 
     #[test]
     fn dispatch_rejects_inactive_quorum_within_window() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(100, 144);
-        let err = verify_fraud_broadcast(
-            &broadcast,
-            &provider_from(histories),
-            &MockOracle(blocks),
-        )
-        .unwrap_err();
+        let err =
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+                .unwrap_err();
         assert!(err.contains("only 100 blocks past"), "wrong error: {}", err);
     }
 
@@ -1195,23 +1209,15 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_uncredited_onchain() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
-        verify_fraud_broadcast(
-            &broadcast,
-            &provider_from(histories),
-            &MockOracle(blocks),
-        )
-        .unwrap();
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks)).unwrap();
     }
 
     #[test]
     fn dispatch_rejects_uncredited_onchain_with_insufficient_confs() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(3, 6);
-        let err = verify_fraud_broadcast(
-            &broadcast,
-            &provider_from(histories),
-            &MockOracle(blocks),
-        )
-        .unwrap_err();
+        let err =
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+                .unwrap_err();
         assert!(err.contains("only 3 blocks past"), "wrong error: {}", err);
     }
 
@@ -1219,7 +1225,9 @@ mod dispatch {
     fn dispatch_rejects_uncredited_onchain_with_tampered_offer() {
         let (mut broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
         // Tamper with deadline_block — invalidates cosig.
-        if let FraudEvidence::UncreditedOnchain { deadline_block, .. } = &mut broadcast.proof.evidence {
+        if let FraudEvidence::UncreditedOnchain { deadline_block, .. } =
+            &mut broadcast.proof.evidence
+        {
             *deadline_block = 9999;
         }
         // Re-anchor embedding since proof_hash changed.
@@ -1232,12 +1240,9 @@ mod dispatch {
             u.block_hash = [0xEE; 32];
             u
         };
-        let err = verify_fraud_broadcast(
-            &broadcast,
-            &provider_from(histories),
-            &MockOracle(blocks),
-        )
-        .unwrap_err();
+        let err =
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+                .unwrap_err();
         assert!(
             err.contains("offer cosignature failed BIP-340"),
             "wrong error: {}",
@@ -1372,8 +1377,7 @@ mod stale_cosignature {
         (proof, accused_history, member_history)
     }
 
-    fn genuine_fraud_fixture() -> (FraudProof, Vec<SignedLedgerUpdate>, Vec<SignedLedgerUpdate>)
-    {
+    fn genuine_fraud_fixture() -> (FraudProof, Vec<SignedLedgerUpdate>, Vec<SignedLedgerUpdate>) {
         // Cosign at block 110 — AFTER member advanced at block 100. Stale.
         build_fixture(110)
     }
@@ -1391,11 +1395,7 @@ mod stale_cosignature {
         // hadn't advanced past it yet → not stale.
         let (proof, accused, member) = build_fixture(80);
         let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
-        assert!(
-            err.contains("did not advance past"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("did not advance past"), "wrong error: {}", err);
     }
 
     #[test]
@@ -1429,7 +1429,11 @@ mod stale_cosignature {
             *stale_update_sequence = 999;
         }
         let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
-        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+        assert!(
+            err.contains("not in accused history"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1443,7 +1447,11 @@ mod stale_cosignature {
             *member_later_sequence = 999;
         }
         let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
-        assert!(err.contains("not in member history"), "wrong error: {}", err);
+        assert!(
+            err.contains("not in member history"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1456,7 +1464,11 @@ mod stale_cosignature {
             *stale_update_hash = "ff".repeat(32);
         }
         let err = verify_stale_cosignature(&proof, &accused, &member).unwrap_err();
-        assert!(err.contains("stale_update_hash mismatch"), "wrong error: {}", err);
+        assert!(
+            err.contains("stale_update_hash mismatch"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1515,7 +1527,11 @@ mod uncredited_lightning {
         let msg = Message::from_digest(msg_hash);
         let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
-        (cosigner_pubkey, hex::encode(sig.serialize()), cosigner_ledger_hash)
+        (
+            cosigner_pubkey,
+            hex::encode(sig.serialize()),
+            cosigner_ledger_hash,
+        )
     }
 
     fn fixture_update(seq: u64, op: LedgerOperation) -> SignedLedgerUpdate {
@@ -1599,10 +1615,7 @@ mod uncredited_lightning {
     fn rejects_when_preimage_doesnt_match_payment_hash() {
         let preimage = [0xBE; 32];
         let mut proof = proof_for(preimage, 50);
-        if let FraudEvidence::UncreditedLightning {
-            payment_hash, ..
-        } = &mut proof.evidence
-        {
+        if let FraudEvidence::UncreditedLightning { payment_hash, .. } = &mut proof.evidence {
             *payment_hash = "ff".repeat(32); // doesn't match hash(preimage)
         }
         let history = vec![fixture_update(50, dummy_op())];
@@ -1638,11 +1651,7 @@ mod uncredited_lightning {
             fixture_update(50, dummy_op()),
         ];
         let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
-        assert!(
-            err.contains("InvoiceCredit found"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("InvoiceCredit found"), "wrong error: {}", err);
     }
 
     #[test]
@@ -1664,11 +1673,7 @@ mod uncredited_lightning {
             fixture_update(50, dummy_op()),
         ];
         let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
-        assert!(
-            err.contains("InvoiceFulfill found"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("InvoiceFulfill found"), "wrong error: {}", err);
     }
 
     #[test]
@@ -1677,7 +1682,11 @@ mod uncredited_lightning {
         let proof = proof_for(preimage, 50);
         let history = vec![fixture_update(49, dummy_op())]; // 50 missing
         let err = verify_uncredited_lightning(&proof, &history).unwrap_err();
-        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+        assert!(
+            err.contains("not in accused history"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1728,9 +1737,9 @@ mod uncredited_lightning {
         // verification fails.
         let other_proof = proof_for([0xCC; 32], 99); // signs a different message
         let other_sig = match &other_proof.evidence {
-            FraudEvidence::UncreditedLightning { cosign_signature, .. } => {
-                cosign_signature.clone()
-            }
+            FraudEvidence::UncreditedLightning {
+                cosign_signature, ..
+            } => cosign_signature.clone(),
             _ => unreachable!(),
         };
 
@@ -1756,10 +1765,7 @@ mod uncredited_lightning {
         // Anyone tampering with the amount field after the cosig was made
         // should be detected.
         let mut proof = proof_for([0xBE; 32], 50);
-        if let FraudEvidence::UncreditedLightning {
-            amount_msat, ..
-        } = &mut proof.evidence
-        {
+        if let FraudEvidence::UncreditedLightning { amount_msat, .. } = &mut proof.evidence {
             *amount_msat = 9_999_999; // tampered
         }
         let history = vec![fixture_update(50, dummy_op())];
@@ -1793,7 +1799,11 @@ mod inactive_quorum_member {
         .unwrap()
     }
 
-    fn member_update_at(seq: u64, block_hash: [u8; 32], signer: bitcoin::secp256k1::PublicKey) -> SignedLedgerUpdate {
+    fn member_update_at(
+        seq: u64,
+        block_hash: [u8; 32],
+        signer: bitcoin::secp256k1::PublicKey,
+    ) -> SignedLedgerUpdate {
         SignedLedgerUpdate {
             message: vec![],
             message_type: 1,
@@ -1863,11 +1873,7 @@ mod inactive_quorum_member {
         // Member published only 100 blocks after fraud — within the 144 window.
         let (proof, history, oracle) = fixture(100, 144, member_pk());
         let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
-        assert!(
-            err.contains("only 100 blocks past"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("only 100 blocks past"), "wrong error: {}", err);
     }
 
     #[test]
@@ -1926,7 +1932,11 @@ mod inactive_quorum_member {
         let (proof, _history, oracle) = fixture(200, 144, member_pk());
         let history: Vec<SignedLedgerUpdate> = vec![]; // no update at seq 200
         let err = verify_inactive_quorum_member(&proof, &history, &oracle).unwrap_err();
-        assert!(err.contains("not in member history"), "wrong error: {}", err);
+        assert!(
+            err.contains("not in member history"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -2139,8 +2149,8 @@ mod uncredited_onchain {
         {
             *confirmed_at_block_hash = [0xFF; 32];
         }
-        let err = verify_uncredited_onchain(&proof, &history, &MockOracle(HashMap::new()))
-            .unwrap_err();
+        let err =
+            verify_uncredited_onchain(&proof, &history, &MockOracle(HashMap::new())).unwrap_err();
         assert!(
             err.contains("confirmed_at_block_hash") && err.contains("not in verifier"),
             "wrong error: {}",
@@ -2153,14 +2163,15 @@ mod uncredited_onchain {
         // Build the genuine fixture, then drop the proof-block entry
         // from the oracle so only the funding block is confirmed.
         let (proof, history, oracle, _) = fixture(10, 6);
-        let funding_block_hash =
-            if let FraudEvidence::UncreditedOnchain { confirmed_at_block_hash, .. } =
-                &proof.evidence
-            {
-                *confirmed_at_block_hash
-            } else {
-                unreachable!()
-            };
+        let funding_block_hash = if let FraudEvidence::UncreditedOnchain {
+            confirmed_at_block_hash,
+            ..
+        } = &proof.evidence
+        {
+            *confirmed_at_block_hash
+        } else {
+            unreachable!()
+        };
         let mut oracle_map = HashMap::new();
         oracle_map.insert(funding_block_hash, oracle.0[&funding_block_hash]);
         let oracle = MockOracle(oracle_map);
@@ -2188,11 +2199,7 @@ mod uncredited_onchain {
             fixture_update(50, [0xCC; 32], dummy_op()),
         ];
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
-        assert!(
-            err.contains("OnchainCredit found"),
-            "wrong error: {}",
-            err
-        );
+        assert!(err.contains("OnchainCredit found"), "wrong error: {}", err);
     }
 
     #[test]
@@ -2219,7 +2226,11 @@ mod uncredited_onchain {
         let (proof, _, oracle, _) = fixture(10, 6);
         let history: Vec<SignedLedgerUpdate> = vec![]; // no update at seq 50
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
-        assert!(err.contains("not in accused history"), "wrong error: {}", err);
+        assert!(
+            err.contains("not in accused history"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -2238,10 +2249,7 @@ mod uncredited_onchain {
     fn rejects_offer_signature_over_wrong_message() {
         // Tamper with deadline_block after the cosig was made.
         let (mut proof, history, oracle, _) = fixture(10, 6);
-        if let FraudEvidence::UncreditedOnchain {
-            deadline_block, ..
-        } = &mut proof.evidence
-        {
+        if let FraudEvidence::UncreditedOnchain { deadline_block, .. } = &mut proof.evidence {
             *deadline_block = 999_999;
         }
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
@@ -2651,8 +2659,7 @@ mod quorum_expired_verifier {
         let mut oracle_map = HashMap::new();
         oracle_map.insert(anchor, 500);
         let oracle = MockOracle(oracle_map);
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
         assert!(
             err.contains("not past quorum_expiry"),
             "expected expiry guard error, got: {}",
@@ -2667,8 +2674,7 @@ mod quorum_expired_verifier {
         let mut oracle_map = HashMap::new();
         oracle_map.insert(anchor, 400);
         let oracle = MockOracle(oracle_map);
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
         assert!(err.contains("not past quorum_expiry"));
     }
 
@@ -2677,8 +2683,7 @@ mod quorum_expired_verifier {
         let history = vec![quorum_begin_update(1, 500)];
         let anchor = [0xCC; 32];
         let oracle = MockOracle(HashMap::new()); // empty
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
         assert!(err.contains("not in verifier's confirmed chain"));
     }
 
@@ -2693,8 +2698,7 @@ mod quorum_expired_verifier {
         let mut oracle_map = HashMap::new();
         oracle_map.insert(anchor, 600);
         let oracle = MockOracle(oracle_map);
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 400), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 400), &history, &oracle).unwrap_err();
         assert!(
             err.contains("doesn't match the ledger's most"),
             "expected mismatch error, got: {}",
@@ -2711,8 +2715,7 @@ mod quorum_expired_verifier {
         let mut oracle_map = HashMap::new();
         oracle_map.insert(anchor, 600);
         let oracle = MockOracle(oracle_map);
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap_err();
         assert!(err.contains("no QuorumBegin"));
     }
 
@@ -2730,8 +2733,7 @@ mod quorum_expired_verifier {
         let oracle = MockOracle(oracle_map);
         verify_quorum_expired(&make_proof(anchor, 500), &history, &oracle).unwrap();
         // And the old expiry is rejected (matches a stale QuorumBegin):
-        let err =
-            verify_quorum_expired(&make_proof(anchor, 200), &history, &oracle).unwrap_err();
+        let err = verify_quorum_expired(&make_proof(anchor, 200), &history, &oracle).unwrap_err();
         assert!(err.contains("doesn't match the ledger's most"));
     }
 }
@@ -2851,8 +2853,7 @@ mod winner_collateral_deviation_tests {
 
     use std::str::FromStr;
 
-    const REGTEST_TARGET: &str =
-        "bcrt1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qzf4jry";
+    const REGTEST_TARGET: &str = "bcrt1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qzf4jry";
 
     #[test]
     fn winner_did_not_deviate_returns_err() {
@@ -3026,7 +3027,11 @@ mod winner_collateral_deviation_tests {
         let proof = make_proof(armed_hex, claim_txid, anchor);
         let err = verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle)
             .unwrap_err();
-        assert!(err.contains("not in verifier's confirmed chain"), "got: {}", err);
+        assert!(
+            err.contains("not in verifier's confirmed chain"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -3052,6 +3057,10 @@ mod winner_collateral_deviation_tests {
         let proof = make_proof(armed_hex, claim_txid, anchor);
         let err = verify_winner_collateral_deviation(&proof, &claim_tx, lottery_amount, &oracle)
             .unwrap_err();
-        assert!(err.contains("nothing for the claim TX to deviate from"), "got: {}", err);
+        assert!(
+            err.contains("nothing for the claim TX to deviate from"),
+            "got: {}",
+            err
+        );
     }
 }

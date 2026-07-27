@@ -96,8 +96,7 @@ pub fn pubkey_to_p2wpkh(args: &[String]) -> Result<(), String> {
     // Resolve the pubkey: explicit positional wins, else derive from seed.
     let arr: [u8; 33] = match pubkey_hex {
         Some(hex_str) => {
-            let bytes = hex::decode(hex_str.trim())
-                .map_err(|e| format!("Invalid hex: {}", e))?;
+            let bytes = hex::decode(hex_str.trim()).map_err(|e| format!("Invalid hex: {}", e))?;
             if bytes.len() != 33 {
                 return Err(format!(
                     "Pubkey must be 33 bytes compressed (66 hex chars); got {}",
@@ -274,15 +273,15 @@ pub fn delegate_pubkey(args: &[String]) -> Result<(), String> {
                     e
                 )
             })?;
-            let bytes = hex::decode(raw.trim())
-                .map_err(|e| format!("seed.hex hex decode: {}", e))?;
+            let bytes =
+                hex::decode(raw.trim()).map_err(|e| format!("seed.hex hex decode: {}", e))?;
             if bytes.len() != 32 {
                 return Err("seed.hex must be 64 hex chars".to_string());
             }
             let mut seed = [0u8; 32];
             seed.copy_from_slice(&bytes);
-            let xpriv = Xpriv::new_master(network, &seed)
-                .map_err(|e| format!("xpriv from seed: {}", e))?;
+            let xpriv =
+                Xpriv::new_master(network, &seed).map_err(|e| format!("xpriv from seed: {}", e))?;
             let path = DerivationPath::from_str("m/85'/0'/0'/0/0")
                 .map_err(|e| format!("delegate path: {}", e))?;
             let derived = xpriv

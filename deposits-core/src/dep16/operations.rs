@@ -90,7 +90,10 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             args: {
                 let mut a = BTreeMap::new();
                 a.insert("amount".to_string(), Value::Int(*amount as i128));
-                a.insert("kind".to_string(), Value::Symbol(Symbol::new(kind::INVOICE)));
+                a.insert(
+                    "kind".to_string(),
+                    Value::Symbol(Symbol::new(kind::INVOICE)),
+                );
                 a.insert("payment_id".to_string(), Value::Bytes(payment_id.to_vec()));
                 // Bind the operator fee budget into the signed preimage so the
                 // operator can't inflate it. Conditional: a legacy fee=None lock
@@ -119,10 +122,19 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             args: {
                 let mut a = BTreeMap::new();
                 a.insert("amount".to_string(), Value::Int(*amount as i128));
-                a.insert("destination".to_string(), Value::Bytes(destination_address.as_bytes().to_vec()));
+                a.insert(
+                    "destination".to_string(),
+                    Value::Bytes(destination_address.as_bytes().to_vec()),
+                );
                 a.insert("fee".to_string(), Value::Int(*fee_sats as i128));
-                a.insert("kind".to_string(), Value::Symbol(Symbol::new(kind::ONCHAIN)));
-                a.insert("withdrawal_id".to_string(), Value::Bytes(withdrawal_id.to_vec()));
+                a.insert(
+                    "kind".to_string(),
+                    Value::Symbol(Symbol::new(kind::ONCHAIN)),
+                );
+                a.insert(
+                    "withdrawal_id".to_string(),
+                    Value::Bytes(withdrawal_id.to_vec()),
+                );
                 a
             },
             deposit_id: pad_deposit_id(deposit_id),
@@ -147,16 +159,34 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             args: {
                 let mut a = BTreeMap::new();
                 a.insert("amount".to_string(), Value::Int(*amount as i128));
-                a.insert("completion_script".to_string(), Value::Bytes(completion_script.as_bytes().to_vec()));
-                a.insert("destination_deposit_id".to_string(), Value::Bytes(destination_deposit_id.to_vec()));
+                a.insert(
+                    "completion_script".to_string(),
+                    Value::Bytes(completion_script.as_bytes().to_vec()),
+                );
+                a.insert(
+                    "destination_deposit_id".to_string(),
+                    Value::Bytes(destination_deposit_id.to_vec()),
+                );
                 a.insert("fee".to_string(), Value::Int(*fee as i128));
-                a.insert("kind".to_string(), Value::Symbol(Symbol::new(kind::TRANSFER)));
+                a.insert(
+                    "kind".to_string(),
+                    Value::Symbol(Symbol::new(kind::TRANSFER)),
+                );
                 // The transfer-level nonce is the 32-byte transfer-identity field, distinct
                 // from `nonce` above which is the per-deposit monotonic counter dep-16 binds
                 // into the operation preimage.
-                a.insert("transfer_nonce".to_string(), Value::Bytes(transfer_nonce.to_vec()));
-                a.insert("transfer_id".to_string(), Value::Bytes(transfer_id.to_vec()));
-                a.insert("timeout_height".to_string(), Value::Int(*timeout_height as i128));
+                a.insert(
+                    "transfer_nonce".to_string(),
+                    Value::Bytes(transfer_nonce.to_vec()),
+                );
+                a.insert(
+                    "transfer_id".to_string(),
+                    Value::Bytes(transfer_id.to_vec()),
+                );
+                a.insert(
+                    "timeout_height".to_string(),
+                    Value::Int(*timeout_height as i128),
+                );
                 // TODO phase 5: include `release_descriptor` here once TransferLock carries it
                 a
             },
@@ -204,7 +234,10 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             op_type: Symbol::new("transfer_release"),
             args: {
                 let mut a = BTreeMap::new();
-                a.insert("transfer_id".to_string(), Value::Bytes(transfer_id.to_vec()));
+                a.insert(
+                    "transfer_id".to_string(),
+                    Value::Bytes(transfer_id.to_vec()),
+                );
                 a
             },
             // The deposit_id binding for TransferComplete is the transfer_id (which is what
@@ -372,7 +405,11 @@ mod tests {
         let sh_b = operation_sighash(&mk(Some(10_000))).unwrap();
         assert_ne!(sh_none, sh_a, "fee must change the signed preimage");
         assert_ne!(sh_a, sh_b, "distinct fees must produce distinct sighashes");
-        assert_eq!(sh_none, operation_sighash(&mk(None)).unwrap(), "deterministic");
+        assert_eq!(
+            sh_none,
+            operation_sighash(&mk(None)).unwrap(),
+            "deterministic"
+        );
     }
 
     /// `OnchainLock` translates to a `spend` op with `kind=onchain` and the destination/amount/

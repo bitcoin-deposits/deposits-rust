@@ -263,11 +263,19 @@ impl LdkBackend {
     pub fn estimate_route_fee(&self, invoice: &str) -> Result<u64, Error> {
         let output = self.run_command(&["bolt11-estimate-route-fee", invoice])?;
         let v: serde_json::Value = serde_json::from_str(&output).map_err(|e| {
-            Error::Protocol(format!("estimate-route-fee parse: {} (output: {})", e, output))
+            Error::Protocol(format!(
+                "estimate-route-fee parse: {} (output: {})",
+                e, output
+            ))
         })?;
         v.get("routing_fee_msat")
             .and_then(|x| x.as_u64())
-            .ok_or_else(|| Error::Protocol(format!("estimate-route-fee: no routing_fee_msat in {}", output)))
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "estimate-route-fee: no routing_fee_msat in {}",
+                    output
+                ))
+            })
     }
 
     /// Pay a BOLT11 invoice with a specific amount (for amountless invoices)
@@ -323,10 +331,7 @@ impl LdkBackend {
     /// receive-side record to commit a real proof-of-payment in
     /// `InvoiceFulfill.preimage`. Returns `Ok(None)` if LDK doesn't
     /// recognize the id.
-    pub fn get_payment_preimage(
-        &self,
-        payment_id_hex: &str,
-    ) -> Result<Option<[u8; 32]>, Error> {
+    pub fn get_payment_preimage(&self, payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error> {
         let output = match self.run_command(&["get-payment-details", payment_id_hex]) {
             Ok(s) => s,
             Err(e) => {
@@ -357,9 +362,8 @@ impl LdkBackend {
             Some(p) => p,
             None => return Ok(None),
         };
-        let bytes = hex::decode(preimage_hex).map_err(|e| {
-            Error::Protocol(format!("Bad preimage hex from LDK: {}", e))
-        })?;
+        let bytes = hex::decode(preimage_hex)
+            .map_err(|e| Error::Protocol(format!("Bad preimage hex from LDK: {}", e)))?;
         if bytes.len() != 32 {
             return Err(Error::Protocol(format!(
                 "Preimage from LDK was {} bytes, want 32",
@@ -558,19 +562,11 @@ impl LightningBackend for LdkBackend {
         LdkBackend::pay_invoice(self, invoice)
     }
 
-    fn pay_invoice_with_amount(
-        &self,
-        invoice: &str,
-        amount_msat: u64,
-    ) -> Result<String, Error> {
+    fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
         LdkBackend::pay_invoice_with_amount(self, invoice, amount_msat)
     }
 
-    fn pay_invoice_with_fee_cap(
-        &self,
-        invoice: &str,
-        max_fee_msat: u64,
-    ) -> Result<String, Error> {
+    fn pay_invoice_with_fee_cap(&self, invoice: &str, max_fee_msat: u64) -> Result<String, Error> {
         LdkBackend::pay_invoice_capped(self, invoice, max_fee_msat)
     }
 
@@ -613,10 +609,7 @@ impl LightningBackend for LdkBackend {
             .collect())
     }
 
-    fn get_payment_preimage(
-        &self,
-        payment_id_hex: &str,
-    ) -> Result<Option<[u8; 32]>, Error> {
+    fn get_payment_preimage(&self, payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error> {
         LdkBackend::get_payment_preimage(self, payment_id_hex)
     }
 
@@ -665,10 +658,7 @@ impl LightningBackend for LdkBackend {
             })
     }
 
-    fn lookup_hold_invoice(
-        &self,
-        payment_hash_hex: &str,
-    ) -> Result<HoldInvoiceState, Error> {
+    fn lookup_hold_invoice(&self, payment_hash_hex: &str) -> Result<HoldInvoiceState, Error> {
         // Terminal states come from the payment record; the held/accepted
         // distinction comes from the fork's GetClaimableDetails (the
         // PaymentClaimable event tracking — PaymentDetails alone reports
@@ -697,7 +687,10 @@ impl LightningBackend for LdkBackend {
                 e, output
             ))
         })?;
-        if v.get("claimable").and_then(|c| c.as_bool()).unwrap_or(false) {
+        if v.get("claimable")
+            .and_then(|c| c.as_bool())
+            .unwrap_or(false)
+        {
             Ok(HoldInvoiceState::Accepted {
                 htlc_expiry_height: v
                     .get("claim_deadline")

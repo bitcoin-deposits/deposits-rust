@@ -55,7 +55,10 @@ fn equivocation_chain_continuity_keeps_quorum_consistent() {
     // ledger imported by default; pick a peer that does).
     let peer_op_idx = find_peer_with_ledger(&accused_ledger, attacker_op_idx)
         .expect("no peer has op4's L1 imported — cluster setup incomplete");
-    eprintln!("[setup]   reading quorum_members from peer=op{}", peer_op_idx);
+    eprintln!(
+        "[setup]   reading quorum_members from peer=op{}",
+        peer_op_idx
+    );
 
     // Map each quorum_member pubkey to the cluster operator index whose
     // seed produces it. We need the seeds to forge cosignatures.
@@ -204,10 +207,7 @@ fn op_idx_for_pubkey(pubkey_hex: &str) -> Option<usize> {
     let secp = Secp256k1::new();
     for i in 0..22 {
         let seed_hex = op_seed(i);
-        let bytes: [u8; 32] = match hex::decode(&seed_hex)
-            .ok()
-            .and_then(|v| v.try_into().ok())
-        {
+        let bytes: [u8; 32] = match hex::decode(&seed_hex).ok().and_then(|v| v.try_into().ok()) {
             Some(b) => b,
             None => continue,
         };

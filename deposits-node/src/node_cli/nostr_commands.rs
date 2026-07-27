@@ -1583,7 +1583,10 @@ pub async fn nostr_dispute_status(args: &[String]) -> Result<(), Box<dyn std::er
     // hidden behind the relay's per-query cap.
     let update_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(crate::nostr::TAG_LEDGER_ID, [ledger_tag(ledger_id.as_str())]);
+        .custom_tag(
+            crate::nostr::TAG_LEDGER_ID,
+            [ledger_tag(ledger_id.as_str())],
+        );
 
     let update_events = fetch_all_events_paginated(&client, update_filter)
         .await
@@ -2111,11 +2114,9 @@ pub async fn nostr_request(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let params_json = match action.as_str() {
         "deposit_open" => {
             if positionals.is_empty() {
-                return Err(
-                    "deposit_open requires: <deposit_pubkey> \
+                return Err("deposit_open requires: <deposit_pubkey> \
                      [--annual-fee-bps N] [--annual-fee-fixed-msats N] [--fee-period-blocks N]"
-                        .into(),
-                );
+                    .into());
             }
             let mut obj = serde_json::Map::new();
             obj.insert(
@@ -2772,7 +2773,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
-                ..
+                    ..
                 } => (
                     "DisputeEnter",
                     format!("last_valid_seq:{}  reason:{}", last_valid_sequence, reason),
@@ -2833,9 +2834,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
                 ),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
-                LedgerOperation::Batch(ops) => {
-                    ("Batch", format!("{} inner ops", ops.len()))
-                }
+                LedgerOperation::Batch(ops) => ("Batch", format!("{} inner ops", ops.len())),
                 LedgerOperation::TransferLock {
                     source_deposit_id,
                     destination_deposit_id,

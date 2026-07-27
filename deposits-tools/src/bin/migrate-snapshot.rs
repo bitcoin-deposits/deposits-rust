@@ -131,13 +131,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         for (idx, entry) in entries.iter_mut().enumerate() {
             // Skip already-migrated entries.
-            if entry.get("tier_leaves").and_then(|v| v.as_array()).map(|a| !a.is_empty()).unwrap_or(false) {
+            if entry
+                .get("tier_leaves")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+            {
                 println!("  entry[{}]: already self-describing; skipping", idx);
                 continue;
             }
-            let declared_address = entry.get("address").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let outpoint_txid = entry.get("outpoint_txid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let outpoint_vout = entry.get("outpoint_vout").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            let declared_address = entry
+                .get("address")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let outpoint_txid = entry
+                .get("outpoint_txid")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let outpoint_vout = entry
+                .get("outpoint_vout")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as u32;
 
             if outpoint_txid.is_empty() {
                 println!("  entry[{}]: no outpoint_txid; skipping", idx);
@@ -152,7 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )) {
                 Ok(Some(a)) => a,
                 Ok(None) => {
-                    println!("  entry[{}]: couldn't fetch outpoint {} from esplora", idx, outpoint_txid);
+                    println!(
+                        "  entry[{}]: couldn't fetch outpoint {} from esplora",
+                        idx, outpoint_txid
+                    );
                     continue;
                 }
                 Err(e) => {
@@ -164,10 +183,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  entry[{}]: declared address == on-chain; no drift", idx);
                 continue;
             }
-            println!("  entry[{}]: DRIFT — declared={} on-chain={}", idx, declared_address, on_chain);
+            println!(
+                "  entry[{}]: DRIFT — declared={} on-chain={}",
+                idx, declared_address, on_chain
+            );
 
             // Parse the recorded inputs.
-            let operator = match entry.get("operator").and_then(|v| v.as_str()).and_then(|s| PublicKey::from_str(s).ok()) {
+            let operator = match entry
+                .get("operator")
+                .and_then(|v| v.as_str())
+                .and_then(|s| PublicKey::from_str(s).ok())
+            {
                 Some(p) => p,
                 None => {
                     println!("    can't parse operator; skipping");
@@ -209,7 +235,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 })
                 .unwrap_or_default();
             if ledger_id_candidates.is_empty() {
-                println!("    no ledger jsonls in {}; skipping", ledgers_dir.display());
+                println!(
+                    "    no ledger jsonls in {}; skipping",
+                    ledgers_dir.display()
+                );
                 continue;
             }
 
@@ -232,7 +261,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if !tried.insert(h) {
                             continue;
                         }
-                        if let Ok((addr, _, _)) = v_2026_04_17::build(&voter_set, &tiers, args.network, h) {
+                        if let Ok((addr, _, _)) =
+                            v_2026_04_17::build(&voter_set, &tiers, args.network, h)
+                        {
                             if addr.to_string() == on_chain {
                                 found = Some((ledger_id.clone(), h, u.sequence_number));
                                 break 'outer;
@@ -249,7 +280,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
             };
-            println!("    matched ledger {} at seq {}: ledger_hash={}", &ledger_id_hex[..16], seq, hex::encode(ledger_hash));
+            println!(
+                "    matched ledger {} at seq {}: ledger_hash={}",
+                &ledger_id_hex[..16],
+                seq,
+                hex::encode(ledger_hash)
+            );
 
             // Rebuild + extract tier leaves and control blocks.
             let (rebuilt_addr, spend_info, leaf_scripts) =
@@ -268,24 +304,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         continue;
                     }
                 };
-                tier_leaves_json.as_array_mut().unwrap().push(serde_json::json!({
-                    "tier_index": i as u32,
-                    "script_hex": hex::encode(leaf.as_bytes()),
-                    "control_block_hex": hex::encode(cb.serialize()),
-                }));
+                tier_leaves_json
+                    .as_array_mut()
+                    .unwrap()
+                    .push(serde_json::json!({
+                        "tier_index": i as u32,
+                        "script_hex": hex::encode(leaf.as_bytes()),
+                        "control_block_hex": hex::encode(cb.serialize()),
+                    }));
             }
 
             // Write the new fields onto the entry (Phase 1 self-describing format).
             let obj = entry.as_object_mut().unwrap();
-            obj.insert("script_pubkey".to_string(), serde_json::Value::String(script_pubkey_hex));
-            obj.insert("internal_key".to_string(), serde_json::Value::String(internal_key_hex));
+            obj.insert(
+                "script_pubkey".to_string(),
+                serde_json::Value::String(script_pubkey_hex),
+            );
+            obj.insert(
+                "internal_key".to_string(),
+                serde_json::Value::String(internal_key_hex),
+            );
             obj.insert("tier_leaves".to_string(), tier_leaves_json);
             // ALSO update the address field to point to the on-chain reality —
             // every downstream tool that trusts `address` should agree with on-chain.
-            obj.insert("address".to_string(), serde_json::Value::String(on_chain.clone()));
+            obj.insert(
+                "address".to_string(),
+                serde_json::Value::String(on_chain.clone()),
+            );
             // And the ledger_hash, since we now know the correct one.
-            obj.insert("ledger_hash".to_string(), serde_json::Value::String(hex::encode(ledger_hash)));
-            println!("    materialized self-describing fields ({} tier leaves)", leaf_scripts.len());
+            obj.insert(
+                "ledger_hash".to_string(),
+                serde_json::Value::String(hex::encode(ledger_hash)),
+            );
+            println!(
+                "    materialized self-describing fields ({} tier leaves)",
+                leaf_scripts.len()
+            );
             total_migrated += 1;
         }
 
@@ -302,7 +356,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Summary ===");
     println!("  migrated: {}", total_migrated);
     println!("  skipped:  {}", total_skipped);
-    println!("  mode:     {}", if args.write { "WRITE" } else { "dry-run" });
+    println!(
+        "  mode:     {}",
+        if args.write { "WRITE" } else { "dry-run" }
+    );
     Ok(())
 }
 
@@ -339,7 +396,9 @@ async fn fetch_outpoint_address(
     };
     let script_bytes = hex::decode(script_hex).map_err(|e| format!("hex: {}", e))?;
     let script = bitcoin::ScriptBuf::from_bytes(script_bytes);
-    Ok(Address::from_script(&script, network).ok().map(|a| a.to_string()))
+    Ok(Address::from_script(&script, network)
+        .ok()
+        .map(|a| a.to_string()))
 }
 
 async fn fetch_ledger_history(
@@ -356,8 +415,10 @@ async fn fetch_ledger_history(
         "#d": [ledger_tag],
         "limit": 10000,
     });
-    ws.send(Message::Text(serde_json::json!(["REQ", sub_id, filter]).to_string()))
-        .await?;
+    ws.send(Message::Text(
+        serde_json::json!(["REQ", sub_id, filter]).to_string(),
+    ))
+    .await?;
 
     let mut out = Vec::new();
     loop {
@@ -377,7 +438,11 @@ async fn fetch_ledger_history(
         };
         match arr.first().and_then(|v| v.as_str()) {
             Some("EVENT") => {
-                if let Some(content) = arr.get(2).and_then(|e| e.get("content")).and_then(|v| v.as_str()) {
+                if let Some(content) = arr
+                    .get(2)
+                    .and_then(|e| e.get("content"))
+                    .and_then(|v| v.as_str())
+                {
                     if let Ok(bytes) = BASE64.decode(content) {
                         if let Ok(u) = SignedLedgerUpdate::tlv_decode(&bytes) {
                             out.push(u);
@@ -389,7 +454,11 @@ async fn fetch_ledger_history(
             _ => {}
         }
     }
-    ws.send(Message::Text(serde_json::json!(["CLOSE", sub_id]).to_string())).await.ok();
+    ws.send(Message::Text(
+        serde_json::json!(["CLOSE", sub_id]).to_string(),
+    ))
+    .await
+    .ok();
     out.sort_by_key(|u| u.sequence_number);
     Ok(out)
 }

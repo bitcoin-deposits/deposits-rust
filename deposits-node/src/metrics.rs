@@ -478,8 +478,7 @@ pub fn record_cosign_duration(duration: Duration) {
 /// attributed: `queue` = time blocked on the serializing semaphore (back-
 /// pressure under load), `rtt` = network round-trip to collect cosignatures.
 pub fn record_cosign_phase(phase: &str, duration: Duration) {
-    histogram!("cosign_phase_seconds", "phase" => phase.to_string())
-        .record(duration.as_secs_f64());
+    histogram!("cosign_phase_seconds", "phase" => phase.to_string()).record(duration.as_secs_f64());
 }
 
 /// Record ledger operation duration.

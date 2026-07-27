@@ -12,7 +12,10 @@ use super::*;
 /// backend per process (`from_env`), so a global cache is correct.
 static LN_PAYMENTS_CACHE: std::sync::OnceLock<
     std::sync::Mutex<
-        Option<(std::time::Instant, std::sync::Arc<Vec<crate::lightning_backend::PaymentInfo>>)>,
+        Option<(
+            std::time::Instant,
+            std::sync::Arc<Vec<crate::lightning_backend::PaymentInfo>>,
+        )>,
     >,
 > = std::sync::OnceLock::new();
 
@@ -922,14 +925,10 @@ impl Node {
         // marker in the operator's data dir to disable refreshes
         // without having to bring the daemon down.
         if self.data_dir.join(".pause_auto_quorum_refresh").exists() {
-            tracing::debug!(
-                ".pause_auto_quorum_refresh marker present — skipping refresh cycle"
-            );
+            tracing::debug!(".pause_auto_quorum_refresh marker present — skipping refresh cycle");
             return;
         }
-        let threshold_blocks: u32 = self
-            .rotate_before_expiry_days
-            .saturating_mul(144);
+        let threshold_blocks: u32 = self.rotate_before_expiry_days.saturating_mul(144);
         if threshold_blocks == 0 {
             return;
         }
@@ -956,9 +955,7 @@ impl Node {
                         return None;
                     }
                     let expiry = l.state.quorum_expiry?;
-                    if l.state.quorum_state
-                        != deposits_core::types::QuorumState::Active
-                    {
+                    if l.state.quorum_state != deposits_core::types::QuorumState::Active {
                         return None;
                     }
                     Some(LedgerRefreshSnapshot {
@@ -1054,11 +1051,9 @@ impl Node {
                 "cltv-offset-v2" | "cltv-offset-literal"
             );
             let post_expiry = current_block > snap.quorum_expiry;
-            let auto_self_rescue_disabled = std::env::var(
-                "DEPOSITS_DISABLE_AUTO_SELF_RESCUE",
-            )
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+            let auto_self_rescue_disabled = std::env::var("DEPOSITS_DISABLE_AUTO_SELF_RESCUE")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
             if post_expiry && (!cascade_active || auto_self_rescue_disabled) {
                 tracing::debug!(
                     "auto_quorum_refresh: ledger {}... past quorum_expiry={} \
@@ -1091,10 +1086,7 @@ impl Node {
 
             let mut all_fresh = true;
             for m in &snap.active_members {
-                let pending_match = snap
-                    .pending_members
-                    .iter()
-                    .find(|p| p.pubkey == m.pubkey);
+                let pending_match = snap.pending_members.iter().find(|p| p.pubkey == m.pubkey);
                 let fresh = pending_match
                     .and_then(|p| p.membership_until)
                     .map(|until| until >= staleness_floor)
@@ -1139,10 +1131,7 @@ impl Node {
                 };
                 let (success, _, error) = self.process_quorum_add_request(&req).await;
                 if success {
-                    tracing::info!(
-                        "auto_quorum_refresh: member {}... refreshed",
-                        prefix
-                    );
+                    tracing::info!("auto_quorum_refresh: member {}... refreshed", prefix);
                     continue;
                 }
                 tracing::warn!(
@@ -1203,8 +1192,7 @@ impl Node {
                         subkey_attestation: None,
                         addressee: None,
                     };
-                    let (cs, _, cerr) =
-                        self.process_quorum_add_request(&candidate_req).await;
+                    let (cs, _, cerr) = self.process_quorum_add_request(&candidate_req).await;
                     if cs {
                         tracing::info!(
                             "auto_quorum_refresh: candidate consented; removing \
@@ -1228,8 +1216,7 @@ impl Node {
                             subkey_attestation: None,
                             addressee: None,
                         };
-                        let (rs, _, rerr) =
-                            self.process_quorum_remove_request(&remove_req).await;
+                        let (rs, _, rerr) = self.process_quorum_remove_request(&remove_req).await;
                         if !rs {
                             tracing::warn!(
                                 "auto_quorum_refresh: failed to remove {} \
@@ -1318,8 +1305,7 @@ impl Node {
                 subkey_attestation: None,
                 addressee: None,
             };
-            let (success, _, error) =
-                self.process_quorum_begin_request(&begin_req).await;
+            let (success, _, error) = self.process_quorum_begin_request(&begin_req).await;
             if success {
                 tracing::info!(
                     "auto_quorum_refresh: ledger {}... rotated",
@@ -1355,10 +1341,12 @@ impl Node {
     /// One step per plan per cycle keeps the periodic budget bounded.
     /// Disable via `.pause_auto_drip_self_liquidity` marker.
     pub async fn auto_drip_self_liquidity(self: &Arc<Self>) {
-        if self.data_dir.join(".pause_auto_drip_self_liquidity").exists() {
-            tracing::debug!(
-                ".pause_auto_drip_self_liquidity marker present — skipping cycle"
-            );
+        if self
+            .data_dir
+            .join(".pause_auto_drip_self_liquidity")
+            .exists()
+        {
+            tracing::debug!(".pause_auto_drip_self_liquidity marker present — skipping cycle");
             return;
         }
         let mut registry = match crate::operator_drips::DripRegistry::load(&self.data_dir) {
@@ -1436,7 +1424,10 @@ impl Node {
                 );
                 continue;
             }
-            match self.internal_buffer_drain(buffer_index, decrement_msats).await {
+            match self
+                .internal_buffer_drain(buffer_index, decrement_msats)
+                .await
+            {
                 Ok(new_balance) => {
                     use bitcoin::secp256k1::rand::rngs::OsRng;
                     use bitcoin::secp256k1::rand::RngCore;
@@ -1511,13 +1502,33 @@ mod ln_payments_cache_tests {
         let ttl = Duration::from_millis(60);
 
         // First call fetches; a second within the TTL is served from cache.
-        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
-        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "second call within TTL must not hit the backend");
+        cached_list_payments_in(&cell, ttl, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        })
+        .unwrap();
+        cached_list_payments_in(&cell, ttl, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        })
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second call within TTL must not hit the backend"
+        );
 
         // After the TTL, the next call refreshes.
         std::thread::sleep(Duration::from_millis(75));
-        cached_list_payments_in(&cell, ttl, || { calls.fetch_add(1, Ordering::SeqCst); Ok(vec![]) }).unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 2, "call after TTL must refresh from the backend");
+        cached_list_payments_in(&cell, ttl, || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![])
+        })
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "call after TTL must refresh from the backend"
+        );
     }
 }

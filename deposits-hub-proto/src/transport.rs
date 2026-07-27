@@ -52,10 +52,7 @@ impl HubTransport {
     /// Connect to the given relays as the hub. Returns once at least
     /// one relay is connected (with a 5s ceiling — partial connectivity
     /// is fine, the pump retries forever).
-    pub async fn connect(
-        secret_hex: &str,
-        relays: &[String],
-    ) -> Result<Self, NostrError> {
+    pub async fn connect(secret_hex: &str, relays: &[String]) -> Result<Self, NostrError> {
         let secret = SecretKey::from_hex(secret_hex)
             .map_err(|e| NostrError::Sdk(format!("decode hub secret: {}", e)))?;
         let keys = Keys::new(secret);
@@ -234,9 +231,7 @@ impl HubTransport {
 
         // Pick newest by created_at — relays SHOULD only serve one per
         // (pubkey, kind, d), but multi-relay setups can fan in.
-        let newest = events
-            .into_iter()
-            .max_by_key(|e| e.created_at.as_u64());
+        let newest = events.into_iter().max_by_key(|e| e.created_at.as_u64());
         let Some(event) = newest else {
             return Ok(None);
         };
@@ -247,11 +242,7 @@ impl HubTransport {
 
     /// Send a `HubMessage` to a peer via gift-wrap. Returns once the
     /// event is sent to the relay; relays may further fan-out.
-    pub async fn send(
-        &self,
-        recipient: &str,
-        msg: HubMessage,
-    ) -> Result<(), NostrError> {
+    pub async fn send(&self, recipient: &str, msg: HubMessage) -> Result<(), NostrError> {
         let recipient_pk = PublicKey::from_hex(recipient)
             .map_err(|e| NostrError::Recipient(format!("{}: {}", recipient, e)))?;
         let payload = serde_json::to_string(&msg)?;

@@ -41,16 +41,16 @@
 //! | Wallet | Channel manager | BDK wallet |
 //! | Peer discovery | LN peer connections | Nostr pubkeys |
 
-pub mod error;
-pub mod handler;
-pub mod hub;
 pub mod admin_api;
 pub mod bitcoind_backend;
 pub mod candidate_queue;
 pub mod chain_backend;
 pub mod cln_backend;
 pub mod electrum_backend;
+pub mod error;
 pub mod esplora_backend;
+pub mod handler;
+pub mod hub;
 pub mod ldk_backend;
 pub mod ledger_wallet;
 pub mod lightning_backend;

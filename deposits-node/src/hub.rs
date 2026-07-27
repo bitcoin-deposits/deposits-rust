@@ -144,8 +144,8 @@ pub async fn run(
 /// fall back to zeros so a transient wallet-sync failure doesn't
 /// drop the whole status push.
 fn compute_node_stats(node: &Node) -> NodeStats {
-    use deposits_core::messages::LedgerOperation;
     use deposits_core::cosign_threshold::{cosign_requirement, LifecycleTier};
+    use deposits_core::messages::LedgerOperation;
     use deposits_core::types::DisputeState;
     use deposits_hub_proto::proto::{LedgerHealth, QuorumMemberInfo, ServingLedger};
 
@@ -249,13 +249,16 @@ fn compute_node_stats(node: &Node) -> NodeStats {
     // ship the error to the hub, which surfaces it as a critical concern.
     // catch_unwind guards the lnd/cln from_env() panic-on-misconfig path so
     // a bad LN setup can't take down the status pump.
-    let ln_error: Option<String> = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-        || crate::lightning_backend::from_env().get_node_info(),
-    )) {
-        Ok(Ok(_)) => None,
-        Ok(Err(e)) => Some(e.to_string()),
-        Err(_) => Some("lightning backend init panicked (check LIGHTNING_BACKEND config)".into()),
-    };
+    let ln_error: Option<String> =
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::lightning_backend::from_env().get_node_info()
+        })) {
+            Ok(Ok(_)) => None,
+            Ok(Err(e)) => Some(e.to_string()),
+            Err(_) => {
+                Some("lightning backend init panicked (check LIGHTNING_BACKEND config)".into())
+            }
+        };
     if let Some(ref e) = ln_error {
         tracing::warn!("lightning backend unreachable — invoices will fail: {}", e);
     }
@@ -291,7 +294,10 @@ fn handle_from_hub(msg: HubMessage, accepted: &mut bool) {
             tracing::debug!("hub: StatusReq received (not implemented)");
         }
         other => {
-            tracing::debug!("hub: unexpected inbound {:?}", std::mem::discriminant(&other));
+            tracing::debug!(
+                "hub: unexpected inbound {:?}",
+                std::mem::discriminant(&other)
+            );
         }
     }
 }

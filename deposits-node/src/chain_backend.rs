@@ -57,10 +57,7 @@ pub trait ChainBackend: Send + Sync {
     /// in the best chain. `Ok(None)` for unknown hashes and for known
     /// hashes on a stale fork — both mean "this block isn't confirming
     /// anything from the caller's perspective."
-    fn get_block_height_if_in_best_chain(
-        &self,
-        hash: &BlockHash,
-    ) -> Result<Option<u32>, Error>;
+    fn get_block_height_if_in_best_chain(&self, hash: &BlockHash) -> Result<Option<u32>, Error>;
 
     /// Fetch a transaction by id. `Ok(None)` if the backend doesn't know
     /// the txid (typically: not in mempool, not in chain, or backend
@@ -89,10 +86,7 @@ pub trait ChainBackend: Send + Sync {
     /// esplora exposes it via `/scripthash/{hash}/utxo`; electrum via
     /// `script_hash.listunspent`; bitcoind needs `scantxoutset` (which is
     /// expensive but doesn't require `txindex`).
-    fn find_unspent_output_at(
-        &self,
-        script: &Script,
-    ) -> Result<Option<UnspentOutput>, Error>;
+    fn find_unspent_output_at(&self, script: &Script) -> Result<Option<UnspentOutput>, Error>;
 
     /// Find the transaction that SPENDS `outpoint`, if the backend can
     /// see one. Used by the forfeit-sweep flow to locate the lottery

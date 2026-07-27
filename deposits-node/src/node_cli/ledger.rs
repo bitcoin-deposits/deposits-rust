@@ -82,14 +82,15 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
                 "--collateral-ratio" if i + 1 < args.len() => {
                     let raw = &args[i + 1];
                     let ratio: f64 = raw.parse().map_err(|_| {
-                        format!("Invalid --collateral-ratio value: {} (expected float in [0, 1])", raw)
-                    })?;
-                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
-                        return Err(format!(
-                            "--collateral-ratio {} must be in [0.0, 1.0]",
+                        format!(
+                            "Invalid --collateral-ratio value: {} (expected float in [0, 1])",
                             raw
                         )
-                        .into());
+                    })?;
+                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+                        return Err(
+                            format!("--collateral-ratio {} must be in [0.0, 1.0]", raw).into()
+                        );
                     }
                     collateral_bps = Some((ratio * 10_000.0).round() as u32);
                     i += 1;
@@ -151,12 +152,9 @@ async fn ledger_open(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     if let Some(bps) = collateral_bps {
         params.insert("collateral_bps".to_string(), serde_json::json!(bps));
     }
-    let result = super::send_admin_daemon_request(
-        &config,
-        "ledger_open",
-        serde_json::Value::Object(params),
-    )
-    .await?;
+    let result =
+        super::send_admin_daemon_request(&config, "ledger_open", serde_json::Value::Object(params))
+            .await?;
     let ledger_id = result
         .get("ledger_id")
         .and_then(|v| v.as_str())

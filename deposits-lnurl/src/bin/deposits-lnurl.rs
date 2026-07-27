@@ -280,10 +280,7 @@ fn extract_ledger_from_host(host: &str, base_domain: &str) -> Option<String> {
 ///   - anything else (including localhost dev URLs) → overview by
 ///     default; user can navigate to `/wallet` or `/ledger` for the
 ///     other surfaces with an explicit `#ledger=<id>` override.
-async fn root_index(
-    State(state): State<Arc<AppState>>,
-    Host(host): Host,
-) -> Html<&'static str> {
+async fn root_index(State(state): State<Arc<AppState>>, Host(host): Host) -> Html<&'static str> {
     let host_no_port = host.split(':').next().unwrap_or(&host);
     if host_no_port.starts_with("wallet.") {
         return Html(assets().wallet_index);
@@ -393,20 +390,19 @@ impl StaticAssets {
     fn load(dir: &std::path::Path) -> Self {
         let load = |sub: &str| -> &'static str {
             let p = dir.join(sub);
-            let s = std::fs::read_to_string(&p).unwrap_or_else(|e| {
-                panic!("failed to read static asset {}: {}", p.display(), e)
-            });
+            let s = std::fs::read_to_string(&p)
+                .unwrap_or_else(|e| panic!("failed to read static asset {}: {}", p.display(), e));
             Box::leak(s.into_boxed_str())
         };
         Self {
-            explorer_ledger:   load("explorer/ledger.html"),
+            explorer_ledger: load("explorer/ledger.html"),
             explorer_overview: load("explorer/explorer.html"),
-            explorer_update:   load("explorer/update.html"),
-            explorer_deposit:  load("explorer/deposit.html"),
+            explorer_update: load("explorer/update.html"),
+            explorer_deposit: load("explorer/deposit.html"),
             explorer_deposits: load("explorer/deposits.html"),
             explorer_live: load("explorer/live.html"),
-            wallet_index:      load("wallet/index.html"),
-            request_payment:    load("explorer/request-payment.html"),
+            wallet_index: load("wallet/index.html"),
+            request_payment: load("explorer/request-payment.html"),
         }
     }
 }
@@ -426,7 +422,9 @@ fn web_assets_service(
 static ASSETS: std::sync::OnceLock<StaticAssets> = std::sync::OnceLock::new();
 
 fn assets() -> &'static StaticAssets {
-    ASSETS.get().expect("ASSETS not initialized — call StaticAssets::load + ASSETS.set in main")
+    ASSETS
+        .get()
+        .expect("ASSETS not initialized — call StaticAssets::load + ASSETS.set in main")
 }
 
 /// GET /.well-known/lnurlp/<deposit_id>
@@ -1144,8 +1142,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Static UI assets — load once at startup so the binary stays
     // unchanged across HTML/JS edits (see StaticAssets docs).
-    let asset_dir = std::env::var("DEPOSITS_WEB_DIR")
-        .unwrap_or_else(|_| "./deposits-web".to_string());
+    let asset_dir =
+        std::env::var("DEPOSITS_WEB_DIR").unwrap_or_else(|_| "./deposits-web".to_string());
     ASSETS
         .set(StaticAssets::load(std::path::Path::new(&asset_dir)))
         .map_err(|_| "ASSETS already initialized")?;
@@ -1294,20 +1292,27 @@ mod static_asset_tests {
         std::fs::write(root.join("wallet/vendor/dep17.js"), "export const a=1;").unwrap();
         std::fs::write(root.join("explorer/shared.js"), "export const b=2;").unwrap();
 
-        let req = |uri: &str| {
-            Request::builder().uri(uri).body(Body::empty()).unwrap()
-        };
+        let req = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
 
         // Wallet asset resolves directly.
-        let r = web_assets_service(root).oneshot(req("/vendor/dep17.js")).await.unwrap();
+        let r = web_assets_service(root)
+            .oneshot(req("/vendor/dep17.js"))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "wallet vendor asset");
 
         // Explorer-only asset must fall through with 200, not 404.
-        let r = web_assets_service(root).oneshot(req("/shared.js")).await.unwrap();
+        let r = web_assets_service(root)
+            .oneshot(req("/shared.js"))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::OK, "explorer shared.js fallthrough");
 
         // Genuinely missing in both → 404.
-        let r = web_assets_service(root).oneshot(req("/nope.js")).await.unwrap();
+        let r = web_assets_service(root)
+            .oneshot(req("/nope.js"))
+            .await
+            .unwrap();
         assert_eq!(r.status(), StatusCode::NOT_FOUND, "missing asset");
     }
 }

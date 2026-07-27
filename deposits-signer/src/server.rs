@@ -228,11 +228,7 @@ where
     }
 }
 
-fn handle_request(
-    signer: &dyn Signer,
-    policy: &SeqPolicy,
-    req: SignRequest,
-) -> SignResponse {
+fn handle_request(signer: &dyn Signer, policy: &SeqPolicy, req: SignRequest) -> SignResponse {
     // Anti-equivocation gate. Only BIP-340 ops with a ledger-bound role
     // run through the policy; ECDSA sighashes and ECDH have no SeqContext,
     // PubkeyQuery is read-only.

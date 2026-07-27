@@ -256,11 +256,7 @@ async fn run(
                 // disputant's) before DisputeAcquire publishes — so
                 // having them in the tracked set lets the spend trace
                 // correctly label that intermediate hop.
-                hits.push((
-                    "DisputeArmed",
-                    "target_reserves",
-                    target_reserves.clone(),
-                ));
+                hits.push(("DisputeArmed", "target_reserves", target_reserves.clone()));
             }
             LedgerOperation::OnchainCredit {
                 funding_address, ..
@@ -271,21 +267,13 @@ async fn run(
                 destination_address,
                 ..
             } => {
-                hits.push((
-                    "OnchainLock",
-                    "destination",
-                    destination_address.clone(),
-                ));
+                hits.push(("OnchainLock", "destination", destination_address.clone()));
             }
             LedgerOperation::OnchainFulfill {
                 destination_address,
                 ..
             } => {
-                hits.push((
-                    "OnchainFulfill",
-                    "destination",
-                    destination_address.clone(),
-                ));
+                hits.push(("OnchainFulfill", "destination", destination_address.clone()));
             }
             _ => {}
         }
@@ -300,10 +288,7 @@ async fn run(
                     u.sequence_number, label, field, ledger_id_short, addr_str
                 );
             }
-            let (chain, note) = classify_and_query(
-                &http, esplora_url, network, &addr_str,
-            )
-            .await;
+            let (chain, note) = classify_and_query(&http, esplora_url, network, &addr_str).await;
             rows.push(Row {
                 op: label,
                 field,
@@ -429,8 +414,7 @@ async fn run(
             println!();
             println!("=== Spend traces ===");
             // Dedup by address — many `LedgerOpen` rows share a reserves_id.
-            let mut seen_addrs: std::collections::HashSet<&str> =
-                std::collections::HashSet::new();
+            let mut seen_addrs: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for r in to_trace {
                 if !seen_addrs.insert(r.reserves_id.as_str()) {
                     continue;
@@ -461,10 +445,7 @@ async fn run(
                                 } else {
                                     "external".to_string()
                                 };
-                                println!(
-                                    "    {:>14} sats → {}  [{}]",
-                                    val, dst, label
-                                );
+                                println!("    {:>14} sats → {}  [{}]", val, dst, label);
                             }
                         }
                     }
@@ -551,7 +532,10 @@ async fn reconstruct_lottery_addresses(
                 }
             }
         }
-        for u in events.iter().filter(|u| hex::encode(u.ledger_id) == ledger_hex) {
+        for u in events
+            .iter()
+            .filter(|u| hex::encode(u.ledger_id) == ledger_hex)
+        {
             if history_seen.insert(u.content_hash) {
                 history.push(u.clone());
             }
@@ -570,9 +554,7 @@ async fn reconstruct_lottery_addresses(
                 Err(_) => continue,
             };
             match op {
-                LedgerOperation::LedgerOpen { operator_id, .. }
-                    if original_operator.is_none() =>
-                {
+                LedgerOperation::LedgerOpen { operator_id, .. } if original_operator.is_none() => {
                     original_operator = Some(operator_id);
                 }
                 LedgerOperation::QuorumBegin { quorum_members, .. } => {
@@ -778,10 +760,7 @@ async fn fetch_spend_traces(
                         .and_then(|v| v.as_str())
                         .unwrap_or("OP_RETURN")
                         .to_string();
-                    let val = out
-                        .get("value")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
+                    let val = out.get("value").and_then(|v| v.as_u64()).unwrap_or(0);
                     destinations.push((dst, val));
                 }
             }
@@ -821,9 +800,7 @@ async fn classify_and_query(
         Err(_) => {
             if addr_str.starts_with("genesis:") {
                 (None, "genesis-placeholder".to_string())
-            } else if addr_str.len() == 66
-                && addr_str.chars().all(|c| c.is_ascii_hexdigit())
-            {
+            } else if addr_str.len() == 66 && addr_str.chars().all(|c| c.is_ascii_hexdigit()) {
                 (None, "pubkey-hex".to_string())
             } else {
                 (None, "unparseable".to_string())
@@ -844,8 +821,7 @@ fn ingest_jsonl_path(
     path: &std::path::Path,
 ) -> Result<Vec<SignedLedgerUpdate>, Box<dyn std::error::Error>> {
     let mut out = Vec::new();
-    let meta = std::fs::metadata(path)
-        .map_err(|e| format!("stat {}: {}", path.display(), e))?;
+    let meta = std::fs::metadata(path).map_err(|e| format!("stat {}: {}", path.display(), e))?;
     if meta.is_file() {
         ingest_one_jsonl(path, &mut out)?;
         return Ok(out);
@@ -874,8 +850,7 @@ fn ingest_one_jsonl(
     out: &mut Vec<SignedLedgerUpdate>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use std::io::BufRead;
-    let file = std::fs::File::open(path)
-        .map_err(|e| format!("open {}: {}", path.display(), e))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("open {}: {}", path.display(), e))?;
     for line in std::io::BufReader::new(file).lines() {
         let line = match line {
             Ok(l) => l,
@@ -968,7 +943,10 @@ async fn fetch_all_9100(
                         Some(e) => e,
                         None => continue,
                     };
-                    let created_at = event.get("created_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let created_at = event
+                        .get("created_at")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     page_oldest = Some(match page_oldest {
                         Some(o) => o.min(created_at),
                         None => created_at,

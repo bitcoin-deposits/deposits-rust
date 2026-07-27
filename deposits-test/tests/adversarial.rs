@@ -16,12 +16,12 @@
 //! Target: extract more than alice's own 1M sat reserves
 
 use deposits_core::ledger::Ledger;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::{
     compute_deposit_id, ConformanceViolation, DisputeState, FeeStructure, QuorumState,
 };
 use deposits_protocol::TlvDecode;
+use deposits_test::*;
 
 /// Set up a 4-operator network with quorum and collateral.
 fn setup_adversarial_network() -> TestNetwork {
@@ -191,11 +191,7 @@ fn attack_forged_invoice_witness() {
         .op("alice")
         .ledger
         .state
-        .apply_with_verifier(
-            &op,
-            &deposits_core::dep16::Dep16Authorizer::new(),
-            0,
-        )
+        .apply_with_verifier(&op, &deposits_core::dep16::Dep16Authorizer::new(), 0)
         .expect("apply succeeds; the rejection is in conformance");
     assert!(
         !violations.is_empty(),

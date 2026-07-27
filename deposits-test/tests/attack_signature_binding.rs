@@ -27,8 +27,7 @@ fn make_key(seed: u8) -> (bitcoin::secp256k1::SecretKey, bitcoin::secp256k1::Pub
 /// route through dep-16 authorization — none of the ops constructed in this
 /// test fall into that bucket.
 fn preimage(op: &LedgerOperation) -> [u8; 32] {
-    deposits_core::dep16::operations::operation_sighash(op)
-        .expect("test op must be signable")
+    deposits_core::dep16::operations::operation_sighash(op).expect("test op must be signable")
 }
 
 fn invoice_lock(
@@ -261,7 +260,12 @@ fn attack_signing_domain_separation() {
     });
 
     // dep-17 also binds op_nonce, so signatures don't replay across nonces.
-    let other_nonce_msg = preimage(&invoice_lock(deposit_id_a, payment_hash, 100_000, nonce + 1));
+    let other_nonce_msg = preimage(&invoice_lock(
+        deposit_id_a,
+        payment_hash,
+        100_000,
+        nonce + 1,
+    ));
     let nonce_bound = invoice_msg != other_nonce_msg;
     steps.push(AttackStep {
         action: "Verify nonce binding in dep-17 preimage".into(),
@@ -270,17 +274,11 @@ fn attack_signing_domain_separation() {
         } else {
             StepOutcome::Succeeded
         },
-        detail: format!(
-            "Different op_nonce → different message: {}",
-            nonce_bound
-        ),
+        detail: format!("Different op_nonce → different message: {}", nonce_bound),
     });
 
-    let all_bound = collisions == 0
-        && deposit_bound
-        && amount_bound
-        && cross_op_distinct
-        && nonce_bound;
+    let all_bound =
+        collisions == 0 && deposit_bound && amount_bound && cross_op_distinct && nonce_bound;
 
     log.record(AttackResult {
         name: "Systematic signature binding check".into(),

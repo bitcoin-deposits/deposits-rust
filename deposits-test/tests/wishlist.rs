@@ -4,10 +4,10 @@
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_core::ledger::Ledger;
-use deposits_test::adversarial::*;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
+use deposits_test::adversarial::*;
+use deposits_test::*;
 
 fn make_key(seed: u8) -> (SecretKey, PublicKey) {
     let secp = Secp256k1::new();
@@ -35,12 +35,8 @@ fn tier2_1_nums_point_audit() {
     let config = ThresholdConfig::default_for_voter_count(4);
     let ledger_hash = [0xAB; 32];
 
-    let builder = TapscriptReservesBuilder::new(
-        voter_set,
-        config,
-        bitcoin::Network::Regtest,
-        ledger_hash,
-    );
+    let builder =
+        TapscriptReservesBuilder::new(voter_set, config, bitcoin::Network::Regtest, ledger_hash);
     let output = builder.build().unwrap();
 
     // The BIP-341 recommended NUMS point for the internal key is:
@@ -353,7 +349,9 @@ fn tier5_1_signature_malleability() {
         expiry: u32::MAX,
         timeout_height: None,
         fee: None,
-        witness: DescriptorWitness { stack: vec![sig_bytes.clone()] },
+        witness: DescriptorWitness {
+            stack: vec![sig_bytes.clone()],
+        },
         commitment: None,
     };
     assert!(

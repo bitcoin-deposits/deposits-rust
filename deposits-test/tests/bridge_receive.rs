@@ -137,7 +137,11 @@ fn bridge_receive_end_to_end() {
     let bolt11 = rx
         .recv_timeout(Duration::from_secs(30))
         .expect("wallet did not print a BOLT-11 — bridge unreachable or refused");
-    assert!(bolt11.starts_with("lnbcrt"), "not a regtest invoice: {}", bolt11);
+    assert!(
+        bolt11.starts_with("lnbcrt"),
+        "not a regtest invoice: {}",
+        bolt11
+    );
     eprintln!("[invoice] {}…", &bolt11[..40]);
 
     // Payer pays — blocks while the bridge's LND holds the HTLC.

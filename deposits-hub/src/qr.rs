@@ -37,7 +37,11 @@ fn render_qr(qr: &QrCode, quiet_modules: usize) -> String {
     // Sample a module at logical (x, y) — coordinates include the
     // quiet zone, so anything outside the QR proper is "light" (off).
     let on = |x: usize, y: usize| -> bool {
-        if x < quiet_modules || y < quiet_modules || x >= w + quiet_modules || y >= w + quiet_modules {
+        if x < quiet_modules
+            || y < quiet_modules
+            || x >= w + quiet_modules
+            || y >= w + quiet_modules
+        {
             return false;
         }
         let qx = x - quiet_modules;

@@ -63,7 +63,9 @@ impl Interp {
     }
 
     fn pop(&mut self) -> Result<Vec<u8>, String> {
-        self.stack.pop().ok_or_else(|| "stack underflow".to_string())
+        self.stack
+            .pop()
+            .ok_or_else(|| "stack underflow".to_string())
     }
 
     fn push(&mut self, v: Vec<u8>) {
@@ -98,7 +100,10 @@ impl Interp {
             self.step(inst)?;
         }
         if !self.cond_stack.is_empty() {
-            return Err(format!("unbalanced IF/ENDIF: cond_stack={:?}", self.cond_stack));
+            return Err(format!(
+                "unbalanced IF/ENDIF: cond_stack={:?}",
+                self.cond_stack
+            ));
         }
         Ok(())
     }
@@ -133,17 +138,12 @@ impl Interp {
                     return Ok(());
                 }
                 0x67 => {
-                    let last = self
-                        .cond_stack
-                        .last_mut()
-                        .ok_or("OP_ELSE without OP_IF")?;
+                    let last = self.cond_stack.last_mut().ok_or("OP_ELSE without OP_IF")?;
                     *last = !*last;
                     return Ok(());
                 }
                 0x68 => {
-                    self.cond_stack
-                        .pop()
-                        .ok_or("OP_ENDIF without OP_IF")?;
+                    self.cond_stack.pop().ok_or("OP_ENDIF without OP_IF")?;
                     return Ok(());
                 }
                 _ => {}
@@ -383,8 +383,13 @@ fn run_lottery(contributions: &[usize]) -> Result<XOnlyPublicKey, String> {
     let pubkey_bytes = interp
         .last_checked_pubkey
         .ok_or("OP_CHECKSIG was never executed — dispatch must have fallen through")?;
-    XOnlyPublicKey::from_slice(&pubkey_bytes)
-        .map_err(|e| format!("recorded non-pubkey {}: {:?}", hex::encode(&pubkey_bytes), e))
+    XOnlyPublicKey::from_slice(&pubkey_bytes).map_err(|e| {
+        format!(
+            "recorded non-pubkey {}: {:?}",
+            hex::encode(&pubkey_bytes),
+            e
+        )
+    })
 }
 
 // ============================================================================
@@ -454,14 +459,12 @@ fn derived_preimages_spend_the_claim_leaf_and_agree_with_calculate_winner() {
             .unwrap_or_else(|e| panic!("n={}: derived preimages failed the leaf: {}", n, e));
         let top = interp.stack.last().expect("empty stack");
         assert!(read_scriptbool(top), "n={}: script returned FALSE", n);
-        let winner_pk = XOnlyPublicKey::from_slice(interp.last_checked_pubkey.unwrap().as_slice())
-            .unwrap();
+        let winner_pk =
+            XOnlyPublicKey::from_slice(interp.last_checked_pubkey.unwrap().as_slice()).unwrap();
         assert_eq!(
-            winner_pk,
-            participants[off_chain].pubkey,
+            winner_pk, participants[off_chain].pubkey,
             "n={}: on-chain dispatch disagrees with calculate_winner (idx {})",
-            n,
-            off_chain
+            n, off_chain
         );
     }
 }
@@ -478,16 +481,16 @@ fn primary_lottery_dispatches_correctly_across_linear_regime() {
     // Sweep N=2..=5 with random-ish contributions; verify the
     // interpreter agrees with calculate_winner.
     let cases: &[(&[usize], usize)] = &[
-        (&[2, 1], 1),       // sum 3 mod 2 = 1
-        (&[1, 1, 1], 0),    // sum 3 mod 3 = 0
-        (&[3, 2, 1], 0),    // sum 6 mod 3 = 0
-        (&[1, 2, 3, 4], 2), // sum 10 mod 4 = 2
+        (&[2, 1], 1),          // sum 3 mod 2 = 1
+        (&[1, 1, 1], 0),       // sum 3 mod 3 = 0
+        (&[3, 2, 1], 0),       // sum 6 mod 3 = 0
+        (&[1, 2, 3, 4], 2),    // sum 10 mod 4 = 2
         (&[5, 4, 3, 2, 1], 0), // sum 15 mod 5 = 0
         (&[1, 2, 3, 4, 5], 0), // sum 15 mod 5 = 0
     ];
     for (contribs, expected_idx) in cases {
-        let pk_won = run_lottery(contribs)
-            .unwrap_or_else(|e| panic!("contributions {:?}: {}", contribs, e));
+        let pk_won =
+            run_lottery(contribs).unwrap_or_else(|e| panic!("contributions {:?}: {}", contribs, e));
         assert_eq!(
             pk_won,
             pk((*expected_idx + 1) as u8),
@@ -502,14 +505,14 @@ fn primary_lottery_dispatches_correctly_across_linear_regime() {
 fn primary_lottery_dispatches_correctly_in_combined_table_regime() {
     // N=6 to N=10: CombinedTable. Pick a few representative cases.
     let cases: &[(&[usize], usize)] = &[
-        (&[1, 1, 1, 1, 1, 1], 0),       // sum 6 mod 6 = 0
-        (&[6, 5, 4, 3, 2, 1], 3),       // sum 21 mod 6 = 3
-        (&[1; 10], 0),                  // sum 10 mod 10 = 0
+        (&[1, 1, 1, 1, 1, 1], 0),              // sum 6 mod 6 = 0
+        (&[6, 5, 4, 3, 2, 1], 3),              // sum 21 mod 6 = 3
+        (&[1; 10], 0),                         // sum 10 mod 10 = 0
         (&[1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 5), // sum 55 mod 10 = 5
     ];
     for (contribs, expected_idx) in cases {
-        let pk_won = run_lottery(contribs)
-            .unwrap_or_else(|e| panic!("contributions {:?}: {}", contribs, e));
+        let pk_won =
+            run_lottery(contribs).unwrap_or_else(|e| panic!("contributions {:?}: {}", contribs, e));
         assert_eq!(
             pk_won,
             pk((*expected_idx + 1) as u8),
@@ -526,12 +529,22 @@ fn primary_lottery_dispatches_correctly_at_n11_and_n15() {
     let n11: Vec<usize> = (1..=11).collect();
     let sum_n11: usize = n11.iter().sum(); // 66, mod 11 = 0
     let pk_won = run_lottery(&n11).expect("N=11 dispatch should succeed");
-    assert_eq!(pk_won, pk(1), "N=11 sum {} mod 11 = 0 → participant 1", sum_n11);
+    assert_eq!(
+        pk_won,
+        pk(1),
+        "N=11 sum {} mod 11 = 0 → participant 1",
+        sum_n11
+    );
 
     let n15: Vec<usize> = (1..=15).collect();
     let sum_n15: usize = n15.iter().sum(); // 120, mod 15 = 0
     let pk_won = run_lottery(&n15).expect("N=15 dispatch should succeed");
-    assert_eq!(pk_won, pk(1), "N=15 sum {} mod 15 = 0 → participant 1", sum_n15);
+    assert_eq!(
+        pk_won,
+        pk(1),
+        "N=15 sum {} mod 15 = 0 → participant 1",
+        sum_n15
+    );
 
     // Non-zero modulo case at N=15.
     let mut alt = n15.clone();
@@ -578,8 +591,7 @@ fn primary_lottery_rejects_wrong_preimage() {
     let mut interp = Interp::new(witness);
     let result = interp.run(&script);
     assert!(
-        result.is_err()
-            && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
+        result.is_err() && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
         "expected EQUALVERIFY failure, got: {:?}",
         result
     );
@@ -608,8 +620,7 @@ fn primary_lottery_rejects_undersized_preimage() {
     // pass because we hashed *the same bytes* we'll reveal.
     let bad_preimage = vec![0xCDu8; 5];
     let bad_commit = hash160::Hash::hash(&bad_preimage).to_byte_array();
-    participants[0] =
-        LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
+    participants[0] = LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
     preimages[0] = bad_preimage;
 
     let script = LotteryScriptBuilder::new(
@@ -629,8 +640,7 @@ fn primary_lottery_rejects_undersized_preimage() {
     let mut interp = Interp::new(witness);
     let result = interp.run(&script);
     assert!(
-        result.is_err()
-            && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
+        result.is_err() && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
         "expected OP_VERIFY failure on undersized preimage, got: {:?}",
         result
     );
@@ -651,8 +661,7 @@ fn primary_lottery_rejects_oversized_preimage() {
     }
     let bad_preimage = vec![0xCDu8; 50];
     let bad_commit = hash160::Hash::hash(&bad_preimage).to_byte_array();
-    participants[0] =
-        LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
+    participants[0] = LotteryParticipant::new(pk(1), bad_commit, "bcrt1p...".to_string());
     preimages[0] = bad_preimage;
 
     let script = LotteryScriptBuilder::new(
@@ -672,8 +681,7 @@ fn primary_lottery_rejects_oversized_preimage() {
     let mut interp = Interp::new(witness);
     let result = interp.run(&script);
     assert!(
-        result.is_err()
-            && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
+        result.is_err() && result.as_ref().unwrap_err().contains("OP_VERIFY failed"),
         "expected OP_VERIFY failure on oversized preimage, got: {:?}",
         result
     );
@@ -718,7 +726,13 @@ fn partial_reveal_leaf_excludes_missing_disputant() {
     let revealer_preimages: Vec<Vec<u8>> = all_preimages
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .filter_map(|(i, p)| {
+            if i == missing_idx {
+                None
+            } else {
+                Some(p.clone())
+            }
+        })
         .collect();
     let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
         .filter(|i| *i != missing_idx)
@@ -744,7 +758,10 @@ fn partial_reveal_leaf_excludes_missing_disputant() {
         .unwrap_or_else(|e| panic!("partial-reveal leaf execution failed: {}", e));
 
     // Final stack should be [TRUE]
-    let top = interp.stack.last().expect("partial-reveal left empty stack");
+    let top = interp
+        .stack
+        .last()
+        .expect("partial-reveal left empty stack");
     assert!(
         read_scriptbool(top),
         "partial-reveal leaf returned FALSE: stack={:?}",
@@ -754,8 +771,7 @@ fn partial_reveal_leaf_excludes_missing_disputant() {
     let pubkey_bytes = interp
         .last_checked_pubkey
         .expect("OP_CHECKSIG must execute — dispatch fell through");
-    let recorded =
-        XOnlyPublicKey::from_slice(&pubkey_bytes).expect("recorded non-pubkey bytes");
+    let recorded = XOnlyPublicKey::from_slice(&pubkey_bytes).expect("recorded non-pubkey bytes");
     assert_eq!(
         recorded, revealer_pks[expected_idx],
         "partial-reveal at N=11 missing=3: sum {} mod 10 = {} → revealer #{}",
@@ -803,8 +819,13 @@ fn run_witness_against_leaf(
     let pubkey_bytes = interp
         .last_checked_pubkey
         .ok_or("OP_CHECKSIG was never executed")?;
-    XOnlyPublicKey::from_slice(&pubkey_bytes)
-        .map_err(|e| format!("recorded non-pubkey {}: {:?}", hex::encode(&pubkey_bytes), e))
+    XOnlyPublicKey::from_slice(&pubkey_bytes).map_err(|e| {
+        format!(
+            "recorded non-pubkey {}: {:?}",
+            hex::encode(&pubkey_bytes),
+            e
+        )
+    })
 }
 
 #[test]
@@ -867,7 +888,13 @@ fn create_partial_reveal_witness_unlocks_correct_leaf() {
     let revealer_preimages: Vec<Vec<u8>> = preimages
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .filter_map(|(i, p)| {
+            if i == missing_idx {
+                None
+            } else {
+                Some(p.clone())
+            }
+        })
         .collect();
     let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
         .filter(|i| *i != missing_idx)
@@ -891,7 +918,8 @@ fn create_partial_reveal_witness_unlocks_correct_leaf() {
     let sum: usize = revealer_contribs.iter().sum();
     let expected_idx = sum % revealer_contribs.len();
     assert_eq!(
-        pk_won, revealer_pks[expected_idx],
+        pk_won,
+        revealer_pks[expected_idx],
         "N={} missing_idx={} sum {} mod {} = {} → revealer #{}",
         n,
         missing_idx,
@@ -940,9 +968,7 @@ fn create_partial_reveal_witness_rejects_invalid_inputs() {
     assert!(output
         .create_partial_reveal_witness(0, &sig, &preimages)
         .is_err());
-    assert!(output
-        .create_partial_reveal_witness(0, &sig, &[])
-        .is_err());
+    assert!(output.create_partial_reveal_witness(0, &sig, &[]).is_err());
 }
 
 #[test]
@@ -1161,7 +1187,13 @@ fn high_q_partial_reveal_n15_missing_seven() {
     let revealer_preimages: Vec<Vec<u8>> = preimages
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .filter_map(|(i, p)| {
+            if i == missing_idx {
+                None
+            } else {
+                Some(p.clone())
+            }
+        })
         .collect();
     let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
         .filter(|i| *i != missing_idx)
@@ -1217,7 +1249,13 @@ fn high_q_partial_reveal_n11_missing_three_combined_table() {
     let revealer_preimages: Vec<Vec<u8>> = preimages
         .iter()
         .enumerate()
-        .filter_map(|(i, p)| if i == missing_idx { None } else { Some(p.clone()) })
+        .filter_map(|(i, p)| {
+            if i == missing_idx {
+                None
+            } else {
+                Some(p.clone())
+            }
+        })
         .collect();
     let revealer_pks: Vec<XOnlyPublicKey> = (0..n)
         .filter(|i| *i != missing_idx)
@@ -1268,14 +1306,10 @@ fn high_q_recovery_leaf_csv144_threshold_t() {
     let recovery_voters = standard_recovery_voters();
 
     // Build the recovery leaf for CSV 144, threshold T=3.
-    let recovery_script = LotteryScriptBuilder::new(
-        participants,
-        recovery_voters.clone(),
-        3,
-        Network::Regtest,
-    )
-    .build_recovery_script(144)
-    .expect("recovery script should build at threshold 3");
+    let recovery_script =
+        LotteryScriptBuilder::new(participants, recovery_voters.clone(), 3, Network::Regtest)
+            .build_recovery_script(144)
+            .expect("recovery script should build at threshold 3");
 
     // Build a witness: 4 voter slots, three sigs filled, one empty.
     // Recovery script sorts pubkeys before laying out CHECKSIG/
@@ -1323,14 +1357,10 @@ fn high_q_recovery_leaf_rejects_below_threshold() {
     }
     let recovery_voters = standard_recovery_voters();
 
-    let recovery_script = LotteryScriptBuilder::new(
-        participants,
-        recovery_voters,
-        3,
-        Network::Regtest,
-    )
-    .build_recovery_script(144)
-    .unwrap();
+    let recovery_script =
+        LotteryScriptBuilder::new(participants, recovery_voters, 3, Network::Regtest)
+            .build_recovery_script(144)
+            .unwrap();
 
     // Only 2 sigs in 4 slots — below threshold 3.
     let dummy_sig = vec![0xAAu8; 64];
@@ -1365,14 +1395,10 @@ fn high_q_timeout_recovery_leaf_csv8064_threshold_one() {
     let recovery_voters = standard_recovery_voters();
 
     // Build the timeout-recovery leaf: CSV 8064, threshold 1.
-    let timeout_script = LotteryScriptBuilder::new(
-        participants,
-        recovery_voters,
-        1,
-        Network::Regtest,
-    )
-    .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
-    .expect("timeout-recovery script should build at threshold 1");
+    let timeout_script =
+        LotteryScriptBuilder::new(participants, recovery_voters, 1, Network::Regtest)
+            .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
+            .expect("timeout-recovery script should build at threshold 1");
 
     // Single-sig case: recovery script emits a bare
     // <pubkey> OP_CHECKSIG. Witness is just the sig.
@@ -1405,14 +1431,10 @@ fn high_q_timeout_recovery_rejects_empty_signature() {
     }
     let recovery_voters = standard_recovery_voters();
 
-    let timeout_script = LotteryScriptBuilder::new(
-        participants,
-        recovery_voters,
-        1,
-        Network::Regtest,
-    )
-    .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
-    .unwrap();
+    let timeout_script =
+        LotteryScriptBuilder::new(participants, recovery_voters, 1, Network::Regtest)
+            .build_recovery_script(deposits_core::TIMEOUT_RECOVERY_CSV_BLOCKS)
+            .unwrap();
 
     let stack_inputs: Vec<Vec<u8>> = vec![Vec::new()]; // empty sig
     let mut interp = Interp::new(stack_inputs);
@@ -1451,7 +1473,9 @@ fn armer_reveal_leaf_accepts_valid_reveal() {
     let stack_inputs: Vec<Vec<u8>> = vec![sig, preimage];
 
     let mut interp = Interp::new(stack_inputs);
-    interp.run(&leaf).expect("reveal-claim should accept valid reveal");
+    interp
+        .run(&leaf)
+        .expect("reveal-claim should accept valid reveal");
 
     let top = interp.stack.last().expect("non-empty stack");
     assert!(
@@ -1485,8 +1509,7 @@ fn armer_reveal_leaf_rejects_wrong_preimage() {
     let mut interp = Interp::new(stack_inputs);
     let result = interp.run(&leaf);
     assert!(
-        result.is_err()
-            && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
+        result.is_err() && result.as_ref().unwrap_err().contains("OP_EQUALVERIFY"),
         "wrong preimage must fail EQUALVERIFY, got: {:?}",
         result
     );
@@ -1547,8 +1570,7 @@ fn armer_sweep_leaf_accepts_threshold_signatures() {
         nonempty.clone(), // sig for sorted[2]
         empty,            // no sig for sorted[3]
     ];
-    let stack_inputs: Vec<Vec<u8>> =
-        sigs_in_key_order.iter().rev().cloned().collect();
+    let stack_inputs: Vec<Vec<u8>> = sigs_in_key_order.iter().rev().cloned().collect();
 
     let mut interp = Interp::new(stack_inputs);
     interp
@@ -1631,7 +1653,11 @@ fn sweep_tx_pays_pro_rata_to_revealers() {
     )
     .expect("sweep tx must build");
 
-    assert_eq!(tx.input.len(), 1, "exactly one input (the armer-share UTXO)");
+    assert_eq!(
+        tx.input.len(),
+        1,
+        "exactly one input (the armer-share UTXO)"
+    );
     assert_eq!(tx.output.len(), 3, "one P2TR per revealer");
     // (100_000 - 1_000) / 3 = 33_000; dust 0 (it divides evenly)
     for o in &tx.output {

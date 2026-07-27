@@ -244,17 +244,26 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
                 i += 2;
             }
             "--relay" => {
-                let v = args.get(i + 1).ok_or("--relay requires a value")?.to_string();
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--relay requires a value")?
+                    .to_string();
                 out.relays.push(v);
                 i += 2;
             }
             "--name" => {
-                let v = args.get(i + 1).ok_or("--name requires a value")?.to_string();
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--name requires a value")?
+                    .to_string();
                 out.name = Some(v);
                 i += 2;
             }
             "--text" => {
-                let v = args.get(i + 1).ok_or("--text requires a value")?.to_string();
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--text requires a value")?
+                    .to_string();
                 out.text = Some(v);
                 i += 2;
             }
@@ -267,7 +276,10 @@ fn parse_common(args: &[String]) -> Result<CommonArgs, String> {
                 i += 2;
             }
             "--seed" => {
-                let v = args.get(i + 1).ok_or("--seed requires a 32-byte hex value")?.to_string();
+                let v = args
+                    .get(i + 1)
+                    .ok_or("--seed requires a 32-byte hex value")?
+                    .to_string();
                 out.seed = Some(v);
                 i += 2;
             }
@@ -534,8 +546,7 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
             .map_err(|e| format!("stat data dir: {}", e))?
             .permissions();
         perms.set_mode(0o700);
-        std::fs::set_permissions(&data_dir, perms)
-            .map_err(|e| format!("chmod data dir: {}", e))?;
+        std::fs::set_permissions(&data_dir, perms).map_err(|e| format!("chmod data dir: {}", e))?;
     }
 
     // Take the data-dir lock BEFORE loading state. Two concurrent runs
@@ -606,7 +617,13 @@ fn cmd_run(args: &[String]) -> Result<(), String> {
     if c.auto_approve && !c.headless {
         return Err("--auto-approve requires --headless".to_string());
     }
-    rt.block_on(run_async(data_dir, state, relays, c.headless, c.auto_approve))
+    rt.block_on(run_async(
+        data_dir,
+        state,
+        relays,
+        c.headless,
+        c.auto_approve,
+    ))
 }
 
 async fn run_async(
@@ -639,12 +656,8 @@ async fn run_async(
     if headless {
         run_headless(data_dir, state, transport, inbox, auto_approve).await
     } else {
-        let app = deposits_hub::tui::App::new_with_relays(
-            data_dir,
-            state,
-            transport,
-            relays.clone(),
-        );
+        let app =
+            deposits_hub::tui::App::new_with_relays(data_dir, state, transport, relays.clone());
         app.run(inbox).await
     }
 }
@@ -765,7 +778,9 @@ fn cmd_approve(args: &[String]) -> Result<(), String> {
     let data_dir = data_dir_or_default(c.data_dir);
     let pubkey = c.pubkey.ok_or("missing --pubkey")?;
     if c.relays.is_empty() {
-        return Err("`approve` requires at least one --relay so the ack reaches the peer".to_string());
+        return Err(
+            "`approve` requires at least one --relay so the ack reaches the peer".to_string(),
+        );
     }
     let secret_path = deposits_hub::state::HubState::nostr_secret_path(&data_dir);
     let secret_hex = std::fs::read_to_string(&secret_path)
@@ -1128,7 +1143,11 @@ fn cmd_liquidity(args: &[String]) -> Result<(), String> {
                             v.as_str().map(|s| {
                                 (
                                     k.clone(),
-                                    if s.len() == 66 { s[2..].to_string() } else { s.to_string() },
+                                    if s.len() == 66 {
+                                        s[2..].to_string()
+                                    } else {
+                                        s.to_string()
+                                    },
                                 )
                             })
                         })
@@ -1151,7 +1170,10 @@ fn cmd_liquidity(args: &[String]) -> Result<(), String> {
                 {
                     Ok(res) => {
                         let empty = Vec::new();
-                        let plans = res.get("plans").and_then(|v| v.as_array()).unwrap_or(&empty);
+                        let plans = res
+                            .get("plans")
+                            .and_then(|v| v.as_array())
+                            .unwrap_or(&empty);
                         if plans.is_empty() {
                             println!("{}  (no drip plans)", name);
                         } else {
@@ -1383,7 +1405,14 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
                     m.iter()
                         .filter_map(|(k, v)| {
                             v.as_str().map(|s| {
-                                (k.clone(), if s.len() == 66 { s[2..].to_string() } else { s.to_string() })
+                                (
+                                    k.clone(),
+                                    if s.len() == 66 {
+                                        s[2..].to_string()
+                                    } else {
+                                        s.to_string()
+                                    },
+                                )
                             })
                         })
                         .collect()
@@ -1439,7 +1468,10 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
                 .and_then(|m| m.get(&node))
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| {
-                    format!("no ledger for node '{}' in bootstrap-state; pass --ledger", node)
+                    format!(
+                        "no ledger for node '{}' in bootstrap-state; pass --ledger",
+                        node
+                    )
                 })?
                 .to_string(),
         };
@@ -1448,11 +1480,21 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
         } else {
             "advertise_refresh"
         };
-        let verb = if sub == "retract" { "retracted" } else { "refreshed" };
+        let verb = if sub == "retract" {
+            "retracted"
+        } else {
+            "refreshed"
+        };
         let params = serde_json::json!({ "ledger_id": ledger });
         return rt.block_on(async move {
             match deposits_hub::admin_client::send_admin_request(
-                &secret_hex, &relays, &xo, &ledger, action, params, timeout,
+                &secret_hex,
+                &relays,
+                &xo,
+                &ledger,
+                action,
+                params,
+                timeout,
             )
             .await
             {
@@ -1479,22 +1521,39 @@ fn cmd_advertise(args: &[String]) -> Result<(), String> {
             .get("ledgers")
             .and_then(|m| m.get(&node))
             .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("no ledger for node '{}' in bootstrap-state; pass --ledger", node))?
+            .ok_or_else(|| {
+                format!(
+                    "no ledger for node '{}' in bootstrap-state; pass --ledger",
+                    node
+                )
+            })?
             .to_string(),
     };
     if terms.is_empty() {
         return Err("advertise set: nothing to set — pass at least one term flag".to_string());
     }
-    terms.insert("ledger_id".into(), serde_json::Value::String(ledger.clone()));
+    terms.insert(
+        "ledger_id".into(),
+        serde_json::Value::String(ledger.clone()),
+    );
     rt.block_on(async move {
         match deposits_hub::admin_client::send_admin_request(
-            &secret_hex, &relays, &xo, &ledger, "advertise_set",
-            serde_json::Value::Object(terms), timeout,
+            &secret_hex,
+            &relays,
+            &xo,
+            &ledger,
+            "advertise_set",
+            serde_json::Value::Object(terms),
+            timeout,
         )
         .await
         {
             Ok(_) => {
-                println!("advertisement updated on {} (ledger {})", node, &ledger[..16.min(ledger.len())]);
+                println!(
+                    "advertisement updated on {} (ledger {})",
+                    node,
+                    &ledger[..16.min(ledger.len())]
+                );
                 Ok::<(), String>(())
             }
             Err(e) => Err(format!("advertise set failed: {}", e)),
@@ -1510,12 +1569,11 @@ fn cmd_publish_backup(args: &[String]) -> Result<(), String> {
     }
     let state = deposits_hub::state::HubState::load_or_init(&data_dir)
         .map_err(|e| format!("hub state: {}", e))?;
-    let secret_hex = std::fs::read_to_string(
-        deposits_hub::state::HubState::nostr_secret_path(&data_dir),
-    )
-    .map_err(|e| format!("read hub secret: {}", e))?
-    .trim()
-    .to_string();
+    let secret_hex =
+        std::fs::read_to_string(deposits_hub::state::HubState::nostr_secret_path(&data_dir))
+            .map_err(|e| format!("read hub secret: {}", e))?
+            .trim()
+            .to_string();
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1601,14 +1659,12 @@ fn cmd_restore(args: &[String]) -> Result<(), String> {
         // intact if the write somehow fails midway.
         let tmp = hub_json_path.with_extension("json.tmp");
         std::fs::write(&tmp, &pretty).map_err(|e| format!("write tmp hub.json: {}", e))?;
-        std::fs::rename(&tmp, &hub_json_path)
-            .map_err(|e| format!("rename hub.json: {}", e))?;
+        std::fs::rename(&tmp, &hub_json_path).map_err(|e| format!("rename hub.json: {}", e))?;
 
         let mut wrote_master = false;
         if let Some(seed_hex) = master_seed {
             let mp = deposits_hub::state::HubState::master_seed_path(&data_dir);
-            std::fs::write(&mp, &seed_hex)
-                .map_err(|e| format!("write master seed: {}", e))?;
+            std::fs::write(&mp, &seed_hex).map_err(|e| format!("write master seed: {}", e))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -1637,7 +1693,9 @@ fn cmd_reject(args: &[String]) -> Result<(), String> {
     let data_dir = data_dir_or_default(c.data_dir);
     let pubkey = c.pubkey.ok_or("missing --pubkey")?;
     if c.relays.is_empty() {
-        return Err("`reject` requires at least one --relay so the ack reaches the peer".to_string());
+        return Err(
+            "`reject` requires at least one --relay so the ack reaches the peer".to_string(),
+        );
     }
     let secret_path = deposits_hub::state::HubState::nostr_secret_path(&data_dir);
     let secret_hex = std::fs::read_to_string(&secret_path)

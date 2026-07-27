@@ -78,8 +78,7 @@ pub fn compute_required_replacement_sats(
     }
     // u128 to avoid intermediate overflow on
     // `obligations × collateral` for realistic values.
-    let scaled = (obligations_msat as u128)
-        .saturating_mul(collateral_at_qb_msat as u128)
+    let scaled = (obligations_msat as u128).saturating_mul(collateral_at_qb_msat as u128)
         / (reserves_at_qb_msat as u128);
     // msat → sat (round up so the cosigner errs on the strict side).
     let required_sats = ((scaled + 999) / 1000) as u64;
@@ -146,10 +145,8 @@ mod tests {
             min_confirmations: 0,
             claim_fee_estimate_sats: 1_000,
         };
-        let req = compute_required_replacement_sats(
-            200_000_000, 30_000_000, 100_000_000, &policy,
-        )
-        .unwrap();
+        let req = compute_required_replacement_sats(200_000_000, 30_000_000, 100_000_000, &policy)
+            .unwrap();
         assert_eq!(req, 60_000 + 1_000);
     }
 
@@ -160,10 +157,8 @@ mod tests {
             min_confirmations: 0,
             claim_fee_estimate_sats: 1_000,
         };
-        let req = compute_required_replacement_sats(
-            50_000_000, 30_000_000, 100_000_000, &policy,
-        )
-        .unwrap();
+        let req = compute_required_replacement_sats(50_000_000, 30_000_000, 100_000_000, &policy)
+            .unwrap();
         assert_eq!(req, 15_000 + 1_000);
     }
 

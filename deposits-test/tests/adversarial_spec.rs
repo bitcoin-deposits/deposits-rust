@@ -3,10 +3,10 @@
 //! These test whether the implementation actually enforces what the spec claims.
 
 use deposits_core::ledger::Ledger;
-use deposits_test::adversarial::*;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
+use deposits_test::adversarial::*;
+use deposits_test::*;
 
 fn test_pubkey(seed: u8) -> bitcoin::secp256k1::PublicKey {
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -195,12 +195,8 @@ fn attack_non_nums_internal_key() {
     let config = ThresholdConfig::default_for_voter_count(4);
     let ledger_hash = [0xAB; 32];
 
-    let builder = TapscriptReservesBuilder::new(
-        voter_set,
-        config,
-        bitcoin::Network::Regtest,
-        ledger_hash,
-    );
+    let builder =
+        TapscriptReservesBuilder::new(voter_set, config, bitcoin::Network::Regtest, ledger_hash);
 
     let output = builder.build().unwrap();
 

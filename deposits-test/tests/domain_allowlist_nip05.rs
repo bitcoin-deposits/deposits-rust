@@ -74,16 +74,11 @@ async fn domain_allowlist_nip05_unlocks_deposit_open() {
     let scratch = tempdir();
     let ephemeral_nsec = scratch.join("ephemeral.nsec");
     std::fs::write(&ephemeral_nsec, &ephemeral_sec_hex).unwrap();
-    let nip05_secret_key = bitcoin::secp256k1::SecretKey::from_slice(
-        &hex::decode(nip05_sec_hex.trim()).unwrap(),
-    )
-    .unwrap();
+    let nip05_secret_key =
+        bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(nip05_sec_hex.trim()).unwrap())
+            .unwrap();
 
-    let _guard = Op0AccessControl::enable_with_attestation(
-        &[],
-        &[FIXTURE_DOMAIN],
-        &verifier_xonly,
-    );
+    let _guard = Op0AccessControl::enable_with_attestation(&[], &[FIXTURE_DOMAIN], &verifier_xonly);
 
     // The verifier's nip05 cache is keyed by domain. With the short
     // VERIFY_NIP05_CACHE_SECS in compose, sleep just past the TTL so a
@@ -156,7 +151,8 @@ async fn domain_allowlist_nip05_unlocks_deposit_open() {
         &["--relay", relay_ledgers()],
     );
     assert!(
-        ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),
+        ok && (out.contains("Deposit account created")
+            || out.contains("Deposit account already exists")),
         "deposit_open signed by ephemeral key should have been accepted via attestation:\n{}",
         out
     );

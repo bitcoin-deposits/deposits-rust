@@ -67,7 +67,9 @@ fn find_accused_op_with_quorum_begin() -> Option<(usize, String)> {
     use deposits_core::tlv::TlvDecode;
     for op in 0..16 {
         // node{op}'s single ledger, from the hub's bootstrap-state.json.
-        let Some(lid) = try_op_ledger(op) else { continue };
+        let Some(lid) = try_op_ledger(op) else {
+            continue;
+        };
         if lid.len() != 64 {
             continue;
         }
@@ -94,7 +96,9 @@ fn find_accused_op_with_quorum_begin() -> Option<(usize, String)> {
         let mut any_disputed = false;
         for peer in 0..16 {
             let ledgers_dir = op_data_dir(peer).join("wallet/ledgers");
-            let Ok(entries) = std::fs::read_dir(&ledgers_dir) else { continue };
+            let Ok(entries) = std::fs::read_dir(&ledgers_dir) else {
+                continue;
+            };
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if name.starts_with(&lid[..]) && name.len() == fork_name_len {
@@ -231,7 +235,10 @@ fn cooperative_refund_drains_and_anchors_lottery() {
     let target = quorum_expiry + 10;
     if chain_tip < target {
         let to_mine = target - chain_tip;
-        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+1)", to_mine, target);
+        eprintln!(
+            "[setup]   mining {} blocks → tip {} (past expiry+1)",
+            to_mine, target
+        );
         mine_blocks(to_mine);
     }
     let chain_tip = current_block_height();
@@ -318,11 +325,7 @@ fn cooperative_refund_drains_and_anchors_lottery() {
     // Each member gets a P2WPKH output sized for their RC declaration.
     for &op_idx in &member_ops {
         spend_args.push("--split".to_string());
-        spend_args.push(format!(
-            "{}:{}",
-            op_p2wpkh_address(op_idx),
-            drain_per_op
-        ));
+        spend_args.push(format!("{}:{}", op_p2wpkh_address(op_idx), drain_per_op));
     }
 
     let out = Command::new(&node)
@@ -366,10 +369,7 @@ fn cooperative_refund_drains_and_anchors_lottery() {
     }
     eprintln!("[pause]   markers removed; awaiting auto-arm to declare RC");
 
-    let expected_armed = member_ops
-        .iter()
-        .filter(|&&op| op != ACCUSED_OP)
-        .count();
+    let expected_armed = member_ops.iter().filter(|&&op| op != ACCUSED_OP).count();
     poll_until_armed_with_rc(
         &accused_ledger,
         &member_ops,
@@ -419,12 +419,7 @@ fn cooperative_refund_drains_and_anchors_lottery() {
                 refund_stdout
             )
         });
-    let txid_hex = txid_line
-        .split(':')
-        .nth(1)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let txid_hex = txid_line.split(':').nth(1).unwrap_or("").trim().to_string();
     assert_eq!(
         txid_hex.len(),
         64,
@@ -512,12 +507,7 @@ fn poll_until_fork_disputed(ledger_id: &str, ops: &[usize], timeout: Duration) {
 /// Poll until at least `min_count` of the given ops have a
 /// DisputeArmed with a populated `replacement_collateral` on their
 /// fork branch.
-fn poll_until_armed_with_rc(
-    ledger_id: &str,
-    ops: &[usize],
-    min_count: usize,
-    timeout: Duration,
-) {
+fn poll_until_armed_with_rc(ledger_id: &str, ops: &[usize], min_count: usize, timeout: Duration) {
     use deposits_core::SignedLedgerUpdate;
     let deadline = Instant::now() + timeout;
     loop {
@@ -586,8 +576,8 @@ fn resolve_member_ops(ledger_id: &str, accused_op: usize) -> Vec<usize> {
     let path = op_data_dir(accused_op)
         .join("wallet/ledgers")
         .join(format!("{}.jsonl", ledger_id));
-    let content = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
+    let content =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {}", path.display(), e));
 
     // SignedLedgerUpdate rows are flat — serde uses `#[serde(tag = "type")]`
     // on the LedgerLogRow enum, so the SignedLedgerUpdate fields sit

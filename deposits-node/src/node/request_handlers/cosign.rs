@@ -80,17 +80,12 @@ impl Node {
                         if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv) {
                             self.handler.insert_event(&update);
                             self.ensure_actor_for(&request.ledger_id);
-                            if let Some(handle) = self
-                                .ledger_actors
-                                .lock()
-                                .unwrap()
-                                .get(&request.ledger_id)
+                            if let Some(handle) =
+                                self.ledger_actors.lock().unwrap().get(&request.ledger_id)
                             {
-                                handle.try_send(
-                                    super::super::ledger_actor::LedgerEvent::Inbound(Box::new(
-                                        update,
-                                    )),
-                                );
+                                handle.try_send(super::super::ledger_actor::LedgerEvent::Inbound(
+                                    Box::new(update),
+                                ));
                                 forwarded += 1;
                             }
                         }
@@ -380,7 +375,9 @@ impl Node {
                 CosignSeqGate::Behind => {
                     tracing::info!(
                         "Cosign seq mismatch: expected {}, got {} for {}...",
-                        expected_seq, sequence_number, lid
+                        expected_seq,
+                        sequence_number,
+                        lid
                     );
                     return (
                         false,
@@ -593,10 +590,8 @@ impl Node {
                         // path. We use the wallet's view of the chain tip
                         // — fresh enough since the wallet syncs every
                         // periodic_interval.
-                        let current_block_height =
-                            self.wallet.get_block_height().unwrap_or(0);
-                        if let Err(e) = ledger
-                            .validate_for_cosign(&operation, current_block_height)
+                        let current_block_height = self.wallet.get_block_height().unwrap_or(0);
+                        if let Err(e) = ledger.validate_for_cosign(&operation, current_block_height)
                         {
                             tracing::warn!(
                                 "Cosign validation FAILED (policy/expiry): seq={} op={} error={}",
@@ -604,11 +599,7 @@ impl Node {
                                 Self::format_op_short(&operation),
                                 e
                             );
-                            return (
-                                false,
-                                None,
-                                Some(format!("Cosign refused: {}", e)),
-                            );
+                            return (false, None, Some(format!("Cosign refused: {}", e)));
                         }
                         // Cosigner's pre-sign gate. `check_speculative`
                         // is the canonical "would this op be conforming
@@ -676,13 +667,10 @@ impl Node {
                             deposits_core::quorum_policy::default_quorum_begin_confs(
                                 self.wallet.network(),
                             );
-                        let expected_sats = reserves_amount_msats
-                            .saturating_add(*collateral_amount_msats)
-                            / 1000;
+                        let expected_sats =
+                            reserves_amount_msats.saturating_add(*collateral_amount_msats) / 1000;
                         let txid = bitcoin::Txid::from_raw_hash(
-                            bitcoin::hashes::sha256d::Hash::from_byte_array(
-                                *new_outpoint_txid,
-                            ),
+                            bitcoin::hashes::sha256d::Hash::from_byte_array(*new_outpoint_txid),
                         );
                         match self
                             .wallet
@@ -792,13 +780,7 @@ impl Node {
             .and_then(|v| v.try_into().ok())
         {
             Some(b) => b,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("invalid operator ledger_id".to_string()),
-                )
-            }
+            None => return (false, None, Some("invalid operator ledger_id".to_string())),
         };
         use deposits_signer_api::SignContext;
         let sig_bytes = match self.handler.signer.bip340_sign(
@@ -1040,10 +1022,11 @@ impl Node {
 
         // Sign with Schnorr (BIP-340) via the Signer.
         use deposits_signer_api::{SigPurpose, SignContext};
-        let sig_bytes = match self.handler.signer.bip340_sign(
-            &SignContext::no_ledger(SigPurpose::DepositOffer),
-            &msg_hash,
-        ) {
+        let sig_bytes = match self
+            .handler
+            .signer
+            .bip340_sign(&SignContext::no_ledger(SigPurpose::DepositOffer), &msg_hash)
+        {
             Ok(s) => s,
             Err(e) => return (false, None, Some(format!("offer cosign sign: {}", e))),
         };
@@ -1064,7 +1047,6 @@ impl Node {
 
         (true, Some(result.to_string()), None)
     }
-
 }
 
 /// Outcome of the anti-equivocation sequence gate (see `cosign_seq_gate`).
@@ -1146,7 +1128,10 @@ mod cosign_seq_gate_tests {
         // The whole incident: cosign_data reconstructs a DIFFERENT update than
         // what we committed at that seq → refuse. (Pre-fix the gate keyed off the
         // attacker-supplied content_hash and could be tricked into Allow.)
-        assert_eq!(cosign_seq_gate(8, 10, Some(false)), CosignSeqGate::Equivocation);
+        assert_eq!(
+            cosign_seq_gate(8, 10, Some(false)),
+            CosignSeqGate::Equivocation
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Transfer protocol: lock, complete, timeout between deposits.
 
-use deposits_test::*;
 use deposits_protocol::types::compute_deposit_id;
+use deposits_test::*;
 
 #[test]
 fn transfer_lock_and_complete() {

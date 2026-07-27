@@ -137,7 +137,10 @@ fn cross_ledger_route_via_htlc_agent() {
 
     // ── Drive the HTLC route ────────────────────────────────────────
     let route_amount_sats: u64 = 500;
-    eprintln!("[route]   {} sats: src → dst via htlc-agent", route_amount_sats);
+    eprintln!(
+        "[route]   {} sats: src → dst via htlc-agent",
+        route_amount_sats
+    );
     let (ok, out) = wallet_route(&wdir, &nsec, "src", "dst", route_amount_sats);
     if !ok {
         panic!("wallet route failed:\n{}", out);
@@ -245,7 +248,10 @@ fn cross_ledger_route_via_htlc_agent_ptlc() {
 
     // ── Drive the PTLC route ────────────────────────────────────────
     let route_amount_sats: u64 = 500;
-    eprintln!("[route]   {} sats: src → dst via PTLC pattern", route_amount_sats);
+    eprintln!(
+        "[route]   {} sats: src → dst via PTLC pattern",
+        route_amount_sats
+    );
     let (ok, out) = wallet_route_ptlc(&wdir, &nsec, "src", "dst", route_amount_sats);
     if !ok {
         panic!("wallet route --ptlc failed:\n{}", out);

@@ -71,7 +71,11 @@ fn batch_applies_inner_ops_in_order() {
     let (next, violations) = state
         .apply_with_verifier(&batch, &AllowAll, 0)
         .expect("batch apply");
-    assert!(violations.is_empty(), "expected no violations: {:?}", violations);
+    assert!(
+        violations.is_empty(),
+        "expected no violations: {:?}",
+        violations
+    );
     let deposit_id = compute_deposit_id("pk(aa)");
     assert_eq!(
         next.deposits.get(&deposit_id).unwrap().balance,

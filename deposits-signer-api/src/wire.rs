@@ -159,17 +159,13 @@ pub enum SignOp {
     /// ECDH shared secret with `peer` (SHA-256-hashed form). Used by
     /// NIP-44 and other consumers that expect the standard hashed
     /// shared-secret.
-    Ecdh {
-        peer: PublicKey,
-    },
+    Ecdh { peer: PublicKey },
     /// NIP-04 raw-X shared key with `peer`. Returns the first 32 bytes
     /// of the ECDH shared *point* (no hashing) — what NIP-04's AES-CBC
     /// envelope uses as its symmetric key. Distinct wire op from `Ecdh`
     /// because the two derivations produce different bytes; using the
     /// wrong one yields unreadable ciphertext.
-    Nip04SharedKey {
-        peer: PublicKey,
-    },
+    Nip04SharedKey { peer: PublicKey },
     /// Just return the signer's identity pubkeys. The daemon caches these
     /// after handshake; `PubkeyQuery` exists for warm reconnect.
     PubkeyQuery,
@@ -183,9 +179,7 @@ pub enum SignOp {
     /// derive its own receive/change addresses without holding the seed,
     /// and asks the signer to sign each PSBT input via
     /// [`crate::KeyPath::Wallet`].
-    WalletAccountXpub {
-        account: u32,
-    },
+    WalletAccountXpub { account: u32 },
     /// Return the master xpub at path `m`. The daemon embeds it in a
     /// watch-only node-level wallet descriptor `wpkh(master_xpub/<change>/*)`
     /// (the operator's general-balance wallet, used for incoming
@@ -197,9 +191,7 @@ pub enum SignOp {
     /// advertise public material at a derivation path (e.g.
     /// buffer-deposit `deposit_pubkey` for a freshly-issued buffer
     /// index) without ever holding the secret.
-    PubkeyAt {
-        key_path: crate::KeyPath,
-    },
+    PubkeyAt { key_path: crate::KeyPath },
     /// Deterministically derive a dispute's lottery preimage. The
     /// daemon needs the same 32 bytes at arm time (to compute the
     /// commitment) and at reveal time (to publish the preimage); the
@@ -268,17 +260,11 @@ pub enum SignResult {
     },
     /// Result of `WalletAccountXpub`. The serialized xpub (Base58Check
     /// encoded). Daemon parses with `bitcoin::bip32::Xpub::from_str`.
-    WalletAccountXpub {
-        xpub_str: String,
-    },
+    WalletAccountXpub { xpub_str: String },
     /// Result of `MasterXpub`. The serialized master xpub (Base58Check).
-    MasterXpub {
-        xpub_str: String,
-    },
+    MasterXpub { xpub_str: String },
     /// Result of [`SignOp::PubkeyAt`]. The 33-byte compressed pubkey.
-    PubkeyAt {
-        pubkey: PublicKey,
-    },
+    PubkeyAt { pubkey: PublicKey },
     /// Signer refused or failed to satisfy the request. The daemon
     /// surfaces this as a `SignerError`.
     Error {

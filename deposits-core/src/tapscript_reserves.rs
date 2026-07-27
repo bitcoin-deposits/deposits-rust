@@ -398,9 +398,9 @@ impl TapscriptReservesBuilder {
         let internal_key = match internal_key_override {
             Some(k) => k,
             None => XOnlyPublicKey::from_slice(&[
-                0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35,
-                0xe9, 0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf,
-                0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+                0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
+                0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
+                0xce, 0x80, 0x3a, 0xc0,
             ])
             .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?,
         };
@@ -555,11 +555,7 @@ pub fn verify_taproot_reserves(
     expected_ledger_hash: [u8; 32],
     on_chain_script: &ScriptBuf,
 ) -> bool {
-    let builder = TapscriptReservesBuilder::with_defaults(
-        voter_set,
-        network,
-        expected_ledger_hash,
-    );
+    let builder = TapscriptReservesBuilder::with_defaults(voter_set, network, expected_ledger_hash);
     match builder.build() {
         Ok(output) => output.verify_script_pubkey(on_chain_script),
         Err(_) => false,
@@ -966,10 +962,7 @@ impl LotteryScriptBuilder {
     /// `bounds_n = participants.len()`; partial-reveal sub-lotteries pass
     /// the *parent* `N` so commitments that are valid under the parent
     /// contract continue to spend the sub-leaf.
-    fn build_lottery_script_with_bounds_n(
-        &self,
-        bounds_n: usize,
-    ) -> DepositsResult<ScriptBuf> {
+    fn build_lottery_script_with_bounds_n(&self, bounds_n: usize) -> DepositsResult<ScriptBuf> {
         let n = self.participants.len();
         if n < 2 {
             return Err(DepositsError::InvalidState(
@@ -1178,7 +1171,13 @@ impl LotteryScriptBuilder {
                 .participants
                 .iter()
                 .enumerate()
-                .filter_map(|(j, p)| if j == missing_idx { None } else { Some(p.clone()) })
+                .filter_map(|(j, p)| {
+                    if j == missing_idx {
+                        None
+                    } else {
+                        Some(p.clone())
+                    }
+                })
                 .collect();
 
             let sub_builder = LotteryScriptBuilder::new(
@@ -1292,10 +1291,10 @@ impl LotteryScriptBuilder {
         // dispute is declared void at the orchestration layer and any
         // single recovery voter can spend through this leaf.
         let recovery_specs = [
-            (144u32, self.recovery_threshold),                           // ~1 day, T
-            (1008, self.recovery_threshold.saturating_sub(1).max(1)),    // ~1 week, T-1
-            (4032, self.recovery_threshold.saturating_sub(2).max(1)),    // ~4 weeks, T-2
-            (crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS, 1usize),     // ~8 weeks, threshold 1
+            (144u32, self.recovery_threshold), // ~1 day, T
+            (1008, self.recovery_threshold.saturating_sub(1).max(1)), // ~1 week, T-1
+            (4032, self.recovery_threshold.saturating_sub(2).max(1)), // ~4 weeks, T-2
+            (crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS, 1usize), // ~8 weeks, threshold 1
         ];
 
         let mut leaves: Vec<ScriptBuf> =
@@ -1910,17 +1909,11 @@ pub fn build_armer_share_output(
     let builder = TaprootBuilder::new()
         .add_leaf(1, reveal_script.clone())
         .map_err(|e| {
-            DepositsError::InvalidState(format!(
-                "Failed to add armer reveal leaf: {:?}",
-                e
-            ))
+            DepositsError::InvalidState(format!("Failed to add armer reveal leaf: {:?}", e))
         })?
         .add_leaf(1, sweep_script.clone())
         .map_err(|e| {
-            DepositsError::InvalidState(format!(
-                "Failed to add armer sweep leaf: {:?}",
-                e
-            ))
+            DepositsError::InvalidState(format!("Failed to add armer sweep leaf: {:?}", e))
         })?;
 
     let secp = Secp256k1::new();
@@ -2177,11 +2170,8 @@ mod tests {
         let hash1 = [0x11; 32];
         let hash2 = [0x22; 32];
 
-        let builder1 = TapscriptReservesBuilder::with_defaults(
-            voter_set.clone(),
-            Network::Regtest,
-            hash1,
-        );
+        let builder1 =
+            TapscriptReservesBuilder::with_defaults(voter_set.clone(), Network::Regtest, hash1);
         let builder2 = TapscriptReservesBuilder::with_defaults(voter_set, Network::Regtest, hash2);
 
         let output1 = builder1.build().expect("Should build");
@@ -2439,14 +2429,9 @@ mod tests {
                                 vec![0u8; 16 + d],
                                 vec![0u8; 16 + e],
                             ];
-                            let winner =
-                                LotteryOutput::calculate_winner(&preimages).unwrap();
+                            let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
                             let expected = (a + b + c + d + e) % 5;
-                            assert_eq!(
-                                winner, expected,
-                                "lengths={:?}",
-                                (a, b, c, d, e)
-                            );
+                            assert_eq!(winner, expected, "lengths={:?}", (a, b, c, d, e));
                         }
                     }
                 }
@@ -2473,12 +2458,7 @@ mod tests {
             generate_x_only_pubkey(22),
         ];
 
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            recovery_voters,
-            2,
-            Network::Regtest,
-        );
+        let builder = LotteryScriptBuilder::new(participants, recovery_voters, 2, Network::Regtest);
 
         let script = builder
             .build_lottery_script()
@@ -2771,7 +2751,8 @@ mod tests {
                 j, bytes[1]
             );
             assert_eq!(
-                bytes[2], OP_CSV.to_u8(),
+                bytes[2],
+                OP_CSV.to_u8(),
                 "leaf {} byte 2 should be OP_CSV (0x{:02x}); got 0x{:02x}",
                 j,
                 OP_CSV.to_u8(),
@@ -2927,12 +2908,10 @@ mod tests {
         .build_recovery_script(crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS)
         .expect("timeout-recovery script should build");
 
-        let cb = output
-            .spend_info
-            .control_block(&(
-                timeout_script.clone(),
-                bitcoin::taproot::LeafVersion::TapScript,
-            ));
+        let cb = output.spend_info.control_block(&(
+            timeout_script.clone(),
+            bitcoin::taproot::LeafVersion::TapScript,
+        ));
         assert!(
             cb.is_some(),
             "timeout-recovery leaf (CSV 8064, threshold 1) must be in the Taproot tree"
@@ -3228,15 +3207,8 @@ mod tests {
             generate_x_only_pubkey(22),
             generate_x_only_pubkey(23),
         ];
-        let tx = build_forfeit_sweep_tx(
-            outpoint,
-            30_000,
-            &revealers,
-            500,
-            None,
-            Network::Regtest,
-        )
-        .expect("sweep tx builds");
+        let tx = build_forfeit_sweep_tx(outpoint, 30_000, &revealers, 500, None, Network::Regtest)
+            .expect("sweep tx builds");
 
         assert_eq!(tx.version, bitcoin::transaction::Version::TWO);
         assert_eq!(tx.input.len(), 1);
@@ -3260,15 +3232,8 @@ mod tests {
         // order produce byte-identical TXs (outputs sorted by xonly key).
         let mut shuffled = revealers.clone();
         shuffled.reverse();
-        let tx2 = build_forfeit_sweep_tx(
-            outpoint,
-            30_000,
-            &shuffled,
-            500,
-            None,
-            Network::Regtest,
-        )
-        .expect("sweep tx builds");
+        let tx2 = build_forfeit_sweep_tx(outpoint, 30_000, &shuffled, 500, None, Network::Regtest)
+            .expect("sweep tx builds");
         assert_eq!(
             bitcoin::consensus::encode::serialize(&tx),
             bitcoin::consensus::encode::serialize(&tx2),
@@ -3288,8 +3253,7 @@ mod tests {
         };
         // No revealers, no fallback → refuse.
         assert!(
-            build_forfeit_sweep_tx(outpoint, 30_000, &[], 500, None, Network::Regtest)
-                .is_err()
+            build_forfeit_sweep_tx(outpoint, 30_000, &[], 500, None, Network::Regtest).is_err()
         );
         // No revealers + fallback → single output of slice - fee to the
         // fallback's key-path P2TR, CSV sequence still set.
@@ -3377,19 +3341,14 @@ mod frozen_builder_snapshot {
         .map(|s| PublicKey::from_str(s).unwrap())
         .collect();
         let voter_set = VoterSet::new(operator, members.clone());
-        let ledger_hash: [u8; 32] = hex::decode(
-            "7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76",
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
+        let ledger_hash: [u8; 32] =
+            hex::decode("7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76")
+                .unwrap()
+                .try_into()
+                .unwrap();
         let config = ThresholdConfig::default_for_voter_count(members.len() + 1);
-        let builder = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            Network::Bitcoin,
-            ledger_hash,
-        );
+        let builder =
+            TapscriptReservesBuilder::new(voter_set, config, Network::Bitcoin, ledger_hash);
         let out = builder.build().expect("build current");
         let actual = hex::encode(out.script_pubkey().as_bytes());
         assert_eq!(

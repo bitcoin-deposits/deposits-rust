@@ -86,9 +86,7 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
     // The most-recent QuorumBegin's sequence = governing_qb_seq.
     let mut governing_qb_seq: u64 = 0;
     for u in fault_history.iter().rev() {
-        if let Ok(LedgerOperation::QuorumBegin { .. }) =
-            LedgerOperation::tlv_decode(&u.message)
-        {
+        if let Ok(LedgerOperation::QuorumBegin { .. }) = LedgerOperation::tlv_decode(&u.message) {
             governing_qb_seq = u.sequence_number;
             break;
         }
@@ -98,8 +96,11 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
         "fault victim ledger has no QuorumBegin",
     );
 
-    let cosigner_op_indices: Vec<usize> =
-        fault_victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let cosigner_op_indices: Vec<usize> = fault_victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
     use bitcoin::secp256k1::{PublicKey, Secp256k1};
     let secp = Secp256k1::new();
     eprintln!(
@@ -251,8 +252,7 @@ fn fraud_proof_non_conforming_cosignature_drives_cross_ledger_confiscation() {
     publish_fraud_broadcast(&node, accused_op_idx, &broadcast);
 
     // ── 8. Poll for confiscation on the DISPUTED ledger ──
-    let (observed_op, txid) =
-        poll_confiscation_txid(&disputed_ledger_id, Duration::from_secs(180));
+    let (observed_op, txid) = poll_confiscation_txid(&disputed_ledger_id, Duration::from_secs(180));
     eprintln!(
         "[ok] NonConformingCosignature drove cross-ledger confiscation: \
          disputed_ledger={}… tx={} (observed via op{})",
@@ -294,8 +294,11 @@ fn non_conforming_cosignature_auto_detects_and_confiscates() {
         }
     };
     let fault_ledger_id = fault_victim.victim_ledger.clone();
-    let cosigner_op_indices: Vec<usize> =
-        fault_victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let cosigner_op_indices: Vec<usize> = fault_victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
     eprintln!(
         "[setup] fault_op=op{} ledger={}… cosigners={:?}",
         fault_op_idx,
@@ -343,10 +346,7 @@ fn non_conforming_cosignature_auto_detects_and_confiscates() {
 
 /// Walk `op_idx`'s view of `ledger_id` for the most recent
 /// `QuorumBegin`, return its declared `quorum_members` pubkeys.
-fn read_quorum_members_of(
-    ledger_id: &str,
-    op_idx: usize,
-) -> Vec<bitcoin::secp256k1::PublicKey> {
+fn read_quorum_members_of(ledger_id: &str, op_idx: usize) -> Vec<bitcoin::secp256k1::PublicKey> {
     let history = read_ledger_history(&op_data_dir(op_idx), ledger_id);
     for u in history.iter().rev() {
         if let Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) =

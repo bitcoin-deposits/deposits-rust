@@ -318,5 +318,4 @@ impl Node {
     // These expose the filesystem-only bootstrap operations as Nostr actions so
     // the daemon can run continuously and remote admins can drive them.
     // ========================================================================
-
 }

@@ -21,7 +21,9 @@ use std::sync::Arc;
 pub async fn disputes_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     if args.is_empty() {
         eprintln!("Usage: deposits-node disputes <list|show>");
-        eprintln!("  list                   One-line summary of every ledger with dispute activity.");
+        eprintln!(
+            "  list                   One-line summary of every ledger with dispute activity."
+        );
         eprintln!("  show <ledger_id|prefix> Detailed view of one ledger + its forks.");
         return Ok(());
     }
@@ -335,8 +337,10 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         std::collections::BTreeMap::new();
     let mut mains: std::collections::BTreeMap<String, deposits_core::ledger::Ledger> =
         std::collections::BTreeMap::new();
-    let mut fork_keys: std::collections::BTreeMap<String, Vec<(String, deposits_core::ledger::Ledger)>> =
-        std::collections::BTreeMap::new();
+    let mut fork_keys: std::collections::BTreeMap<
+        String,
+        Vec<(String, deposits_core::ledger::Ledger)>,
+    > = std::collections::BTreeMap::new();
     for (key, ledger) in snapshot {
         if key.len() == 64 {
             // Main ledger.
@@ -354,8 +358,10 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // `state.dispute_state` reflects them. We re-fetch each
     // affected ledger's kind:9100 events from the relay and pass
     // them into `summarize_fork` as a parallel source.
-    let mut relay_updates: std::collections::HashMap<String, Vec<deposits_core::types::SignedLedgerUpdate>> =
-        std::collections::HashMap::new();
+    let mut relay_updates: std::collections::HashMap<
+        String,
+        Vec<deposits_core::types::SignedLedgerUpdate>,
+    > = std::collections::HashMap::new();
     for main_id in fork_keys.keys() {
         let fetched = fetch_ledger_updates_from_relay(&node, main_id).await;
         relay_updates.insert(main_id.clone(), fetched);
@@ -423,17 +429,15 @@ async fn disputes_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         let state_label = format!("{:?}", main.state.dispute_state);
 
         // Best fork (the most-advanced one) for next-step hint.
-        let best = forks
-            .iter()
-            .max_by_key(|(_, f)| {
-                (
-                    f.has_dispute_acquire as u8,
-                    f.has_dispute_yield as u8,
-                    f.has_replacement_collateral as u8,
-                    f.has_dispute_armed as u8,
-                    f.has_dispute_enter as u8,
-                )
-            });
+        let best = forks.iter().max_by_key(|(_, f)| {
+            (
+                f.has_dispute_acquire as u8,
+                f.has_dispute_yield as u8,
+                f.has_replacement_collateral as u8,
+                f.has_dispute_armed as u8,
+                f.has_dispute_enter as u8,
+            )
+        });
         let hint = match best {
             Some((_, f)) => next_step_hint(f, reserves, current_block, main.state.quorum_expiry),
             None => {
@@ -605,18 +609,14 @@ fn yes_no(b: bool) -> &'static str {
 /// list. We instead read the address's chain_stats from Esplora's
 /// `/scripthash/<hash>` endpoint, which carries `funded_txo_count`
 /// and `spent_txo_count` separately.
-async fn reserves_status(
-    node: &Node,
-    ledger: &deposits_core::ledger::Ledger,
-) -> ReservesStatus {
+async fn reserves_status(node: &Node, ledger: &deposits_core::ledger::Ledger) -> ReservesStatus {
     use bitcoin::hashes::{sha256, Hash};
 
     let addr_str = &ledger.state.reserves_key;
-    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        match addr_str.parse() {
-            Ok(a) => a,
-            Err(_) => return ReservesStatus::Unknown,
-        };
+    let address: bitcoin::Address<bitcoin::address::NetworkUnchecked> = match addr_str.parse() {
+        Ok(a) => a,
+        Err(_) => return ReservesStatus::Unknown,
+    };
     let address = match address.require_network(node.wallet.network()) {
         Ok(a) => a,
         Err(_) => return ReservesStatus::Unknown,

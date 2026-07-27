@@ -75,9 +75,7 @@ fn signed_rotate(
         new_descriptor: new_descriptor.to_string(),
         nonce,
         expiry: u32::MAX,
-        witness: DescriptorWitness {
-            stack: vec![sig.0],
-        },
+        witness: DescriptorWitness { stack: vec![sig.0] },
     }
 }
 
@@ -257,9 +255,8 @@ fn threshold_rotation_two_of_three() {
         expiry: u32::MAX,
         witness: DescriptorWitness::new(),
     };
-    let preimage = miniscript::calculus::operation_preimage(
-        &operations::to_dep16(&op_template).unwrap(),
-    );
+    let preimage =
+        miniscript::calculus::operation_preimage(&operations::to_dep16(&op_template).unwrap());
     let verifier = EcdsaVerifier::new();
     let sig_a = verifier.sign(&sk_a, &preimage);
     let sig_b = verifier.sign(&sk_b, &preimage);
@@ -362,12 +359,9 @@ fn assert_authorizer_accepts(state: &LedgerState, op: &LedgerOperation, op_label
     let (_, violations) = state
         .apply_with_verifier(op, &authorizer, 0)
         .expect("apply succeeds; failure would be in conformance");
-    let invalid_witness = violations.iter().any(|v| {
-        matches!(
-            v,
-            ConformanceViolation::InvalidWitness { .. }
-        )
-    });
+    let invalid_witness = violations
+        .iter()
+        .any(|v| matches!(v, ConformanceViolation::InvalidWitness { .. }));
     assert!(
         !invalid_witness,
         "{} signed via sign_op must satisfy Dep16Authorizer; violations: {:?}",
@@ -419,7 +413,9 @@ fn sign_op_transfer_lock_authorized_by_dep16() {
     let dst_descriptor = format!("wsh(prove(pk({})))", keypair(0x24).1);
     let dst = deposits_protocol::types::compute_deposit_id(&dst_descriptor);
     let mut state = state;
-    state.deposits.insert(dst, Deposit::new(dst_descriptor, None));
+    state
+        .deposits
+        .insert(dst, Deposit::new(dst_descriptor, None));
 
     let proto = LedgerOperation::TransferLock {
         transfer_nonce: [0x77; 32],
@@ -462,8 +458,8 @@ fn sign_op_deposit_key_rotate_authorized_by_dep16() {
 #[test]
 fn dep17_invoice_lock_sighash_pinned() {
     let did = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10,
     ];
     let op = LedgerOperation::InvoiceLock {
         deposit_id: did,
@@ -495,17 +491,13 @@ fn dep17_invoice_lock_sighash_pinned() {
 #[test]
 fn dep17_receive_op_sighash_pinned() {
     let did = [
-        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-        0x0f, 0x10,
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+        0x10,
     ];
 
     // No transfer_id (admission-time receive on make_invoice / make_offer).
-    let sighash_no_tx = deposits_core::dep16::operations::receive_op_sighash(
-        &did,
-        42_u64,
-        u32::MAX,
-        None,
-    );
+    let sighash_no_tx =
+        deposits_core::dep16::operations::receive_op_sighash(&did, 42_u64, u32::MAX, None);
     assert_eq!(
         hex::encode(sighash_no_tx),
         "ea8dbd030cbe8b4734dbf277cac107c2db62e47883e02e58c58e4ed1e3b1072e",

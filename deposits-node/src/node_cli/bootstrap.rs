@@ -20,10 +20,10 @@
 //!    daemon is started (it delegates to the daemon over Nostr).
 
 use super::{derive_operator_secret, parse_config, send_daemon_request};
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
-use bitcoin::Network;
 use crate::nostr::NostrTransportBuilder;
 use crate::{Node, NodeConfig};
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
+use bitcoin::Network;
 use nostr_sdk::prelude::*;
 use std::time::Duration;
 
@@ -78,7 +78,10 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let seed_path = config.data_dir.join("seed.hex");
 
     if seed_path.exists() {
-        eprintln!("bootstrap init: seed already exists at {}, skipping", seed_path.display());
+        eprintln!(
+            "bootstrap init: seed already exists at {}, skipping",
+            seed_path.display()
+        );
         return Ok(());
     }
 
@@ -96,10 +99,7 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     // Persist the admin pubkey so the daemon authorizes admin-class requests
     // gift-wrapped by this identity on every startup.
-    std::fs::write(
-        config.data_dir.join("admin.npub"),
-        admin_pk.to_hex(),
-    )?;
+    std::fs::write(config.data_dir.join("admin.npub"), admin_pk.to_hex())?;
 
     // Generate a fresh 128-bit entropy → BIP39 mnemonic. 128 bits = 12 words,
     // which is short enough to copy into a password manager. The first 32
@@ -148,11 +148,7 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
          Send any amount to the funding address. The first on-chain payment \
          becomes the reserves UTXO, and the container will form a Q={} quorum \
          (Q cosigners + operator) with the fastest peers it can find.",
-        mnemonic,
-        config.network,
-        node_pubkey,
-        funding_address,
-        DEFAULT_QUORUM_SIZE
+        mnemonic, config.network, node_pubkey, funding_address, DEFAULT_QUORUM_SIZE
     );
 
     send_private_msg_nip17(relay, &seed, config.network, &admin_pk, &body).await?;
@@ -166,8 +162,7 @@ async fn bootstrap_init(args: &[String]) -> Result<(), Box<dyn std::error::Error
 fn parse_npub_or_hex(s: &str) -> Result<nostr_sdk::PublicKey, Box<dyn std::error::Error>> {
     if let Some(stripped) = s.strip_prefix("npub1") {
         let _ = stripped; // satisfy lint
-        nostr_sdk::PublicKey::from_bech32(s)
-            .map_err(|e| format!("Invalid npub: {}", e).into())
+        nostr_sdk::PublicKey::from_bech32(s).map_err(|e| format!("Invalid npub: {}", e).into())
     } else if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
         nostr_sdk::PublicKey::from_hex(s).map_err(|e| format!("Invalid hex pubkey: {}", e).into())
     } else {
@@ -186,7 +181,10 @@ async fn validate_admin_profile(
         .map_err(|e| format!("add_relay: {}", e))?;
     client.connect().await;
 
-    let filter = Filter::new().kind(Kind::Metadata).author(*admin_pk).limit(1);
+    let filter = Filter::new()
+        .kind(Kind::Metadata)
+        .author(*admin_pk)
+        .limit(1);
     let events = client
         .fetch_events(vec![filter], Some(Duration::from_secs(8)))
         .await
@@ -212,7 +210,10 @@ async fn derive_funding_address(
     Ok(addr)
 }
 
-fn derive_node_pubkey(seed: &[u8; 32], network: Network) -> Result<String, Box<dyn std::error::Error>> {
+fn derive_node_pubkey(
+    seed: &[u8; 32],
+    network: Network,
+) -> Result<String, Box<dyn std::error::Error>> {
     let sk = derive_operator_secret(seed, network)?;
     let secp = Secp256k1::new();
     let pk = PublicKey::from_secret_key(&secp, &sk);
@@ -281,12 +282,8 @@ async fn bootstrap_reserves(args: &[String]) -> Result<(), Box<dyn std::error::E
     // know the UTXO has arrived and a reserves tx was broadcast.
     let mut waited = 0u64;
     let reserves_result = loop {
-        match super::send_admin_daemon_request(
-            &config,
-            "reserves_create",
-            serde_json::json!({}),
-        )
-        .await
+        match super::send_admin_daemon_request(&config, "reserves_create", serde_json::json!({}))
+            .await
         {
             Ok(r) => break r,
             Err(e) => {
@@ -522,8 +519,7 @@ async fn bootstrap_quorum(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
         // --- Seal ---
         println!("  quorum_begin");
-        match send_daemon_request(&config, &ledger_id, "quorum_begin", serde_json::json!({}))
-            .await
+        match send_daemon_request(&config, &ledger_id, "quorum_begin", serde_json::json!({})).await
         {
             Ok(_) => {
                 println!("bootstrap quorum: active");
@@ -634,4 +630,3 @@ async fn rank_peers_by_ping(
     results.sort_by_key(|(_, _, rtt)| *rtt);
     Ok(results)
 }
-

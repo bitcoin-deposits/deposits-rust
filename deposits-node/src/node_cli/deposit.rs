@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::{parse_config, send_daemon_request};
-use bitcoin::secp256k1::Secp256k1;
 use crate::Node;
+use bitcoin::secp256k1::Secp256k1;
 
 /// Handle deposit subcommands
 pub async fn deposit_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
@@ -548,7 +548,9 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if positional.len() < 4 {
         eprintln!("Usage: deposits-node deposit credit <reserves_id> <deposit_id> <amount_msats> <invoice_id> [options]");
         eprintln!("\nExample:");
-        eprintln!("  deposits-node deposit credit 02abc...partner abc123...deposit_id 1000000 inv123");
+        eprintln!(
+            "  deposits-node deposit credit 02abc...partner abc123...deposit_id 1000000 inv123"
+        );
         eprintln!("\nThis credits the deposit with the specified amount via the running daemon.");
         eprintln!("deposit_id is the 32-char hex hash of the deposit descriptor.");
         return Ok(());
@@ -556,8 +558,8 @@ async fn deposit_credit(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let reserves_id_arg = &positional[0];
     let deposit_id_hex = &positional[1];
-    let deposit_id_bytes = hex::decode(deposit_id_hex)
-        .map_err(|e| format!("Invalid deposit_id hex: {}", e))?;
+    let deposit_id_bytes =
+        hex::decode(deposit_id_hex).map_err(|e| format!("Invalid deposit_id hex: {}", e))?;
     if deposit_id_bytes.len() != 16 {
         return Err(format!(
             "deposit_id must be 16 bytes / 32 hex chars, got {}",

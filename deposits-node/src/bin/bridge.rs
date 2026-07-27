@@ -316,12 +316,17 @@ fn load_persisted_state(path: &PathBuf) -> PersistedState {
     if !path.exists() {
         return PersistedState::default();
     }
-    match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|s| {
-        serde_json::from_str::<PersistedState>(&s).map_err(|e| e.to_string())
-    }) {
+    match std::fs::read_to_string(path)
+        .map_err(|e| e.to_string())
+        .and_then(|s| serde_json::from_str::<PersistedState>(&s).map_err(|e| e.to_string()))
+    {
         Ok(doc) => doc,
         Err(e) => {
-            eprintln!("[STATE] failed to load {}: {} — starting fresh", path.display(), e);
+            eprintln!(
+                "[STATE] failed to load {}: {} — starting fresh",
+                path.display(),
+                e
+            );
             PersistedState::default()
         }
     }
@@ -564,9 +569,7 @@ impl AgentTransport {
                                         .tags
                                         .iter()
                                         .find_map(|tag| {
-                                            if tag.kind()
-                                                == TagKind::SingleLetter(TAG_LEDGER_REQ)
-                                            {
+                                            if tag.kind() == TagKind::SingleLetter(TAG_LEDGER_REQ) {
                                                 tag.content().map(|s| s.to_string())
                                             } else {
                                                 None
@@ -652,11 +655,9 @@ impl AgentTransport {
         response: serde_json::Value,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let content = serde_json::to_string(&response)?;
-        let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content)
-            .tag(Tag::custom(
-                TagKind::SingleLetter(TAG_EVENT_REF),
-                [request_event_id],
-            ));
+        let mut builder = EventBuilder::new(Kind::Custom(KIND_LEDGER_RESPONSE), &content).tag(
+            Tag::custom(TagKind::SingleLetter(TAG_EVENT_REF), [request_event_id]),
+        );
         if !ledger_id.is_empty() {
             builder = builder.tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_REQ),
@@ -743,7 +744,9 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
         }
         LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness, .. } => {
+            script_witness,
+            ..
+        } => {
             // Witness stack[0] is the 32-byte preimage for sha256(H) locks.
             let bytes = script_witness.stack.first()?;
             if bytes.len() != 32 {
@@ -1343,7 +1346,9 @@ fn handle_quote_invoice(state: &Arc<SharedState>, params: &serde_json::Value) ->
     payment_hash.copy_from_slice(invoice.payment_hash().as_ref());
     let invoice_amount_msats = match invoice.amount_milli_satoshis() {
         Some(a) if a > 0 => a,
-        _ => return err_response("amountless invoices not supported — bolt11 must carry an amount"),
+        _ => {
+            return err_response("amountless invoices not supported — bolt11 must carry an amount")
+        }
     };
 
     let service_fee_msats = service_fee_msats(
@@ -1593,7 +1598,10 @@ async fn run_receive_poll_loop(
                 HoldInvoiceState::Settled => {
                     // Shouldn't happen pre-lock (we never handed out r), but
                     // record it rather than poll forever.
-                    eprintln!("[POLL] {}... unexpectedly settled pre-lock", &hash_hex[..16]);
+                    eprintln!(
+                        "[POLL] {}... unexpectedly settled pre-lock",
+                        &hash_hex[..16]
+                    );
                     set_receive_state(&state, &rcv.payment_hash, ReceiveState::Settled);
                     state
                         .stats
@@ -1645,7 +1653,10 @@ async fn run_receive_poll_loop(
 fn set_receive_state(state: &Arc<SharedState>, payment_hash: &[u8; 32], new_state: ReceiveState) {
     {
         let mut receives = state.receives.lock().unwrap();
-        if let Some(r) = receives.iter_mut().find(|r| r.payment_hash == *payment_hash) {
+        if let Some(r) = receives
+            .iter_mut()
+            .find(|r| r.payment_hash == *payment_hash)
+        {
             r.state = new_state;
         }
     }
@@ -1893,10 +1904,7 @@ async fn run_api_server(port: u16, state: Arc<SharedState>) {
                     let active = pays
                         .values()
                         .filter(|q| {
-                            matches!(
-                                q.state,
-                                PayState::LockSeen { .. } | PayState::Paying { .. }
-                            )
+                            matches!(q.state, PayState::LockSeen { .. } | PayState::Paying { .. })
                         })
                         .count();
                     (quotes, active)
@@ -2053,11 +2061,17 @@ fn parse_args() -> Result<Config, Box<dyn std::error::Error>> {
                 eprintln!();
                 eprintln!("Env:");
                 eprintln!("  LIGHTNING_BACKEND               ldk|lnd|cln (default ldk)");
-                eprintln!("  BRIDGE_RECEIVE_FEE_FIXED_MSATS  receive service fee, fixed (default 100)");
-                eprintln!("  BRIDGE_RECEIVE_FEE_BPS          receive service fee, bps (default 30)");
+                eprintln!(
+                    "  BRIDGE_RECEIVE_FEE_FIXED_MSATS  receive service fee, fixed (default 100)"
+                );
+                eprintln!(
+                    "  BRIDGE_RECEIVE_FEE_BPS          receive service fee, bps (default 30)"
+                );
                 eprintln!("  BRIDGE_PAY_FEE_FIXED_MSATS      pay service fee, fixed (default 200)");
                 eprintln!("  BRIDGE_PAY_FEE_BPS              pay service fee, bps (default 50)");
-                eprintln!("  BRIDGE_HOLD_WINDOW_BLOCKS       advertised typical hold window (default 18)");
+                eprintln!(
+                    "  BRIDGE_HOLD_WINDOW_BLOCKS       advertised typical hold window (default 18)"
+                );
                 std::process::exit(0);
             }
             other => return Err(format!("Unknown option: {}", other).into()),
@@ -2246,12 +2260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .collect();
     let recoverable: Vec<QuotedPay> = pays_map
         .values()
-        .filter(|q| {
-            matches!(
-                q.state,
-                PayState::LockSeen { .. } | PayState::Paying { .. }
-            )
-        })
+        .filter(|q| matches!(q.state, PayState::LockSeen { .. } | PayState::Paying { .. }))
         .cloned()
         .collect();
     if !recoverable.is_empty() {
@@ -2326,14 +2335,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(AD_REPUBLISH_SECS)).await;
-                if let Err(e) = publish_bridge_advertisement(
-                    &ad_keys,
-                    &ad_relay,
-                    &ad_deposits,
-                    &ad_fees,
-                    net,
-                )
-                .await
+                if let Err(e) =
+                    publish_bridge_advertisement(&ad_keys, &ad_relay, &ad_deposits, &ad_fees, net)
+                        .await
                 {
                     eprintln!("Warning: ad republish failed: {}", e);
                 }
@@ -2396,14 +2400,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             } => {
                 // Receive path: did the wallet just reveal r for one of our
                 // locks?
-                let matched = shared.receives.lock().unwrap().iter().find_map(|r| {
-                    match r.state {
-                        ReceiveState::Locked { transfer_id: tid, .. } if tid == transfer_id => {
-                            Some(r.payment_hash)
-                        }
+                let matched = shared
+                    .receives
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find_map(|r| match r.state {
+                        ReceiveState::Locked {
+                            transfer_id: tid, ..
+                        } if tid == transfer_id => Some(r.payment_hash),
                         _ => None,
-                    }
-                });
+                    });
 
                 let Some(payment_hash) = matched else {
                     continue; // not one of ours (e.g. our own pay-side claim)
@@ -2607,7 +2614,9 @@ mod tests {
     #[test]
     fn quote_expiry_boundaries() {
         assert!(!quote_expired(Duration::from_secs(0)));
-        assert!(!quote_expired(Duration::from_secs(QUOTE_RETENTION_SECS - 1)));
+        assert!(!quote_expired(Duration::from_secs(
+            QUOTE_RETENTION_SECS - 1
+        )));
         assert!(quote_expired(Duration::from_secs(QUOTE_RETENTION_SECS)));
         // The advertised validity window is tighter than the retention window
         // (a wallet locking slightly late is still served).

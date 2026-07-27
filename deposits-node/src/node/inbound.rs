@@ -193,9 +193,7 @@ impl Node {
                 };
                 self.handler.insert_event(&update.update);
                 self.ensure_actor_for(&update.ledger_id);
-                if let Some(handle) =
-                    self.ledger_actors.lock().unwrap().get(&update.ledger_id)
-                {
+                if let Some(handle) = self.ledger_actors.lock().unwrap().get(&update.ledger_id) {
                     handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
                         update.update,
                     )));
@@ -276,8 +274,8 @@ impl Node {
                             .map(|h| std::sync::Arc::clone(&h.apply_wakeup))
                     };
                     if let Some(wakeup) = apply_wakeup {
-                        let deadline = tokio::time::Instant::now()
-                            + std::time::Duration::from_millis(500);
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_millis(500);
                         loop {
                             let local_next = {
                                 let ledgers = self.handler.ledgers.lock().unwrap();
@@ -391,9 +389,13 @@ impl Node {
             "advertise_refresh" => self.process_advertise_refresh_request(&request).await,
             "liquidity_list" => self.process_liquidity_list_request(&request).await,
             "liquidity_create" => self.process_liquidity_create_request(&request).await,
-            "liquidity_pause" => self.process_liquidity_set_paused_request(&request, true).await,
+            "liquidity_pause" => {
+                self.process_liquidity_set_paused_request(&request, true)
+                    .await
+            }
             "liquidity_resume" => {
-                self.process_liquidity_set_paused_request(&request, false).await
+                self.process_liquidity_set_paused_request(&request, false)
+                    .await
             }
             "liquidity_remove" => self.process_liquidity_remove_request(&request).await,
             "bump" => {
@@ -601,12 +603,7 @@ impl Node {
         // (which the rest of the daemon still queries synchronously)
         // sees the actor's writes through the shared `Arc<RwLock<Ledger>>`.
         self.ensure_actor_for(&inbound.ledger_id);
-        if let Some(handle) = self
-            .ledger_actors
-            .lock()
-            .unwrap()
-            .get(&inbound.ledger_id)
-        {
+        if let Some(handle) = self.ledger_actors.lock().unwrap().get(&inbound.ledger_id) {
             handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
                 inbound.update.clone(),
             )));
@@ -738,8 +735,7 @@ impl Node {
         // pick up the custody transfer before discarding.
         let sender_role = {
             let ledger = ledger_arc.read().unwrap();
-            let is_from_operator =
-                inbound.update.operator_id == ledger.state.parent_pubkey;
+            let is_from_operator = inbound.update.operator_id == ledger.state.parent_pubkey;
             let is_from_active_member = ledger
                 .state
                 .quorum_members
@@ -766,8 +762,7 @@ impl Node {
             )
         };
 
-        let (is_from_operator, is_from_active_member, is_dispute_enter, in_dispute) =
-            sender_role;
+        let (is_from_operator, is_from_active_member, is_dispute_enter, in_dispute) = sender_role;
 
         if !is_from_operator {
             if is_from_active_member && is_dispute_enter {
@@ -782,9 +777,9 @@ impl Node {
                     anchor_block_hash: Some(anchor_hash),
                     anchor_block_height: Some(anchor_height),
                     ..
-                }) = deposits_core::messages::LedgerOperation::tlv_decode(
-                    &inbound.update.message,
-                ) {
+                }) =
+                    deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
+                {
                     self.handle_fork_dispute_enter(
                         &inbound.ledger_id,
                         last_valid_sequence,
@@ -1103,10 +1098,7 @@ impl Node {
         // height as our own anchor produces an anchor < quorum_expiry —
         // the very predicate we just verified the disputer's anchor
         // satisfies — and peers refuse to arm against our fork.
-        let (our_height, our_hash) = self
-            .wallet
-            .fetch_block_info()
-            .unwrap_or((0, [0u8; 32]));
+        let (our_height, our_hash) = self.wallet.fetch_block_info().unwrap_or((0, [0u8; 32]));
         match self
             .auto_arm_for_dispute_with_anchor(
                 ledger_id,
@@ -1194,7 +1186,8 @@ impl Node {
         // NonConformingCosignature names a separate fault ledger inside the
         // evidence; its verifier needs that ledger's history to replay state.
         if let deposits_core::fraud::FraudEvidence::NonConformingCosignature {
-            fault_ledger_id, ..
+            fault_ledger_id,
+            ..
         } = &broadcast.proof.evidence
         {
             needed.insert(fault_ledger_id.clone());
@@ -1465,19 +1458,17 @@ impl Node {
     ) -> Result<(), String> {
         let claim_txid_str = match &broadcast.proof.evidence {
             deposits_core::fraud::FraudEvidence::WinnerCollateralDeviation {
-                claim_txid,
-                ..
+                claim_txid, ..
             } => claim_txid.clone(),
             _ => return Err("evidence type mismatch".into()),
         };
-        let claim_txid_bytes_vec = hex::decode(&claim_txid_str)
-            .map_err(|e| format!("claim_txid hex: {}", e))?;
+        let claim_txid_bytes_vec =
+            hex::decode(&claim_txid_str).map_err(|e| format!("claim_txid hex: {}", e))?;
         let claim_txid_bytes: [u8; 32] = claim_txid_bytes_vec
             .try_into()
             .map_err(|_| "claim_txid: expected 32 bytes".to_string())?;
-        let claim_txid = bitcoin::Txid::from_raw_hash(
-            bitcoin::hashes::Hash::from_byte_array(claim_txid_bytes),
-        );
+        let claim_txid =
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(claim_txid_bytes));
         let claim_tx = self
             .wallet
             .get_transaction(claim_txid)

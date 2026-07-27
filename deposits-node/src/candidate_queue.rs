@@ -140,8 +140,10 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut q = CandidateQueue::load(tmp.path());
         assert!(q.is_empty());
-        q.enqueue(tmp.path(), c("02aaaa", "11".repeat(32).as_str())).unwrap();
-        q.enqueue(tmp.path(), c("02bbbb", "22".repeat(32).as_str())).unwrap();
+        q.enqueue(tmp.path(), c("02aaaa", "11".repeat(32).as_str()))
+            .unwrap();
+        q.enqueue(tmp.path(), c("02bbbb", "22".repeat(32).as_str()))
+            .unwrap();
         let reloaded = CandidateQueue::load(tmp.path());
         assert_eq!(reloaded.entries.len(), 2);
         assert_eq!(reloaded.entries[0].pubkey, "02aaaa");
@@ -152,8 +154,12 @@ mod tests {
     fn enqueue_is_idempotent_per_pubkey() {
         let tmp = TempDir::new().unwrap();
         let mut q = CandidateQueue::load(tmp.path());
-        assert!(q.enqueue(tmp.path(), c("02aa", "11".repeat(32).as_str())).unwrap());
-        assert!(!q.enqueue(tmp.path(), c("02aa", "22".repeat(32).as_str())).unwrap());
+        assert!(q
+            .enqueue(tmp.path(), c("02aa", "11".repeat(32).as_str()))
+            .unwrap());
+        assert!(!q
+            .enqueue(tmp.path(), c("02aa", "22".repeat(32).as_str()))
+            .unwrap());
         assert_eq!(q.entries.len(), 1);
         assert_eq!(q.entries[0].member_ledger_id, "11".repeat(32));
     }
@@ -162,8 +168,10 @@ mod tests {
     fn pop_front_yields_fifo_and_persists() {
         let tmp = TempDir::new().unwrap();
         let mut q = CandidateQueue::load(tmp.path());
-        q.enqueue(tmp.path(), c("02aa", "aa".repeat(32).as_str())).unwrap();
-        q.enqueue(tmp.path(), c("02bb", "bb".repeat(32).as_str())).unwrap();
+        q.enqueue(tmp.path(), c("02aa", "aa".repeat(32).as_str()))
+            .unwrap();
+        q.enqueue(tmp.path(), c("02bb", "bb".repeat(32).as_str()))
+            .unwrap();
         let popped = q.pop_front(tmp.path()).unwrap();
         assert_eq!(popped.pubkey, "02aa");
         let reloaded = CandidateQueue::load(tmp.path());
@@ -175,8 +183,10 @@ mod tests {
     fn drain_removes_specific_pubkey() {
         let tmp = TempDir::new().unwrap();
         let mut q = CandidateQueue::load(tmp.path());
-        q.enqueue(tmp.path(), c("02aa", "aa".repeat(32).as_str())).unwrap();
-        q.enqueue(tmp.path(), c("02bb", "bb".repeat(32).as_str())).unwrap();
+        q.enqueue(tmp.path(), c("02aa", "aa".repeat(32).as_str()))
+            .unwrap();
+        q.enqueue(tmp.path(), c("02bb", "bb".repeat(32).as_str()))
+            .unwrap();
         assert!(q.drain(tmp.path(), "02aa").unwrap());
         assert!(!q.drain(tmp.path(), "02zz").unwrap()); // not present
         let reloaded = CandidateQueue::load(tmp.path());

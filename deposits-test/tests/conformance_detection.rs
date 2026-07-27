@@ -1,7 +1,7 @@
 //! Conformance detection: watcher detects operator violations.
 
-use deposits_test::*;
 use deposits_protocol::types::ConformanceViolation;
+use deposits_test::*;
 
 #[test]
 fn watcher_detects_over_reserve_credit() {
@@ -26,10 +26,7 @@ fn watcher_detects_over_reserve_credit() {
     let last_update = net.op("alice").ledger.history.last().unwrap();
     if let Ok(op) = deposits_protocol::LedgerOperation::tlv_decode(&last_update.message) {
         let violations = watcher
-            .apply_and_check(
-                &op,
-                last_update.block_height,
-            )
+            .apply_and_check(&op, last_update.block_height)
             .unwrap();
         watcher.state.sequence = last_update.sequence_number;
         watcher.state.chain_tip_hash = last_update.chain_hash();
@@ -136,10 +133,7 @@ fn watcher_detects_bad_invoice_witness() {
     let last_update = net.op("alice").ledger.history.last().unwrap();
     if let Ok(op) = deposits_protocol::LedgerOperation::tlv_decode(&last_update.message) {
         let violations = watcher
-            .apply_and_check(
-                &op,
-                last_update.block_height,
-            )
+            .apply_and_check(&op, last_update.block_height)
             .unwrap();
         watcher.state.sequence = last_update.sequence_number;
         watcher.state.chain_tip_hash = last_update.chain_hash();

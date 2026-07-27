@@ -37,16 +37,14 @@ impl Node {
             Err(_descriptor_err) => match super::deposits::parse_deposit_id_param(request) {
                 Ok(id) => {
                     let ledgers = self.handler.ledgers.lock().unwrap();
-                    let descriptor = ledgers
-                        .get(&request.ledger_id)
-                        .and_then(|arc| {
-                            arc.read()
-                                .unwrap()
-                                .state
-                                .deposits
-                                .get(&id)
-                                .map(|d| d.descriptor.clone())
-                        });
+                    let descriptor = ledgers.get(&request.ledger_id).and_then(|arc| {
+                        arc.read()
+                            .unwrap()
+                            .state
+                            .deposits
+                            .get(&id)
+                            .map(|d| d.descriptor.clone())
+                    });
                     match descriptor {
                         Some(d) => (d, id),
                         None => {
@@ -241,8 +239,7 @@ impl Node {
                 // Tag the span with the payment_hash now that it's known — every
                 // subsequent log line for this invoice (and across processes
                 // that handle the same hash) carries it for correlation.
-                tracing::Span::current()
-                    .record("payment_hash", hex::encode(payment_hash).as_str());
+                tracing::Span::current().record("payment_hash", hex::encode(payment_hash).as_str());
 
                 // Track the pending invoice for crediting when paid
                 let pending = PendingInvoice {
@@ -289,11 +286,7 @@ impl Node {
                         ledgers
                             .get(&request.ledger_id)
                             .and_then(|arc| {
-                                arc.read()
-                                    .unwrap()
-                                    .history
-                                    .last()
-                                    .map(|u| u.content_hash)
+                                arc.read().unwrap().history.last().map(|u| u.content_hash)
                             })
                             .unwrap_or([0u8; 32])
                     };
@@ -311,11 +304,7 @@ impl Node {
                     ) {
                         Ok(s) => s,
                         Err(e) => {
-                            return (
-                                false,
-                                None,
-                                Some(format!("invoice cosign sign: {}", e)),
-                            )
+                            return (false, None, Some(format!("invoice cosign sign: {}", e)))
                         }
                     };
                     (hex::encode(operator_ledger_hash), hex::encode(sig))
@@ -634,19 +623,24 @@ impl Node {
         };
         let op_expiry = match request.params.get("expiry").and_then(|v| v.as_u64()) {
             Some(e) if e <= u32::MAX as u64 => e as u32,
-            _ => return (false, None, Some("Missing or out-of-range expiry parameter".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing or out-of-range expiry parameter".to_string()),
+                )
+            }
         };
         // The wallet must cover the operator's minimum fee (its advertised
         // invoice margin); a request that doesn't is rejected up front. The LN
         // routing cap is then `fee_msats`, so the operator never pays more
         // routing than the depositor budgeted (over-budget routes fail → the
         // lock resolves via InvoiceFail and the depositor is refunded).
-        let min_fee_bps =
-            crate::operator_policy::OperatorPolicy::load(&self.data_dir)
-                .ok()
-                .flatten()
-                .and_then(|p| p.invoice_fee_bps)
-                .unwrap_or(0) as u64;
+        let min_fee_bps = crate::operator_policy::OperatorPolicy::load(&self.data_dir)
+            .ok()
+            .flatten()
+            .and_then(|p| p.invoice_fee_bps)
+            .unwrap_or(0) as u64;
         let min_fee_msats = amount_msat.saturating_mul(min_fee_bps) / 10_000;
         if fee_msats < min_fee_msats {
             return (
@@ -723,9 +717,8 @@ impl Node {
                 .filter_map(|m| m.max_transfer_timeout_blocks)
                 .min()
                 .unwrap_or(1008); // default ~1 week
-            // BOLT11 expiry window (seconds) → blocks at ~10 min/block.
-            let invoice_expiry_blocks =
-                (invoice.expiry_time().as_secs() / 600) as u32;
+                                  // BOLT11 expiry window (seconds) → blocks at ~10 min/block.
+            let invoice_expiry_blocks = (invoice.expiry_time().as_secs() / 600) as u32;
             let needed = invoice_expiry_blocks.saturating_add(settlement_margin_blocks);
             if needed > max_timeout {
                 return (
@@ -974,8 +967,7 @@ impl Node {
         };
 
         let payment_hex = hex::encode(payment_id);
-        let resolve_deadline =
-            tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
+        let resolve_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(60);
         let poll_interval = tokio::time::Duration::from_secs(1);
         let resolution = loop {
             if tokio::time::Instant::now() >= resolve_deadline {
@@ -1061,8 +1053,7 @@ impl Node {
                 // Cheap to compute, expensive to commit and roll back.
                 {
                     use bitcoin::hashes::{sha256, Hash};
-                    let computed: [u8; 32] =
-                        *sha256::Hash::hash(&preimage).as_byte_array();
+                    let computed: [u8; 32] = *sha256::Hash::hash(&preimage).as_byte_array();
                     if computed != payment_id {
                         // LDK reported the payment succeeded but the preimage it
                         // gave us doesn't hash to the payment_hash. Don't commit a
@@ -1303,7 +1294,6 @@ impl Node {
         });
         (true, Some(result.to_string()), None)
     }
-
 }
 
 /// Pure quote math for `quote_invoice`. `routing = Some(real estimate)` from the
@@ -1321,7 +1311,12 @@ fn quote_fee_breakdown(
         None => (amount_msat / 100, "heuristic"),
     };
     let margin = amount_msat.saturating_mul(margin_bps) / 10_000;
-    (routing_estimate, margin, routing_estimate + margin, estimation)
+    (
+        routing_estimate,
+        margin,
+        routing_estimate + margin,
+        estimation,
+    )
 }
 
 #[cfg(test)]

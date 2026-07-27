@@ -45,10 +45,7 @@ fn configure_swap_response_filter(
     left_ledger: &str,
     right_ledger: &str,
 ) {
-    transport.set_response_ledger_filter(vec![
-        left_ledger.to_string(),
-        right_ledger.to_string(),
-    ]);
+    transport.set_response_ledger_filter(vec![left_ledger.to_string(), right_ledger.to_string()]);
     // Clear the subscription flag so the next send re-subscribes with the
     // updated filter (first send set it to a single-ledger filter).
     transport.clear_response_subscription();
@@ -208,7 +205,9 @@ async fn watch_for_reveal(
             if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                 if let LedgerOperation::TransferComplete {
                     transfer_id: tid,
-                    script_witness, .. } = op
+                    script_witness,
+                    ..
+                } = op
                 {
                     if tid == transfer_id {
                         if let Some(preimage_bytes) = script_witness.stack.first() {
@@ -362,8 +361,7 @@ pub async fn swap_advertise(args: &[String]) -> Result<(), Box<dyn std::error::E
     let deposit_id = compute_deposit_id(&descriptor);
 
     let nostr_key = config.nostr_key()?;
-    let nostr_pk =
-        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &nostr_key);
+    let nostr_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &nostr_key);
     // Nostr pubkeys are x-only (BIP-340, 32 bytes), not compressed secp256k1.
     // The p-tag and event.pubkey both use x-only form.
     let (xonly_pk, _parity) = nostr_pk.x_only_public_key();
@@ -531,7 +529,10 @@ pub async fn swap_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             avail_sats,
             &ad.source_ledger[..16.min(ad.source_ledger.len())]
         );
-        println!("   Maker:   {}...", &ad.maker_pubkey[..16.min(ad.maker_pubkey.len())]);
+        println!(
+            "   Maker:   {}...",
+            &ad.maker_pubkey[..16.min(ad.maker_pubkey.len())]
+        );
         println!(
             "   Deposit: {}",
             &ad.source_deposit_id[..16.min(ad.source_deposit_id.len())]
@@ -775,15 +776,24 @@ pub async fn swap_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     println!("Swap Request");
     println!("============");
-    println!("  Ad:       {} ({} sats available)", &ad.event_id[..16], ad.available_msats / 1000);
+    println!(
+        "  Ad:       {} ({} sats available)",
+        &ad.event_id[..16],
+        ad.available_msats / 1000
+    );
     println!("  Maker:    {}...", &ad.maker_pubkey[..16]);
-    println!("  Swap:     {} sats on {}... → {} sats on {}...",
+    println!(
+        "  Swap:     {} sats on {}... → {} sats on {}...",
         amount_sats,
         &from_ledger[..12],
         amount_sats,
-        &ad.source_ledger[..12]);
+        &ad.source_ledger[..12]
+    );
     println!("  Preimage: (generated, kept locally)");
-    println!("  Hash:     {}...", hex::encode(hash.as_byte_array())[..16].to_string());
+    println!(
+        "  Hash:     {}...",
+        hex::encode(hash.as_byte_array())[..16].to_string()
+    );
     println!();
 
     // Create the broadcast receiver BEFORE subscribing — receivers only see
@@ -925,8 +935,7 @@ pub async fn swap_listen(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
 
     let deposits_file = config.data_dir.join("deposits.json");
-    let data = std::fs::read_to_string(&deposits_file)
-        .map_err(|_| "No deposits found.")?;
+    let data = std::fs::read_to_string(&deposits_file).map_err(|_| "No deposits found.")?;
     let deposits: Vec<serde_json::Value> = serde_json::from_str(&data)?;
 
     let nostr_key = config.nostr_key()?;
@@ -1000,11 +1009,17 @@ async fn handle_swap_request(
     req: &SwapRequest,
 ) {
     println!();
-    println!("[request {}] from {}...",
-        &req.event_id[..16], &req.taker_pubkey[..16]);
+    println!(
+        "[request {}] from {}...",
+        &req.event_id[..16],
+        &req.taker_pubkey[..16]
+    );
     println!("  ad:     {}...", &req.swap_ad_event_id[..16]);
     println!("  amount: {} msats", req.amount_msats);
-    println!("  taker source ledger: {}...", &req.taker_source_ledger[..16]);
+    println!(
+        "  taker source ledger: {}...",
+        &req.taker_source_ledger[..16]
+    );
 
     let reject = |reason: &str| {
         let resp = SwapResponse {
@@ -1064,8 +1079,8 @@ async fn handle_swap_request(
     // Skip the taker's own source deposit (would collapse the swap to a no-op).
     let taker_source_id_hex = req.taker_source_deposit_id.as_str();
     let maker_dest = deposits.iter().find(|d| {
-        let ledger_match = d.get("ledger_id").and_then(|v| v.as_str())
-            == Some(&req.taker_source_ledger);
+        let ledger_match =
+            d.get("ledger_id").and_then(|v| v.as_str()) == Some(&req.taker_source_ledger);
         let our_did = crate::wallet_cli::deposit_record_identity(d)
             .map(|(_, id)| id)
             .unwrap_or_default();
@@ -1086,21 +1101,18 @@ async fn handle_swap_request(
         .get("key_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as u32;
-    let maker_dest_sk = match derive_secret_key_at_index(
-        &config.seed,
-        config.network,
-        maker_dest_key_index,
-    ) {
-        Ok(k) => k,
-        Err(_) => {
-            let (resp, msg) = reject("failed to derive maker dest key");
-            println!("  → REJECT: {}", msg);
-            let _ = transport
-                .publish_swap_response(&req.taker_pubkey, &resp)
-                .await;
-            return;
-        }
-    };
+    let maker_dest_sk =
+        match derive_secret_key_at_index(&config.seed, config.network, maker_dest_key_index) {
+            Ok(k) => k,
+            Err(_) => {
+                let (resp, msg) = reject("failed to derive maker dest key");
+                println!("  → REJECT: {}", msg);
+                let _ = transport
+                    .publish_swap_response(&req.taker_pubkey, &resp)
+                    .await;
+                return;
+            }
+        };
     let secp = bitcoin::secp256k1::Secp256k1::new();
     let maker_dest_pk =
         bitcoin::secp256k1::Keypair::from_secret_key(&secp, &maker_dest_sk).public_key();
@@ -1136,7 +1148,10 @@ async fn handle_swap_request(
     {
         Ok(rid) => println!(
             "  → ACCEPT (fee {} msats, left +{} / right +{}): response {}",
-            fee_msats, timeout_left_blocks, timeout_right_blocks, &rid[..16]
+            fee_msats,
+            timeout_left_blocks,
+            timeout_right_blocks,
+            &rid[..16]
         ),
         Err(e) => {
             println!("  → ACCEPT failed to publish: {}", e);
@@ -1195,7 +1210,11 @@ async fn handle_swap_request(
         )
         .await
         {
-            println!("  maker execution failed ({}...): {}", &req.event_id[..16], e);
+            println!(
+                "  maker execution failed ({}...): {}",
+                &req.event_id[..16],
+                e
+            );
         } else {
             println!("  swap {} completed on maker side", &req.event_id[..16]);
         }

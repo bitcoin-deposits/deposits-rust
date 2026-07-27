@@ -56,8 +56,8 @@ use crate::tapscript_reserves::VoterSet;
 use bitcoin::{
     hashes::Hash,
     opcodes::all::*,
-    secp256k1::{Secp256k1, XOnlyPublicKey},
     script::Builder,
+    secp256k1::{Secp256k1, XOnlyPublicKey},
     taproot::{LeafVersion, TaprootBuilder, TaprootSpendInfo},
     Address, Network, ScriptBuf,
 };
@@ -88,9 +88,9 @@ pub mod v_2026_04_17 {
 
     /// BIP-341 NUMS: `lift_x(SHA256("TapTweak"))`. Same bytes as current code.
     pub const NUMS_INTERNAL_KEY: [u8; 32] = [
-        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
-        0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
-        0xce, 0x80, 0x3a, 0xc0,
+        0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a,
+        0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80,
+        0x3a, 0xc0,
     ];
 
     /// A single tier in this version's config. Fields and meaning are
@@ -186,7 +186,9 @@ pub mod v_2026_04_17 {
                 let tb = voter_set
                     .tie_breaker()
                     .expect("tie-breaker required but not in voter set");
-                builder = builder.push_x_only_key(&tb.x_only()).push_opcode(OP_CHECKSIG);
+                builder = builder
+                    .push_x_only_key(&tb.x_only())
+                    .push_opcode(OP_CHECKSIG);
             } else {
                 builder = builder
                     .push_x_only_key(&sorted_keys[0])
@@ -364,12 +366,11 @@ mod tests {
         .map(|s| PublicKey::from_str(s).unwrap())
         .collect();
         let voter_set = VoterSet::new(operator, members.clone());
-        let ledger_hash: [u8; 32] = hex::decode(
-            "7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76",
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
+        let ledger_hash: [u8; 32] =
+            hex::decode("7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76")
+                .unwrap()
+                .try_into()
+                .unwrap();
         // The daemon at b3d38acc called `default_for_voter_count(quorum_members.len() + 1)` —
         // including the operator in the count. So `n = members + 1`.
         let tiers = v_2026_04_17::default_tiers(members.len() + 1);
@@ -395,8 +396,6 @@ mod tests {
     }
 }
 
-
-
 #[cfg(test)]
 mod subset_search {
     use super::*;
@@ -421,22 +420,29 @@ mod subset_search {
         )
         .unwrap();
         let all_members: Vec<PublicKey> = [
-            ("assange", "0206c4db20bda97893e99f843b0acf6bd61624baa09c72536841a974230f1e4995"),
-            ("finney",  "036cba47c801a59c0792fd4a214ec6b37eb6f206a5be68a9d87064d5f89fd8a777"),
-            ("hughes",  "02208787bb5c2d2428d4055d353d4656642be7ef6550a3240b2063b4c073d8ae1a"),
+            (
+                "assange",
+                "0206c4db20bda97893e99f843b0acf6bd61624baa09c72536841a974230f1e4995",
+            ),
+            (
+                "finney",
+                "036cba47c801a59c0792fd4a214ec6b37eb6f206a5be68a9d87064d5f89fd8a777",
+            ),
+            (
+                "hughes",
+                "02208787bb5c2d2428d4055d353d4656642be7ef6550a3240b2063b4c073d8ae1a",
+            ),
         ]
         .into_iter()
         .map(|(_, hex)| PublicKey::from_str(hex).unwrap())
         .collect();
         let names = ["assange", "finney", "hughes"];
-        let ledger_hash: [u8; 32] = hex::decode(
-            "7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76",
-        )
-        .unwrap()
-        .try_into()
-        .unwrap();
-        const TARGET: &str =
-            "bc1pfq2e6y8cpdd06nug6pdsgcuvvedevmkr43nr554vkj3s6ykdjqsqzse4n5";
+        let ledger_hash: [u8; 32] =
+            hex::decode("7fc25d5245e7003be4f1c4138fbf608bf0ecbb4eca7be4954529d42168473b76")
+                .unwrap()
+                .try_into()
+                .unwrap();
+        const TARGET: &str = "bc1pfq2e6y8cpdd06nug6pdsgcuvvedevmkr43nr554vkj3s6ykdjqsqzse4n5";
 
         // Try every subset of {0,1,2,3} members (including empty, which
         // triggers the single-tier operator-only branch).
@@ -476,15 +482,14 @@ mod subset_search {
             };
 
             for (tier_label, tiers) in tier_options {
-                let result = v_2026_04_17::build(
-                    &voter_set,
-                    &tiers,
-                    Network::Bitcoin,
-                    ledger_hash,
-                );
+                let result = v_2026_04_17::build(&voter_set, &tiers, Network::Bitcoin, ledger_hash);
                 match result {
                     Ok((addr, _, _)) => {
-                        let m = if addr.to_string() == TARGET { " ★" } else { "" };
+                        let m = if addr.to_string() == TARGET {
+                            " ★"
+                        } else {
+                            ""
+                        };
                         println!("members=[{}] tiers={}: {}{}", label, tier_label, addr, m);
                     }
                     Err(e) => {

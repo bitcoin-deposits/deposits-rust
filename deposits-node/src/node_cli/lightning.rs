@@ -6,8 +6,8 @@
 // accordance with one or both of these licenses.
 
 use super::parse_config;
-use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use crate::Node;
+use bitcoin::secp256k1::{PublicKey, Secp256k1};
 use std::str::FromStr;
 
 /// Handle lightning (ln) subcommands
@@ -288,7 +288,9 @@ async fn lightning_release_locks(args: &[String]) -> Result<(), Box<dyn std::err
         while i < args.len() {
             match args[i].as_str() {
                 "--force" => {}
-                "--payment-hash" => { i += 1; } // skip its value too
+                "--payment-hash" => {
+                    i += 1;
+                } // skip its value too
                 other => out.push(other.to_string()),
             }
             i += 1;
@@ -336,21 +338,32 @@ async fn lightning_release_locks(args: &[String]) -> Result<(), Box<dyn std::err
     let mut skipped = 0u64;
     for (lid, pid, deposit_id, amount) in targets {
         let hex_id = hex::encode(pid);
-        let status = payments.as_ref().and_then(|ps| ps.iter().find(|p| p.id == hex_id));
+        let status = payments
+            .as_ref()
+            .and_then(|ps| ps.iter().find(|p| p.id == hex_id));
         let in_flight = matches!(status, Some(p) if p.status == PaymentStatus::Pending);
         let succeeded = matches!(status, Some(p) if p.status == PaymentStatus::Succeeded);
 
         if succeeded {
-            println!("  skip {}… — backend says SUCCEEDED (needs fulfill, not fail)", &hex_id[..16]);
+            println!(
+                "  skip {}… — backend says SUCCEEDED (needs fulfill, not fail)",
+                &hex_id[..16]
+            );
             skipped += 1;
             continue;
         }
         if in_flight && !force {
-            println!("  skip {}… — PENDING in backend; use --force to release anyway", &hex_id[..16]);
+            println!(
+                "  skip {}… — PENDING in backend; use --force to release anyway",
+                &hex_id[..16]
+            );
             skipped += 1;
             continue;
         }
-        match node.fail_invoice_payment(&lid, deposit_id, amount, pid).await {
+        match node
+            .fail_invoice_payment(&lid, deposit_id, amount, pid)
+            .await
+        {
             Ok(bal) => {
                 println!(
                     "  released {}… — {} sats unlocked (deposit balance now {} sats)",

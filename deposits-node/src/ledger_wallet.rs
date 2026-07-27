@@ -31,9 +31,7 @@ use bdk_esplora::EsploraExt;
 use bdk_wallet::bitcoin::secp256k1::PublicKey;
 use bdk_wallet::bitcoin::{Address, Amount, FeeRate, Network, OutPoint, Transaction, Txid};
 use bdk_wallet::{KeychainKind, SignOptions, Wallet as BdkWallet};
-use deposits_core::{
-    TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, VoterSet,
-};
+use deposits_core::{TapscriptReservesBuilder, ThresholdConfig, ThresholdTier, VoterSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -189,8 +187,7 @@ impl LedgerWallet {
             wallet.reveal_next_address(KeychainKind::External);
         }
 
-        let taproot_reserves =
-            Self::load_taproot_reserves(&dir, operator_pubkey, network)?;
+        let taproot_reserves = Self::load_taproot_reserves(&dir, operator_pubkey, network)?;
 
         Ok(Self {
             inner: Mutex::new(wallet),
@@ -342,12 +339,7 @@ impl LedgerWallet {
             let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
             (ruleset.tier_config_factory)(quorum_members.len() + 1, first_expiry)
         };
-        let builder = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            self.network,
-            ledger_hash,
-        );
+        let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
         let taproot_output = builder
             .build()
             .map_err(|e| Error::Wallet(format!("build taproot reserves: {:?}", e)))?;
@@ -801,21 +793,12 @@ impl LedgerWallet {
         let config = if quorum_members.is_empty() {
             ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only")])
         } else {
-            let ruleset =
-                deposits_core::ruleset::resolve_or_legacy(Some(&serde_info.ruleset_name));
-            (ruleset.tier_config_factory)(
-                quorum_members.len() + 1,
-                serde_info.quorum_expiry,
-            )
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&serde_info.ruleset_name));
+            (ruleset.tier_config_factory)(quorum_members.len() + 1, serde_info.quorum_expiry)
         };
-        let taproot_output = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            network,
-            ledger_hash,
-        )
-        .build()
-        .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;
+        let taproot_output = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash)
+            .build()
+            .map_err(|e| Error::Wallet(format!("rebuild taproot output: {:?}", e)))?;
 
         Ok(Some(TaprootReservesInfo {
             outpoint,
@@ -866,7 +849,10 @@ impl LedgerWallet {
                             .parse::<bdk_wallet::bitcoin::Txid>()
                             .ok();
                         let same_outpoint = existing_txid
-                            .map(|t| t == info.outpoint.txid && existing.outpoint_vout == info.outpoint.vout)
+                            .map(|t| {
+                                t == info.outpoint.txid
+                                    && existing.outpoint_vout == info.outpoint.vout
+                            })
                             .unwrap_or(true);
                         if same_outpoint && existing_spk != &new_spk {
                             return Err(Error::Wallet(format!(
@@ -1253,7 +1239,8 @@ mod tests {
                 + bal.trusted_pending.to_sat()
                 + bal.untrusted_pending.to_sat();
             assert_eq!(
-                total, 100_000_000,
+                total,
+                100_000_000,
                 "wallet at account {} saw {} sats (confirmed={}, trusted={}, untrusted={}); \
                  expected 100_000_000 — sibling-account UTXO leak?",
                 i,
@@ -1272,10 +1259,10 @@ mod tests {
     /// stale inputs, overwrote the correct snapshot with a wrong one" bug.
     #[test]
     fn save_taproot_reserves_refuses_to_overwrite_different_script() {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
         use deposits_core::tapscript_reserves::{
             TapscriptReservesBuilder, ThresholdConfig, VoterSet,
         };
-        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 
         let tmp = TempDir::new().unwrap();
         let secp = Secp256k1::new();

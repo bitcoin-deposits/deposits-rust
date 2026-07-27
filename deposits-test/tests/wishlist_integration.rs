@@ -2,10 +2,10 @@
 //! Tier 5.2: Timing attacks on cryptographic operations.
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
-use deposits_test::adversarial::*;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
+use deposits_test::adversarial::*;
+use deposits_test::*;
 
 fn make_key(seed: u8) -> (SecretKey, PublicKey) {
     let secp = Secp256k1::new();

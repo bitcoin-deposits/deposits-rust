@@ -1,7 +1,7 @@
 //! End-to-end deposit lifecycle: open, credit, lock, fulfill, close.
 
-use deposits_test::*;
 use deposits_protocol::types::compute_deposit_id;
+use deposits_test::*;
 
 #[test]
 fn deposit_open_credit_close() {
@@ -133,7 +133,10 @@ fn deposit_close_requires_zero_balance() {
         .credit_deposit(deposit_id, 100_000, [0xAA; 32]);
 
     // Close should fail with non-zero balance
-    let close_op = deposits_protocol::LedgerOperation::DepositClose { deposit_id, commitment: None, };
+    let close_op = deposits_protocol::LedgerOperation::DepositClose {
+        deposit_id,
+        commitment: None,
+    };
     let result = net.op_mut("alice").ledger.apply_operation(&close_op);
     assert!(result.is_err());
 }

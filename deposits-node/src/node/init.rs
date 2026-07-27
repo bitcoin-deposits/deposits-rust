@@ -20,8 +20,8 @@ impl Node {
             None => {
                 let xpriv = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
                     .map_err(|e| Error::Wallet(format!("xpriv from seed: {}", e)))?;
-                let local =
-                    deposits_signer_api::LocalSigner::from_xpriv_with_nostr(xpriv).map_err(|e| {
+                let local = deposits_signer_api::LocalSigner::from_xpriv_with_nostr(xpriv)
+                    .map_err(|e| {
                         Error::Wallet(format!("LocalSigner::from_xpriv_with_nostr: {}", e))
                     })?;
                 std::sync::Arc::new(local)
@@ -76,11 +76,7 @@ impl Node {
                     let entry = entry.map_err(|e| {
                         Error::Wallet(format!("read ledger wallets dir entry: {}", e))
                     })?;
-                    if !entry
-                        .file_type()
-                        .map(|ft| ft.is_dir())
-                        .unwrap_or(false)
-                    {
+                    if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                         continue;
                     }
                     let ledger_id = entry.file_name().to_string_lossy().to_string();
@@ -93,11 +89,7 @@ impl Node {
                     ) {
                         Ok(lw) => lw,
                         Err(e) => {
-                            tracing::warn!(
-                                "skipping ledger wallet at {:?}: {}",
-                                entry.path(),
-                                e
-                            );
+                            tracing::warn!("skipping ledger wallet at {:?}: {}", entry.path(), e);
                             continue;
                         }
                     };
@@ -143,8 +135,7 @@ impl Node {
                     .map_err(|e| Error::Wallet(format!("issued nostr secret invalid: {}", e)))?
             }
         };
-        let delegate_pubkey =
-            PublicKey::from_secret_key(&secp, &delegate_secret);
+        let delegate_pubkey = PublicKey::from_secret_key(&secp, &delegate_secret);
 
         // Store relay URL for later use
         let relay_url = config.relays.first().cloned().unwrap_or_default();
@@ -212,21 +203,14 @@ impl Node {
         // created after this point.
         let actor_pool_span = tracing::info_span!("actor_pool_spawn").entered();
         let (actor_outbox_tx, actor_outbox_rx) =
-            tokio::sync::mpsc::unbounded_channel::<(
-                String,
-                super::ledger_actor::LedgerOutbound,
-            )>();
-        let mut ledger_actors: HashMap<
-            String,
-            super::ledger_actor::LedgerActorHandle,
-        > = HashMap::new();
+            tokio::sync::mpsc::unbounded_channel::<(String, super::ledger_actor::LedgerOutbound)>();
+        let mut ledger_actors: HashMap<String, super::ledger_actor::LedgerActorHandle> =
+            HashMap::new();
         {
             let ledgers = handler_arc.ledgers.lock().unwrap();
             for (lid, arc) in ledgers.iter() {
                 let shared_ledger = Arc::clone(arc);
-                let (tx, rx) = tokio::sync::mpsc::channel::<
-                    super::ledger_actor::LedgerEvent,
-                >(64);
+                let (tx, rx) = tokio::sync::mpsc::channel::<super::ledger_actor::LedgerEvent>(64);
                 let apply_wakeup = Arc::new(tokio::sync::Notify::new());
                 let actor = super::ledger_actor::LedgerActor {
                     inbox: rx,
@@ -368,11 +352,7 @@ impl Node {
                 Some(pk)
             }
             Err(e) => {
-                tracing::warn!(
-                    "Ignoring malformed admin.npub ({}): {}",
-                    path.display(),
-                    e
-                );
+                tracing::warn!("Ignoring malformed admin.npub ({}): {}", path.display(), e);
                 None
             }
         }
@@ -552,7 +532,12 @@ impl Node {
             let pub_path = data_dir.join(pubkey_name);
             let pub_body = hex::encode(pk.serialize());
             let mut pf = std::fs::File::create(&pub_path).map_err(|e| {
-                Error::Wallet(format!("create {} {}: {}", pubkey_name, pub_path.display(), e))
+                Error::Wallet(format!(
+                    "create {} {}: {}",
+                    pubkey_name,
+                    pub_path.display(),
+                    e
+                ))
             })?;
             pf.write_all(pub_body.as_bytes())
                 .and_then(|_| pf.write_all(b"\n"))
@@ -613,9 +598,7 @@ impl Node {
                 None => return,
             }
         };
-        let (tx, rx) = tokio::sync::mpsc::channel::<
-            super::ledger_actor::LedgerEvent,
-        >(64);
+        let (tx, rx) = tokio::sync::mpsc::channel::<super::ledger_actor::LedgerEvent>(64);
         let apply_wakeup = Arc::new(tokio::sync::Notify::new());
         let actor = super::ledger_actor::LedgerActor {
             inbox: rx,
@@ -633,7 +616,10 @@ impl Node {
                 inbox: tx,
                 apply_wakeup,
             });
-        tracing::debug!("ensure_actor_for: spawned actor for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
+        tracing::debug!(
+            "ensure_actor_for: spawned actor for ledger {}",
+            &ledger_id[..16.min(ledger_id.len())]
+        );
     }
 
     /// Validate that the last in-memory update chains correctly from what's on disk.

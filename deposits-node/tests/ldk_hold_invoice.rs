@@ -55,7 +55,9 @@ fn spawn_payer_pay(
         });
         let mut bytes = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
         bytes.push(b'\n');
-        stream.write_all(&bytes).map_err(|e| format!("write pay: {}", e))?;
+        stream
+            .write_all(&bytes)
+            .map_err(|e| format!("write pay: {}", e))?;
         let mut line = String::new();
         BufReader::new(&stream)
             .read_line(&mut line)
@@ -123,7 +125,11 @@ fn ldk_hold_invoice_settle_and_cancel() {
 
     // Before payment: PENDING + not claimable → Open.
     let state = backend.lookup_hold_invoice(&hash_hex).expect("lookup");
-    assert_eq!(state, HoldInvoiceState::Open, "expected Open before payment");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Open,
+        "expected Open before payment"
+    );
 
     let pay_handle = spawn_payer_pay(&payer_socket, &bolt11);
 
@@ -135,8 +141,8 @@ fn ldk_hold_invoice_settle_and_cancel() {
     });
     match state {
         HoldInvoiceState::Accepted { htlc_expiry_height } => {
-            let h = htlc_expiry_height
-                .expect("fork must surface claim_deadline from PaymentClaimable");
+            let h =
+                htlc_expiry_height.expect("fork must surface claim_deadline from PaymentClaimable");
             assert!(h > 0, "claim_deadline should be a real block height");
             eprintln!("[hold]    HTLCs parked, claim_deadline={}", h);
         }
@@ -149,7 +155,11 @@ fn ldk_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Settled
     });
-    assert_eq!(state, HoldInvoiceState::Settled, "expected Settled after claim");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Settled,
+        "expected Settled after claim"
+    );
     eprintln!("[settle]  payment claimed");
 
     let pay_result = pay_handle.join().expect("payer thread").expect("pay rpc");
@@ -188,7 +198,11 @@ fn ldk_hold_invoice_settle_and_cancel() {
     let state = poll_state(&backend, &hash2_hex, Duration::from_secs(30), |s| {
         *s == HoldInvoiceState::Canceled
     });
-    assert_eq!(state, HoldInvoiceState::Canceled, "expected Canceled after fail");
+    assert_eq!(
+        state,
+        HoldInvoiceState::Canceled,
+        "expected Canceled after fail"
+    );
 
     let pay2_result = pay2_handle.join().expect("payer thread");
     match pay2_result {
@@ -219,9 +233,17 @@ fn ldk_hold_invoice_settle_and_cancel() {
 #[test]
 #[ignore]
 fn ldk_hold_invoice_survives_restart() {
-    for var in ["LDK_CLI", "LDK_SERVER_BIN", "LDK_SERVER_CONFIG", "LDK_SERVER_PID_FILE"] {
+    for var in [
+        "LDK_CLI",
+        "LDK_SERVER_BIN",
+        "LDK_SERVER_CONFIG",
+        "LDK_SERVER_PID_FILE",
+    ] {
         if std::env::var(var).is_err() {
-            eprintln!("skipping: {} unset — start with ./bin/setup-ldk-hold.sh", var);
+            eprintln!(
+                "skipping: {} unset — start with ./bin/setup-ldk-hold.sh",
+                var
+            );
             return;
         }
     }
@@ -272,7 +294,10 @@ fn ldk_hold_invoice_survives_restart() {
         }
         std::thread::sleep(Duration::from_millis(300));
     }
-    eprintln!("[kill]    ldk-server (pid {}) stopped while holding HTLCs", pid);
+    eprintln!(
+        "[kill]    ldk-server (pid {}) stopped while holding HTLCs",
+        pid
+    );
 
     // Restart it. The child outlives the test process (no kill-on-drop).
     let child = std::process::Command::new(&server_bin)
@@ -329,6 +354,9 @@ fn ldk_hold_invoice_survives_restart() {
         .pointer("/result/payment_preimage")
         .and_then(|p| p.as_str())
         .unwrap_or_else(|| panic!("pay response missing preimage: {}", pay_result));
-    assert_eq!(paid, preimage_hex, "payer preimage must match across restart");
+    assert_eq!(
+        paid, preimage_hex,
+        "payer preimage must match across restart"
+    );
     eprintln!("[ok] hold survived ldk-server restart: park → kill → replay → settle");
 }

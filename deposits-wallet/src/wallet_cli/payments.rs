@@ -526,8 +526,12 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
         // malformed scalar from the user would be rejected later by the
         // operator's calculus check anyway, but failing here costs no
         // round-trip and produces a clearer error.
-        bitcoin::secp256k1::SecretKey::from_slice(&scalar_bytes)
-            .map_err(|e| format!("Scalar is not a valid secp256k1 scalar (must be in [1, n-1]): {}", e))?;
+        bitcoin::secp256k1::SecretKey::from_slice(&scalar_bytes).map_err(|e| {
+            format!(
+                "Scalar is not a valid secp256k1 scalar (must be in [1, n-1]): {}",
+                e
+            )
+        })?;
         println!("Transfer Complete Request (PTLC)");
         println!("================================");
         println!("  Transfer ID: {}...", &transfer_id_hex[..16]);
@@ -538,7 +542,9 @@ pub async fn transfer_complete(args: &[String]) -> Result<(), Box<dyn std::error
             "scalar": scalar_hex,
         })
     } else {
-        return Err("Missing lock material. Use --preimage <hex> (HTLC) or --scalar <hex> (PTLC).".into());
+        return Err(
+            "Missing lock material. Use --preimage <hex> (HTLC) or --scalar <hex> (PTLC).".into(),
+        );
     };
 
     // Connect to relay
@@ -611,8 +617,8 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
         i += 1;
     }
 
-    let from_alias =
-        from_alias.ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url> [--ptlc]")?;
+    let from_alias = from_alias
+        .ok_or("Usage: deposits-wallet route <from> <to> <amount_sats> --relay <url> [--ptlc]")?;
     let to_alias = to_alias.ok_or("Missing destination alias")?;
     let amount_sats = amount_sats.ok_or("Missing amount")?;
 
@@ -788,10 +794,10 @@ pub async fn route_transfer(args: &[String]) -> Result<(), Box<dyn std::error::E
     // such that `G·s == P`. The wallet uses whichever matches the route's
     // lock_type at transfer_complete time.
     let mut preimage = [0u8; 32]; // HTLC: random preimage; PTLC: re-derived from `s`
-    let mut hash_hex: String = String::new();         // HTLC
-    let mut point_p_hex: String = String::new();      // PTLC: P = G·s, compressed
-    let mut scalar_s: Option<[u8; 32]> = None;        // PTLC: kept for transfer_complete
-    let mut point_pb_hex: String = String::new();     // PTLC: P + T, the Leg 1 lock point
+    let mut hash_hex: String = String::new(); // HTLC
+    let mut point_p_hex: String = String::new(); // PTLC: P = G·s, compressed
+    let mut scalar_s: Option<[u8; 32]> = None; // PTLC: kept for transfer_complete
+    let mut point_pb_hex: String = String::new(); // PTLC: P + T, the Leg 1 lock point
     let route_req = if use_ptlc {
         // Generate a uniformly-random scalar in `[1, n-1]`. SecretKey::new rejects
         // zero and out-of-range bytes by resampling, so we get a valid scalar
@@ -1218,11 +1224,8 @@ pub async fn spread_deposits(args: &[String]) -> Result<(), Box<dyn std::error::
         shared_args.push(config.data_dir.to_string_lossy().to_string());
 
         // Step 1: create the empty deposit account.
-        let mut open_args: Vec<String> = vec![
-            ledger_id.clone(),
-            "--alias".to_string(),
-            alias.clone(),
-        ];
+        let mut open_args: Vec<String> =
+            vec![ledger_id.clone(), "--alias".to_string(), alias.clone()];
         open_args.extend_from_slice(&shared_args);
 
         if let Err(e) = open_new_deposit(&open_args).await {
@@ -1491,7 +1494,10 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     // quote round-trip fails so a pay never blocks on an unanswered quote.
     let quoted_total: Option<u64> = {
         let qp = serde_json::json!({ "invoice": invoice });
-        match transport.send_ledger_request(ledger_id, "quote_invoice", qp).await {
+        match transport
+            .send_ledger_request(ledger_id, "quote_invoice", qp)
+            .await
+        {
             Ok(rid) => match transport.wait_for_response(&rid, 30_000).await {
                 Ok(resp) if resp.success => resp
                     .result
@@ -1506,7 +1512,10 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     let fee_msats = match quoted_total {
         Some(total) => {
             let buffered = total + total / 5;
-            println!("  Quote: ~{} msats routing+margin (+20% buffer = {})", total, buffered);
+            println!(
+                "  Quote: ~{} msats routing+margin (+20% buffer = {})",
+                total, buffered
+            );
             buffered.max(1000)
         }
         None => {
@@ -1554,7 +1563,10 @@ pub async fn pay_invoice(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     println!("  Alias: {}", alias);
     println!("  Invoice: {}...", &invoice[..40.min(invoice.len())]);
     println!("  Amount: {} msats", amount_msats);
-    println!("  Fee budget: {} msats (routing + operator margin)", fee_msats);
+    println!(
+        "  Fee budget: {} msats (routing + operator margin)",
+        fee_msats
+    );
     println!("  Max total: {} msats", amount_msats + fee_msats);
 
     let request_id = transport
@@ -1711,10 +1723,7 @@ pub async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    println!(
-        "{:>5}  {:<18} {:>14}  {}",
-        "seq", "op", "amount", "detail"
-    );
+    println!("{:>5}  {:<18} {:>14}  {}", "seq", "op", "amount", "detail");
     println!("{}", "-".repeat(70));
 
     let mut net_msat: i128 = 0;
@@ -1783,10 +1792,7 @@ struct HistoryRow {
 ///     (the lock is released back to the deposit).
 ///   - InvoiceCredit / OnchainCredit / TransferLock inbound: `+amount`.
 ///   - FeeCollect: `-amount`.
-fn describe_op(
-    op: &deposits_core::messages::LedgerOperation,
-    me: &[u8; 16],
-) -> HistoryRow {
+fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> HistoryRow {
     use deposits_core::messages::LedgerOperation as L;
 
     fn row(label: &str, delta: Option<i64>, detail: String) -> HistoryRow {
@@ -1800,14 +1806,14 @@ fn describe_op(
     match op {
         L::DepositOpen { .. } => row("DepositOpen", None, "account opened".to_string()),
         L::DepositClose { .. } => row("DepositClose", None, "account closed".to_string()),
-        L::QuorumUpgrade { new_protocol_version } => row(
+        L::QuorumUpgrade {
+            new_protocol_version,
+        } => row(
             "QuorumUpgrade",
             None,
             format!("consensus ruleset → {}", new_protocol_version),
         ),
-        L::FeeChange { .. } => {
-            row("FeeChange", None, "fee schedule updated".to_string())
-        }
+        L::FeeChange { .. } => row("FeeChange", None, "fee schedule updated".to_string()),
         L::DepositKeyRotate { .. } => row(
             "DepositKeyRotate",
             None,
@@ -1837,20 +1843,14 @@ fn describe_op(
             Some(0),
             "withdrawal failed".to_string(),
         ),
-        L::OnchainCredit {
-            amount,
-            txid,
-            ..
-        } => row(
+        L::OnchainCredit { amount, txid, .. } => row(
             "OnchainCredit",
             Some(*amount as i64),
             format!("from txid {}", short(&hex::encode(txid))),
         ),
 
         L::InvoiceLock {
-            amount,
-            payment_id,
-            ..
+            amount, payment_id, ..
         } => row(
             "InvoiceLock",
             Some(-(*amount as i64)),
@@ -1970,9 +1970,11 @@ fn describe_op(
         L::QuorumAddMember { .. }
         | L::QuorumRemoveMember { .. }
         | L::QuorumJoin { .. }
-        | L::QuorumBegin { .. } => {
-            row("QuorumChange", None, "(quorum membership change)".to_string())
-        }
+        | L::QuorumBegin { .. } => row(
+            "QuorumChange",
+            None,
+            "(quorum membership change)".to_string(),
+        ),
         L::DisputeEnter { .. }
         | L::DisputeArmed { .. }
         | L::DisputeAcquire { .. }
@@ -2133,10 +2135,7 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let completion_script = format!("sha256({})", hash_hex);
 
     // Source keypair.
-    let src_key_index = src
-        .get("key_index")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as u32;
+    let src_key_index = src.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     let src_sk = derive_secret_key_at_index(&config.seed, config.network, src_key_index)?;
     let secp = Secp256k1::new();
     let src_kp = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &src_sk);
@@ -2189,12 +2188,19 @@ pub async fn send(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Send");
     println!("====");
-    println!("  From:     {} ({})", src_alias, hex::encode(&source_id[..4]));
+    println!(
+        "  From:     {} ({})",
+        src_alias,
+        hex::encode(&source_id[..4])
+    );
     println!("  To:       {}", hex::encode(dest_id));
     println!("  Amount:   {} sats", amount_sats);
     println!("  Fee:      {} msats", fee_msats);
     println!("  Tip:      block {}", ad.current_block);
-    println!("  Timeout:  block {} (+{} blocks)", timeout_height, timeout_blocks);
+    println!(
+        "  Timeout:  block {} (+{} blocks)",
+        timeout_height, timeout_blocks
+    );
     println!("  Transfer: {}", hex::encode(transfer_id));
     println!();
 
@@ -2320,7 +2326,10 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
         .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
         .ok_or_else(|| format!("No deposit '{}'", alias))?;
-    let ledger_id = dep["ledger_id"].as_str().ok_or("Missing ledger_id")?.to_string();
+    let ledger_id = dep["ledger_id"]
+        .as_str()
+        .ok_or("Missing ledger_id")?
+        .to_string();
     let key_index = dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -2354,7 +2363,10 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
     transport.set_response_ledger_filter(vec![ledger_id.clone()]);
 
     // 2. issue_hold_invoice (DEP-04 §Bridge request envelopes).
-    println!("Requesting hold invoice from bridge {}…", &bridge_pk[..16.min(bridge_pk.len())]);
+    println!(
+        "Requesting hold invoice from bridge {}…",
+        &bridge_pk[..16.min(bridge_pk.len())]
+    );
     let req = serde_json::json!({
         "ledger_id": ledger_id,
         "deposit_id": deposit_id_hex,
@@ -2370,20 +2382,27 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
         return Err(format!("Bridge refused: {}", resp.error.unwrap_or_default()).into());
     }
     let result = resp.result.ok_or("Missing result")?;
-    let bolt11 = result["bolt11"].as_str().ok_or("Missing bolt11")?.to_string();
+    let bolt11 = result["bolt11"]
+        .as_str()
+        .ok_or("Missing bolt11")?
+        .to_string();
     let service_fee = result["service_fee_msats"].as_u64().unwrap_or(0);
     let transfer_fee = result["transfer_fee_msats"].as_u64().unwrap_or(0);
 
     // Sanity: the invoice must ask for exactly X + fees the bridge declared.
-    let parsed: lightning_invoice::Bolt11Invoice = bolt11.parse()
+    let parsed: lightning_invoice::Bolt11Invoice = bolt11
+        .parse()
         .map_err(|e| format!("Bridge returned an unparseable BOLT-11: {:?}", e))?;
-    let inv_msats = parsed.amount_milli_satoshis().ok_or("Amountless invoice from bridge")?;
+    let inv_msats = parsed
+        .amount_milli_satoshis()
+        .ok_or("Amountless invoice from bridge")?;
     let expected = amount_msats + service_fee + transfer_fee;
     if inv_msats != expected {
         return Err(format!(
             "Bridge invoice amount {} != expected {} (X {} + service {} + transfer {})",
             inv_msats, expected, amount_msats, service_fee, transfer_fee
-        ).into());
+        )
+        .into());
     }
     // The invoice must commit to OUR hash — otherwise our reveal won't settle it.
     if hex::encode(parsed.payment_hash()) != hash_hex {
@@ -2435,7 +2454,10 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
     eprintln!();
     let lock_tid = lock_tid.ok_or("Bridge lock did not appear before timeout — preimage NOT revealed; payer will be refunded when the HTLC expires")?;
-    println!("  Bridge locked! transfer_id {}…", hex::encode(&lock_tid[..8]));
+    println!(
+        "  Bridge locked! transfer_id {}…",
+        hex::encode(&lock_tid[..8])
+    );
 
     // 4. Reveal r — this credits us AND (only then) lets the bridge settle upstream.
     let complete_params = serde_json::json!({
@@ -2447,11 +2469,18 @@ pub async fn bridge_receive(args: &[String]) -> Result<(), Box<dyn std::error::E
         .await?;
     let resp = transport.wait_for_response(&req_id, 20000).await?;
     if !resp.success {
-        return Err(format!("transfer_complete failed: {}", resp.error.unwrap_or_default()).into());
+        return Err(format!(
+            "transfer_complete failed: {}",
+            resp.error.unwrap_or_default()
+        )
+        .into());
     }
 
     println!();
-    println!("Bridge receive complete: +{} sats on '{}'", amount_sats, alias);
+    println!(
+        "Bridge receive complete: +{} sats on '{}'",
+        amount_sats, alias
+    );
     Ok(())
 }
 
@@ -2533,7 +2562,10 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
         .iter()
         .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
         .ok_or_else(|| format!("No deposit '{}'", alias))?;
-    let ledger_id = dep["ledger_id"].as_str().ok_or("Missing ledger_id")?.to_string();
+    let ledger_id = dep["ledger_id"]
+        .as_str()
+        .ok_or("Missing ledger_id")?
+        .to_string();
     let key_index = dep.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -2653,7 +2685,10 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "signature": hex::encode(&signature_bytes),
     });
 
-    println!("Locking {} msats to the bridge (timeout block {})…", amount_msats, timeout_height);
+    println!(
+        "Locking {} msats to the bridge (timeout block {})…",
+        amount_msats, timeout_height
+    );
     let lock_req_id = transport
         .send_ledger_request(&ledger_id, "transfer_lock", lock_params)
         .await?;
@@ -2678,7 +2713,9 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
             use deposits_core::{LedgerOperation, TlvDecode};
             if let Ok(LedgerOperation::TransferComplete {
                 transfer_id: ref tid,
-                ref script_witness, .. }) = LedgerOperation::tlv_decode(&update.message)
+                ref script_witness,
+                ..
+            }) = LedgerOperation::tlv_decode(&update.message)
             {
                 if *tid == transfer_id {
                     if let Some(bytes) = script_witness.stack.first() {

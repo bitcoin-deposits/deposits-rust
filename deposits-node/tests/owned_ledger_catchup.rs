@@ -95,11 +95,18 @@ fn build_update(
 }
 
 /// Create an operator ledger (LedgerOpen at seq 0) and return its handle + id.
-fn make_owned_ledger(handler: &Arc<DepositsHandler>, our_pk: PublicKey) -> (String, [u8; 32], [u8; 32]) {
+fn make_owned_ledger(
+    handler: &Arc<DepositsHandler>,
+    our_pk: PublicKey,
+) -> (String, [u8; 32], [u8; 32]) {
     let arc = handler.get_or_create_ledger(our_pk, "test:reserves".to_string());
     let mut l = arc.write().unwrap();
     l.state.parent_pubkey = our_pk;
-    (hex::encode(l.state.ledger_id), l.state.ledger_id, l.state.chain_tip_hash)
+    (
+        hex::encode(l.state.ledger_id),
+        l.state.ledger_id,
+        l.state.chain_tip_hash,
+    )
 }
 
 #[test]
@@ -112,7 +119,13 @@ fn catchup_applies_in_place_and_is_prefix_safe() {
     let (ledger_id, ledger_id_bytes, open_tip) = make_owned_ledger(&handler, our_pk);
 
     // The Arc the actor would share with the handler.
-    let actor_arc = handler.ledgers.lock().unwrap().get(&ledger_id).cloned().unwrap();
+    let actor_arc = handler
+        .ledgers
+        .lock()
+        .unwrap()
+        .get(&ledger_id)
+        .cloned()
+        .unwrap();
 
     // Build a clean chain seq 1..=3 (the "relay tail" we missed).
     let u1 = build_update(&kp, ledger_id_bytes, 1, open_tip);
@@ -125,7 +138,11 @@ fn catchup_applies_in_place_and_is_prefix_safe() {
     assert_eq!(applied, 3, "all three updates applied");
 
     // Invariant: the SAME Arc the actor holds advanced — no orphaned copy.
-    assert_eq!(actor_arc.read().unwrap().state.sequence, 3, "shared Arc advanced to tip 3");
+    assert_eq!(
+        actor_arc.read().unwrap().state.sequence,
+        3,
+        "shared Arc advanced to tip 3"
+    );
 
     // And the writer can keep going from the caught-up tip (seq 4 chains cleanly).
     let u4 = build_update(&kp, ledger_id_bytes, 4, u3.chain_hash());
@@ -157,14 +174,32 @@ fn prefix_apply_stops_at_break_and_keeps_validated_prefix() {
         .expect("apply returns Ok with the valid prefix");
     assert_eq!(applied, 1, "only the validated prefix (seq 1) is applied");
     assert_eq!(
-        handler.ledgers.lock().unwrap().get(&ledger_id).unwrap().read().unwrap().state.sequence,
+        handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .unwrap()
+            .read()
+            .unwrap()
+            .state
+            .sequence,
         1,
         "tip persists at the last valid seq, not rolled back to 0",
     );
 }
 
 fn tip_seq(handler: &Arc<DepositsHandler>, ledger_id: &str) -> u64 {
-    handler.ledgers.lock().unwrap().get(ledger_id).unwrap().read().unwrap().state.sequence
+    handler
+        .ledgers
+        .lock()
+        .unwrap()
+        .get(ledger_id)
+        .unwrap()
+        .read()
+        .unwrap()
+        .state
+        .sequence
 }
 
 // ── adopt_owned_updates: the regressed-operator decision logic ──────────────
@@ -186,16 +221,26 @@ fn adopt_catches_up_a_regressed_operator() {
     let relay_chain = vec![u1.clone(), u2.clone(), u3.clone(), u4.clone(), u5.clone()];
 
     // Our operator regressed: local only has up to seq 2.
-    handler.apply_updates_to_ledger(&ledger_id, vec![u1, u2]).unwrap();
+    handler
+        .apply_updates_to_ledger(&ledger_id, vec![u1, u2])
+        .unwrap();
     assert_eq!(tip_seq(&handler, &ledger_id), 2, "regressed to seq 2");
 
     // Feed the full relay chain → adopt only 3,4,5, advancing to the real tip.
     let adopted = handler.adopt_owned_updates(&ledger_id, relay_chain.clone());
     assert_eq!(adopted, 3, "adopted seqs 3,4,5");
-    assert_eq!(tip_seq(&handler, &ledger_id), 5, "caught up to canonical tip");
+    assert_eq!(
+        tip_seq(&handler, &ledger_id),
+        5,
+        "caught up to canonical tip"
+    );
 
     // Idempotent: feeding the same chain again adopts nothing.
-    assert_eq!(handler.adopt_owned_updates(&ledger_id, relay_chain), 0, "already caught up");
+    assert_eq!(
+        handler.adopt_owned_updates(&ledger_id, relay_chain),
+        0,
+        "already caught up"
+    );
 }
 
 #[test]
@@ -209,13 +254,19 @@ fn adopt_refuses_a_fork_at_our_tip() {
     // Local advances to seq 2 on its own chain.
     let u1 = build_update(&kp, idb, 1, open_tip);
     let u2 = build_update(&kp, idb, 2, u1.chain_hash());
-    handler.apply_updates_to_ledger(&ledger_id, vec![u1, u2]).unwrap();
+    handler
+        .apply_updates_to_ledger(&ledger_id, vec![u1, u2])
+        .unwrap();
 
     // The relay offers a seq 3 that chains off a DIFFERENT seq 2 (fork at tip).
     let fork3 = build_update(&kp, idb, 3, [0xCD; 32]);
     let adopted = handler.adopt_owned_updates(&ledger_id, vec![fork3]);
     assert_eq!(adopted, 0, "a fork at our tip must NOT be adopted");
-    assert_eq!(tip_seq(&handler, &ledger_id), 2, "owned ledger left intact for manual reconciliation");
+    assert_eq!(
+        tip_seq(&handler, &ledger_id),
+        2,
+        "owned ledger left intact for manual reconciliation"
+    );
 }
 
 #[test]
@@ -229,9 +280,15 @@ fn adopt_is_a_noop_when_already_ahead() {
     let u1 = build_update(&kp, idb, 1, open_tip);
     let u2 = build_update(&kp, idb, 2, u1.chain_hash());
     let u3 = build_update(&kp, idb, 3, u2.chain_hash());
-    handler.apply_updates_to_ledger(&ledger_id, vec![u1.clone(), u2.clone(), u3]).unwrap();
+    handler
+        .apply_updates_to_ledger(&ledger_id, vec![u1.clone(), u2.clone(), u3])
+        .unwrap();
 
     // Relay only knows up to seq 2 (we're ahead) → nothing to adopt.
     assert_eq!(handler.adopt_owned_updates(&ledger_id, vec![u1, u2]), 0);
-    assert_eq!(tip_seq(&handler, &ledger_id), 3, "stayed at our own higher tip");
+    assert_eq!(
+        tip_seq(&handler, &ledger_id),
+        3,
+        "stayed at our own higher tip"
+    );
 }

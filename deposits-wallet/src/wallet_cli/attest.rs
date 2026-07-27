@@ -30,8 +30,7 @@ use super::{parse_config, NostrTransportBuilder};
 fn parse_target_xonly(s: &str) -> Result<String, Box<dyn std::error::Error>> {
     let s = s.trim();
     if s.starts_with("npub1") {
-        let pk = nostr_sdk::PublicKey::parse(s)
-            .map_err(|e| format!("invalid npub: {}", e))?;
+        let pk = nostr_sdk::PublicKey::parse(s).map_err(|e| format!("invalid npub: {}", e))?;
         return Ok(pk.to_hex());
     }
     if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -45,9 +44,7 @@ fn parse_target_xonly(s: &str) -> Result<String, Box<dyn std::error::Error>> {
 }
 
 /// Our xonly pubkey (for publishing + self-lookup in the Kind 10301 list).
-fn our_xonly(
-    config: &super::WalletConfig,
-) -> Result<String, Box<dyn std::error::Error>> {
+fn our_xonly(config: &super::WalletConfig) -> Result<String, Box<dyn std::error::Error>> {
     let sk = config.nostr_key()?;
     let secp = Secp256k1::new();
     let pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk);
@@ -161,7 +158,8 @@ pub async fn revoke_subkey(args: &[String]) -> Result<(), Box<dyn std::error::Er
         }
         i += 1;
     }
-    let target = target.ok_or("Usage: deposits-wallet revoke <subkey_npub_or_hex> --relay <url>")?;
+    let target =
+        target.ok_or("Usage: deposits-wallet revoke <subkey_npub_or_hex> --relay <url>")?;
     let config = parse_config(&config_args)?;
     if config.relays.is_empty() {
         return Err("No relay specified. Use --relay <url>".into());
@@ -186,7 +184,11 @@ pub async fn revoke_subkey(args: &[String]) -> Result<(), Box<dyn std::error::Er
     let event_id = transport.publish_subkey_list(&inbox, &revoked).await?;
     println!(
         "Subkey {} ({}).",
-        if was_active { "revoked" } else { "marked revoked (was already inactive)" },
+        if was_active {
+            "revoked"
+        } else {
+            "marked revoked (was already inactive)"
+        },
         &subkey_hex[..16]
     );
     println!("  10301 event: {}...", &event_id[..16]);
@@ -207,9 +209,7 @@ pub async fn list_subkeys(args: &[String]) -> Result<(), Box<dyn std::error::Err
             }
             _ => {
                 config_args.push(args[i].clone());
-                if args[i].starts_with("--")
-                    && i + 1 < args.len()
-                    && !args[i + 1].starts_with("--")
+                if args[i].starts_with("--") && i + 1 < args.len() && !args[i + 1].starts_with("--")
                 {
                     config_args.push(args[i + 1].clone());
                     i += 1;

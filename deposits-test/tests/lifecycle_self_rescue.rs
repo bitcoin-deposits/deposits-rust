@@ -72,12 +72,18 @@ const VICTIM_EXPIRY_BLOCKS: u32 = 100;
 /// Common args every node CLI invocation needs.
 fn op0_cli_args() -> Vec<String> {
     vec![
-        "--seed".into(), op0_seed().to_string(),
-        "--data-dir".into(), op0_data_dir().to_string_lossy().into_owned(),
-        "--network".into(), "regtest".into(),
-        "--esplora".into(), ELECTRS_URL.into(),
-        "--relay".into(), relay_ledgers().to_string(),
-        "--relay".into(), relay_messaging().to_string(),
+        "--seed".into(),
+        op0_seed().to_string(),
+        "--data-dir".into(),
+        op0_data_dir().to_string_lossy().into_owned(),
+        "--network".into(),
+        "regtest".into(),
+        "--esplora".into(),
+        ELECTRS_URL.into(),
+        "--relay".into(),
+        relay_ledgers().to_string(),
+        "--relay".into(),
+        relay_messaging().to_string(),
     ]
 }
 
@@ -92,7 +98,9 @@ fn run_op0_node(node: &std::path::Path, subcmd_args: &[&str]) -> String {
         cmd.arg(a);
     }
     cmd.env("RUST_LOG", "warn");
-    let out = cmd.output().expect("deposits-node invocation failed to spawn");
+    let out = cmd
+        .output()
+        .expect("deposits-node invocation failed to spawn");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
@@ -108,13 +116,23 @@ fn run_op0_node(node: &std::path::Path, subcmd_args: &[&str]) -> String {
 /// pre-fund a freshly-opened victim ledger so its quorum-begin draws
 /// a real UTXO. Mirrors `setup.sh`'s `bitcoin_cli ... sendtoaddress`.
 fn faucet_send(address: &str, amount_sats: u64) -> String {
-    let btc_str = format!("{}.{:08}", amount_sats / 100_000_000, amount_sats % 100_000_000);
+    let btc_str = format!(
+        "{}.{:08}",
+        amount_sats / 100_000_000,
+        amount_sats % 100_000_000
+    );
     let out = Command::new("docker")
         .args([
-            "exec", "bitcoind", "bitcoin-cli", "-regtest",
+            "exec",
+            "bitcoind",
+            "bitcoin-cli",
+            "-regtest",
             "-rpcwallet=faucet",
-            "-rpcuser=user", "-rpcpassword=pass",
-            "sendtoaddress", address, &btc_str,
+            "-rpcuser=user",
+            "-rpcpassword=pass",
+            "sendtoaddress",
+            address,
+            &btc_str,
         ])
         .output()
         .expect("docker exec bitcoin-cli sendtoaddress");
@@ -162,13 +180,19 @@ fn find_healthy_members(wanted: usize) -> Vec<(usize, String, String)> {
         if tip + 50 < exp {
             eprintln!(
                 "[member]  op{} healthy: tip={} expiry={} (headroom={})",
-                op_idx, tip, exp, exp - tip
+                op_idx,
+                tip,
+                exp,
+                exp - tip
             );
             found.push((op_idx, pk, lid));
         } else {
             eprintln!(
                 "[member]  op{} unfit: tip={} expiry={} (headroom={})",
-                op_idx, tip, exp, exp.saturating_sub(tip)
+                op_idx,
+                tip,
+                exp,
+                exp.saturating_sub(tip)
             );
         }
     }
@@ -244,11 +268,17 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     // Belt-and-suspenders: the wallet sync poller can lag the chain
     // tip — give it one fast-poll cycle to ingest the new UTXO.
     std::thread::sleep(Duration::from_secs(45));
-    let _ = run_op0_node(&node, &[
-        "ledger", "advertise",
-        "--name", &op_name(0),
-        "--advertise-relay", relay_ledgers(),
-    ]);
+    let _ = run_op0_node(
+        &node,
+        &[
+            "ledger",
+            "advertise",
+            "--name",
+            &op_name(0),
+            "--advertise-relay",
+            relay_ledgers(),
+        ],
+    );
 
     // ── 3. Add Q=3 cosigners using whichever members still have
     //       healthy ledgers (chain_tip < quorum_expiry). On a
@@ -263,14 +293,9 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
         );
         return;
     }
-    eprintln!(
-        "[stage] requesting consent from {} members",
-        members.len()
-    );
+    eprintln!("[stage] requesting consent from {} members", members.len());
     for (op_idx, member_pk, member_ledger) in &members {
-        run_op0_node(&node, &[
-            "quorum", "add", &victim, member_pk, member_ledger,
-        ]);
+        run_op0_node(&node, &["quorum", "add", &victim, member_pk, member_ledger]);
         eprintln!("[stage] op{} added (pk={}…)", op_idx, &member_pk[..16]);
     }
 
@@ -282,7 +307,8 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     // Backgrounded so we can mine the activation confirmation while
     // it's blocked waiting for confs — mirrors setup.sh Phase 4.
     let mut begin_cmd = Command::new(&node);
-    begin_cmd.args(["quorum", "begin", &victim])
+    begin_cmd
+        .args(["quorum", "begin", &victim])
         .args(["--amount-sats", "99999000"])
         .args(["--collateral-ratio", "0.6"])
         .args(["--protocol-version", "cltv-offset-v2"])
@@ -319,8 +345,7 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     }
 
     // ── 5. Read the victim's now-short expiry ──
-    let (original_expiry, original_reserves_id, ruleset) =
-        latest_quorum_begin(&victim);
+    let (original_expiry, original_reserves_id, ruleset) = latest_quorum_begin(&victim);
     assert!(
         ruleset == "cltv-offset-v2" || ruleset == "cltv-offset-literal",
         "victim activated with wrong ruleset: {}",
@@ -340,7 +365,11 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
 
     // ── 6. Mine past the victim's expiry ──
     let target = original_expiry + 10;
-    let to_mine = if current >= target { 20 } else { target - current };
+    let to_mine = if current >= target {
+        20
+    } else {
+        target - current
+    };
     eprintln!(
         "[mine] tip={} → target={} (expiry+10), mining {}",
         current, target, to_mine
@@ -383,7 +412,10 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     let repair_out = repair_cmd.output().expect("quorum repair spawn");
     let repair_stdout = String::from_utf8_lossy(&repair_out.stdout);
     let repair_stderr = String::from_utf8_lossy(&repair_out.stderr);
-    eprintln!("[repair] exit={} stdout: {}", repair_out.status, repair_stdout);
+    eprintln!(
+        "[repair] exit={} stdout: {}",
+        repair_out.status, repair_stdout
+    );
     if !repair_out.status.success() {
         panic!(
             "quorum repair exited non-zero: status={} stderr={}",
@@ -404,9 +436,8 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
         }
         std::thread::sleep(Duration::from_secs(2));
     }
-    let new_expiry = new_expiry.expect(
-        "no new QuorumBegin landed on victim within 60s of `quorum repair --yes`",
-    );
+    let new_expiry = new_expiry
+        .expect("no new QuorumBegin landed on victim within 60s of `quorum repair --yes`");
     let new_reserves_id = new_reserves_id.unwrap();
     eprintln!(
         "[verify] new QuorumBegin: expiry {} → {}, reserves {} → {}",
@@ -486,11 +517,17 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
     let funding_tip = current_block_height();
     let _ = wait_for_daemon_chain_tip(0, funding_tip, Duration::from_secs(60));
     std::thread::sleep(Duration::from_secs(45));
-    let _ = run_op0_node(&node, &[
-        "ledger", "advertise",
-        "--name", &op_name(0),
-        "--advertise-relay", relay_ledgers(),
-    ]);
+    let _ = run_op0_node(
+        &node,
+        &[
+            "ledger",
+            "advertise",
+            "--name",
+            &op_name(0),
+            "--advertise-relay",
+            relay_ledgers(),
+        ],
+    );
 
     let members = find_healthy_members(3);
     if members.len() < 3 {
@@ -502,14 +539,13 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
         return;
     }
     for (op_idx, member_pk, member_ledger) in &members {
-        run_op0_node(&node, &[
-            "quorum", "add", &victim, member_pk, member_ledger,
-        ]);
+        run_op0_node(&node, &["quorum", "add", &victim, member_pk, member_ledger]);
         eprintln!("[stage] op{} added", op_idx);
     }
 
     let mut begin_cmd = Command::new(&node);
-    begin_cmd.args(["quorum", "begin", &victim])
+    begin_cmd
+        .args(["quorum", "begin", &victim])
         .args(["--amount-sats", "99999000"])
         .args(["--collateral-ratio", "0.6"])
         .args(["--protocol-version", "cltv-offset-v2"])
@@ -544,8 +580,7 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
         );
     }
 
-    let (original_expiry, original_reserves_id, ruleset) =
-        latest_quorum_begin(&victim);
+    let (original_expiry, original_reserves_id, ruleset) = latest_quorum_begin(&victim);
     assert!(
         ruleset == "cltv-offset-v2" || ruleset == "cltv-offset-literal",
         "victim activated with wrong ruleset: {}",
@@ -559,7 +594,11 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
     // Mine past the victim's expiry.
     let current = current_block_height();
     let target = original_expiry + 10;
-    let to_mine = if current >= target { 20 } else { target - current };
+    let to_mine = if current >= target {
+        20
+    } else {
+        target - current
+    };
     eprintln!(
         "[mine] tip={} → target={}, mining {}",
         current, target, to_mine
@@ -572,9 +611,7 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
     // auto_tasks periodic cycle is ~10s with --fast-poll, so a 180s
     // deadline gives ~18 cycles. The first attempt may race with cosigner
     // wallet sync; subsequent cycles retry.
-    eprintln!(
-        "[wait]  awaiting autonomous self-rescue (no `quorum repair` invocation)…"
-    );
+    eprintln!("[wait]  awaiting autonomous self-rescue (no `quorum repair` invocation)…");
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut new_expiry: Option<u32> = None;
     let mut new_reserves_id: Option<String> = None;

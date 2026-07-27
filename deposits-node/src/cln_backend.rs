@@ -72,8 +72,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::lightning_backend::{
-    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo,
-    PaymentStatus,
+    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo, PaymentStatus,
 };
 use crate::Error;
 
@@ -126,11 +125,7 @@ impl ClnBackend {
         params: P,
     ) -> Result<R, Error> {
         let mut stream = UnixStream::connect(&self.socket_path).map_err(|e| {
-            Error::Wallet(format!(
-                "CLN connect {}: {}",
-                self.socket_path.display(),
-                e
-            ))
+            Error::Wallet(format!("CLN connect {}: {}", self.socket_path.display(), e))
         })?;
         stream
             .set_read_timeout(Some(self.timeout))
@@ -165,8 +160,14 @@ impl ClnBackend {
                 method
             )));
         }
-        let resp: ClnRpcResponse<R> = serde_json::from_str(&line)
-            .map_err(|e| Error::Wallet(format!("CLN parse {}: {} (raw: {})", method, e, line.trim())))?;
+        let resp: ClnRpcResponse<R> = serde_json::from_str(&line).map_err(|e| {
+            Error::Wallet(format!(
+                "CLN parse {}: {} (raw: {})",
+                method,
+                e,
+                line.trim()
+            ))
+        })?;
         if let Some(err) = resp.error {
             return Err(Error::Wallet(format!(
                 "CLN {} returned error {}: {}",
@@ -422,8 +423,7 @@ impl LightningBackend for ClnBackend {
 
     fn pay_invoice(&self, invoice: &str) -> Result<String, Error> {
         // CLN's `pay` is sync — returns when the payment terminates.
-        let resp: ClnPayResp =
-            self.call("pay", serde_json::json!({ "bolt11": invoice }))?;
+        let resp: ClnPayResp = self.call("pay", serde_json::json!({ "bolt11": invoice }))?;
         if resp.status == "failed" {
             return Err(Error::Wallet(format!(
                 "CLN pay failed: payment_hash={} preimage={}",
@@ -433,11 +433,7 @@ impl LightningBackend for ClnBackend {
         Ok(resp.payment_hash)
     }
 
-    fn pay_invoice_with_amount(
-        &self,
-        invoice: &str,
-        amount_msat: u64,
-    ) -> Result<String, Error> {
+    fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
         let resp: ClnPayResp = self.call(
             "pay",
             serde_json::json!({ "bolt11": invoice, "amount_msat": amount_msat }),
@@ -465,9 +461,7 @@ impl LightningBackend for ClnBackend {
                 let our = c.our_msat;
                 let theirs = c.total_msat.saturating_sub(our);
                 ChannelInfo {
-                    channel_id: c
-                        .short_channel_id
-                        .unwrap_or(c.channel_id),
+                    channel_id: c.short_channel_id.unwrap_or(c.channel_id),
                     counterparty_node_id: c.peer_id,
                     capacity_sats: c.total_msat / 1000,
                     outbound_capacity_msat: our,
@@ -497,10 +491,7 @@ impl LightningBackend for ClnBackend {
             .collect())
     }
 
-    fn get_payment_preimage(
-        &self,
-        payment_id_hex: &str,
-    ) -> Result<Option<[u8; 32]>, Error> {
+    fn get_payment_preimage(&self, payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error> {
         // Trait's get_payment_preimage is "given a payment_hash, give me the
         // preimage" — used on the self-pay path where the daemon settles an
         // invoice it issued. For CLN: listinvoices, filter by payment_hash,
@@ -520,8 +511,8 @@ impl LightningBackend for ClnBackend {
             Some(p) => p,
             None => return Ok(None),
         };
-        let bytes = hex::decode(&hex_str)
-            .map_err(|e| Error::Wallet(format!("CLN preimage hex: {}", e)))?;
+        let bytes =
+            hex::decode(&hex_str).map_err(|e| Error::Wallet(format!("CLN preimage hex: {}", e)))?;
         if bytes.len() != 32 {
             return Err(Error::Wallet(format!(
                 "CLN preimage wrong length: {} bytes",
@@ -596,10 +587,7 @@ impl LightningBackend for ClnBackend {
         Ok(resp.bolt11)
     }
 
-    fn lookup_hold_invoice(
-        &self,
-        payment_hash_hex: &str,
-    ) -> Result<HoldInvoiceState, Error> {
+    fn lookup_hold_invoice(&self, payment_hash_hex: &str) -> Result<HoldInvoiceState, Error> {
         let resp: ClnHoldListResp = self.call(
             "listholdinvoices",
             serde_json::json!({ "payment_hash": payment_hash_hex }),

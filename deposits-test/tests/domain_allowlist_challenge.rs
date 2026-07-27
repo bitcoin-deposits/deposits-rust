@@ -91,12 +91,7 @@ fn ldk_pay_invoice(invoice: &str) -> Result<(), String> {
 ///   * `ts >= since_ts` — drop anything from a prior test run.
 fn ldk_challenge_amounts_msat(since_ts: u64, exclude_msat: u64) -> Result<Vec<u64>, String> {
     let out = Command::new("docker")
-        .args([
-            "exec",
-            "lnaddr-attest",
-            "cat",
-            "/self-pay/invoices.jsonl",
-        ])
+        .args(["exec", "lnaddr-attest", "cat", "/self-pay/invoices.jsonl"])
         .output()
         .map_err(|e| format!("docker exec cat: {}", e))?;
     let body = String::from_utf8_lossy(&out.stdout);
@@ -164,20 +159,15 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
     let scratch = tempdir();
     let user_nsec = scratch.join("user.nsec");
     std::fs::write(&user_nsec, &user_sec_hex).unwrap();
-    let user_secret_key = bitcoin::secp256k1::SecretKey::from_slice(
-        &hex::decode(user_sec_hex.trim()).unwrap(),
-    )
-    .unwrap();
+    let user_secret_key =
+        bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(user_sec_hex.trim()).unwrap())
+            .unwrap();
     let username = format!("ch{}", &_user_xonly[..8]);
     let address = format!("{}@{}", username, FIXTURE_DOMAIN);
 
     // Op0: ACL + domain allowlist + verifier pubkey (no npub allowlist
     // entry, so the only path to acceptance is via attestation).
-    let _guard = Op0AccessControl::enable_with_attestation(
-        &[],
-        &[FIXTURE_DOMAIN],
-        &verifier_xonly,
-    );
+    let _guard = Op0AccessControl::enable_with_attestation(&[], &[FIXTURE_DOMAIN], &verifier_xonly);
 
     // Connect a Nostr transport as the user. The verifier subscribes to
     // both the ledgers and messaging relays after our compose change in
@@ -223,7 +213,11 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
         .get("amount_sats")
         .and_then(|v| v.as_u64())
         .expect("amount_sats");
-    eprintln!("[link] invoice for {} sats, session={}…", amount_sats, &session_id[..8]);
+    eprintln!(
+        "[link] invoice for {} sats, session={}…",
+        amount_sats,
+        &session_id[..8]
+    );
 
     // ─── 2. pay challenge invoice ──────────────────────────────────
     ldk_pay_invoice(&invoice).expect("pay challenge invoice");
@@ -258,9 +252,8 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
         match resp.get("status").and_then(|v| v.as_str()) {
             Some("challenge_sent") => {
                 eprintln!("[challenge] sent (attempt {})", attempt + 1);
-                sent_amounts =
-                    ldk_challenge_amounts_msat(baseline_ts, amount_sats * 1000)
-                        .expect("read self-pay registry");
+                sent_amounts = ldk_challenge_amounts_msat(baseline_ts, amount_sats * 1000)
+                    .expect("read self-pay registry");
                 eprintln!("[challenge] registry amounts (msat): {:?}", sent_amounts);
                 break;
             }
@@ -312,18 +305,14 @@ async fn domain_allowlist_challenge_unlocks_deposit_open() {
         "ch-deposit",
         &user_nsec,
         &wallet_dir,
-        &[
-            "--lightning-address",
-            &address,
-            "--relay",
-            relay_ledgers(),
-        ],
+        &["--lightning-address", &address, "--relay", relay_ledgers()],
     );
     // With the attestation already on relays, op0 accepts the very
     // first deposit_open — the wallet never has to enter its retry/
     // verify branch, so don't assert on "Already verified" output.
     assert!(
-        ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),
+        ok && (out.contains("Deposit account created")
+            || out.contains("Deposit account already exists")),
         "deposit_open should have been accepted with the existing attestation:\n{}",
         out
     );

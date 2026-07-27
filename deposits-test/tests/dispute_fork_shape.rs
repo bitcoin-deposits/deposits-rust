@@ -287,10 +287,10 @@ fn dispute_creates_well_formed_fork_branches() {
             }
         }
 
-        let (enter_idx, enter_lvs) = dispute_enter
-            .unwrap_or_else(|| panic!("op{} fork is missing DisputeEnter", op_idx));
-        let (armed_idx, armed_has_rc) = dispute_armed
-            .unwrap_or_else(|| panic!("op{} fork is missing DisputeArmed", op_idx));
+        let (enter_idx, enter_lvs) =
+            dispute_enter.unwrap_or_else(|| panic!("op{} fork is missing DisputeEnter", op_idx));
+        let (armed_idx, armed_has_rc) =
+            dispute_armed.unwrap_or_else(|| panic!("op{} fork is missing DisputeArmed", op_idx));
 
         // (b) Shape: DisputeArmed comes after DisputeEnter, with nothing
         //     but QuorumAddMember ops in between (auto-arm syncs the

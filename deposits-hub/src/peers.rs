@@ -192,10 +192,7 @@ mod tests {
 
     #[test]
     fn cache_returns_fresh_within_ttl() {
-        let cache = PeerCache::new(
-            "regtest".into(),
-            vec![sample_peer("aa", 3, 1_700_000_000)],
-        );
+        let cache = PeerCache::new("regtest".into(), vec![sample_peer("aa", 3, 1_700_000_000)]);
         let got = cache.get("regtest").expect("cached");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].operator_pubkey, "aa");
@@ -203,10 +200,7 @@ mod tests {
 
     #[test]
     fn cache_misses_on_network_mismatch() {
-        let cache = PeerCache::new(
-            "regtest".into(),
-            vec![sample_peer("aa", 1, 0)],
-        );
+        let cache = PeerCache::new("regtest".into(), vec![sample_peer("aa", 1, 0)]);
         assert!(cache.get("bitcoin").is_none());
     }
 }

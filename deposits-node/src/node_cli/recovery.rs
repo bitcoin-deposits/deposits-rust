@@ -67,12 +67,8 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!(
             "    [--target-reserves <addr>]           Bitcoin address for winnings (defaults to operator P2WPKH)"
         );
-        eprintln!(
-            "    [--replacement-collateral-outpoint <txid:vout>"
-        );
-        eprintln!(
-            "     --replacement-collateral-amount <sats>]"
-        );
+        eprintln!("    [--replacement-collateral-outpoint <txid:vout>");
+        eprintln!("     --replacement-collateral-amount <sats>]");
         eprintln!(
             "                                         Pledge a wallet UTXO as replacement collateral"
         );
@@ -99,20 +95,38 @@ pub async fn recovery_command(args: &[String]) -> Result<(), Box<dyn std::error:
         eprintln!();
         eprintln!("Stranded-state recovery:");
         eprintln!("  reconstruct-taproot [<ledger_id>] [--quorum-expiry <block>]");
-        eprintln!("                                         Rebuild taproot_reserves.json from on-chain");
-        eprintln!("                                         state when a previous quorum_begin rotated");
-        eprintln!("                                         the legacy P2WSH UTXO but failed to persist");
-        eprintln!("                                         the new entry locally. Run with the daemon");
-        eprintln!("                                         stopped (or behind manual_override.marker).");
+        eprintln!(
+            "                                         Rebuild taproot_reserves.json from on-chain"
+        );
+        eprintln!(
+            "                                         state when a previous quorum_begin rotated"
+        );
+        eprintln!(
+            "                                         the legacy P2WSH UTXO but failed to persist"
+        );
+        eprintln!(
+            "                                         the new entry locally. Run with the daemon"
+        );
+        eprintln!(
+            "                                         stopped (or behind manual_override.marker)."
+        );
         eprintln!("  adopt-vault [<ledger_id>] --funding-address <addr>");
         eprintln!("              [--protocol-version <name>] [--quorum-expiry <block>]");
         eprintln!("              [--expiry-search <N>]");
         eprintln!("                                         Like reconstruct-taproot, but for the");
-        eprintln!("                                         hub-bootstrap funding model (ledger funded");
-        eprintln!("                                         by sending to its wpkh deposit address, no");
-        eprintln!("                                         legacy reserves entry). Follows the spent");
+        eprintln!(
+            "                                         hub-bootstrap funding model (ledger funded"
+        );
+        eprintln!(
+            "                                         by sending to its wpkh deposit address, no"
+        );
+        eprintln!(
+            "                                         legacy reserves entry). Follows the spent"
+        );
         eprintln!("                                         funding output to the P2TR vault and");
-        eprintln!("                                         reconstructs the record. Daemon stopped.");
+        eprintln!(
+            "                                         reconstructs the record. Daemon stopped."
+        );
         eprintln!();
         eprintln!("Recovery flow (entropy-based):");
         eprintln!("  1. dispute - Detect violation, publish DisputeEnter (quorum disbanded)");
@@ -197,9 +211,11 @@ pub async fn recovery_reconstruct_taproot(
     while i < args.len() {
         match args[i].as_str() {
             "--quorum-expiry" if i + 1 < args.len() => {
-                quorum_expiry_arg = Some(args[i + 1].parse().map_err(|_| {
-                    format!("Invalid --quorum-expiry: {}", args[i + 1])
-                })?);
+                quorum_expiry_arg = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid --quorum-expiry: {}", args[i + 1]))?,
+                );
                 i += 1;
             }
             s if s.starts_with("--") => {
@@ -297,13 +313,8 @@ pub async fn recovery_reconstruct_taproot(
                         .is_some()
                 });
                 if is_operator {
-                    operator_ledgers.push(
-                        e.path()
-                            .file_stem()
-                            .unwrap()
-                            .to_string_lossy()
-                            .into_owned(),
-                    );
+                    operator_ledgers
+                        .push(e.path().file_stem().unwrap().to_string_lossy().into_owned());
                 }
             }
             match operator_ledgers.len() {
@@ -365,7 +376,9 @@ pub async fn recovery_reconstruct_taproot(
     let member_pks: Vec<String> = members_source
         .iter()
         .filter_map(|m| {
-            let pk: Option<Vec<u8>> = m.get("pubkey").and_then(|v| serde_json::from_value(v.clone()).ok());
+            let pk: Option<Vec<u8>> = m
+                .get("pubkey")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
             pk.map(|b| hex::encode(b))
         })
         .collect();
@@ -386,8 +399,10 @@ pub async fn recovery_reconstruct_taproot(
     let mut keep_legacy: Vec<LegacyEntry> = Vec::new();
 
     for entry in legacy {
-        let outspend_url =
-            format!("{}/tx/{}/outspend/{}", esplora, entry.outpoint_txid, entry.outpoint_vout);
+        let outspend_url = format!(
+            "{}/tx/{}/outspend/{}",
+            esplora, entry.outpoint_txid, entry.outpoint_vout
+        );
         let outspend: serde_json::Value = match http.get(&outspend_url).send() {
             Ok(r) if r.status().is_success() => r.json()?,
             Ok(r) => {
@@ -405,7 +420,11 @@ pub async fn recovery_reconstruct_taproot(
                 continue;
             }
         };
-        if !outspend.get("spent").and_then(|v| v.as_bool()).unwrap_or(false) {
+        if !outspend
+            .get("spent")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
             println!(
                 "  {}:{} not spent on-chain — leaving in reserves.json",
                 entry.outpoint_txid, entry.outpoint_vout
@@ -417,8 +436,7 @@ pub async fn recovery_reconstruct_taproot(
             .as_str()
             .ok_or("outspend missing txid")?
             .to_string();
-        let confirm_block =
-            outspend["status"]["block_height"].as_u64().unwrap_or(0) as u32;
+        let confirm_block = outspend["status"]["block_height"].as_u64().unwrap_or(0) as u32;
 
         // Fetch the spending tx to find the P2TR output.
         let tx_url = format!("{}/tx/{}", esplora, spending_txid);
@@ -457,12 +475,19 @@ pub async fn recovery_reconstruct_taproot(
 
         println!(
             "  {}:{} spent by {} → reconstructing as taproot {}:{}",
-            entry.outpoint_txid, entry.outpoint_vout, &spending_txid[..16], &spending_txid[..16], out_idx
+            entry.outpoint_txid,
+            entry.outpoint_vout,
+            &spending_txid[..16],
+            &spending_txid[..16],
+            out_idx
         );
         println!("    address:   {}", address);
         println!("    amount:    {} sats", amount);
         println!("    Q members: {}", member_pks.len());
-        println!("    expiry:    {} (derived from confirm block {})", quorum_expiry, confirm_block);
+        println!(
+            "    expiry:    {} (derived from confirm block {})",
+            quorum_expiry, confirm_block
+        );
         println!("    ledger:    {}...", &ledger_hash_hex[..16]);
 
         new_taproot_entries.push(new_entry);
@@ -486,7 +511,10 @@ pub async fn recovery_reconstruct_taproot(
     };
     existing_taproot.extend(new_taproot_entries.iter().cloned());
 
-    std::fs::write(&taproot_path, serde_json::to_string_pretty(&existing_taproot)?)?;
+    std::fs::write(
+        &taproot_path,
+        serde_json::to_string_pretty(&existing_taproot)?,
+    )?;
     std::fs::write(&reserves_path, serde_json::to_string_pretty(&keep_legacy)?)?;
 
     println!();
@@ -551,10 +579,11 @@ pub async fn recovery_adopt_vault(args: &[String]) -> Result<(), Box<dyn std::er
                 i += 1;
             }
             "--quorum-expiry" if i + 1 < args.len() => {
-                quorum_expiry_arg =
-                    Some(args[i + 1].parse().map_err(|_| {
-                        format!("Invalid --quorum-expiry: {}", args[i + 1])
-                    })?);
+                quorum_expiry_arg = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid --quorum-expiry: {}", args[i + 1]))?,
+                );
                 i += 1;
             }
             "--expiry-search" if i + 1 < args.len() => {
@@ -613,7 +642,9 @@ pub async fn recovery_adopt_vault(args: &[String]) -> Result<(), Box<dyn std::er
         .get(format!("{}/address/{}/txs", esplora, funding_address))
         .send()?
         .json()?;
-    let txs = txs.as_array().ok_or("esplora /address/.../txs not an array")?;
+    let txs = txs
+        .as_array()
+        .ok_or("esplora /address/.../txs not an array")?;
     let mut funding: Option<(String, u32)> = None;
     for tx in txs {
         let txid = tx["txid"].as_str().unwrap_or_default();
@@ -674,9 +705,10 @@ pub async fn recovery_adopt_vault(args: &[String]) -> Result<(), Box<dyn std::er
     let vault_spk_hex = vault_out["scriptpubkey"]
         .as_str()
         .ok_or("vault output missing scriptpubkey")?;
-    let vault_amount = vault_out["value"].as_u64().ok_or("vault output missing value")?;
-    let onchain_script =
-        bdk_wallet::bitcoin::ScriptBuf::from(hex::decode(vault_spk_hex)?);
+    let vault_amount = vault_out["value"]
+        .as_u64()
+        .ok_or("vault output missing value")?;
+    let onchain_script = bdk_wallet::bitcoin::ScriptBuf::from(hex::decode(vault_spk_hex)?);
     let vault_outpoint = bdk_wallet::bitcoin::OutPoint {
         txid: activation_txid.parse()?,
         vout: vault_vout as u32,
@@ -695,9 +727,15 @@ pub async fn recovery_adopt_vault(args: &[String]) -> Result<(), Box<dyn std::er
             .collect()
     };
 
-    println!("Adopting taproot vault for ledger {}", &ledger_id[..16.min(ledger_id.len())]);
+    println!(
+        "Adopting taproot vault for ledger {}",
+        &ledger_id[..16.min(ledger_id.len())]
+    );
     println!("  funding output: {}:{}", funding_txid, funding_vout);
-    println!("  activation tx:  {} (block {})", activation_txid, confirm_block);
+    println!(
+        "  activation tx:  {} (block {})",
+        activation_txid, confirm_block
+    );
     println!("  vault outpoint: {}:{}", activation_txid, vault_vout);
     println!("  vault amount:   {} sats", vault_amount);
     println!("  Q members:      {}", quorum_members.len());
@@ -1319,8 +1357,8 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence,
         reason: violation_details.clone(),
-    anchor_block_hash: None,
-    anchor_block_height: None,
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();
@@ -1755,8 +1793,8 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let custody_dispute = LedgerOperation::DisputeEnter {
         last_valid_sequence: last_valid_sequence_u64,
         reason: dispute_reason,
-    anchor_block_hash: None,
-    anchor_block_height: None,
+        anchor_block_hash: None,
+        anchor_block_height: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();
@@ -2339,20 +2377,18 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
                     s
                 )
             })?;
-            let txid_bytes_vec = hex::decode(txid_hex).map_err(|e| {
-                format!("--replacement-collateral-outpoint txid: {}", e)
-            })?;
+            let txid_bytes_vec = hex::decode(txid_hex)
+                .map_err(|e| format!("--replacement-collateral-outpoint txid: {}", e))?;
             let txid_bytes: [u8; 32] = txid_bytes_vec.try_into().map_err(|_| {
                 "--replacement-collateral-outpoint txid: must be 32 bytes (64 hex chars)"
                     .to_string()
             })?;
-            let vout: u32 = vout_str.parse().map_err(|e| {
-                format!("--replacement-collateral-outpoint vout: {}", e)
-            })?;
+            let vout: u32 = vout_str
+                .parse()
+                .map_err(|e| format!("--replacement-collateral-outpoint vout: {}", e))?;
             // Verify the UTXO on-chain.
-            let txid_obj = bitcoin::Txid::from_raw_hash(
-                bitcoin::hashes::Hash::from_byte_array(txid_bytes),
-            );
+            let txid_obj =
+                bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(txid_bytes));
             let tx = crate::chain_backend::from_env(&config.electrum_url)
                 .get_tx(&txid_obj)
                 .map_err(|e| format!("Failed to fetch declared UTXO tx: {}", e))?
@@ -2379,13 +2415,11 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             let expected_script =
                 bitcoin::Address::p2wpkh(&compressed, config.network).script_pubkey();
             if output.script_pubkey != expected_script {
-                return Err(
-                    "declared UTXO is not at the operator-key P2WPKH address. \
+                return Err("declared UTXO is not at the operator-key P2WPKH address. \
                      The RC4 claim-TX builder only signs that script type today; \
                      send funds to your operator address before arming, or extend \
                      the claim-TX builder to handle other scripts."
-                        .into(),
-                );
+                    .into());
             }
             Some(deposits_core::messages::ReplacementCollateral {
                 txid: txid_bytes,
@@ -3079,8 +3113,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     }
 
     if obligations_sats.is_none() {
-        return Err(
-            "--obligations-sats <N> is required. The lottery output \
+        return Err("--obligations-sats <N> is required. The lottery output \
              carries `obligations` worth of reserves (the new operator \
              inherits those obligations against that backing); the \
              remainder is split per the dispute classification — \
@@ -3088,8 +3121,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
              (punitive). The auto-arm path computes obligations from \
              the fork-ledger's deposit balances; manual operators \
              pass it explicitly."
-                .into(),
-        );
+            .into());
     }
 
     let ledger_id = ledger_id.ok_or("Missing ledger_id")?.trim().to_string();
@@ -3444,8 +3476,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let voter_count = voter_set.all_voters().len();
     // Reconstruct under the same ruleset the disputed UTXO was built
     // with — read from the latest QuorumBegin's protocol_version.
-    let ruleset =
-        deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
+    let ruleset = deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
     let threshold_config = (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
     let taproot_builder = TapscriptReservesBuilder::new(
@@ -3513,8 +3544,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
 
     // Patch nLockTime so the tier's OP_CLTV is satisfied (Tier 0 → 0,
     // unchanged).
-    confiscation_tx.lock_time =
-        bitcoin::absolute::LockTime::from_consensus(tier.timelock_blocks);
+    confiscation_tx.lock_time = bitcoin::absolute::LockTime::from_consensus(tier.timelock_blocks);
 
     // Build leaf script and compute sighash
     let leaf_script = taproot_builder
@@ -3712,13 +3742,16 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     // The seed travels through a per-call LocalSigner — same key
     // material, same on-chain addresses as the legacy seed-embedded
     // descriptor, just routed via the Signer trait.
-    let xpriv_for_wallet =
-        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+    let xpriv_for_wallet = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+        .map_err(|e| {
             crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
         })?;
-    let signer_for_wallet =
-        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
-            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+    let signer_for_wallet = deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet)
+        .map_err(|e| {
+            crate::Error::Wallet(format!(
+                "LocalSigner::from_xpriv for transient wallet: {}",
+                e
+            ))
         })?;
     let wallet = crate::wallet::Wallet::new(
         &signer_for_wallet,
@@ -4000,9 +4033,7 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
             state
                 .get("confiscation_txid")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    format!("{} missing confiscation_txid", confiscation_state_path)
-                })?
+                .ok_or_else(|| format!("{} missing confiscation_txid", confiscation_state_path))?
                 .parse()
                 .map_err(|e| format!("Invalid confiscation_txid in state file: {}", e))?
         }
@@ -4233,8 +4264,7 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
         // Sighash: taproot script-spend over the sweep leaf. The input's
         // nSequence is already ARMER_SHARE_SWEEP_CSV_BLOCKS (set inside
         // build_forfeit_sweep_tx) so the leaf's OP_CSV passes.
-        let leaf_hash =
-            TapLeafHash::from_script(&entry.share.sweep_script, LeafVersion::TapScript);
+        let leaf_hash = TapLeafHash::from_script(&entry.share.sweep_script, LeafVersion::TapScript);
         let prevouts = vec![TxOut {
             value: Amount::from_sat(entry.value_sats),
             script_pubkey: entry.share.script_pubkey(),
@@ -4250,8 +4280,7 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
             .map_err(|e| format!("Failed to compute sweep sighash: {}", e))?;
         let sighash_bytes: [u8; 32] = *sighash.as_ref();
 
-        let unsigned_tx_hex =
-            hex::encode(bitcoin::consensus::encode::serialize(&sweep_tx));
+        let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&sweep_tx));
 
         if dry_run {
             println!("  [dry-run] unsigned tx: {}", unsigned_tx_hex);
@@ -4360,10 +4389,14 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
                                             // Verify before counting — a bad
                                             // cosignature discovered at
                                             // broadcast time wastes the round.
-                                            let parsed = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_arr)
+                                            let parsed =
+                                                bitcoin::secp256k1::schnorr::Signature::from_slice(
+                                                    &sig_arr,
+                                                )
                                                 .ok()
                                                 .filter(|s| {
-                                                    secp.verify_schnorr(s, &msg, &signer_xonly).is_ok()
+                                                    secp.verify_schnorr(s, &msg, &signer_xonly)
+                                                        .is_ok()
                                                 });
                                             if parsed.is_some() {
                                                 signatures.insert(signer_xonly, sig_arr);
@@ -4911,11 +4944,9 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let utxo = crate::chain_backend::from_env(&config.electrum_url)
         .find_unspent_output_at(lottery_script.as_script())
         .map_err(|e| format!("Failed to query lottery address: {}", e))?;
-    let (lottery_outpoint, lottery_amount) = utxo
-        .map(|u| (u.outpoint, u.value_sats))
-        .ok_or(
-            "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
-        )?;
+    let (lottery_outpoint, lottery_amount) = utxo.map(|u| (u.outpoint, u.value_sats)).ok_or(
+        "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
+    )?;
 
     println!(
         "  Found lottery UTXO: {} ({} sats)",
@@ -4940,60 +4971,56 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // Fee budget: 400 sats for single-input parity; 1200 sats for the
     // multi-input case (~3× the bytes due to the second input + ECDSA
     // witness). Both are well under the cosigner policy default of 5000.
-    let (claim_fee, mut tx_inputs, mut prevouts, replacement_collateral_input) =
-        if let Some(rc) = our_replacement_collateral {
-            let rc_txid = bitcoin::Txid::from_raw_hash(
-                bitcoin::hashes::Hash::from_byte_array(rc.txid),
-            );
-            let rc_outpoint = OutPoint::new(rc_txid, rc.vout);
-            // Operator-key controlled wpkh — see RC4 design note in
-            // recovery.rs: the disputant declares a UTXO at their
-            // operator pubkey's P2WPKH address. RC6 will tighten arm-time
-            // construction to enforce that placement.
-            let our_compressed = bitcoin::CompressedPublicKey::from_slice(
-                &our_pubkey.serialize(),
-            )
+    let (claim_fee, mut tx_inputs, mut prevouts, replacement_collateral_input) = if let Some(rc) =
+        our_replacement_collateral
+    {
+        let rc_txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
+        let rc_outpoint = OutPoint::new(rc_txid, rc.vout);
+        // Operator-key controlled wpkh — see RC4 design note in
+        // recovery.rs: the disputant declares a UTXO at their
+        // operator pubkey's P2WPKH address. RC6 will tighten arm-time
+        // construction to enforce that placement.
+        let our_compressed = bitcoin::CompressedPublicKey::from_slice(&our_pubkey.serialize())
             .map_err(|e| format!("Compressed pubkey: {}", e))?;
-            let rc_script = bitcoin::Address::p2wpkh(&our_compressed, config.network)
-                .script_pubkey();
-            let prevs = vec![
-                TxOut {
-                    value: Amount::from_sat(lottery_amount),
-                    script_pubkey: lottery_script.clone(),
-                },
-                TxOut {
-                    value: Amount::from_sat(rc.amount),
-                    script_pubkey: rc_script.clone(),
-                },
-            ];
-            let inputs = vec![
-                TxIn {
-                    previous_output: lottery_outpoint,
-                    script_sig: ScriptBuf::new(),
-                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: Witness::new(),
-                },
-                TxIn {
-                    previous_output: rc_outpoint,
-                    script_sig: ScriptBuf::new(),
-                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: Witness::new(),
-                },
-            ];
-            (1200u64, inputs, prevs, Some((rc, rc_script)))
-        } else {
-            let prevs = vec![TxOut {
+        let rc_script = bitcoin::Address::p2wpkh(&our_compressed, config.network).script_pubkey();
+        let prevs = vec![
+            TxOut {
                 value: Amount::from_sat(lottery_amount),
                 script_pubkey: lottery_script.clone(),
-            }];
-            let inputs = vec![TxIn {
+            },
+            TxOut {
+                value: Amount::from_sat(rc.amount),
+                script_pubkey: rc_script.clone(),
+            },
+        ];
+        let inputs = vec![
+            TxIn {
                 previous_output: lottery_outpoint,
                 script_sig: ScriptBuf::new(),
                 sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
                 witness: Witness::new(),
-            }];
-            (400u64, inputs, prevs, None)
-        };
+            },
+            TxIn {
+                previous_output: rc_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            },
+        ];
+        (1200u64, inputs, prevs, Some((rc, rc_script)))
+    } else {
+        let prevs = vec![TxOut {
+            value: Amount::from_sat(lottery_amount),
+            script_pubkey: lottery_script.clone(),
+        }];
+        let inputs = vec![TxIn {
+            previous_output: lottery_outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        }];
+        (400u64, inputs, prevs, None)
+    };
     let _ = (&mut tx_inputs, &mut prevouts);
 
     let total_input_value: u64 = prevouts.iter().map(|o| o.value.to_sat()).sum();
@@ -5087,13 +5114,16 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // The seed travels through a per-call LocalSigner — same key
     // material, same on-chain addresses as the legacy seed-embedded
     // descriptor, just routed via the Signer trait.
-    let xpriv_for_wallet =
-        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+    let xpriv_for_wallet = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+        .map_err(|e| {
             crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
         })?;
-    let signer_for_wallet =
-        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
-            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+    let signer_for_wallet = deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet)
+        .map_err(|e| {
+            crate::Error::Wallet(format!(
+                "LocalSigner::from_xpriv for transient wallet: {}",
+                e
+            ))
         })?;
     let wallet = crate::wallet::Wallet::new(
         &signer_for_wallet,
@@ -5430,12 +5460,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let new_ruleset = deposits_core::ruleset::resolve_or_legacy(Some("legacy"));
     let threshold_config = (new_ruleset.tier_config_factory)(voter_count, quorum_expiry);
 
-    let taproot_builder = TapscriptReservesBuilder::new(
-        voter_set,
-        threshold_config,
-        config.network,
-        ledger_hash,
-    );
+    let taproot_builder =
+        TapscriptReservesBuilder::new(voter_set, threshold_config, config.network, ledger_hash);
 
     let taproot_output = taproot_builder
         .build()
@@ -5497,13 +5523,16 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     // The seed travels through a per-call LocalSigner — same key
     // material, same on-chain addresses as the legacy seed-embedded
     // descriptor, just routed via the Signer trait.
-    let xpriv_for_wallet =
-        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed).map_err(|e| {
+    let xpriv_for_wallet = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+        .map_err(|e| {
             crate::Error::Wallet(format!("xpriv from seed for transient wallet: {}", e))
         })?;
-    let signer_for_wallet =
-        deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet).map_err(|e| {
-            crate::Error::Wallet(format!("LocalSigner::from_xpriv for transient wallet: {}", e))
+    let signer_for_wallet = deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet)
+        .map_err(|e| {
+            crate::Error::Wallet(format!(
+                "LocalSigner::from_xpriv for transient wallet: {}",
+                e
+            ))
         })?;
     let wallet = crate::wallet::Wallet::new(
         &signer_for_wallet,
@@ -5546,10 +5575,12 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         ledger_hash,
         quorum_members: quorum_members
             .iter()
-            .map(|pk| deposits_core::messages::QuorumMemberRef::new(
-                *pk,
-                member_ledger_ids.get(pk).cloned().unwrap_or_default(),
-            ))
+            .map(|pk| {
+                deposits_core::messages::QuorumMemberRef::new(
+                    *pk,
+                    member_ledger_ids.get(pk).cloned().unwrap_or_default(),
+                )
+            })
             .collect(),
         collateral_amount: 0,
         // Post-win rotation pins to whichever ruleset the disputed
@@ -5632,9 +5663,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
 /// without going through the full transfer-cosign flow.
 ///
 /// Usage: `recovery embed-hash <reserves_id> <hash_hex>`
-pub async fn recovery_embed_hash(
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn recovery_embed_hash(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use crate::nostr::NostrTransportBuilder;
     use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
     use deposits_core::messages::LedgerOperation;
@@ -5650,9 +5679,7 @@ pub async fn recovery_embed_hash(
     let reserves_id = &args[0];
     let request_hash: [u8; 32] = {
         let bytes = hex::decode(&args[1])?;
-        bytes
-            .try_into()
-            .map_err(|_| "hash must be 32 bytes hex")?
+        bytes.try_into().map_err(|_| "hash must be 32 bytes hex")?
     };
 
     let mut config_args = Vec::new();
@@ -5666,11 +5693,7 @@ pub async fn recovery_embed_hash(
         i += 1;
     }
     let config = parse_config(&config_args)?;
-    let relay_url = config
-        .relays
-        .first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
     let data_dir = config.data_dir.clone();
 
     let secp = Secp256k1::new();
@@ -5845,9 +5868,7 @@ pub async fn recovery_publish_fraud_broadcast(
 ///   --last-valid-sequence N
 ///                         — fork-point sequence. Required: the same
 ///                           value DisputeEnter committed to.
-pub async fn recovery_confiscate_plan(
-    args: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use crate::nostr::KIND_LEDGER_UPDATE;
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     use bitcoin::sighash::{SighashCache, TapSighashType};
@@ -5856,9 +5877,7 @@ pub async fn recovery_confiscate_plan(
     use deposits_core::messages::LedgerOperation;
     use deposits_core::tapscript_reserves::{LotteryParticipant, LotteryScriptBuilder};
     use deposits_core::types::LedgerState;
-    use deposits_core::{
-        SignedLedgerUpdate, TapscriptReservesBuilder, TlvDecode, VoterSet,
-    };
+    use deposits_core::{SignedLedgerUpdate, TapscriptReservesBuilder, TlvDecode, VoterSet};
     use nostr_sdk::prelude::*;
 
     let mut ledger_id: Option<String> = None;
@@ -5870,9 +5889,11 @@ pub async fn recovery_confiscate_plan(
     while i < args.len() {
         match args[i].as_str() {
             "--last-valid-sequence" if i + 1 < args.len() => {
-                last_valid_sequence = Some(args[i + 1].parse().map_err(|_| {
-                    format!("Invalid --last-valid-sequence: {}", args[i + 1])
-                })?);
+                last_valid_sequence = Some(
+                    args[i + 1]
+                        .parse()
+                        .map_err(|_| format!("Invalid --last-valid-sequence: {}", args[i + 1]))?,
+                );
                 i += 1;
             }
             "--proof-type" if i + 1 < args.len() => {
@@ -5914,7 +5935,9 @@ pub async fn recovery_confiscate_plan(
     }
 
     let ledger_id = ledger_id
-        .ok_or("Usage: deposits-node recovery confiscate-plan <ledger_id> [--last-valid-sequence <N>]")?
+        .ok_or(
+            "Usage: deposits-node recovery confiscate-plan <ledger_id> [--last-valid-sequence <N>]",
+        )?
         .trim()
         .to_string();
     let override_last_valid_sequence = last_valid_sequence;
@@ -5926,38 +5949,53 @@ pub async fn recovery_confiscate_plan(
     println!("=== Confiscation plan: dry run ===");
     println!("ledger_id:           {}", ledger_id);
     match override_last_valid_sequence {
-        Some(n) => println!("last_valid_sequence: {} (--last-valid-sequence override)", n),
-        None => println!("last_valid_sequence: auto (will read from first fork-branch DisputeEnter)"),
+        Some(n) => println!(
+            "last_valid_sequence: {} (--last-valid-sequence override)",
+            n
+        ),
+        None => {
+            println!("last_valid_sequence: auto (will read from first fork-branch DisputeEnter)")
+        }
     }
 
     // ── 1. Discover the fraud proof ──
     println!("\n── 1. Fraud proof ──");
     let on_relay = node.fetch_fraud_proof_type_for_ledger(&ledger_id).await;
-    let proof_type: Option<deposits_core::fraud::FraudProofType> = match (proof_type_override, on_relay) {
-        (Some(ovr), Some(rly)) => {
-            println!("  on-relay type:    {:?}", rly);
-            println!("  --proof-type:     {:?} (override; planning AS IF this were published)", ovr);
-            Some(ovr)
-        }
-        (Some(ovr), None) => {
-            println!("  on relay:         (none published yet)");
-            println!("  --proof-type:     {:?} (planning AS IF this were published)", ovr);
-            Some(ovr)
-        }
-        (None, Some(rly)) => {
-            println!("  type (on relay):  {:?}", rly);
-            Some(rly)
-        }
-        (None, None) => {
-            println!("  ⚠ no kind:9101 broadcast on relay AND no --proof-type override");
-            println!("    → falling back to PUNITIVE (single-output) shape");
-            println!("    → cosigner verifier WOULD REFUSE at sign-time:");
-            println!("      a confiscation without a published fraud proof is unverifiable");
-            println!("    Tip: pass --proof-type <name> to dry-run a specific scenario.");
-            None
-        }
-    };
-    let is_respectful = proof_type.as_ref().map(|pt| pt.is_respectful()).unwrap_or(false);
+    let proof_type: Option<deposits_core::fraud::FraudProofType> =
+        match (proof_type_override, on_relay) {
+            (Some(ovr), Some(rly)) => {
+                println!("  on-relay type:    {:?}", rly);
+                println!(
+                    "  --proof-type:     {:?} (override; planning AS IF this were published)",
+                    ovr
+                );
+                Some(ovr)
+            }
+            (Some(ovr), None) => {
+                println!("  on relay:         (none published yet)");
+                println!(
+                    "  --proof-type:     {:?} (planning AS IF this were published)",
+                    ovr
+                );
+                Some(ovr)
+            }
+            (None, Some(rly)) => {
+                println!("  type (on relay):  {:?}", rly);
+                Some(rly)
+            }
+            (None, None) => {
+                println!("  ⚠ no kind:9101 broadcast on relay AND no --proof-type override");
+                println!("    → falling back to PUNITIVE (single-output) shape");
+                println!("    → cosigner verifier WOULD REFUSE at sign-time:");
+                println!("      a confiscation without a published fraud proof is unverifiable");
+                println!("    Tip: pass --proof-type <name> to dry-run a specific scenario.");
+                None
+            }
+        };
+    let is_respectful = proof_type
+        .as_ref()
+        .map(|pt| pt.is_respectful())
+        .unwrap_or(false);
     if let Some(pt) = proof_type.as_ref() {
         println!(
             "  classification:   {} (is_respectful={})",
@@ -6028,7 +6066,7 @@ pub async fn recovery_confiscate_plan(
         if let Ok(LedgerOperation::DisputeEnter {
             last_valid_sequence: lvs,
             reason,
-        ..
+            ..
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             existing_enters.push((u.operator_id, u.sequence_number, reason, lvs));
@@ -6063,12 +6101,18 @@ pub async fn recovery_confiscate_plan(
         // broadcast first, which we already noted in section 1).
         println!("  no fork-branch DisputeEnter on relay — we would be FIRST");
         println!("  proposed DisputeEnter from {}:", our_pubkey);
-        println!("    last_valid_sequence: {} (main-chain tip)", main_chain_tip_seq);
+        println!(
+            "    last_valid_sequence: {} (main-chain tip)",
+            main_chain_tip_seq
+        );
         let proposed_reason = match &proof_type {
             Some(deposits_core::fraud::FraudProofType::QuorumExpired) => "quorum_expired",
             Some(pt) => {
                 // Best-effort label; auto_arm_for_dispute uses "auto_dispute".
-                println!("    reason:              auto_dispute (proof_type={:?})", pt);
+                println!(
+                    "    reason:              auto_dispute (proof_type={:?})",
+                    pt
+                );
                 ""
             }
             None => {
@@ -6105,9 +6149,7 @@ pub async fn recovery_confiscate_plan(
             resolved
         );
         if !we_already_disputed {
-            println!(
-                "  we are NOT among the disputers — would publish our own DisputeEnter"
-            );
+            println!("  we are NOT among the disputers — would publish our own DisputeEnter");
             println!("    last_valid_sequence: {}", resolved);
         }
         resolved
@@ -6149,9 +6191,9 @@ pub async fn recovery_confiscate_plan(
                 u.sequence_number,
             ));
         }
-        state = state.apply(&op).map_err(|e| {
-            format!("replay seq {}: {:?}", u.sequence_number, e)
-        })?;
+        state = state
+            .apply(&op)
+            .map_err(|e| format!("replay seq {}: {:?}", u.sequence_number, e))?;
     }
     let (qb_reserves_id, qb_ledger_hash, qb_members, qb_expiry, qb_ruleset, qb_seq) =
         latest_qb.ok_or("no QuorumBegin observed at or before last_valid_sequence")?;
@@ -6159,18 +6201,27 @@ pub async fn recovery_confiscate_plan(
     let obligations_sats = obligations_msat / 1000;
 
     println!("\n── 3. Ledger state at last_valid_sequence ──");
-    println!("  original_operator:   {}", hex::encode(original_operator.serialize()));
+    println!(
+        "  original_operator:   {}",
+        hex::encode(original_operator.serialize())
+    );
     println!("  latest QuorumBegin:");
     println!("    seq:               {}", qb_seq);
     println!("    reserves_id:       {}", qb_reserves_id);
     println!("    ledger_hash:       {}", hex::encode(qb_ledger_hash));
-    println!("    ruleset:           {:?}", qb_ruleset.as_deref().unwrap_or("legacy"));
+    println!(
+        "    ruleset:           {:?}",
+        qb_ruleset.as_deref().unwrap_or("legacy")
+    );
     println!("    quorum_expiry:     {}", qb_expiry);
     println!("    members:           {}", qb_members.len());
     for m in &qb_members {
         println!("      - {}", hex::encode(m.serialize()));
     }
-    println!("  obligations:         {} msat ({} sats)", obligations_msat, obligations_sats);
+    println!(
+        "  obligations:         {} msat ({} sats)",
+        obligations_msat, obligations_sats
+    );
 
     // ── 4. Fork-branch DisputeArmed participants ──
     println!("\n── 4. DisputeArmed participants ──");
@@ -6236,8 +6287,9 @@ pub async fn recovery_confiscate_plan(
     println!("  lottery address:    {}", lottery_output.address);
     println!("  recovery threshold: {}", recovery_threshold);
 
-    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-        qb_reserves_id.parse().map_err(|e| format!("parse reserves_id: {}", e))?;
+    let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = qb_reserves_id
+        .parse()
+        .map_err(|e| format!("parse reserves_id: {}", e))?;
     let reserves_addr = reserves_addr
         .require_network(node.wallet.network())
         .map_err(|e| format!("network mismatch: {}", e))?;
@@ -6275,19 +6327,38 @@ pub async fn recovery_confiscate_plan(
     )
     .map_err(|e| format!("build expected outputs: {}", e))?;
 
-    println!("  shape:              {}", if outputs.len() == 2 { "BIFURCATED (respectful)" } else { "SINGLE (punitive)" });
-    println!("  input:              {}:{} ({} sats)",
-        reserves_outpoint.txid, reserves_outpoint.vout, reserves_amount);
+    println!(
+        "  shape:              {}",
+        if outputs.len() == 2 {
+            "BIFURCATED (respectful)"
+        } else {
+            "SINGLE (punitive)"
+        }
+    );
+    println!(
+        "  input:              {}:{} ({} sats)",
+        reserves_outpoint.txid, reserves_outpoint.vout, reserves_amount
+    );
     for (i, o) in outputs.iter().enumerate() {
         let label = if outputs.len() == 2 {
-            if i == 0 { "lottery" } else { "operator change (P2WPKH)" }
+            if i == 0 {
+                "lottery"
+            } else {
+                "operator change (P2WPKH)"
+            }
         } else {
             "lottery (full UTXO − fee)"
         };
         println!("  output[{}] {}: {} sats", i, label, o.value.to_sat());
-        println!("           script: {}", hex::encode(o.script_pubkey.as_bytes()));
+        println!(
+            "           script: {}",
+            hex::encode(o.script_pubkey.as_bytes())
+        );
     }
-    println!("  fee:                {} sats ({} sat/vb × ~{} vb)", fee, fee_rate, estimated_vsize);
+    println!(
+        "  fee:                {} sats ({} sat/vb × ~{} vb)",
+        fee, fee_rate, estimated_vsize
+    );
     if is_respectful && outputs.len() == 2 {
         println!("  rationale:          obligations={} sats → lottery=max({}, dust=330)={}; change={} − {} − {} = {}",
             obligations_sats, obligations_sats, outputs[0].value.to_sat(),
@@ -6310,8 +6381,7 @@ pub async fn recovery_confiscate_plan(
     // ── 7. Sighash ──
     let voter_set = VoterSet::new(original_operator, qb_members.clone());
     let voter_count = voter_set.all_voters().len();
-    let ruleset =
-        deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
+    let ruleset = deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
     let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
     let taproot_builder = TapscriptReservesBuilder::new(
         voter_set,
@@ -6346,7 +6416,10 @@ pub async fn recovery_confiscate_plan(
         .map_err(|e| format!("compute sighash: {}", e))?;
     let sighash_bytes: [u8; 32] = sighash.to_byte_array();
     println!("\n── 7. Tap-leaf sighash ──");
-    println!("  tier:               threshold={}, timelock={}", tier.threshold, tier.timelock_blocks);
+    println!(
+        "  tier:               threshold={}, timelock={}",
+        tier.threshold, tier.timelock_blocks
+    );
     println!("  sighash:            {}", hex::encode(sighash_bytes));
     println!("  required cosigs:    {}", tier.threshold);
 
@@ -6449,10 +6522,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
         i += 1;
     }
 
-    let ledger_id = ledger_id_arg
-        .ok_or("Missing ledger_id")?
-        .trim()
-        .to_string();
+    let ledger_id = ledger_id_arg.ok_or("Missing ledger_id")?.trim().to_string();
     let config = parse_config(&config_args)?;
     let relay_url = config
         .relays
@@ -6635,8 +6705,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
     let mut input_specs: Vec<InputSpec> = Vec::new();
     for (pk, _) in &participants {
         let rc = rc_decls[pk];
-        let txid =
-            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
+        let txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
         let outpoint = OutPoint::new(txid, rc.vout);
         let compressed = bitcoin::CompressedPublicKey::from_slice(&pk.serialize())
             .map_err(|e| format!("compressed pubkey for {}: {}", &pk.to_string()[..16], e))?;
@@ -6752,8 +6821,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
     };
 
     // Pending remote-sign requests, indexed by Nostr event_id we sent.
-    let mut pending: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut pending: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
         .build()
@@ -6786,12 +6854,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             let event_id = transport
                 .send_ledger_request(&ledger_id, "cooperative_refund_sign", params)
                 .await
-                .map_err(|e| {
-                    format!(
-                        "send cooperative_refund_sign for input {}: {:?}",
-                        i, e
-                    )
-                })?;
+                .map_err(|e| format!("send cooperative_refund_sign for input {}: {:?}", i, e))?;
             pending.insert(event_id, i);
             println!(
                 "    Input {} requested from {}...",
@@ -6815,12 +6878,10 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             pending.len()
         );
         let mut notification_rx = transport.client().notifications();
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
         while !pending.is_empty() && std::time::Instant::now() < deadline {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            let notification = match tokio::time::timeout(remaining, notification_rx.recv()).await
-            {
+            let notification = match tokio::time::timeout(remaining, notification_rx.recv()).await {
                 Ok(Ok(n)) => n,
                 _ => break,
             };
@@ -6930,9 +6991,8 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
     println!("  Broadcasting cooperative refund TX {}...", txid);
 
     // Transient wallet for broadcast (same pattern as recovery_lottery_claim).
-    let xpriv_for_wallet =
-        bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
-            .map_err(|e| format!("xpriv from seed: {}", e))?;
+    let xpriv_for_wallet = bitcoin::bip32::Xpriv::new_master(config.network, &config.seed)
+        .map_err(|e| format!("xpriv from seed: {}", e))?;
     let signer_for_wallet = deposits_signer_api::LocalSigner::from_xpriv(xpriv_for_wallet)
         .map_err(|e| format!("LocalSigner from xpriv: {}", e))?;
     let wallet = crate::wallet::Wallet::new(
@@ -6952,6 +7012,8 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
     println!();
     println!("Next steps:");
     println!("  - Each disputant runs `recovery reveal <ledger_id>`");
-    println!("  - Winner runs `recovery lottery-claim <ledger_id>` once all preimages are revealed");
+    println!(
+        "  - Winner runs `recovery lottery-claim <ledger_id>` once all preimages are revealed"
+    );
     Ok(())
 }

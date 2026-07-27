@@ -92,7 +92,10 @@ impl DataDir {
             Some(s) => derive_transport_from_seed(s)?,
             None => TransportKey::random(),
         };
-        write_secret(&self.transport_secret_path(), &hex::encode(transport.secret_bytes()))?;
+        write_secret(
+            &self.transport_secret_path(),
+            &hex::encode(transport.secret_bytes()),
+        )?;
         write_public(
             &self.transport_pubkey_path(),
             &hex::encode(transport.public.serialize()),
@@ -122,8 +125,8 @@ impl DataDir {
             return Ok(None);
         }
         let hexstr = fs::read_to_string(&path)?;
-        let bytes = hex::decode(hexstr.trim())
-            .map_err(|e| DataError::Hex(format!("seed: {}", e)))?;
+        let bytes =
+            hex::decode(hexstr.trim()).map_err(|e| DataError::Hex(format!("seed: {}", e)))?;
         if bytes.len() != 32 {
             return Err(DataError::Key(format!(
                 "seed must be 32 bytes hex, got {}",
@@ -149,10 +152,7 @@ impl DataDir {
     /// Nostr:    `m/85'/0'/0'/0/0` (sibling, deliberately distinct prime
     /// path so the keys are structurally separate — leaking the Nostr key
     /// can't be confused with leaking the operator key).
-    pub fn derive_keys(
-        &self,
-        network: Network,
-    ) -> Result<(SecretKey, SecretKey), DataError> {
+    pub fn derive_keys(&self, network: Network) -> Result<(SecretKey, SecretKey), DataError> {
         let seed = self
             .load_seed()?
             .ok_or_else(|| DataError::Key("seed not installed; run `import-seed`".to_string()))?;
@@ -167,8 +167,7 @@ impl DataDir {
         let seed = self
             .load_seed()?
             .ok_or_else(|| DataError::Key("seed not installed; run `import-seed`".to_string()))?;
-        Xpriv::new_master(network, &seed)
-            .map_err(|e| DataError::Key(format!("xpriv: {}", e)))
+        Xpriv::new_master(network, &seed).map_err(|e| DataError::Key(format!("xpriv: {}", e)))
     }
 
     pub fn load_allowlist(&self) -> Result<Vec<PublicKey>, DataError> {
@@ -184,9 +183,8 @@ impl DataDir {
             }
             let bytes = hex::decode(trimmed)
                 .map_err(|e| DataError::Hex(format!("allowlist line {}: {}", lineno + 1, e)))?;
-            let pk = PublicKey::from_slice(&bytes).map_err(|e| {
-                DataError::Key(format!("allowlist line {}: {}", lineno + 1, e))
-            })?;
+            let pk = PublicKey::from_slice(&bytes)
+                .map_err(|e| DataError::Key(format!("allowlist line {}: {}", lineno + 1, e)))?;
             out.push(pk);
         }
         Ok(out)
@@ -254,8 +252,8 @@ pub fn derive_keys_from_seed(
     network: Network,
 ) -> Result<(SecretKey, SecretKey), DataError> {
     let secp = Secp256k1::new();
-    let xpriv = Xpriv::new_master(network, seed)
-        .map_err(|e| DataError::Key(format!("xpriv: {}", e)))?;
+    let xpriv =
+        Xpriv::new_master(network, seed).map_err(|e| DataError::Key(format!("xpriv: {}", e)))?;
     let operator_path = DerivationPath::from_str("m/86'/0'/0'/0/0")
         .map_err(|e| DataError::Key(format!("operator path: {}", e)))?;
     let nostr_path = DerivationPath::from_str("m/85'/0'/0'/0/0")

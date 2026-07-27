@@ -88,10 +88,9 @@ fn bridge_pay_end_to_end() {
     std::thread::sleep(Duration::from_secs(4)); // DepositOpen propagation
 
     // Fund it via the ledger's operator (op2 owns ledger_2_*).
-    let deposits: Vec<serde_json::Value> = serde_json::from_str(
-        &std::fs::read_to_string(wdir.join("deposits.json")).unwrap(),
-    )
-    .unwrap();
+    let deposits: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(wdir.join("deposits.json")).unwrap())
+            .unwrap();
     let dep = deposits
         .iter()
         .find(|d| d["alias"] == "payer")

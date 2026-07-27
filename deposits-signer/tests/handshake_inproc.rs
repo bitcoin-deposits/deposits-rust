@@ -53,9 +53,8 @@ async fn handshake_then_sign_and_verify() {
     let (mut server_side, mut client_side) = duplex(64 * 1024);
 
     let ctx_for_task = Arc::clone(&ctx);
-    let server_task = tokio::spawn(async move {
-        serve_connection(&mut server_side, &ctx_for_task).await
-    });
+    let server_task =
+        tokio::spawn(async move { serve_connection(&mut server_side, &ctx_for_task).await });
 
     // ---- Daemon-side handshake -----------------------------------------------
 
@@ -171,9 +170,8 @@ async fn policy_refuses_seq_regression_over_wire() {
 
     let (mut server_side, mut client_side) = duplex(64 * 1024);
     let ctx_for_task = Arc::clone(&ctx);
-    let server_task = tokio::spawn(async move {
-        serve_connection(&mut server_side, &ctx_for_task).await
-    });
+    let server_task =
+        tokio::spawn(async move { serve_connection(&mut server_side, &ctx_for_task).await });
 
     // Run a minimal handshake.
     let nonce_a = [1u8; 32];
@@ -255,7 +253,7 @@ async fn rejects_unallowlisted_node() {
     let operator_signer = LocalSigner::random();
     let ctx = Arc::new(ServerCtx {
         transport: Keypair::from_secret_key(&secp, &signer_transport.secret),
-        allowlist: vec![],   // empty: nobody is allowed.
+        allowlist: vec![], // empty: nobody is allowed.
         signer: Arc::new(operator_signer),
         seed: None,
         policy: Arc::new(SeqPolicy::load(tmp_policy_path()).unwrap()),
@@ -264,9 +262,8 @@ async fn rejects_unallowlisted_node() {
     let (mut server_side, mut client_side) = duplex(8 * 1024);
 
     let ctx_for_task = Arc::clone(&ctx);
-    let server_task = tokio::spawn(async move {
-        serve_connection(&mut server_side, &ctx_for_task).await
-    });
+    let server_task =
+        tokio::spawn(async move { serve_connection(&mut server_side, &ctx_for_task).await });
 
     let hello = Hello {
         version: [0u8; 16],
@@ -277,5 +274,8 @@ async fn rejects_unallowlisted_node() {
     write_frame(&mut client_side, &hello).await.unwrap();
 
     let server_result = server_task.await.unwrap();
-    assert!(server_result.is_err(), "server should refuse non-allowlisted hello");
+    assert!(
+        server_result.is_err(),
+        "server should refuse non-allowlisted hello"
+    );
 }

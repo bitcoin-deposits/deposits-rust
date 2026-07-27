@@ -412,7 +412,10 @@ fn pubkey_from_seed(seed: u8) -> bitcoin::secp256k1::PublicKey {
     PublicKey::from_secret_key(&Secp256k1::new(), &sk)
 }
 
-fn entry(pubkey: bitcoin::secp256k1::PublicKey, sig_byte: u8) -> deposits_protocol::types::CosignEntry {
+fn entry(
+    pubkey: bitcoin::secp256k1::PublicKey,
+    sig_byte: u8,
+) -> deposits_protocol::types::CosignEntry {
     deposits_protocol::types::CosignEntry {
         cosigner_pubkey: pubkey,
         cosign_signature: [sig_byte; 64],
@@ -545,9 +548,22 @@ fn equivocation_witness_is_observable_to_anyone_with_both_updates() {
     // The 4-tuple equivocation key is identical; only message + content_hash
     // differ. Cheap to detect with a hash-set keyed on (operator, ledger,
     // seq, prev_hash) → content_hash; collision triggers proof emission.
-    let key_a = (u_a.operator_id, u_a.ledger_id, u_a.sequence_number, u_a.previous_hash);
-    let key_b = (u_b.operator_id, u_b.ledger_id, u_b.sequence_number, u_b.previous_hash);
-    assert_eq!(key_a, key_b, "equivocating updates share the (op, ledger, seq, prev) key");
+    let key_a = (
+        u_a.operator_id,
+        u_a.ledger_id,
+        u_a.sequence_number,
+        u_a.previous_hash,
+    );
+    let key_b = (
+        u_b.operator_id,
+        u_b.ledger_id,
+        u_b.sequence_number,
+        u_b.previous_hash,
+    );
+    assert_eq!(
+        key_a, key_b,
+        "equivocating updates share the (op, ledger, seq, prev) key"
+    );
     assert_ne!(u_a.content_hash, u_b.content_hash, "but content differs");
     assert_ne!(
         u_a.operator_signing_data(),

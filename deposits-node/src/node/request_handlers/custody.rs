@@ -310,10 +310,7 @@ impl Node {
         // that observes any failure MUST refuse to sign — the dispute
         // stalls until the failing disputant amends their declaration
         // or the arm window closes them out.
-        if let Err(reason) = self
-            .verify_disputants_replacement_collateral(request)
-            .await
-        {
+        if let Err(reason) = self.verify_disputants_replacement_collateral(request).await {
             tracing::warn!(
                 "Refusing confiscation_sign for ledger {}: {}",
                 ledger_prefix,
@@ -494,29 +491,26 @@ impl Node {
             Some(f) => f,
             None => return (false, None, Some("Missing fee_sats".to_string())),
         };
-        let claimed_revealers: Vec<XOnlyPublicKey> = match request
-            .params
-            .get("revealers")
-            .and_then(|v| v.as_array())
-        {
-            Some(arr) => {
-                let mut out = Vec::new();
-                for v in arr {
-                    match v.as_str().and_then(|s| s.parse().ok()) {
-                        Some(pk) => out.push(pk),
-                        None => {
-                            return (
-                                false,
-                                None,
-                                Some("Invalid revealer pubkey in request".to_string()),
-                            )
+        let claimed_revealers: Vec<XOnlyPublicKey> =
+            match request.params.get("revealers").and_then(|v| v.as_array()) {
+                Some(arr) => {
+                    let mut out = Vec::new();
+                    for v in arr {
+                        match v.as_str().and_then(|s| s.parse().ok()) {
+                            Some(pk) => out.push(pk),
+                            None => {
+                                return (
+                                    false,
+                                    None,
+                                    Some("Invalid revealer pubkey in request".to_string()),
+                                )
+                            }
                         }
                     }
+                    out
                 }
-                out
-            }
-            None => return (false, None, Some("Missing revealers".to_string())),
-        };
+                None => return (false, None, Some("Missing revealers".to_string())),
+            };
         let fallback_recipient: Option<XOnlyPublicKey> = match request
             .params
             .get("fallback_recipient")
@@ -524,13 +518,7 @@ impl Node {
         {
             Some(s) => match s.parse() {
                 Ok(pk) => Some(pk),
-                Err(_) => {
-                    return (
-                        false,
-                        None,
-                        Some("Invalid fallback_recipient".to_string()),
-                    )
-                }
+                Err(_) => return (false, None, Some("Invalid fallback_recipient".to_string())),
             },
             None => None,
         };
@@ -675,13 +663,7 @@ impl Node {
                     Some("confiscation tx not found on-chain".to_string()),
                 )
             }
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("confiscation tx lookup: {}", e)),
-                )
-            }
+            Err(e) => return (false, None, Some(format!("confiscation tx lookup: {}", e))),
         };
         let onchain_out = match confiscation_tx.output.get(share_vout as usize) {
             Some(o) => o,
@@ -775,13 +757,7 @@ impl Node {
             self.wallet.network(),
         ) {
             Ok(t) => t,
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("rebuild sweep tx: {:?}", e)),
-                )
-            }
+            Err(e) => return (false, None, Some(format!("rebuild sweep tx: {:?}", e))),
         };
         if bitcoin::consensus::encode::serialize(&expected_tx)
             != bitcoin::consensus::encode::serialize(&proposed_tx)
@@ -982,7 +958,13 @@ impl Node {
 
         let unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
             Some(h) => h,
-            None => return (false, None, Some("Missing unsigned_tx parameter".to_string())),
+            None => {
+                return (
+                    false,
+                    None,
+                    Some("Missing unsigned_tx parameter".to_string()),
+                )
+            }
         };
         let tx_bytes = match hex::decode(unsigned_tx_hex) {
             Ok(b) => b,
@@ -1086,8 +1068,7 @@ impl Node {
             }
             let current: Vec<bitcoin::secp256k1::PublicKey> =
                 state.quorum_members.iter().map(|m| m.pubkey).collect();
-            let new: Vec<bitcoin::secp256k1::PublicKey> = if state.next_quorum_members.is_empty()
-            {
+            let new: Vec<bitcoin::secp256k1::PublicKey> = if state.next_quorum_members.is_empty() {
                 current.clone()
             } else {
                 state.next_quorum_members.iter().map(|m| m.pubkey).collect()
@@ -1124,9 +1105,7 @@ impl Node {
                         Some("reserves UTXO not found on-chain (already spent?)".to_string()),
                     )
                 }
-                Err(e) => {
-                    return (false, None, Some(format!("esplora reserves lookup: {}", e)))
-                }
+                Err(e) => return (false, None, Some(format!("esplora reserves lookup: {}", e))),
             };
 
         if proposed_tx.input[0].previous_output != reserves_outpoint {
@@ -1174,9 +1153,7 @@ impl Node {
         // the *new* output is rebuilt against the operator's claimed
         // values while the *current* output is rebuilt against our own
         // state (the spend authorization side, which we control).
-        let rebuild = |members: &[bitcoin::secp256k1::PublicKey],
-                       lh: [u8; 32],
-                       qe: u32| {
+        let rebuild = |members: &[bitcoin::secp256k1::PublicKey], lh: [u8; 32], qe: u32| {
             let others: Vec<bitcoin::secp256k1::PublicKey> = members
                 .iter()
                 .filter(|pk| **pk != operator_key)
@@ -1184,30 +1161,22 @@ impl Node {
                 .collect();
             let voter_set = VoterSet::new(operator_key, others);
             let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
-            let config = (ruleset.tier_config_factory)(
-                voter_set.all_voters().len(),
-                qe,
-            );
-            TapscriptReservesBuilder::new(
-                voter_set,
-                config,
-                self.wallet.network(),
-                lh,
-            )
-            .build()
+            let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), qe);
+            TapscriptReservesBuilder::new(voter_set, config, self.wallet.network(), lh).build()
         };
 
         // Build the *new* Taproot output and verify the proposed TX matches.
-        let expected_new = match rebuild(&new_members, claimed_ledger_hash, claimed_new_quorum_expiry) {
-            Ok(o) => o,
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("build expected rotated taproot output: {:?}", e)),
-                )
-            }
-        };
+        let expected_new =
+            match rebuild(&new_members, claimed_ledger_hash, claimed_new_quorum_expiry) {
+                Ok(o) => o,
+                Err(e) => {
+                    return (
+                        false,
+                        None,
+                        Some(format!("build expected rotated taproot output: {:?}", e)),
+                    )
+                }
+            };
         if proposed_tx.output[0].script_pubkey != expected_new.script_pubkey() {
             return (
                 false,
@@ -1307,10 +1276,7 @@ impl Node {
                 .collect();
             let voter_set = VoterSet::new(operator_key, others);
             let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
-            let config = (ruleset.tier_config_factory)(
-                voter_set.all_voters().len(),
-                quorum_expiry,
-            );
+            let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), quorum_expiry);
             let builder = TapscriptReservesBuilder::new(
                 voter_set,
                 config,
@@ -1527,9 +1493,7 @@ impl Node {
                 ..
             } = op
             {
-                let entry = latest_armed
-                    .entry(update.operator_id)
-                    .or_insert((0, None));
+                let entry = latest_armed.entry(update.operator_id).or_insert((0, None));
                 if update.sequence_number >= entry.0 {
                     *entry = (update.sequence_number, replacement_collateral);
                 }
@@ -1563,9 +1527,8 @@ impl Node {
                 }
             }
             // Esplora outpoint check.
-            let txid = bitcoin::Txid::from_raw_hash(
-                bitcoin::hashes::Hash::from_byte_array(rc.txid),
-            );
+            let txid =
+                bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
             match self.wallet.get_outpoint_value_and_confs(txid, rc.vout) {
                 Ok(Some((value_sats, confs))) => {
                     if value_sats < rc.amount {
@@ -1649,8 +1612,8 @@ impl Node {
             .get("unsigned_tx")
             .and_then(|v| v.as_str())
             .ok_or_else(|| "missing unsigned_tx parameter".to_string())?;
-        let tx_bytes = hex::decode(unsigned_tx_hex)
-            .map_err(|e| format!("unsigned_tx hex decode: {}", e))?;
+        let tx_bytes =
+            hex::decode(unsigned_tx_hex).map_err(|e| format!("unsigned_tx hex decode: {}", e))?;
         let proposed_tx: Transaction = bitcoin::consensus::encode::deserialize(&tx_bytes)
             .map_err(|e| format!("unsigned_tx parse: {}", e))?;
 
@@ -1679,7 +1642,10 @@ impl Node {
         //    Either is sufficient for the verifier to know the
         //    confiscation is grounded; we refuse only if neither is
         //    on the relay.
-        let proof_type = match self.fetch_fraud_proof_type_for_ledger(&request.ledger_id).await {
+        let proof_type = match self
+            .fetch_fraud_proof_type_for_ledger(&request.ledger_id)
+            .await
+        {
             Some(pt) => pt,
             None => match self
                 .fetch_quorum_expired_inline_evidence(&request.ledger_id)
@@ -1832,10 +1798,9 @@ impl Node {
             .map_err(|e| format!("rebuild lottery output: {:?}", e))?;
 
         // 7. Verify input + look up reserves UTXO on-chain for amount
-        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-            qb_reserves_id
-                .parse()
-                .map_err(|e| format!("parse reserves_id: {}", e))?;
+        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> = qb_reserves_id
+            .parse()
+            .map_err(|e| format!("parse reserves_id: {}", e))?;
         let reserves_addr = reserves_addr
             .require_network(self.wallet.network())
             .map_err(|e| format!("network mismatch: {}", e))?;
@@ -2011,5 +1976,4 @@ impl Node {
     // ========================================================================
     // Daemon-mediated CLI request handlers
     // ========================================================================
-
 }

@@ -67,7 +67,13 @@ impl Node {
         };
         let op_expiry = match request.params.get("expiry").and_then(|v| v.as_u64()) {
             Some(e) if e <= u32::MAX as u64 => e as u32,
-            _ => return (false, None, Some("Missing or out-of-range expiry".to_string())),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("Missing or out-of-range expiry".to_string()),
+                )
+            }
         };
 
         // Witness authorizes the withdrawal under the descriptor.
@@ -342,7 +348,6 @@ impl Node {
                     )),
                 );
             }
-
         };
 
         // Check destination deposit balance limit
@@ -377,7 +382,9 @@ impl Node {
                                 return (
                                     false,
                                     None,
-                                    Some("Destination deposit requires receive_witness".to_string()),
+                                    Some(
+                                        "Destination deposit requires receive_witness".to_string(),
+                                    ),
                                 )
                             }
                         };
@@ -636,5 +643,4 @@ impl Node {
             None,
         )
     }
-
 }

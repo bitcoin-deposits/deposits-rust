@@ -91,7 +91,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rt = tokio::runtime::Runtime::new()?;
     let events = rt.block_on(fetch_ledger_history(&relay, ledger_tag))?;
-    eprintln!("Fetched {} event(s) for ledger {}…", events.len(), ledger_tag);
+    eprintln!(
+        "Fetched {} event(s) for ledger {}…",
+        events.len(),
+        ledger_tag
+    );
 
     let voter_set = VoterSet::new(operator, members.clone());
     let tiers = v_2026_04_17::default_tiers(members.len() + 1);
@@ -100,7 +104,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // candidate ledger_hash. Hand-validate against the target address.
     let mut tried: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
     for u in &events {
-        for (label, h) in [("content_hash", u.content_hash), ("previous_hash", u.previous_hash)] {
+        for (label, h) in [
+            ("content_hash", u.content_hash),
+            ("previous_hash", u.previous_hash),
+        ] {
             if !tried.insert(h) {
                 continue;
             }
@@ -110,8 +117,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             if addr.to_string() == target {
                 eprintln!();
-                eprintln!("✔ MATCH at seq {} {} = {}", u.sequence_number, label, hex::encode(h));
-                eprintln!("  → ledger_hash to use for tier-leaf reconstruction: {}", hex::encode(h));
+                eprintln!(
+                    "✔ MATCH at seq {} {} = {}",
+                    u.sequence_number,
+                    label,
+                    hex::encode(h)
+                );
+                eprintln!(
+                    "  → ledger_hash to use for tier-leaf reconstruction: {}",
+                    hex::encode(h)
+                );
                 // Also dump op type for context.
                 if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
                     eprintln!("  (event op: {})", op.discriminant());
@@ -122,8 +137,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     eprintln!();
-    eprintln!("✘ No event's content_hash or previous_hash produces target {}", target);
-    eprintln!("  Tried {} unique hashes from {} events.", tried.len(), events.len());
+    eprintln!(
+        "✘ No event's content_hash or previous_hash produces target {}",
+        target
+    );
+    eprintln!(
+        "  Tried {} unique hashes from {} events.",
+        tried.len(),
+        events.len()
+    );
     std::process::exit(1);
 }
 

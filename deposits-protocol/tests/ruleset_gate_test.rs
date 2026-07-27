@@ -86,7 +86,9 @@ fn explicit_legacy_protocol_version_also_skips_gate() {
     let member = pk(2);
     let s = state_with_staged_member(operator, member, Vec::new());
     let op = quorum_begin(member, Some("legacy".into()));
-    let next = s.apply(&op).expect("explicit legacy QuorumBegin must apply");
+    let next = s
+        .apply(&op)
+        .expect("explicit legacy QuorumBegin must apply");
     assert_eq!(next.active_ruleset_name, "legacy");
 }
 
@@ -130,7 +132,10 @@ fn rejected_quorum_begin_leaves_state_untouched() {
     assert_eq!(s.next_quorum_members, before.next_quorum_members);
     assert!(s.quorum_members.is_empty());
     assert_eq!(s.quorum_state, before.quorum_state);
-    assert_eq!(s, before, "rejected QuorumBegin must leave the whole state unchanged");
+    assert_eq!(
+        s, before,
+        "rejected QuorumBegin must leave the whole state unchanged"
+    );
 }
 
 /// A member who declared support only for `legacy` cannot be promoted
@@ -158,7 +163,9 @@ fn nonlegacy_quorum_begin_accepts_attested_member() {
         vec!["legacy".into(), "cltv-offset-v2".into()],
     );
     let op = quorum_begin(member, Some("cltv-offset-v2".into()));
-    let next = s.apply(&op).expect("attested non-legacy QuorumBegin must apply");
+    let next = s
+        .apply(&op)
+        .expect("attested non-legacy QuorumBegin must apply");
     assert_eq!(next.active_ruleset_name, "cltv-offset-v2");
     assert_eq!(next.quorum_members.len(), 1);
 }

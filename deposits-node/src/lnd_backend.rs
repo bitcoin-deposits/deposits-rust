@@ -33,8 +33,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use crate::lightning_backend::{
-    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo,
-    PaymentStatus,
+    Balances, ChannelInfo, HoldInvoiceState, LightningBackend, NodeInfo, PaymentInfo, PaymentStatus,
 };
 use crate::Error;
 
@@ -82,8 +81,8 @@ impl LndBackend {
     /// - `LND_TLS_CERT_FILE`   (PEM path; omit if you trust the default chain)
     /// - `LND_TLS_INSECURE=1`  (skip TLS verification; dev only)
     pub fn from_env() -> Result<Self, Error> {
-        let base_url = std::env::var("LND_REST_URL")
-            .unwrap_or_else(|_| "https://127.0.0.1:8080".to_string());
+        let base_url =
+            std::env::var("LND_REST_URL").unwrap_or_else(|_| "https://127.0.0.1:8080".to_string());
 
         let macaroon_hex = match std::env::var("LND_MACAROON_HEX") {
             Ok(h) => h,
@@ -102,12 +101,13 @@ impl LndBackend {
             }
         };
 
-        let tls_cert_pem = match std::env::var("LND_TLS_CERT_FILE") {
-            Ok(path) => Some(std::fs::read(&path).map_err(|e| {
-                Error::Wallet(format!("read LND_TLS_CERT_FILE={}: {}", path, e))
-            })?),
-            Err(_) => None,
-        };
+        let tls_cert_pem =
+            match std::env::var("LND_TLS_CERT_FILE") {
+                Ok(path) => Some(std::fs::read(&path).map_err(|e| {
+                    Error::Wallet(format!("read LND_TLS_CERT_FILE={}: {}", path, e))
+                })?),
+                Err(_) => None,
+            };
         let insecure = std::env::var("LND_TLS_INSECURE").is_ok();
 
         Self::new(base_url, macaroon_hex, tls_cert_pem.as_deref(), insecure)
@@ -121,9 +121,9 @@ impl LndBackend {
             .header("Grpc-Metadata-Macaroon", &self.macaroon_hex)
             .send()
             .map_err(|e| Error::Wallet(format!("LND GET {}: {}", url, e)))?;
-        check_status(&url, resp)?.json().map_err(|e| {
-            Error::Wallet(format!("LND parse response from {}: {}", url, e))
-        })
+        check_status(&url, resp)?
+            .json()
+            .map_err(|e| Error::Wallet(format!("LND parse response from {}: {}", url, e)))
     }
 
     fn post<B: Serialize, T: for<'de> Deserialize<'de>>(
@@ -139,9 +139,9 @@ impl LndBackend {
             .json(body)
             .send()
             .map_err(|e| Error::Wallet(format!("LND POST {}: {}", url, e)))?;
-        check_status(&url, resp)?.json().map_err(|e| {
-            Error::Wallet(format!("LND parse response from {}: {}", url, e))
-        })
+        check_status(&url, resp)?
+            .json()
+            .map_err(|e| Error::Wallet(format!("LND parse response from {}: {}", url, e)))
     }
 
     /// LND identifies invoices by `payment_addr`-less r_hash (the payment_hash
@@ -165,9 +165,9 @@ impl LndBackend {
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        Ok(Some(check_status(&full_url, resp)?.json().map_err(|e| {
-            Error::Wallet(format!("LND parse invoice from {}: {}", full_url, e))
-        })?))
+        Ok(Some(check_status(&full_url, resp)?.json().map_err(
+            |e| Error::Wallet(format!("LND parse invoice from {}: {}", full_url, e)),
+        )?))
     }
 }
 
@@ -206,10 +206,7 @@ where
 {
     let s = Option::<String>::deserialize(d)?;
     match s {
-        Some(s) if !s.is_empty() => s
-            .parse::<u64>()
-            .map(Some)
-            .map_err(serde::de::Error::custom),
+        Some(s) if !s.is_empty() => s.parse::<u64>().map(Some).map_err(serde::de::Error::custom),
         _ => Ok(None),
     }
 }
@@ -431,11 +428,7 @@ impl LightningBackend for LndBackend {
         Ok(resp.payment_hash)
     }
 
-    fn pay_invoice_with_amount(
-        &self,
-        invoice: &str,
-        amount_msat: u64,
-    ) -> Result<String, Error> {
+    fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error> {
         let body = serde_json::json!({
             "payment_request": invoice,
             "amt_msat": amount_msat.to_string(),
@@ -481,16 +474,14 @@ impl LightningBackend for LndBackend {
                 },
                 amount_msat: p.value_msat,
                 preimage_hex: (!p.payment_preimage.is_empty()
-                    && p.payment_preimage != "0000000000000000000000000000000000000000000000000000000000000000")
+                    && p.payment_preimage
+                        != "0000000000000000000000000000000000000000000000000000000000000000")
                     .then_some(p.payment_preimage),
             })
             .collect())
     }
 
-    fn get_payment_preimage(
-        &self,
-        payment_id_hex: &str,
-    ) -> Result<Option<[u8; 32]>, Error> {
+    fn get_payment_preimage(&self, payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error> {
         // Trait's `get_payment_preimage` is "given a payment_hash, give me
         // the preimage". Two places it can live in LND:
         //   - inbound (self-pay: an invoice WE issued got settled) →
@@ -519,13 +510,10 @@ impl LightningBackend for LndBackend {
 
         // Outbound fallback (payments are hex-encoded in /v1/payments).
         for p in self.list_payments()? {
-            if p.id.eq_ignore_ascii_case(payment_id_hex)
-                && p.status == PaymentStatus::Succeeded
-            {
+            if p.id.eq_ignore_ascii_case(payment_id_hex) && p.status == PaymentStatus::Succeeded {
                 if let Some(preimage_hex) = p.preimage_hex {
-                    let bytes = hex::decode(&preimage_hex).map_err(|e| {
-                        Error::Wallet(format!("LND payment_preimage hex: {}", e))
-                    })?;
+                    let bytes = hex::decode(&preimage_hex)
+                        .map_err(|e| Error::Wallet(format!("LND payment_preimage hex: {}", e)))?;
                     if bytes.len() != 32 {
                         return Err(Error::Wallet(format!(
                             "LND payment_preimage wrong length: {} bytes",
@@ -588,10 +576,7 @@ impl LightningBackend for LndBackend {
         Ok(resp.payment_request)
     }
 
-    fn lookup_hold_invoice(
-        &self,
-        payment_hash_hex: &str,
-    ) -> Result<HoldInvoiceState, Error> {
+    fn lookup_hold_invoice(&self, payment_hash_hex: &str) -> Result<HoldInvoiceState, Error> {
         let invoice = self.lookup_invoice(payment_hash_hex)?.ok_or_else(|| {
             Error::Wallet(format!(
                 "LND hold invoice not found for hash {}…",

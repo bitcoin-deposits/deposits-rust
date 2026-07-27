@@ -89,7 +89,11 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     // Wait for op1's daemon to ingest its own QuorumBegin (race with
     // `setup.sh` returning). 90s — fresh cluster sometimes takes
     // longer than 30s to settle after setup.sh returns.
-    wait_for_quorum_begin(accused_op_idx, &accused_ledger, std::time::Duration::from_secs(90));
+    wait_for_quorum_begin(
+        accused_op_idx,
+        &accused_ledger,
+        std::time::Duration::from_secs(90),
+    );
 
     let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
     let mut quorum_expiry: Option<u32> = None;
@@ -145,7 +149,10 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     let target = quorum_expiry + 10;
     if chain_tip < target {
         let to_mine = target - chain_tip;
-        eprintln!("[setup]   mining {} blocks → tip {} (past expiry+1)", to_mine, target);
+        eprintln!(
+            "[setup]   mining {} blocks → tip {} (past expiry+1)",
+            to_mine, target
+        );
         mine_blocks(to_mine);
     }
     let chain_tip = current_block_height();

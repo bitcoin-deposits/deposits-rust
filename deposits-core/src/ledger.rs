@@ -1066,7 +1066,8 @@ impl Ledger {
         }
         // Record the QuorumBegin's location (for duration / entry-link).
         if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
-            self.state.note_quorum_begin(block_height, sequence, new_hash);
+            self.state
+                .note_quorum_begin(block_height, sequence, new_hash);
         }
 
         // Update sequence (hash is set above, will become chain_hash after signing)
@@ -1153,11 +1154,9 @@ impl Ledger {
         // expiry they picked, and this gate fails any op whose witness
         // doesn't satisfy the descriptor at this height.
         let authorizer = crate::dep16::Dep16Authorizer::new();
-        let violations = self.state.check_speculative(
-            &operation,
-            &authorizer,
-            block_height,
-        );
+        let violations = self
+            .state
+            .check_speculative(&operation, &authorizer, block_height);
         if let Some(v) = violations.first() {
             return Err(DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -1212,9 +1211,7 @@ impl Ledger {
         // operator's cosigned view of the tip; descriptor `after()`
         // checks evaluate at that horizon via the Dep16Authorizer.
         let authorizer = crate::dep16::Dep16Authorizer::new();
-        let new_state =
-            self.state
-                .apply_signed(&staged.update, &authorizer)?;
+        let new_state = self.state.apply_signed(&staged.update, &authorizer)?;
         self.state = new_state;
 
         // Set opened_at_block and initial last_fee_assessment for new deposits
@@ -1564,28 +1561,25 @@ impl Ledger {
                         if *commitment_hash != prior_commit {
                             return Err(DepositsError::ProtocolViolation {
                                 violation_type: "dispute_armed_commitment_changed".to_string(),
-                                details:
-                                    "Re-arm commitment_hash must match the prior arm; \
+                                details: "Re-arm commitment_hash must match the prior arm; \
                                      the lottery commitment is immutable once arming begins"
-                                        .to_string(),
+                                    .to_string(),
                             });
                         }
                         if prior_rc.is_some() {
                             return Err(DepositsError::ProtocolViolation {
                                 violation_type: "dispute_armed_already_collateralized".to_string(),
-                                details:
-                                    "Re-arm rejected: prior arm already declared \
+                                details: "Re-arm rejected: prior arm already declared \
                                      replacement_collateral. Only None→Some upgrade is allowed."
-                                        .to_string(),
+                                    .to_string(),
                             });
                         }
                         if replacement_collateral.is_none() {
                             return Err(DepositsError::ProtocolViolation {
                                 violation_type: "dispute_armed_no_upgrade".to_string(),
-                                details:
-                                    "Re-arm rejected: new arm must declare \
+                                details: "Re-arm rejected: new arm must declare \
                                      replacement_collateral. None→None is a no-op."
-                                        .to_string(),
+                                    .to_string(),
                             });
                         }
                     }
@@ -1600,8 +1594,7 @@ impl Ledger {
                 if claim_txid == &[0u8; 32] {
                     return Err(DepositsError::ProtocolViolation {
                         violation_type: "custody_acquire_no_claim".to_string(),
-                        details: "DisputeAcquire requires a non-zero claim_txid"
-                            .to_string(),
+                        details: "DisputeAcquire requires a non-zero claim_txid".to_string(),
                     });
                 }
             }
@@ -2833,9 +2826,9 @@ mod tests {
             .validate_operation(&even)
             .expect_err("Q=4 must be rejected (even)");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "quorum_size_invalid"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "quorum_size_invalid")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
 
@@ -2845,9 +2838,9 @@ mod tests {
             .validate_operation(&too_small)
             .expect_err("Q=1 must be rejected (below floor)");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "quorum_size_invalid"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "quorum_size_invalid")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
 
@@ -2857,9 +2850,9 @@ mod tests {
             .validate_operation(&too_big)
             .expect_err("Q=9 must be rejected (above cap)");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "quorum_size_invalid"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "quorum_size_invalid")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
     }
@@ -2908,25 +2901,23 @@ mod tests {
         // Activate the quorum at expiry block 500.
         ledger.state.quorum_state = QuorumState::Active;
         ledger.state.quorum_expiry = Some(500);
-        ledger.state.quorum_members = vec![
-            QuorumMember {
-                pubkey: pk(2),
-                ledger_id: "m1".into(),
-                min_fee_bps: None,
-                min_fee_fixed: None,
-                max_fee_period: None,
-                membership_until: Some(500),
-                dispute_response_blocks: None,
-                dispute_arm_blocks: None,
-                service_response_blocks: None,
-                max_transfer_timeout_blocks: None,
-                max_descriptor_bytes: None,
-                compensation_bps: None,
-                compensation_deposit_id: None,
-                compensation_frequency_blocks: None,
-                supported_rulesets: Vec::new(),
-            },
-        ];
+        ledger.state.quorum_members = vec![QuorumMember {
+            pubkey: pk(2),
+            ledger_id: "m1".into(),
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
+            membership_until: Some(500),
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
+            supported_rulesets: Vec::new(),
+        }];
 
         // Before expiry → accept.
         assert!(
@@ -2943,9 +2934,9 @@ mod tests {
             .validate_for_cosign(&op, 501)
             .expect_err("block 501 with expiry 500 must refuse");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "post_expiry_cosign_refused")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
 
@@ -2954,9 +2945,9 @@ mod tests {
             .validate_for_cosign(&op, 1_000_000)
             .expect_err("far-past expiry must refuse");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "post_expiry_cosign_refused"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "post_expiry_cosign_refused")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
     }
@@ -3024,9 +3015,9 @@ mod tests {
             .validate_for_cosign(&over_cap, current)
             .expect_err("over-cap lock timeout must refuse");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "lock_timeout_exceeds_max"),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "lock_timeout_exceeds_max")
+            }
             other => panic!("expected ProtocolViolation, got {:?}", other),
         }
     }
@@ -3108,10 +3099,13 @@ mod tests {
             .validate_for_cosign(&shorter, 200)
             .expect_err("ratchet must still refuse a reduced membership_expires");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "quorum_join_ratchet"),
-            other => panic!("expected ProtocolViolation::quorum_join_ratchet, got {:?}", other),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "quorum_join_ratchet")
+            }
+            other => panic!(
+                "expected ProtocolViolation::quorum_join_ratchet, got {:?}",
+                other
+            ),
         }
 
         // Author-side guard still fires when a Partner tries to author
@@ -3129,10 +3123,13 @@ mod tests {
             )
             .expect_err("partner staging QuorumJoin must refuse");
         match err {
-            DepositsError::ProtocolViolation {
-                violation_type, ..
-            } => assert_eq!(violation_type, "quorum_join_wrong_role"),
-            other => panic!("expected ProtocolViolation::quorum_join_wrong_role, got {:?}", other),
+            DepositsError::ProtocolViolation { violation_type, .. } => {
+                assert_eq!(violation_type, "quorum_join_wrong_role")
+            }
+            other => panic!(
+                "expected ProtocolViolation::quorum_join_wrong_role, got {:?}",
+                other
+            ),
         }
     }
 }

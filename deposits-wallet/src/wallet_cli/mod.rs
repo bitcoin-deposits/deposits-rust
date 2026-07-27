@@ -151,12 +151,27 @@ pub fn print_usage(program: &str) {
     eprintln!("  BITCOIN_RPC_{{HOST,PORT,USER,PASS,WALLET}}  regtest-faucet RPC target");
     eprintln!();
     eprintln!("Examples:");
-    eprintln!("  {} discover                                        # bitcoin via the default relay", program);
-    eprintln!("  {} discover --network regtest --relay ws://localhost:17779", program);
+    eprintln!(
+        "  {} discover                                        # bitcoin via the default relay",
+        program
+    );
+    eprintln!(
+        "  {} discover --network regtest --relay ws://localhost:17779",
+        program
+    );
     eprintln!("  {} open abc123... --alias savings", program);
-    eprintln!("  {} offer savings 50000          # on-chain: returns funding address", program);
-    eprintln!("  {} make_invoice savings 50000   # lightning: returns BOLT11", program);
-    eprintln!("  {} regtest-faucet savings       # fund locally (regtest only)", program);
+    eprintln!(
+        "  {} offer savings 50000          # on-chain: returns funding address",
+        program
+    );
+    eprintln!(
+        "  {} make_invoice savings 50000   # lightning: returns BOLT11",
+        program
+    );
+    eprintln!(
+        "  {} regtest-faucet savings       # fund locally (regtest only)",
+        program
+    );
 }
 
 pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error::Error>> {
@@ -225,9 +240,7 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
             "--attestation-sig" if i + 1 < args.len() => {
                 let s = args[i + 1].trim();
                 if s.len() != 128 || !s.chars().all(|c| c.is_ascii_hexdigit()) {
-                    return Err(
-                        "--attestation-sig must be 64-byte Schnorr hex (128 chars)".into(),
-                    );
+                    return Err("--attestation-sig must be 64-byte Schnorr hex (128 chars)".into());
                 }
                 subkey_attestation = Some(s.to_lowercase());
                 i += 1;
@@ -301,9 +314,7 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
     // A DEP-04 subkey delegation is (account, attestation) — either both
     // supplied or neither. Half a credential has no meaning.
     if subkey_account.is_some() != subkey_attestation.is_some() {
-        return Err(
-            "--subkey-of and --attestation-sig must be supplied together".into(),
-        );
+        return Err("--subkey-of and --attestation-sig must be supplied together".into());
     }
 
     Ok(WalletConfig {
@@ -321,8 +332,7 @@ pub fn parse_config(args: &[String]) -> Result<WalletConfig, Box<dyn std::error:
 fn parse_xonly_arg(s: &str) -> Result<String, Box<dyn std::error::Error>> {
     let s = s.trim();
     if s.starts_with("npub1") {
-        let pk = nostr_sdk::PublicKey::parse(s)
-            .map_err(|e| format!("invalid npub: {}", e))?;
+        let pk = nostr_sdk::PublicKey::parse(s).map_err(|e| format!("invalid npub: {}", e))?;
         return Ok(pk.to_hex());
     }
     if s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -356,8 +366,12 @@ fn load_nsec_file(path: &str) -> Result<SecretKey, Box<dyn std::error::Error>> {
         return SecretKey::from_slice(bytes)
             .map_err(|e| format!("nsec bytes invalid for secp256k1 ({}): {}", path, e).into());
     }
-    let bytes = hex::decode(s)
-        .map_err(|e| format!("--nsec-file {} is neither nsec1… nor valid hex: {}", path, e))?;
+    let bytes = hex::decode(s).map_err(|e| {
+        format!(
+            "--nsec-file {} is neither nsec1… nor valid hex: {}",
+            path, e
+        )
+    })?;
     if bytes.len() != 32 {
         return Err(format!(
             "--nsec-file {} hex key must be 32 bytes (64 chars), got {}",
@@ -382,9 +396,7 @@ pub fn derive_secret_key(
 /// which case we synthesize `pk(<pubkey>)` and recompute the id. The
 /// returned descriptor is the source of identity — always pass it
 /// through to the daemon, never re-derive from the pubkey.
-pub fn deposit_record_identity(
-    deposit: &serde_json::Value,
-) -> Option<(String, String)> {
+pub fn deposit_record_identity(deposit: &serde_json::Value) -> Option<(String, String)> {
     let descriptor = match deposit.get("descriptor").and_then(|v| v.as_str()) {
         Some(d) => d.to_string(),
         None => {
@@ -442,7 +454,6 @@ pub fn save_deposit_key_index(
     let index_file = data_dir.join("deposit_key_index.txt");
     std::fs::write(&index_file, index.to_string())
 }
-
 
 /// Verify an offer co-signature from a quorum member
 pub fn verify_offer_cosignature(

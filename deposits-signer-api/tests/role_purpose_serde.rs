@@ -42,10 +42,8 @@ fn key_path_round_trips() {
     let cases = vec![
         SignContext::no_ledger(SigPurpose::Bip340Untagged),
         SignContext::no_ledger(SigPurpose::Bip340Untagged).with_key(KeyPath::Operator),
-        SignContext::no_ledger(SigPurpose::Bip340Untagged)
-            .with_key(KeyPath::Deposit { index: 0 }),
-        SignContext::no_ledger(SigPurpose::Bip340Untagged)
-            .with_key(KeyPath::Deposit { index: 99 }),
+        SignContext::no_ledger(SigPurpose::Bip340Untagged).with_key(KeyPath::Deposit { index: 0 }),
+        SignContext::no_ledger(SigPurpose::Bip340Untagged).with_key(KeyPath::Deposit { index: 99 }),
         SignContext::deposit(42, SigPurpose::DepositGuarantee),
     ];
     for ctx in cases {

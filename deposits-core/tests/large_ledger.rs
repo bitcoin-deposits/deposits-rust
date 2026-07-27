@@ -132,7 +132,11 @@ fn fixed_pubkey() -> bitcoin::secp256k1::PublicKey {
 fn rss_mb() -> f64 {
     std::fs::read_to_string("/proc/self/statm")
         .ok()
-        .and_then(|s| s.split_whitespace().nth(1).and_then(|p| p.parse::<u64>().ok()))
+        .and_then(|s| {
+            s.split_whitespace()
+                .nth(1)
+                .and_then(|p| p.parse::<u64>().ok())
+        })
         .map(|pages| (pages * 4096) as f64 / 1e6)
         .unwrap_or(0.0)
 }
@@ -202,10 +206,20 @@ fn large_ledger_characterization() {
         .expect("DepositOpen");
     ledger.finalize_chain_hash();
 
-    println!("\nlarge-ledger characterization: target={} checkpoints={:?}", target, checkpoints);
+    println!(
+        "\nlarge-ledger characterization: target={} checkpoints={:?}",
+        target, checkpoints
+    );
     println!(
         "{:>11}  {:>12}  {:>13}  {:>12}  {:>13}  {:>13}  {:>10}  {:>9}",
-        "entries", "append us/op", "recompute ms", "inbound us/op", "reimport ms", "chainwalk ms", "binary MB", "RSS MB"
+        "entries",
+        "append us/op",
+        "recompute ms",
+        "inbound us/op",
+        "reimport ms",
+        "chainwalk ms",
+        "binary MB",
+        "RSS MB"
     );
 
     let mut i: u64 = 0;
@@ -252,8 +266,8 @@ fn large_ledger_characterization() {
             use deposits_core::tlv::TlvDecode;
             let mut fresh = Ledger::new_as_operator(op, hex::encode(op.serialize()), 0);
             for update in &ledger.history {
-                let inner = LedgerOperation::tlv_decode(&update.message)
-                    .expect("tlv_decode history op");
+                let inner =
+                    LedgerOperation::tlv_decode(&update.message).expect("tlv_decode history op");
                 fresh
                     .apply_and_check(&inner, update.block_height)
                     .expect("apply_and_check");

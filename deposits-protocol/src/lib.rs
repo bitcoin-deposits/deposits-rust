@@ -6,8 +6,8 @@
 #![allow(missing_docs)]
 
 pub mod constants;
-pub mod display_name;
 pub mod cosign_threshold;
+pub mod display_name;
 pub mod error;
 pub mod fraud;
 pub mod messages;
@@ -34,13 +34,12 @@ pub use signature_utils::{invoice_cosign_signing_message, offer_cosign_signing_m
 pub use tlv::{TlvBuilder, TlvDecode, TlvEncode, TlvError, TlvReader, TlvResult, TlvStream};
 pub use types::{
     compute_deposit_id, entropy_selection_score, is_entropy_winner, select_entropy_winner,
-    serde_32, serde_64, serde_opt_64, serde_pubkey, serde_pubkey_map, serde_pubkey_vec,
-    AllowAll, AuditResult, Authorizer, ChannelId, CommitmentExtraOutput, ConformanceViolation,
+    serde_32, serde_64, serde_opt_64, serde_pubkey, serde_pubkey_map, serde_pubkey_vec, AllowAll,
+    AuditResult, Authorizer, ChannelId, CommitmentExtraOutput, ConformanceViolation,
     CrossLedgerViolation, DenyAll, Deposit, DepositId, DepositInfo, DepositOffer,
     DepositOfferStatus, DescriptorWitness, DisputeState, FeeStructure, Invoice, InvoiceInfo,
-    LedgerState, LedgerStateUpdate, LedgerUpdate, OnChainWithdrawal,
-    OnChainWithdrawalStatus, PendingInvoice, PendingTransfer, QuorumJoinRequestMsg,
-    QuorumJoinResponseMsg, QuorumState, QuorumVoteMsg, ReservesOutput, ReservesStatus,
-    SignedLedgerUpdate, SignedLedgerUpdateLog, TransferFeeSchedule, Violation,
-    WithdrawalCompleteResult, WithdrawalLockResult,
+    LedgerState, LedgerStateUpdate, LedgerUpdate, OnChainWithdrawal, OnChainWithdrawalStatus,
+    PendingInvoice, PendingTransfer, QuorumJoinRequestMsg, QuorumJoinResponseMsg, QuorumState,
+    QuorumVoteMsg, ReservesOutput, ReservesStatus, SignedLedgerUpdate, SignedLedgerUpdateLog,
+    TransferFeeSchedule, Violation, WithdrawalCompleteResult, WithdrawalLockResult,
 };

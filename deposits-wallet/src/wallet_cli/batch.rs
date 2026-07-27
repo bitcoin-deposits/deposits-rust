@@ -281,9 +281,7 @@ async fn batch_transfer_lock(
     };
     let signed = match deposits_core::signing::sign_op(proto, &info.keypair.secret_key()) {
         Some(s) => s,
-        None => {
-            return serde_json::json!({"success": false, "error": "sign_op failed"})
-        }
+        None => return serde_json::json!({"success": false, "error": "sign_op failed"}),
     };
     let signature_bytes = match &signed {
         deposits_core::messages::LedgerOperation::TransferLock { witness, .. } => {

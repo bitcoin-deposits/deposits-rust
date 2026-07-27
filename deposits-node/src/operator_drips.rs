@@ -173,9 +173,8 @@ impl DripRegistry {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::path(data_dir);
         let tmp = path.with_extension("json.tmp");
-        let pretty = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let pretty = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&tmp, pretty)?;
         std::fs::rename(&tmp, &path)
     }
@@ -193,7 +192,10 @@ impl DripRegistry {
     /// Insert a new plan. Returns `Err` if the alias is already taken.
     pub fn insert(&mut self, plan: DripPlan) -> Result<(), String> {
         if self.find(&plan.alias).is_some() {
-            return Err(format!("drip plan with alias '{}' already exists", plan.alias));
+            return Err(format!(
+                "drip plan with alias '{}' already exists",
+                plan.alias
+            ));
         }
         self.plans.push(plan);
         Ok(())

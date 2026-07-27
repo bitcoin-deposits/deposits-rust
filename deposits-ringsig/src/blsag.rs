@@ -191,10 +191,7 @@ pub fn verify(
 /// reduced into a 32-byte scalar buffer (caller turns it into a `Scalar`
 /// via `scalar_from_bytes`, which rejects values ≥ n).
 fn challenge(l: &PublicKey, r: &PublicKey, message: &[u8]) -> [u8; 32] {
-    tagged_hash_parts(
-        TAG_CHALLENGE,
-        &[&l.serialize(), &r.serialize(), message],
-    )
+    tagged_hash_parts(TAG_CHALLENGE, &[&l.serialize(), &r.serialize(), message])
 }
 
 /// `s·P + c·Q`, treating either-zero-scalar specially because
@@ -228,8 +225,7 @@ fn linear_combo(
 /// is guaranteed in `[1, n-1]` so this never fails on range, but
 /// `Scalar::from_be_bytes` returns Result so we propagate it.
 fn sk_to_scalar(sk: &SecretKey) -> Scalar {
-    Scalar::from_be_bytes(sk.secret_bytes())
-        .expect("SecretKey bytes are always a valid Scalar")
+    Scalar::from_be_bytes(sk.secret_bytes()).expect("SecretKey bytes are always a valid Scalar")
 }
 
 /// Construct a `Scalar` from raw bytes. Returns `Degenerate` if the
@@ -343,10 +339,7 @@ mod tests {
         let sig = sign(&secp, &pks, 0, &sks[0], b"m", &mut OsRng).unwrap();
         // Swap a non-signer's pubkey with a fresh one.
         pks[3] = SecretKey::new(&mut OsRng).public_key(&secp);
-        assert_eq!(
-            verify(&secp, &pks, b"m", &sig).unwrap_err(),
-            Error::Invalid
-        );
+        assert_eq!(verify(&secp, &pks, b"m", &sig).unwrap_err(), Error::Invalid);
     }
 
     #[test]
@@ -355,10 +348,7 @@ mod tests {
         let (pks, sks) = ring(&secp, 4);
         let mut sig = sign(&secp, &pks, 1, &sks[1], b"m", &mut OsRng).unwrap();
         sig.responses[2][0] ^= 0x01;
-        assert_eq!(
-            verify(&secp, &pks, b"m", &sig).unwrap_err(),
-            Error::Invalid
-        );
+        assert_eq!(verify(&secp, &pks, b"m", &sig).unwrap_err(), Error::Invalid);
     }
 
     #[test]

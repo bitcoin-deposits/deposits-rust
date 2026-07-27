@@ -441,18 +441,15 @@ pub struct Node {
     /// Inbound updates and operator-driven commits flow into the
     /// actor's inbox; the actor emits broadcast / cosig requests /
     /// dispute-pipeline wakeups via the shared outbox.
-    pub(crate) ledger_actors:
-        Mutex<HashMap<String, ledger_actor::LedgerActorHandle>>,
+    pub(crate) ledger_actors: Mutex<HashMap<String, ledger_actor::LedgerActorHandle>>,
 
     /// Outbox sender shared with every actor in the pool. Held on
     /// `Node` so ledgers created post-startup (via `ledger open`,
     /// `import_ledger`, or inbound discovery) can lazy-spawn an
     /// actor without restarting the daemon. The matching receiver
     /// is parked in `actor_outbox_rx` until `run()` takes it.
-    pub(crate) actor_outbox_tx: tokio::sync::mpsc::UnboundedSender<(
-        String,
-        ledger_actor::LedgerOutbound,
-    )>,
+    pub(crate) actor_outbox_tx:
+        tokio::sync::mpsc::UnboundedSender<(String, ledger_actor::LedgerOutbound)>,
 
     /// Parked receiver for the actor outbox. `Node::new` doesn't
     /// spawn the drainer itself — the drainer needs `Arc<Node>` for
@@ -462,12 +459,8 @@ pub struct Node {
     /// `Arc::clone(self)` in scope) and spawns the drainer there.
     /// Wrapped in `Option` so `take()` consumes it on first run; a
     /// second call to `run()` would find `None` and skip spawning.
-    pub(crate) actor_outbox_rx: Mutex<Option<
-        tokio::sync::mpsc::UnboundedReceiver<(
-            String,
-            ledger_actor::LedgerOutbound,
-        )>,
-    >>,
+    pub(crate) actor_outbox_rx:
+        Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<(String, ledger_actor::LedgerOutbound)>>>,
 
     /// Whether deposit access control is enabled (DEPOSIT_ACCESS_CONTROL=true).
     /// When false, all deposit opens are allowed (denylist still checked).

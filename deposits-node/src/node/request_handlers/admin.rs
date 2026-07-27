@@ -179,7 +179,8 @@ impl Node {
             commitment: None,
         };
 
-        let batch = deposits_core::messages::LedgerOperation::Batch(vec![deposit_open, invoice_credit]);
+        let batch =
+            deposits_core::messages::LedgerOperation::Batch(vec![deposit_open, invoice_credit]);
         self.commit_operation(&ledger_id, batch)
             .await
             .map_err(|e| format!("commit open+fund batch: {}", e))?;
@@ -224,9 +225,15 @@ impl Node {
         let invoice_id = format!("buffer-fill-{}-{}", index, hex::encode(nonce));
         let payment_hash = sha256::Hash::hash(invoice_id.as_bytes()).to_byte_array();
 
-        self.credit_deposit(&entry.ledger_id, deposit_id, amount_msats, payment_hash, invoice_id)
-            .await
-            .map_err(|e| format!("credit_deposit: {}", e))
+        self.credit_deposit(
+            &entry.ledger_id,
+            deposit_id,
+            amount_msats,
+            payment_hash,
+            invoice_id,
+        )
+        .await
+        .map_err(|e| format!("credit_deposit: {}", e))
     }
 
     /// Drain an existing buffer deposit via synthetic InvoiceLock +
@@ -311,8 +318,7 @@ impl Node {
             witness: fulfill_witness,
             commitment: None,
         };
-        let batch =
-            deposits_core::messages::LedgerOperation::Batch(vec![lock_op, fulfill_op]);
+        let batch = deposits_core::messages::LedgerOperation::Batch(vec![lock_op, fulfill_op]);
         self.commit_operation(&entry.ledger_id, batch)
             .await
             .map_err(|e| format!("commit drain batch: {}", e))?;
@@ -379,7 +385,10 @@ impl Node {
             .get("ledger_id")
             .and_then(|v| v.as_str())
             .map(str::to_string);
-        match self.internal_buffer_open(ledger_override, index_override).await {
+        match self
+            .internal_buffer_open(ledger_override, index_override)
+            .await
+        {
             Ok(out) => {
                 let result = serde_json::json!({
                     "index": out.index,
@@ -570,10 +579,8 @@ impl Node {
             match cached {
                 Some(w) => Some(w),
                 None => {
-                    let dir = crate::ledger_wallet::LedgerWallet::ledger_dir(
-                        &self.data_dir,
-                        &ledger_id,
-                    );
+                    let dir =
+                        crate::ledger_wallet::LedgerWallet::ledger_dir(&self.data_dir, &ledger_id);
                     if dir.join("account_index.txt").exists() {
                         match self.ensure_ledger_wallet(&ledger_id) {
                             Ok(w) => Some(w),
@@ -680,7 +687,11 @@ impl Node {
                 _ => ads.push(serde_json::json!({ "ledger_id": lid, "advertised": false })),
             }
         }
-        (true, Some(serde_json::json!({ "ads": ads }).to_string()), None)
+        (
+            true,
+            Some(serde_json::json!({ "ads": ads }).to_string()),
+            None,
+        )
     }
 
     /// Admin: set advertisement terms (operator name/description, fee bps,
@@ -711,7 +722,12 @@ impl Node {
         {
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(&ledger_id) {
-                None => return refuse(format!("ledger {} not found", &ledger_id[..16.min(ledger_id.len())])),
+                None => {
+                    return refuse(format!(
+                        "ledger {} not found",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    ))
+                }
                 Some(arc) => {
                     let l = arc.read().unwrap();
                     if !matches!(l.role, deposits_core::ledger::LedgerRole::Operator) {
@@ -987,7 +1003,11 @@ impl Node {
         match crate::operator_drips::DripRegistry::load(&self.data_dir) {
             Ok(reg) => {
                 let plans = serde_json::to_value(&reg.plans).unwrap_or(serde_json::json!([]));
-                (true, Some(serde_json::json!({ "plans": plans }).to_string()), None)
+                (
+                    true,
+                    Some(serde_json::json!({ "plans": plans }).to_string()),
+                    None,
+                )
             }
             Err(e) => (false, None, Some(format!("load drips: {}", e))),
         }
@@ -1007,12 +1027,26 @@ impl Node {
         }
         let p = &request.params;
         let refuse = |m: String| (false, None, Some(m));
-        let alias = p.get("alias").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let ledger_id = p.get("ledger_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let alias = p
+            .get("alias")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ledger_id = p
+            .get("ledger_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let initial = p.get("initial_sats").and_then(|v| v.as_u64()).unwrap_or(0);
-        let decrement = p.get("decrement_sats").and_then(|v| v.as_u64()).unwrap_or(0);
+        let decrement = p
+            .get("decrement_sats")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let interval = p.get("interval_sec").and_then(|v| v.as_u64()).unwrap_or(0);
-        let fuzz = p.get("interval_fuzz_sec").and_then(|v| v.as_u64()).unwrap_or(0);
+        let fuzz = p
+            .get("interval_fuzz_sec")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         if alias.is_empty() || ledger_id.is_empty() {
             return refuse("alias and ledger_id are required".to_string());
@@ -1081,7 +1115,11 @@ impl Node {
         if let Err(e) = reg.save(&self.data_dir) {
             return refuse(format!("save drips: {}", e));
         }
-        (true, Some(serde_json::json!({ "created": alias }).to_string()), None)
+        (
+            true,
+            Some(serde_json::json!({ "created": alias }).to_string()),
+            None,
+        )
     }
 
     /// Admin: pause/resume a drip plan by alias (the auto-task skips paused
@@ -1149,7 +1187,11 @@ impl Node {
         if let Err(e) = reg.save(&self.data_dir) {
             return (false, None, Some(format!("save drips: {}", e)));
         }
-        (true, Some(serde_json::json!({ "removed": alias }).to_string()), None)
+        (
+            true,
+            Some(serde_json::json!({ "removed": alias }).to_string()),
+            None,
+        )
     }
 
     /// Admin: increase a buffer deposit's balance via a synthetic
@@ -1259,5 +1301,4 @@ impl Node {
         let result = serde_json::json!({ "buffers": out });
         (true, Some(result.to_string()), None)
     }
-
 }

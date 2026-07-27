@@ -78,9 +78,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let seed_path = seed_path.ok_or("--seed is required")?;
-    let seed_hex = std::fs::read_to_string(&seed_path)?
-        .trim()
-        .to_string();
+    let seed_hex = std::fs::read_to_string(&seed_path)?.trim().to_string();
     let seed_bytes = hex::decode(&seed_hex)?;
     if seed_bytes.len() != 32 {
         return Err(format!("seed must be 32 bytes; got {}", seed_bytes.len()).into());
@@ -95,7 +93,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(scan(
-        &xpriv, &secp, network, &esplora, gap, max_accounts, verbose,
+        &xpriv,
+        &secp,
+        network,
+        &esplora,
+        gap,
+        max_accounts,
+        verbose,
     ))
 }
 
@@ -116,7 +120,10 @@ async fn scan(
         "{:<48} {:<22} {:>14} {:>14} {:>14} {:>5}",
         "address", "path", "funded_sats", "spent_sats", "balance_sats", "txs"
     );
-    println!("{}", "─".repeat(48 + 1 + 22 + 1 + 14 + 1 + 14 + 1 + 14 + 1 + 5));
+    println!(
+        "{}",
+        "─".repeat(48 + 1 + 22 + 1 + 14 + 1 + 14 + 1 + 14 + 1 + 5)
+    );
 
     let mut totals = Totals::default();
 
@@ -136,7 +143,10 @@ async fn scan(
         )
         .await?;
         if verbose {
-            eprintln!("  m/{}  (terminated after {} empty addrs)", change, stretch_misses);
+            eprintln!(
+                "  m/{}  (terminated after {} empty addrs)",
+                change, stretch_misses
+            );
         }
     }
 
@@ -161,7 +171,15 @@ async fn scan(
             ];
             let before = totals.queries;
             let _ = scan_branch(
-                xpriv, secp, network, esplora, &http, prefix, gap, &mut totals, verbose,
+                xpriv,
+                secp,
+                network,
+                esplora,
+                &http,
+                prefix,
+                gap,
+                &mut totals,
+                verbose,
             )
             .await?;
             if totals.queries > before && totals.found_any_in_branch {

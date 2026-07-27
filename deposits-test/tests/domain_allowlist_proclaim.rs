@@ -68,19 +68,14 @@ async fn proclaim_unlocks_deposit_open() {
     let scratch = tempdir();
     let ephemeral_nsec = scratch.join("ephemeral.nsec");
     std::fs::write(&ephemeral_nsec, &ephemeral_sec_hex).unwrap();
-    let account_secret_key = bitcoin::secp256k1::SecretKey::from_slice(
-        &hex::decode(account_sec_hex.trim()).unwrap(),
-    )
-    .unwrap();
+    let account_secret_key =
+        bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(account_sec_hex.trim()).unwrap())
+            .unwrap();
 
     // Op0: ACL on, account on the allowlist (so the verifier accepts
     // its proclamation), no domain allowlist (the proclaim path
     // doesn't need one).
-    let _guard = Op0AccessControl::enable_with_attestation(
-        &[&account_xonly],
-        &[],
-        &verifier_xonly,
-    );
+    let _guard = Op0AccessControl::enable_with_attestation(&[&account_xonly], &[], &verifier_xonly);
 
     // Connect a Nostr transport signing as the account_key. The
     // verifier subscribes on both the ledgers and messaging relays
@@ -124,7 +119,8 @@ async fn proclaim_unlocks_deposit_open() {
     );
     eprintln!(
         "[proclaim] attestation issued: {}",
-        &resp.get("attestation_event_id")
+        &resp
+            .get("attestation_event_id")
             .and_then(|v| v.as_str())
             .unwrap_or("(missing)")[..16]
     );
@@ -145,7 +141,8 @@ async fn proclaim_unlocks_deposit_open() {
         &["--relay", relay_ledgers()],
     );
     assert!(
-        ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),
+        ok && (out.contains("Deposit account created")
+            || out.contains("Deposit account already exists")),
         "deposit_open should have been accepted via the proclaim attestation:\n{}",
         out
     );

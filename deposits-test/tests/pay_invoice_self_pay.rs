@@ -97,10 +97,9 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
         out2
     );
 
-    let deposits: Vec<serde_json::Value> = serde_json::from_str(
-        &std::fs::read_to_string(wdir.join("deposits.json")).unwrap(),
-    )
-    .unwrap();
+    let deposits: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(wdir.join("deposits.json")).unwrap())
+            .unwrap();
     let send = deposits
         .iter()
         .find(|d| d["alias"].as_str() == Some("send"))
@@ -131,8 +130,7 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
     std::thread::sleep(std::time::Duration::from_secs(1));
 
     // ── Wallet's Nostr signing identity ───────────────────────────────
-    let user_secret_key =
-        SecretKey::from_slice(&hex::decode(sec_hex.trim()).unwrap()).unwrap();
+    let user_secret_key = SecretKey::from_slice(&hex::decode(sec_hex.trim()).unwrap()).unwrap();
     let transport = NostrTransportBuilder::new(user_secret_key)
         .relay(relay_ledgers())
         .relay(relay_messaging())
@@ -197,9 +195,8 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
     let send_sk = derive_deposit_secret(&seed, bitcoin::Network::Regtest, send_key_index);
 
     let mut send_deposit_id = [0u8; 16];
-    send_deposit_id.copy_from_slice(
-        &hex::decode(&send_deposit_id_hex).expect("send_deposit_id hex"),
-    );
+    send_deposit_id
+        .copy_from_slice(&hex::decode(&send_deposit_id_hex).expect("send_deposit_id hex"));
     let amount_msat = amount_sats * 1000;
     let op_nonce = deposits_core::signing::fresh_op_nonce();
     let op_expiry = u32::MAX;
@@ -287,7 +284,8 @@ async fn pay_invoice_self_pay_returns_real_preimage() {
         .expect("preimage 32 bytes");
     let computed_hash = *sha256::Hash::hash(&preimage_bytes).as_byte_array();
     assert_eq!(
-        computed_hash, payment_hash,
+        computed_hash,
+        payment_hash,
         "preimage doesn't hash to payment_hash — that's not real proof of payment.\n\
          preimage:    {}\n\
          payment_hash: {}\n\

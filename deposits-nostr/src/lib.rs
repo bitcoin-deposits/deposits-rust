@@ -675,16 +675,18 @@ fn nip04_decrypt_with_shared_key(
     shared_key: &[u8; 32],
     ciphertext: &str,
 ) -> Result<String, &'static str> {
+    use ::base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     use aes::cipher::block_padding::Pkcs7;
     use aes::cipher::{BlockDecryptMut, KeyIvInit};
-    use ::base64::{engine::general_purpose::STANDARD as B64, Engine as _};
     type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
 
     let parts: Vec<&str> = ciphertext.split("?iv=").collect();
     if parts.len() != 2 {
         return Err("NIP-04: invalid ciphertext format (no `?iv=`)");
     }
-    let ct = B64.decode(parts[0]).map_err(|_| "NIP-04: ciphertext not base64")?;
+    let ct = B64
+        .decode(parts[0])
+        .map_err(|_| "NIP-04: ciphertext not base64")?;
     let iv = B64.decode(parts[1]).map_err(|_| "NIP-04: iv not base64")?;
     if iv.len() != 16 {
         return Err("NIP-04: iv must be 16 bytes");
@@ -832,9 +834,7 @@ impl AdvertisedCapabilities {
     /// did not publish capabilities; assume the protocol-mandated minimum."
     /// Used as the serde `skip_serializing_if` predicate on the field.
     pub fn is_empty(&self) -> bool {
-        self.obligations.is_empty()
-            && self.state_preds.is_empty()
-            && self.value_fns.is_empty()
+        self.obligations.is_empty() && self.state_preds.is_empty() && self.value_fns.is_empty()
     }
 
     /// Whether the operator has advertised support for the named obligation
@@ -1320,7 +1320,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::Deterrence,
                 honesty: HonestyAssumption::OperatorOnly,
-                time_profile: TimeProfile { happy_path_blocks: 6, worst_case_blocks: 720 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 6,
+                    worst_case_blocks: 720,
+                },
             },
             // On-chain withdrawal: operator broadcasts; deterrence-only.
             GuaranteeRegime {
@@ -1329,7 +1332,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::Deterrence,
                 honesty: HonestyAssumption::OperatorOnly,
-                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 1,
+                    worst_case_blocks: 720,
+                },
             },
             // Invoice receive: today's protocol is deterrence-only. Wallets
             // hold the payer's preimage as evidence; one uncredited payment
@@ -1341,7 +1347,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::Deterrence,
                 honesty: HonestyAssumption::OperatorAndQuorumAndLn,
-                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 1,
+                    worst_case_blocks: 720,
+                },
             },
             // Invoice pay: operator-routed through their LN node. Advisory
             // outcome (success / fail / stuck), Deterrence on the debit
@@ -1352,7 +1361,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::Deterrence,
                 honesty: HonestyAssumption::OperatorAndQuorumAndLn,
-                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 144 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 1,
+                    worst_case_blocks: 144,
+                },
             },
             // Same-ledger transfer: settlement-atomic — both deposits are
             // updated in a single quorum-cosigned ledger update.
@@ -1362,7 +1374,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::SettlementAtomic,
                 honesty: HonestyAssumption::OperatorAndQuorum,
-                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 6 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 1,
+                    worst_case_blocks: 6,
+                },
             },
             // Cross-ledger via courier: HTLC-style (PTLC after #171), so
             // the courier's commitment timeout bounds worst-case loss.
@@ -1372,7 +1387,10 @@ impl LedgerAdvertisement {
                 max_msats: u64::MAX,
                 shape: GuaranteeShape::Deterrence,
                 honesty: HonestyAssumption::OperatorAndCourier,
-                time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 144 },
+                time_profile: TimeProfile {
+                    happy_path_blocks: 1,
+                    worst_case_blocks: 144,
+                },
             },
         ]
     }
@@ -1404,7 +1422,10 @@ impl LedgerAdvertisement {
             max_msats: u64::MAX,
             shape: GuaranteeShape::SettlementAtomic,
             honesty: HonestyAssumption::OperatorAndQuorum,
-            time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 6 },
+            time_profile: TimeProfile {
+                happy_path_blocks: 1,
+                worst_case_blocks: 6,
+            },
         });
         // Deterrence fallback for offline wallets that can't pre-cosign.
         rows.push(GuaranteeRegime {
@@ -1413,7 +1434,10 @@ impl LedgerAdvertisement {
             max_msats: u64::MAX,
             shape: GuaranteeShape::Deterrence,
             honesty: HonestyAssumption::OperatorAndQuorumAndLn,
-            time_profile: TimeProfile { happy_path_blocks: 1, worst_case_blocks: 720 },
+            time_profile: TimeProfile {
+                happy_path_blocks: 1,
+                worst_case_blocks: 720,
+            },
         });
         rows
     }
@@ -1734,15 +1758,25 @@ impl NostrTransport {
         let since = nostr_sdk::Timestamp::now() - 5;
         vec![
             // Requests (ephemeral kind 20101)
-            Filter::new().kind(Kind::Custom(KIND_LEDGER_REQUEST)).since(since),
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_REQUEST))
+                .since(since),
             // Responses (ephemeral kind 20102)
-            Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE)).since(since),
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_RESPONSE))
+                .since(since),
             // Updates (durable kind 9100)
-            Filter::new().kind(Kind::Custom(KIND_LEDGER_UPDATE)).since(since),
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+                .since(since),
             // Disputes (durable kind 9103)
-            Filter::new().kind(Kind::Custom(KIND_LEDGER_DISPUTE)).since(since),
+            Filter::new()
+                .kind(Kind::Custom(KIND_LEDGER_DISPUTE))
+                .since(since),
             // Fraud proofs (durable kind 9101)
-            Filter::new().kind(Kind::Custom(KIND_FRAUD_PROOF)).since(since),
+            Filter::new()
+                .kind(Kind::Custom(KIND_FRAUD_PROOF))
+                .since(since),
         ]
     }
 
@@ -1941,7 +1975,9 @@ impl NostrTransport {
         &self,
         update: &SignedLedgerUpdate,
     ) -> Result<String, Error> {
-        self.broadcast_ledger_update_at(update, None).await.map(|(id, _ts)| id)
+        self.broadcast_ledger_update_at(update, None)
+            .await
+            .map(|(id, _ts)| id)
     }
 
     /// Like `broadcast_ledger_update` but lets the caller pin the
@@ -2000,7 +2036,8 @@ impl NostrTransport {
             // monitoring) match a credit back to the originating BOLT11
             // without TLV-decoding the body.
             if let deposits_protocol::messages::LedgerOperation::InvoiceCredit {
-                payment_hash, ..
+                payment_hash,
+                ..
             } = &op
             {
                 builder = builder.tag(Tag::custom(
@@ -3326,10 +3363,7 @@ impl NostrTransport {
     /// NIP-04 decrypt path (`nip04_shared_key`). Gated behind the
     /// `signer` feature; wallet-only consumers don't pull this in.
     #[cfg(feature = "signer")]
-    pub fn set_signer(
-        &self,
-        signer: std::sync::Arc<dyn deposits_signer_api::Signer>,
-    ) {
+    pub fn set_signer(&self, signer: std::sync::Arc<dyn deposits_signer_api::Signer>) {
         if let Ok(mut guard) = self.signer.lock() {
             *guard = Some(signer);
         }
@@ -3386,20 +3420,18 @@ impl NostrTransport {
             let mut compressed = [0u8; 33];
             compressed[0] = 0x02; // even Y
             compressed[1..].copy_from_slice(&sender_bytes);
-            let sender_full = bitcoin::secp256k1::PublicKey::from_slice(&compressed).map_err(|e| {
-                Error::Nostr(format!("NIP-04 fallback: lift sender pubkey: {}", e))
-            })?;
+            let sender_full = bitcoin::secp256k1::PublicKey::from_slice(&compressed)
+                .map_err(|e| Error::Nostr(format!("NIP-04 fallback: lift sender pubkey: {}", e)))?;
 
-            let shared_key = signer.nip04_shared_key(&sender_full).map_err(|e| {
-                Error::Nostr(format!("NIP-04 fallback ECDH via signer: {}", e))
-            })?;
+            let shared_key = signer
+                .nip04_shared_key(&sender_full)
+                .map_err(|e| Error::Nostr(format!("NIP-04 fallback ECDH via signer: {}", e)))?;
 
             // AES-256-CBC decrypt with the shared key. Mirrors what
             // nostr/nips/nip04.rs::decrypt_to_bytes does after
             // `util::generate_shared_key`.
-            return nip04_decrypt_with_shared_key(&shared_key, ciphertext).map_err(|e| {
-                Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e))
-            });
+            return nip04_decrypt_with_shared_key(&shared_key, ciphertext)
+                .map_err(|e| Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e)));
         }
 
         #[cfg(not(feature = "signer"))]
@@ -3482,15 +3514,12 @@ impl NostrTransport {
         // `signer` feature). The Signer-using branch is gated behind the
         // feature so wallet-only consumers don't pull deposits-signer-api.
         #[cfg(feature = "signer")]
-        let event = if let Some(signer) =
-            self.signer.lock().ok().and_then(|g| g.clone())
-        {
+        let event = if let Some(signer) = self.signer.lock().ok().and_then(|g| g.clone()) {
             // Operator xonly → nostr_sdk::PublicKey (same 32-byte encoding).
             let xonly_secp = signer.xonly_pubkey();
             let xonly_bytes = xonly_secp.serialize();
-            let operator_xonly = nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
-                Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
-            })?;
+            let operator_xonly = nostr_sdk::PublicKey::from_slice(&xonly_bytes)
+                .map_err(|e| Error::Nostr(format!("operator xonly → nostr pubkey: {}", e)))?;
 
             let unsigned = builder.build(operator_xonly);
             let id = unsigned.id.ok_or_else(|| {
@@ -3505,12 +3534,10 @@ impl NostrTransport {
                 Error::Nostr(format!("signer bip340_sign for advertisement: {}", e))
             })?;
             let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
-                .map_err(|e| {
-                    Error::Nostr(format!("parse advertisement schnorr sig: {}", e))
-                })?;
-            unsigned.add_signature(sig).map_err(|e| {
-                Error::Nostr(format!("attach signature to advertisement: {}", e))
-            })?
+                .map_err(|e| Error::Nostr(format!("parse advertisement schnorr sig: {}", e)))?;
+            unsigned
+                .add_signature(sig)
+                .map_err(|e| Error::Nostr(format!("attach signature to advertisement: {}", e)))?
         } else {
             builder
                 .sign_with_keys(&self.keys)
@@ -3554,9 +3581,8 @@ impl NostrTransport {
         {
             if let Some(signer) = self.signer.lock().ok().and_then(|g| g.clone()) {
                 let xonly_bytes = signer.xonly_pubkey().serialize();
-                return nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
-                    Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
-                });
+                return nostr_sdk::PublicKey::from_slice(&xonly_bytes)
+                    .map_err(|e| Error::Nostr(format!("operator xonly → nostr pubkey: {}", e)));
             }
         }
         Ok(self.keys.public_key())
@@ -3570,10 +3596,8 @@ impl NostrTransport {
         {
             if let Some(signer) = self.signer.lock().ok().and_then(|g| g.clone()) {
                 let xonly_bytes = signer.xonly_pubkey().serialize();
-                let operator_xonly =
-                    nostr_sdk::PublicKey::from_slice(&xonly_bytes).map_err(|e| {
-                        Error::Nostr(format!("operator xonly → nostr pubkey: {}", e))
-                    })?;
+                let operator_xonly = nostr_sdk::PublicKey::from_slice(&xonly_bytes)
+                    .map_err(|e| Error::Nostr(format!("operator xonly → nostr pubkey: {}", e)))?;
                 let unsigned = builder.build(operator_xonly);
                 let id = unsigned.id.ok_or_else(|| {
                     Error::Nostr("UnsignedEvent::build did not populate id".to_string())
@@ -3582,9 +3606,9 @@ impl NostrTransport {
                 let ctx = deposits_signer_api::SignContext::no_ledger(
                     deposits_signer_api::SigPurpose::NostrEvent,
                 );
-                let sig_bytes = signer.bip340_sign(&ctx, &id_bytes).map_err(|e| {
-                    Error::Nostr(format!("signer bip340_sign: {}", e))
-                })?;
+                let sig_bytes = signer
+                    .bip340_sign(&ctx, &id_bytes)
+                    .map_err(|e| Error::Nostr(format!("signer bip340_sign: {}", e)))?;
                 let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
                     .map_err(|e| Error::Nostr(format!("parse schnorr sig: {}", e)))?;
                 return unsigned
@@ -3614,7 +3638,12 @@ impl NostrTransport {
     /// was found on the relay (already gone, or signed by a different key).
     pub async fn delete_ledger_advertisement(&self, ledger_id: &str) -> Result<String, Error> {
         let author = self.operator_author_pubkey()?;
-        let coordinate = format!("{}:{}:{}", KIND_LEDGER_ADVERTISE, author.to_hex(), ledger_id);
+        let coordinate = format!(
+            "{}:{}:{}",
+            KIND_LEDGER_ADVERTISE,
+            author.to_hex(),
+            ledger_id
+        );
 
         // Drop the local cache first so a concurrent read can't re-cache it.
         if let Ok(mut cache) = self.ad_cache.write() {
@@ -3682,11 +3711,7 @@ impl NostrTransport {
     /// piggyback on the price feed to learn the tip without polling
     /// another source. `0` means "unknown" — wallets ignore the
     /// height in that case.
-    pub async fn publish_price(
-        &self,
-        price_usd: f64,
-        block_height: u32,
-    ) -> Result<String, Error> {
+    pub async fn publish_price(&self, price_usd: f64, block_height: u32) -> Result<String, Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -4174,10 +4199,7 @@ impl NostrTransport {
     /// refuse opening a deposit on an operator whose quorum has
     /// already lapsed without trusting the operator's own
     /// advertisement.
-    pub async fn fetch_latest_quorum_expiry(
-        &self,
-        ledger_id: &str,
-    ) -> Result<Option<u32>, Error> {
+    pub async fn fetch_latest_quorum_expiry(&self, ledger_id: &str) -> Result<Option<u32>, Error> {
         use deposits_protocol::LedgerOperation;
 
         let updates = self.fetch_ledger_updates(ledger_id).await?;
@@ -4307,7 +4329,8 @@ impl NostrTransport {
         for event in events.iter() {
             // Updates are base64-encoded SignedLedgerUpdate
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                {
                     updates.push(update);
                 }
             }
@@ -4384,7 +4407,8 @@ impl NostrTransport {
 
         for event in events.iter() {
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                {
                     if update.sequence_number == seq {
                         return Ok(Some(update));
                     }
@@ -4418,7 +4442,8 @@ impl NostrTransport {
         let mut updates = Vec::new();
         for event in events.iter() {
             if let Ok(bytes) = BASE64.decode(&event.content) {
-                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                {
                     if update.sequence_number >= from_seq && update.sequence_number <= to_seq {
                         updates.push(update);
                     }
@@ -5086,8 +5111,7 @@ impl NostrTransport {
                     .and_then(|g| *g)
                     .map(|pk| pk.to_hex());
                 let addressed_to_us = event.tags.iter().any(|tag| {
-                    if tag.kind()
-                        != TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
+                    if tag.kind() != TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::P))
                     {
                         return false;
                     }
@@ -5280,9 +5304,7 @@ impl NostrTransport {
                         &seal_pubkey,
                         seal["content"].as_str().unwrap_or(""),
                     )
-                    .map_err(|e| {
-                        Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e))
-                    })?;
+                    .map_err(|e| Error::Nostr(format!("Gift unwrap seal decrypt failed: {}", e)))?;
                 let rumor: serde_json::Value = serde_json::from_str(&rumor_json)
                     .map_err(|e| Error::Nostr(format!("Gift unwrap rumor parse failed: {}", e)))?;
 
@@ -5353,9 +5375,7 @@ impl NostrTransport {
         // Signature verification + Kind 10301 policy check happen in the
         // handler — we just surface the raw values here.
         let subkey_account = tags.iter().find_map(|tag| {
-            if tag.kind()
-                == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::V))
-            {
+            if tag.kind() == TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::V)) {
                 tag.content().map(|s| s.to_string())
             } else {
                 None
@@ -5487,8 +5507,8 @@ impl NostrTransport {
             }
         };
 
-        let mut response: LedgerResponse = serde_json::from_str(&response_text).unwrap_or_else(
-            |_| LedgerResponse {
+        let mut response: LedgerResponse =
+            serde_json::from_str(&response_text).unwrap_or_else(|_| LedgerResponse {
                 success: status == "ok",
                 result: None,
                 error: Some("Failed to parse response".to_string()),
@@ -5497,8 +5517,7 @@ impl NostrTransport {
                 event_id: String::new(),
                 timestamp: 0,
                 responder_pubkey: None,
-            },
-        );
+            });
 
         response.request_id = request_id.clone();
         response.ledger_id = ledger_id;
@@ -5541,8 +5560,9 @@ impl NostrTransport {
     }
 
     fn process_fraud_proof(&self, event: &Event) -> Result<FraudProofEvent, Error> {
-        let broadcast: deposits_protocol::fraud::FraudBroadcast = serde_json::from_str(&event.content)
-            .map_err(|e| Error::Serialization(format!("Failed to parse fraud proof: {}", e)))?;
+        let broadcast: deposits_protocol::fraud::FraudBroadcast =
+            serde_json::from_str(&event.content)
+                .map_err(|e| Error::Serialization(format!("Failed to parse fraud proof: {}", e)))?;
 
         // Structural verification (chain links connect properly)
         if let Err(e) = broadcast.verify_chain_structure() {
@@ -5715,8 +5735,14 @@ mod custody_lottery_reveal_tests {
         assert!(json.contains("\"ledger_id\""));
         assert!(json.contains("\"preimage_hex\""));
         assert!(json.contains("\"signature\""));
-        assert!(!json.contains("\"event_id\""), "event_id must be #[serde(skip)]");
-        assert!(!json.contains("\"timestamp\""), "timestamp must be #[serde(skip)]");
+        assert!(
+            !json.contains("\"event_id\""),
+            "event_id must be #[serde(skip)]"
+        );
+        assert!(
+            !json.contains("\"timestamp\""),
+            "timestamp must be #[serde(skip)]"
+        );
 
         let parsed: CustodyLotteryReveal = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.member_pubkey, r.member_pubkey);
@@ -5762,8 +5788,8 @@ mod ledger_advertisement_tests {
             "regtest".into(),
         );
         ad.annual_fee_bps = 50;
-        ad.annualized_fixed_msats = 2_500_000;   // 2500 sats/year
-        ad.fee_period_blocks = 2016;             // ≈ 2 weeks → 26 periods/year
+        ad.annualized_fixed_msats = 2_500_000; // 2500 sats/year
+        ad.fee_period_blocks = 2016; // ≈ 2 weeks → 26 periods/year
 
         let (bps, fixed_per_period) = ad.minimum_fees();
         assert_eq!(bps, 50);
@@ -5802,7 +5828,10 @@ mod relay_deaf_guard_tests {
         );
         // Every filter must carry a `since` so a refresh only pulls a tiny
         // forward window, not a full history re-dump (which risks EAGAIN drops).
-        assert!(filters.iter().all(|f| f.since.is_some()), "all filters need a `since`");
+        assert!(
+            filters.iter().all(|f| f.since.is_some()),
+            "all filters need a `since`"
+        );
     }
 }
 

@@ -511,9 +511,9 @@ pub fn verify_stale_cosignature(
     //     at some sequence S < member_later_sequence, AND the member has
     //     advanced past it at a block_height ≤ the accused's stale-update
     //     block_height (so at the time of cosign, the member was past S).
-    let s_match = member_history.iter().find(|u| {
-        u.chain_hash() == declared_bytes && u.sequence_number < *member_later_sequence
-    });
+    let s_match = member_history
+        .iter()
+        .find(|u| u.chain_hash() == declared_bytes && u.sequence_number < *member_later_sequence);
     let s = s_match.ok_or_else(|| {
         format!(
             "declared_member_hash {} doesn't appear in member history before seq {}",
@@ -580,8 +580,7 @@ pub fn verify_uncredited_lightning(
     };
 
     let payment_hash_bytes = parse_hex32(payment_hash, "payment_hash")?;
-    let cosigner_ledger_hash_bytes =
-        parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
+    let cosigner_ledger_hash_bytes = parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
     let preimage_bytes = parse_hex32(preimage, "preimage")?;
 
     // (1) hash(preimage) == payment_hash.
@@ -635,12 +634,7 @@ pub fn verify_uncredited_lightning(
     let _proof_update = accused_history
         .iter()
         .find(|u| u.sequence_number == *proof_sequence)
-        .ok_or_else(|| {
-            format!(
-                "proof_sequence {} not in accused history",
-                proof_sequence
-            )
-        })?;
+        .ok_or_else(|| format!("proof_sequence {} not in accused history", proof_sequence))?;
 
     // (3) no InvoiceCredit / InvoiceFulfill for this payment_hash
     //     anywhere at seq ≤ proof_sequence. Recurses into Batch contents
@@ -902,10 +896,8 @@ pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
     };
 
     // (1) Decode.
-    let bytes_a = hex::decode(update_a_hex)
-        .map_err(|e| format!("update_a hex decode: {}", e))?;
-    let bytes_b = hex::decode(update_b_hex)
-        .map_err(|e| format!("update_b hex decode: {}", e))?;
+    let bytes_a = hex::decode(update_a_hex).map_err(|e| format!("update_a hex decode: {}", e))?;
+    let bytes_b = hex::decode(update_b_hex).map_err(|e| format!("update_b hex decode: {}", e))?;
     let update_a = crate::types::SignedLedgerUpdate::tlv_decode(&bytes_a)
         .map_err(|e| format!("update_a TLV decode: {:?}", e))?;
     let update_b = crate::types::SignedLedgerUpdate::tlv_decode(&bytes_b)
@@ -930,8 +922,8 @@ pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
             hex::encode(&update_b.ledger_id[..8])
         ));
     }
-    let outer_ledger_bytes = hex::decode(&proof.ledger_id)
-        .map_err(|e| format!("outer ledger_id hex: {}", e))?;
+    let outer_ledger_bytes =
+        hex::decode(&proof.ledger_id).map_err(|e| format!("outer ledger_id hex: {}", e))?;
     if outer_ledger_bytes.len() != 32 || outer_ledger_bytes[..] != update_a.ledger_id[..] {
         return Err(format!(
             "outer ledger_id {} ≠ updates' ledger_id {}",
@@ -976,8 +968,7 @@ pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
         .map_err(|e| format!("update_b signature verification: {}", e))?;
 
     // (7) Accused matches the operator that signed.
-    let accused_bytes = hex::decode(&proof.accused)
-        .map_err(|e| format!("accused hex: {}", e))?;
+    let accused_bytes = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     if accused_bytes != update_a.operator_id.serialize() {
         return Err(format!(
             "outer accused {} ≠ updates' operator_id {} — impersonation \
@@ -1049,8 +1040,8 @@ pub fn verify_non_conforming_cosignature(
     };
 
     // (2) Decode the inline fault update + sanity checks.
-    let fault_update_bytes = hex::decode(fault_update_hex)
-        .map_err(|e| format!("fault_update_hex decode: {}", e))?;
+    let fault_update_bytes =
+        hex::decode(fault_update_hex).map_err(|e| format!("fault_update_hex decode: {}", e))?;
     let fault_update = crate::types::SignedLedgerUpdate::tlv_decode(&fault_update_bytes)
         .map_err(|e| format!("fault_update TLV decode: {:?}", e))?;
 
@@ -1060,8 +1051,8 @@ pub fn verify_non_conforming_cosignature(
             fault_sequence, fault_update.sequence_number
         ));
     }
-    let fault_ledger_bytes = hex::decode(fault_ledger_id)
-        .map_err(|e| format!("fault_ledger_id hex: {}", e))?;
+    let fault_ledger_bytes =
+        hex::decode(fault_ledger_id).map_err(|e| format!("fault_ledger_id hex: {}", e))?;
     if fault_ledger_bytes.len() != 32 || fault_ledger_bytes[..] != fault_update.ledger_id[..] {
         return Err(format!(
             "fault_ledger_id {} ≠ inline update.ledger_id {}",
@@ -1078,8 +1069,7 @@ pub fn verify_non_conforming_cosignature(
         .map_err(|e| format!("fault update operator_signature: {}", e))?;
 
     // (3) Accused's key appears as operator_id OR cosigner.
-    let accused_bytes = hex::decode(&proof.accused)
-        .map_err(|e| format!("accused hex: {}", e))?;
+    let accused_bytes = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     if accused_bytes.len() != 33 {
         return Err(format!(
             "accused pubkey must be 33-byte compressed: got {} bytes",
@@ -1160,9 +1150,9 @@ pub fn verify_non_conforming_cosignature(
         }
         let op = LedgerOperation::tlv_decode(&u.message)
             .map_err(|e| format!("replay decode at seq {}: {}", u.sequence_number, e))?;
-        state.apply_in_place(&op).map_err(|e| {
-            format!("replay apply at seq {}: {:?}", u.sequence_number, e)
-        })?;
+        state
+            .apply_in_place(&op)
+            .map_err(|e| format!("replay apply at seq {}: {:?}", u.sequence_number, e))?;
     }
 
     // (6) Apply the fault update through the conformance pipeline.
@@ -1226,8 +1216,8 @@ pub fn verify_non_conforming_update(
     };
 
     // (1) Decode the inline fault update.
-    let bytes = hex::decode(fault_update_hex)
-        .map_err(|e| format!("fault_update hex decode: {}", e))?;
+    let bytes =
+        hex::decode(fault_update_hex).map_err(|e| format!("fault_update hex decode: {}", e))?;
     let fault = crate::types::SignedLedgerUpdate::tlv_decode(&bytes)
         .map_err(|e| format!("fault_update TLV decode: {:?}", e))?;
 
@@ -1425,9 +1415,7 @@ pub fn verify_winner_collateral_deviation(
             ..
         } => (target_reserves, replacement_collateral),
         _ => {
-            return Err(
-                "winner_armed_update operation is not DisputeArmed".into()
-            );
+            return Err("winner_armed_update operation is not DisputeArmed".into());
         }
     };
     let declared = declared.ok_or_else(|| {
@@ -1535,8 +1523,7 @@ pub fn verify_uncredited_onchain(
 
     let txid_bytes = parse_hex32(txid, "txid")?;
     let offer_id_bytes = parse_hex32(offer_id, "offer_id")?;
-    let cosigner_ledger_hash_bytes =
-        parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
+    let cosigner_ledger_hash_bytes = parse_hex32(cosigner_ledger_hash, "cosigner_ledger_hash")?;
 
     // (0) cosignature on the offer is a valid BIP-340 schnorr sig from
     //     cosigner_pubkey over the canonical offer signing message.
@@ -1592,12 +1579,7 @@ pub fn verify_uncredited_onchain(
     let proof_update = accused_history
         .iter()
         .find(|u| u.sequence_number == *proof_sequence)
-        .ok_or_else(|| {
-            format!(
-                "proof_sequence {} not in accused history",
-                proof_sequence
-            )
-        })?;
+        .ok_or_else(|| format!("proof_sequence {} not in accused history", proof_sequence))?;
     let proof_height = block_oracle
         .confirms(&proof_update.block_hash)
         .ok_or_else(|| {
@@ -1933,11 +1915,7 @@ pub fn verify_fraud_broadcast(
             // only land updates that pass their own conformance check,
             // so an honest update won't fire any violation regardless
             // of authorizer choice.
-            verify_non_conforming_cosignature(
-                proof,
-                &fault_history,
-                &crate::types::DenyAll,
-            )?;
+            verify_non_conforming_cosignature(proof, &fault_history, &crate::types::DenyAll)?;
         }
     }
 

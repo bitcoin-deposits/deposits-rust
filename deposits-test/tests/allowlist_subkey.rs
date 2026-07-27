@@ -50,17 +50,11 @@ fn allowlist_subkey_resolves_to_allowlisted_account() {
     let acct_wdir = tempdir();
 
     // Publish the Kind 10301 attestation.
-    let att_sig =
-        wallet_attest(&sub_xonly, &nsec_acct, &acct_wdir).expect("attest should succeed");
+    let att_sig = wallet_attest(&sub_xonly, &nsec_acct, &acct_wdir).expect("attest should succeed");
 
     // --- Case 4a: subkey signs with v/va tags → accepted via DEP-04 resolution ---
     let sub_wdir = tempdir();
-    let delegation_args: &[&str] = &[
-        "--subkey-of",
-        &acct_xonly,
-        "--attestation-sig",
-        &att_sig,
-    ];
+    let delegation_args: &[&str] = &["--subkey-of", &acct_xonly, "--attestation-sig", &att_sig];
     let (_ok, out) = wallet_open(&ledger, "sub-a", &nsec_sub, &sub_wdir, delegation_args);
     assert!(
         out.contains("Deposit account created") || out.contains("Deposit account already exists"),

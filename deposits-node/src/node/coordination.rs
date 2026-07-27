@@ -336,7 +336,10 @@ impl Node {
         let queued = queue_start.elapsed();
         metrics::record_cosign_phase("queue", queued);
         if queued.as_millis() > 50 {
-            tracing::debug!(queued_ms = queued.as_millis() as u64, "cosign permit acquired after queue wait");
+            tracing::debug!(
+                queued_ms = queued.as_millis() as u64,
+                "cosign permit acquired after queue wait"
+            );
         }
 
         // Compute cosign data

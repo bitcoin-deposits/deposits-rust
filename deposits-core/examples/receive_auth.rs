@@ -80,8 +80,12 @@ fn main() {
             m
         },
     };
-    let release_ok =
-        authorizer.authorize_receive(&descriptor, &deposit_id, Some(&transfer_id), &release_witness);
+    let release_ok = authorizer.authorize_receive(
+        &descriptor,
+        &deposit_id,
+        Some(&transfer_id),
+        &release_witness,
+    );
     assert!(release_ok, "transfer-release receive must authorize");
     println!("=== transfer-release ===\nverdict: AUTHORIZED ✓\n");
 
@@ -94,9 +98,6 @@ fn main() {
         Some(&other_transfer_id),
         &release_witness,
     );
-    assert!(
-        !replayed_release,
-        "cross-transfer replay must be rejected"
-    );
+    assert!(!replayed_release, "cross-transfer replay must be rejected");
     println!("=== cross-transfer replay ===\nverdict: REJECTED ✓ (signature bound to original transfer_id)");
 }

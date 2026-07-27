@@ -93,9 +93,16 @@ fn fraud_proof_equivocation_drives_confiscation() {
     // `danger fork-update` needs every cosigner's seed. The victim
     // helper already enrolled the cosigners we picked, so use those
     // op indices directly.
-    let cosigner_op_indices: Vec<usize> =
-        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
-    eprintln!("[setup] accused=op{}  ledger={}…", accused_op_idx, &accused_ledger[..16]);
+    let cosigner_op_indices: Vec<usize> = victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
+    eprintln!(
+        "[setup] accused=op{}  ledger={}…",
+        accused_op_idx,
+        &accused_ledger[..16]
+    );
     eprintln!("[setup] cosigner ops: {:?}", cosigner_op_indices);
 
     // ── 2. Run `danger fork-update` with all cosigner seeds ──
@@ -113,10 +120,7 @@ fn fraud_proof_equivocation_drives_confiscation() {
         .args(["--seed", &op_seed(accused_op_idx)])
         .args(["--name", &op_name(accused_op_idx)])
         .args(["--network", "regtest"])
-        .args([
-            "--data-dir",
-            op_data_dir(accused_op_idx).to_str().unwrap(),
-        ])
+        .args(["--data-dir", op_data_dir(accused_op_idx).to_str().unwrap()])
         .args(["--esplora", ELECTRS_URL])
         .args(["--relay", relay_ledgers()])
         .output()
@@ -152,10 +156,8 @@ fn fraud_proof_equivocation_drives_confiscation() {
          older build of deposits-node?",
     );
     let bytes_b = pluck("U_B tlv_hex").expect("missing `U_B tlv_hex=...` line");
-    let update_a = SignedLedgerUpdate::tlv_decode(&bytes_a)
-        .expect("decode U_A from danger stdout");
-    let update_b = SignedLedgerUpdate::tlv_decode(&bytes_b)
-        .expect("decode U_B from danger stdout");
+    let update_a = SignedLedgerUpdate::tlv_decode(&bytes_a).expect("decode U_A from danger stdout");
+    let update_b = SignedLedgerUpdate::tlv_decode(&bytes_b).expect("decode U_B from danger stdout");
     assert_eq!(
         update_a.sequence_number, update_b.sequence_number,
         "fork-update produced two updates at different seqs — danger bug"
@@ -193,13 +195,8 @@ fn fraud_proof_equivocation_drives_confiscation() {
     );
 
     // ── 5. Embed proof_hash via DEP-12 delivery_embed on a peer ──
-    let embed_update = embed_proof_hash(
-        &node,
-        accused_op_idx,
-        peer_op,
-        &accused_ledger,
-        proof_hash,
-    );
+    let embed_update =
+        embed_proof_hash(&node, accused_op_idx, peer_op, &accused_ledger, proof_hash);
     let broadcast = FraudBroadcast {
         proof,
         embedding: ProofEmbedding {
@@ -257,8 +254,11 @@ fn equivocation_auto_emits_and_confiscates() {
         }
     };
     let accused_ledger = victim.victim_ledger.clone();
-    let cosigner_op_indices: Vec<usize> =
-        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let cosigner_op_indices: Vec<usize> = victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
     eprintln!(
         "[setup] accused=op{} ledger={}… cosigners={:?}",
         accused_op_idx,
@@ -270,8 +270,11 @@ fn equivocation_auto_emits_and_confiscates() {
     // 4s, then broadcasts the conflicting U_B — so cosigners ingest U_A and
     // advance, then see U_B at the same seq. That second ingest is exactly
     // what the detector keys on. We intentionally ignore the printed TLV here.
-    let mut fork_args: Vec<String> =
-        vec!["danger".into(), "fork-update".into(), accused_ledger.clone()];
+    let mut fork_args: Vec<String> = vec![
+        "danger".into(),
+        "fork-update".into(),
+        accused_ledger.clone(),
+    ];
     for op_idx in &cosigner_op_indices {
         fork_args.push("--cosigner-seed".into());
         fork_args.push(op_seed(*op_idx));
@@ -339,13 +342,18 @@ fn equivocation_recovers_to_serviceable_ledger() {
     let victim = match open_victim_quorum_ledger(&node, accused_op_idx, 10_000, 3) {
         Some(v) => v,
         None => {
-            eprintln!("skipping: couldn't open a fresh Q=3 victim — rerun against `setup.sh --fresh 3`.");
+            eprintln!(
+                "skipping: couldn't open a fresh Q=3 victim — rerun against `setup.sh --fresh 3`."
+            );
             return;
         }
     };
     let accused_ledger = victim.victim_ledger.clone();
-    let cosigner_op_indices: Vec<usize> =
-        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let cosigner_op_indices: Vec<usize> = victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
     let (_accused_full, accused_pk) = op_identity_pubkey(accused_op_idx);
     eprintln!(
         "[setup] accused=op{} ({}…) ledger={}… cosigners={:?}",
@@ -356,8 +364,11 @@ fn equivocation_recovers_to_serviceable_ledger() {
     );
 
     // Equivocate: double-sign the same sequence to both branches.
-    let mut fork_args: Vec<String> =
-        vec!["danger".into(), "fork-update".into(), accused_ledger.clone()];
+    let mut fork_args: Vec<String> = vec![
+        "danger".into(),
+        "fork-update".into(),
+        accused_ledger.clone(),
+    ];
     for op_idx in &cosigner_op_indices {
         fork_args.push("--cosigner-seed".into());
         fork_args.push(op_seed(*op_idx));
@@ -390,8 +401,8 @@ fn equivocation_recovers_to_serviceable_ledger() {
     //     whose lengths sit in `[17, 16+N]` (= [17,19] at Q=3). We assert
     //     both that the leaf was spent AND that the revealed preimages carry
     //     valid lengths — the exact regression the fix closes.
-    let lottery_addr = lottery_output_address(&txid)
-        .expect("confiscation TX must have a P2TR lottery output");
+    let lottery_addr =
+        lottery_output_address(&txid).expect("confiscation TX must have a P2TR lottery output");
     eprintln!("[info] lottery output address: {}", lottery_addr);
     let (claim_txid, witness_lens) =
         poll_lottery_claim_witness(&lottery_addr, Duration::from_secs(300)).unwrap_or_else(|| {
@@ -434,7 +445,10 @@ fn equivocation_recovers_to_serviceable_ledger() {
             )
         });
     let custodian_hex = hex::encode(new_custodian.serialize());
-    eprintln!("[ok] DisputeAcquire → new custodian {}…", &custodian_hex[..16]);
+    eprintln!(
+        "[ok] DisputeAcquire → new custodian {}…",
+        &custodian_hex[..16]
+    );
 
     // 3. New custodian must be an honest cosigner, never the accused.
     let custodian_xonly = hex::encode(new_custodian.x_only_public_key().0.serialize());

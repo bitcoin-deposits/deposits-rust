@@ -96,7 +96,10 @@ struct Config {
 fn parse_seed(s: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(s).map_err(|e| format!("--seed not hex: {}", e))?;
     if bytes.len() != 32 {
-        return Err(format!("--seed must be 32 bytes (64 hex), got {}", bytes.len()));
+        return Err(format!(
+            "--seed must be 32 bytes (64 hex), got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 32];
     out.copy_from_slice(&bytes);
@@ -106,7 +109,10 @@ fn parse_seed(s: &str) -> Result<[u8; 32], String> {
 fn parse_deposit_id(s: &str) -> Result<DepositId, String> {
     let bytes = hex::decode(s).map_err(|e| format!("bad deposit id hex: {}", e))?;
     if bytes.len() != 16 {
-        return Err(format!("deposit id must be 16 bytes (32 hex), got {}", bytes.len()));
+        return Err(format!(
+            "deposit id must be 16 bytes (32 hex), got {}",
+            bytes.len()
+        ));
     }
     let mut out = [0u8; 16];
     out.copy_from_slice(&bytes);
@@ -124,9 +130,9 @@ fn parse_args() -> Result<Config, String> {
         network: bitcoin::Network::Regtest,
         behavior: "forward".into(),
         extra_peers: Vec::new(),
-        floor_msats: 1_000_000,    // 1000 sats
-        reserve_msats: 200_000,    // 200 sats kept back so we never hit 0
-        min_payment_msats: 1_000,  // 1 sat
+        floor_msats: 1_000_000,   // 1000 sats
+        reserve_msats: 200_000,   // 200 sats kept back so we never hit 0
+        min_payment_msats: 1_000, // 1 sat
         interval_ms: 1500,
         fee_fixed_msats: 2,
         fee_rate_bps: 20,
@@ -141,15 +147,34 @@ fn parse_args() -> Result<Config, String> {
     let mut i = 1;
     while i < args.len() {
         let need = |i: usize| -> Result<String, String> {
-            args.get(i + 1).cloned().ok_or_else(|| format!("{} needs a value", args[i]))
+            args.get(i + 1)
+                .cloned()
+                .ok_or_else(|| format!("{} needs a value", args[i]))
         };
         match args[i].as_str() {
-            "--relay" => { cfg.relay = need(i)?; i += 1; }
-            "--data-dir" => { cfg.data_dir = PathBuf::from(need(i)?); i += 1; }
-            "--seed" => { cfg.seed_inline = Some(parse_seed(&need(i)?)?); i += 1; }
-            "--seed-file" => { cfg.seed_file = Some(PathBuf::from(need(i)?)); i += 1; }
-            "--i-understand" => { cfg.i_understand = true; }
-            "--alias" => { cfg.alias = need(i)?; i += 1; }
+            "--relay" => {
+                cfg.relay = need(i)?;
+                i += 1;
+            }
+            "--data-dir" => {
+                cfg.data_dir = PathBuf::from(need(i)?);
+                i += 1;
+            }
+            "--seed" => {
+                cfg.seed_inline = Some(parse_seed(&need(i)?)?);
+                i += 1;
+            }
+            "--seed-file" => {
+                cfg.seed_file = Some(PathBuf::from(need(i)?));
+                i += 1;
+            }
+            "--i-understand" => {
+                cfg.i_understand = true;
+            }
+            "--alias" => {
+                cfg.alias = need(i)?;
+                i += 1;
+            }
             "--network" => {
                 cfg.network = match need(i)?.as_str() {
                     "bitcoin" | "mainnet" => bitcoin::Network::Bitcoin,
@@ -160,22 +185,91 @@ fn parse_args() -> Result<Config, String> {
                 };
                 i += 1;
             }
-            "--behavior" => { cfg.behavior = need(i)?; i += 1; }
-            "--peer" => { cfg.extra_peers.push(parse_deposit_id(&need(i)?)?); i += 1; }
-            "--floor-sats" => { cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
-            "--reserve-sats" => { cfg.reserve_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000; i += 1; }
-            "--floor-msats" => { cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())?; i += 1; }
-            "--min-payment-sats" => { cfg.min_payment_msats = need(i)?.parse::<u64>().map_err(|e: std::num::ParseIntError| e.to_string())? * 1000; i += 1; }
-            "--min-payment-msats" => { cfg.min_payment_msats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--interval-ms" => { cfg.interval_ms = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--fee-fixed-msats" => { cfg.fee_fixed_msats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--fee-rate-bps" => { cfg.fee_rate_bps = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--timeout-offset" => { cfg.timeout_offset = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--timeout-height" => { cfg.timeout_height = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--bitcoin-cli" => { cfg.bitcoin_cli = need(i)?; i += 1; }
-            "--initial-sats" => { cfg.initial_sats = need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?; i += 1; }
-            "--make-invoice" => { cfg.make_invoice_sats = Some(need(i)?.parse().map_err(|e: std::num::ParseIntError| e.to_string())?); i += 1; }
-            "--description" => { cfg.description = need(i)?; i += 1; }
+            "--behavior" => {
+                cfg.behavior = need(i)?;
+                i += 1;
+            }
+            "--peer" => {
+                cfg.extra_peers.push(parse_deposit_id(&need(i)?)?);
+                i += 1;
+            }
+            "--floor-sats" => {
+                cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000;
+                i += 1;
+            }
+            "--reserve-sats" => {
+                cfg.reserve_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())? * 1000;
+                i += 1;
+            }
+            "--floor-msats" => {
+                cfg.floor_msats = need(i)?.parse::<i64>().map_err(|e| e.to_string())?;
+                i += 1;
+            }
+            "--min-payment-sats" => {
+                cfg.min_payment_msats = need(i)?
+                    .parse::<u64>()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?
+                    * 1000;
+                i += 1;
+            }
+            "--min-payment-msats" => {
+                cfg.min_payment_msats = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--interval-ms" => {
+                cfg.interval_ms = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--fee-fixed-msats" => {
+                cfg.fee_fixed_msats = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--fee-rate-bps" => {
+                cfg.fee_rate_bps = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--timeout-offset" => {
+                cfg.timeout_offset = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--timeout-height" => {
+                cfg.timeout_height = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--bitcoin-cli" => {
+                cfg.bitcoin_cli = need(i)?;
+                i += 1;
+            }
+            "--initial-sats" => {
+                cfg.initial_sats = need(i)?
+                    .parse()
+                    .map_err(|e: std::num::ParseIntError| e.to_string())?;
+                i += 1;
+            }
+            "--make-invoice" => {
+                cfg.make_invoice_sats = Some(
+                    need(i)?
+                        .parse()
+                        .map_err(|e: std::num::ParseIntError| e.to_string())?,
+                );
+                i += 1;
+            }
+            "--description" => {
+                cfg.description = need(i)?;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -188,7 +282,10 @@ fn parse_args() -> Result<Config, String> {
         return Err("--alias <deposit alias> is required".into());
     }
     if cfg.behavior != "forward" {
-        return Err(format!("unknown --behavior '{}' (only 'forward' so far)", cfg.behavior));
+        return Err(format!(
+            "unknown --behavior '{}' (only 'forward' so far)",
+            cfg.behavior
+        ));
     }
     Ok(cfg)
 }
@@ -202,18 +299,28 @@ fn print_help() {
     eprintln!("  --seed <64-hex>           inline (refused on mainnet w/o --i-understand)");
     eprintln!("  --i-understand            allow inline --seed on mainnet (discouraged)");
     eprintln!("  --relay <url>             relay (default ws://localhost:7801)");
-    eprintln!("  --data-dir <dir>          wallet dir holding deposits.json + seed.hex (default .)");
+    eprintln!(
+        "  --data-dir <dir>          wallet dir holding deposits.json + seed.hex (default .)"
+    );
     eprintln!("  --network <net>           regtest|signet|testnet|mainnet (default regtest)");
     eprintln!("  --behavior <name>         forward (default; more later)");
-    eprintln!("  --peer <deposit_id_hex>   add a payable peer (repeatable; else auto from deposits.json)");
-    eprintln!("  --floor-sats / --floor-msats <n>   don't pay below this balance (default 1000 sat)");
+    eprintln!(
+        "  --peer <deposit_id_hex>   add a payable peer (repeatable; else auto from deposits.json)"
+    );
+    eprintln!(
+        "  --floor-sats / --floor-msats <n>   don't pay below this balance (default 1000 sat)"
+    );
     eprintln!("  --reserve-sats <n>        always keep this much back (default 200)");
     eprintln!("  --min-payment-sats / --min-payment-msats <n>   smallest payment to bother making (default 1 sat)");
     eprintln!("  --interval-ms <n>         tick interval, jittered ±50% (default 1500)");
     eprintln!("  --fee-fixed-msats / --fee-rate-bps   transfer fee (default 2 + 20bps)");
-    eprintln!("  --timeout-height <n>      explicit lock timeout height (0 = auto via bitcoin-cli)");
+    eprintln!(
+        "  --timeout-height <n>      explicit lock timeout height (0 = auto via bitcoin-cli)"
+    );
     eprintln!("  --timeout-offset <n>      blocks above tip for the lock timeout (default 500)");
-    eprintln!("  --bitcoin-cli <cmd>       for auto timeout height (default 'bitcoin-cli -regtest')");
+    eprintln!(
+        "  --bitcoin-cli <cmd>       for auto timeout height (default 'bitcoin-cli -regtest')"
+    );
     eprintln!("  --initial-sats <n>        seed the local balance estimate (default 0)");
     eprintln!("  --make-invoice <sats>     one-shot: mint a BOLT11 funding invoice and exit");
     eprintln!("  --description <text>      invoice description (default 'deposit-bot funding')");
@@ -280,8 +387,8 @@ fn derive_secret_key_at_index(
     use std::str::FromStr;
     let xpriv = Xpriv::new_master(network, seed).map_err(|e| e.to_string())?;
     let secp = Secp256k1::new();
-    let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
-        .map_err(|e| e.to_string())?;
+    let path =
+        DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index)).map_err(|e| e.to_string())?;
     let derived = xpriv.derive_priv(&secp, &path).map_err(|e| e.to_string())?;
     Ok(derived.private_key)
 }
@@ -291,13 +398,13 @@ fn derive_secret_key_at_index(
 fn load_identity(cfg: &Config, seed: &[u8; 32]) -> Result<Identity, String> {
     let secp = Secp256k1::new();
     let path = cfg.data_dir.join("deposits.json");
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {}", path.display(), e))?;
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&data).map_err(|e| format!("parse deposits.json: {}", e))?;
 
     let mut me: Option<(String, u32)> = None; // (ledger_id, key_index)
-    // First pass: find ourselves.
+                                              // First pass: find ourselves.
     for d in &entries {
         if d.get("alias").and_then(|v| v.as_str()) == Some(cfg.alias.as_str()) {
             let ledger_id = d
@@ -322,24 +429,40 @@ fn load_identity(cfg: &Config, seed: &[u8; 32]) -> Result<Identity, String> {
     // Same-ledger peers get paid by transfer; cross-ledger ones over Lightning.
     let mut peers: Vec<Peer> = Vec::new();
     for d in &entries {
-        let Some(pledger) = d.get("ledger_id").and_then(|v| v.as_str()) else { continue };
+        let Some(pledger) = d.get("ledger_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
         let idx = d.get("key_index").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-        let Ok(psk) = derive_secret_key_at_index(seed, cfg.network, idx) else { continue };
+        let Ok(psk) = derive_secret_key_at_index(seed, cfg.network, idx) else {
+            continue;
+        };
         let pkp = Keypair::from_secret_key(&secp, &psk);
         let pdesc = format!("pk({})", hex::encode(pkp.public_key().serialize()));
         let pid = deposits_core::types::compute_deposit_id(&pdesc);
         if pid != deposit_id && !peers.iter().any(|p| p.deposit_id == pid) {
-            peers.push(Peer { deposit_id: pid, ledger_id: pledger.to_string() });
+            peers.push(Peer {
+                deposit_id: pid,
+                ledger_id: pledger.to_string(),
+            });
         }
     }
     // --peer entries are assumed to be on our own ledger (transfer rail).
     for p in &cfg.extra_peers {
         if *p != deposit_id && !peers.iter().any(|x| x.deposit_id == *p) {
-            peers.push(Peer { deposit_id: *p, ledger_id: ledger_id.clone() });
+            peers.push(Peer {
+                deposit_id: *p,
+                ledger_id: ledger_id.clone(),
+            });
         }
     }
 
-    Ok(Identity { ledger_id, deposit_id, descriptor, keypair, peers })
+    Ok(Identity {
+        ledger_id,
+        deposit_id,
+        descriptor,
+        keypair,
+        peers,
+    })
 }
 
 // ─── transport ───────────────────────────────────────────────────────────
@@ -369,10 +492,18 @@ struct Bot {
 }
 
 impl Bot {
-    async fn send_request(&self, ledger_id: &str, action: &str, params: serde_json::Value) -> Result<ResponseData, String> {
+    async fn send_request(
+        &self,
+        ledger_id: &str,
+        action: &str,
+        params: serde_json::Value,
+    ) -> Result<ResponseData, String> {
         let content = serde_json::to_string(&params).map_err(|e| e.to_string())?;
         let event = EventBuilder::new(Kind::Custom(KIND_LEDGER_REQUEST), &content)
-            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id.to_string()]))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id.to_string()],
+            ))
             .tag(Tag::custom(TagKind::custom("action"), [action]))
             .sign_with_keys(&Keys::new(
                 nostr_sdk::SecretKey::from_slice(&self.keypair.secret_key().secret_bytes())
@@ -450,7 +581,9 @@ impl Bot {
             "signature": hex::encode(&signature_bytes),
         });
 
-        let lock = self.send_request(&self.ledger_id, "transfer_lock", lock_params).await?;
+        let lock = self
+            .send_request(&self.ledger_id, "transfer_lock", lock_params)
+            .await?;
         if !lock.success {
             return Err(format!("lock rejected: {}", lock.error.unwrap_or_default()));
         }
@@ -467,7 +600,11 @@ impl Bot {
         let mut last_err = String::new();
         for attempt in 1..=4u32 {
             match self
-                .send_request(&self.ledger_id, "transfer_complete", complete_params.clone())
+                .send_request(
+                    &self.ledger_id,
+                    "transfer_complete",
+                    complete_params.clone(),
+                )
                 .await
             {
                 Ok(resp) if resp.success => return Ok(()),
@@ -521,12 +658,20 @@ impl Bot {
         });
         let resp = self.send_request(ledger_id, "make_invoice", params).await?;
         if !resp.success {
-            return Err(format!("make_invoice rejected: {}", resp.error.unwrap_or_default()));
+            return Err(format!(
+                "make_invoice rejected: {}",
+                resp.error.unwrap_or_default()
+            ));
         }
         let r = resp.result.ok_or("make_invoice response had no result")?;
-        let bolt11 = r.get("invoice").and_then(|v| v.as_str())
-            .ok_or("response had no `invoice`")?.to_string();
-        let ph_hex = r.get("payment_hash").and_then(|v| v.as_str())
+        let bolt11 = r
+            .get("invoice")
+            .and_then(|v| v.as_str())
+            .ok_or("response had no `invoice`")?
+            .to_string();
+        let ph_hex = r
+            .get("payment_hash")
+            .and_then(|v| v.as_str())
             .ok_or("response had no `payment_hash`")?;
         let ph = hex::decode(ph_hex).map_err(|e| format!("bad payment_hash: {}", e))?;
         let mut payment_hash = [0u8; 32];
@@ -544,7 +689,11 @@ impl Bot {
             .get("amount_msat")
             .or_else(|| r.get("amount_msats"))
             .and_then(|v| v.as_u64())
-            .or_else(|| r.get("amount_sats").and_then(|v| v.as_u64()).map(|s| s * 1000))
+            .or_else(|| {
+                r.get("amount_sats")
+                    .and_then(|v| v.as_u64())
+                    .map(|s| s * 1000)
+            })
             .unwrap_or(amount_msats);
         Ok((bolt11, payment_hash, amount_msats))
     }
@@ -561,9 +710,13 @@ impl Bot {
     /// from getting stuck.
     async fn query_balance(&self) -> Result<i64, String> {
         let params = serde_json::json!({ "deposit_id": hex::encode(self.deposit_id) });
-        let resp = self.send_request(&self.ledger_id, "balance_query", params).await?;
+        let resp = self
+            .send_request(&self.ledger_id, "balance_query", params)
+            .await?;
         if !resp.success {
-            return Err(resp.error.unwrap_or_else(|| "balance_query rejected".into()));
+            return Err(resp
+                .error
+                .unwrap_or_else(|| "balance_query rejected".into()));
         }
         let r = resp.result.ok_or("balance_query: no result")?;
         let bal = r.get("balance_msats").and_then(|v| v.as_u64()).unwrap_or(0) as i64;
@@ -581,9 +734,13 @@ impl Bot {
     /// (quote_invoice → estimate_routing_fee), returning total_fee_msats.
     async fn quote_fee(&self, invoice: &str) -> Result<u64, String> {
         let params = serde_json::json!({ "invoice": invoice });
-        let resp = self.send_request(&self.ledger_id, "quote_invoice", params).await?;
+        let resp = self
+            .send_request(&self.ledger_id, "quote_invoice", params)
+            .await?;
         if !resp.success {
-            return Err(resp.error.unwrap_or_else(|| "quote_invoice rejected".into()));
+            return Err(resp
+                .error
+                .unwrap_or_else(|| "quote_invoice rejected".into()));
         }
         let r = resp.result.ok_or("quote_invoice: no result")?;
         r.get("total_fee_msats")
@@ -645,9 +802,14 @@ impl Bot {
             "expiry": op_expiry,
             "witness": witness,
         });
-        let resp = self.send_request(&self.ledger_id, "pay_invoice", params).await?;
+        let resp = self
+            .send_request(&self.ledger_id, "pay_invoice", params)
+            .await?;
         if !resp.success {
-            return Err(format!("pay_invoice rejected: {}", resp.error.unwrap_or_default()));
+            return Err(format!(
+                "pay_invoice rejected: {}",
+                resp.error.unwrap_or_default()
+            ));
         }
         Ok(())
     }
@@ -717,16 +879,18 @@ fn parse_available_msats(err: &str) -> Option<i64> {
 
 fn inbound_credit_msats(content: &str, me: &DepositId) -> Option<u64> {
     use base64::Engine as _;
-    let raw = base64::engine::general_purpose::STANDARD.decode(content).ok()?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(content)
+        .ok()?;
     let update = SignedLedgerUpdate::tlv_decode(&raw).ok()?;
     let op = LedgerOperation::tlv_decode(&update.message).ok()?;
     match op {
-        LedgerOperation::OnchainCredit { deposit_id, amount, .. }
-        | LedgerOperation::InvoiceCredit { deposit_id, amount, .. }
-            if deposit_id == *me =>
-        {
-            Some(amount)
+        LedgerOperation::OnchainCredit {
+            deposit_id, amount, ..
         }
+        | LedgerOperation::InvoiceCredit {
+            deposit_id, amount, ..
+        } if deposit_id == *me => Some(amount),
         LedgerOperation::TransferLock {
             source_deposit_id,
             destination_deposit_id,
@@ -763,7 +927,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let id = load_identity(&cfg, &seed)?;
     let ledger_tag = id.ledger_id[..16.min(id.ledger_id.len())].to_string();
-    let same = id.peers.iter().filter(|p| p.ledger_id == id.ledger_id).count();
+    let same = id
+        .peers
+        .iter()
+        .filter(|p| p.ledger_id == id.ledger_id)
+        .count();
     let cross = id.peers.len() - same;
     eprintln!(
         "deposit-bot '{}' · deposit {} · ledger {}… · {} peers ({} transfer, {} lightning) · behavior={}",
@@ -796,9 +964,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resp_filter = Filter::new().kind(Kind::Custom(KIND_LEDGER_RESPONSE));
     let upd_filter = Filter::new()
         .kind(Kind::Custom(KIND_LEDGER_UPDATE))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::D), [ledger_tag.clone()])
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::I), [hex::encode(id.deposit_id)]);
-    client.subscribe(vec![resp_filter, upd_filter], None).await?;
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::D),
+            [ledger_tag.clone()],
+        )
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::I),
+            [hex::encode(id.deposit_id)],
+        );
+    client
+        .subscribe(vec![resp_filter, upd_filter], None)
+        .await?;
 
     let bot = Arc::new(Bot {
         client: client.clone(),
@@ -822,38 +998,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(RelayPoolNotification::Event { event, .. }) => {
-                        match event.kind.as_u16() {
-                            KIND_LEDGER_RESPONSE => {
-                                let req_id = event.tags.iter().find_map(|t| {
-                                    if t.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
-                                        t.content().map(|s| s.to_string())
-                                    } else {
-                                        None
-                                    }
-                                });
-                                if let Some(req_id) = req_id {
-                                    let resp = serde_json::from_str::<serde_json::Value>(&event.content)
+                    Ok(RelayPoolNotification::Event { event, .. }) => match event.kind.as_u16() {
+                        KIND_LEDGER_RESPONSE => {
+                            let req_id = event.tags.iter().find_map(|t| {
+                                if t.kind() == TagKind::SingleLetter(TAG_EVENT_REF) {
+                                    t.content().map(|s| s.to_string())
+                                } else {
+                                    None
+                                }
+                            });
+                            if let Some(req_id) = req_id {
+                                let resp =
+                                    serde_json::from_str::<serde_json::Value>(&event.content)
                                         .map(|v| ResponseData {
-                                            success: v.get("success").and_then(|s| s.as_bool()).unwrap_or(false),
-                                            error: v.get("error").and_then(|s| s.as_str()).map(String::from),
+                                            success: v
+                                                .get("success")
+                                                .and_then(|s| s.as_bool())
+                                                .unwrap_or(false),
+                                            error: v
+                                                .get("error")
+                                                .and_then(|s| s.as_str())
+                                                .map(String::from),
                                             result: v.get("result").cloned(),
                                         })
-                                        .unwrap_or(ResponseData { success: false, error: Some("bad response json".into()), result: None });
-                                    if let Some(tx) = bot.pending.lock().unwrap().remove(&req_id) {
-                                        let _ = tx.send(resp);
-                                    }
+                                        .unwrap_or(ResponseData {
+                                            success: false,
+                                            error: Some("bad response json".into()),
+                                            result: None,
+                                        });
+                                if let Some(tx) = bot.pending.lock().unwrap().remove(&req_id) {
+                                    let _ = tx.send(resp);
                                 }
                             }
-                            KIND_LEDGER_UPDATE => {
-                                if let Some(credit) = inbound_credit_msats(&event.content, &me) {
-                                    let nb = bot.balance.fetch_add(credit as i64, Ordering::Relaxed) + credit as i64;
-                                    eprintln!("  ← received {} sats (balance ~{} sats)", credit / 1000, nb / 1000);
-                                }
-                            }
-                            _ => {}
                         }
-                    }
+                        KIND_LEDGER_UPDATE => {
+                            if let Some(credit) = inbound_credit_msats(&event.content, &me) {
+                                let nb = bot.balance.fetch_add(credit as i64, Ordering::Relaxed)
+                                    + credit as i64;
+                                eprintln!(
+                                    "  ← received {} sats (balance ~{} sats)",
+                                    credit / 1000,
+                                    nb / 1000
+                                );
+                            }
+                        }
+                        _ => {}
+                    },
                     Ok(RelayPoolNotification::Shutdown) => break,
                     _ => {}
                 }
@@ -864,9 +1054,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // One-shot invoice mode: mint a funding BOLT11 for this deposit, print
     // it to stdout, and exit. Doesn't need peers or a timeout height.
     if let Some(sats) = cfg.make_invoice_sats {
-        eprintln!("requesting a {} sat funding invoice from the operator…", sats);
+        eprintln!(
+            "requesting a {} sat funding invoice from the operator…",
+            sats
+        );
         match bot
-            .make_invoice_for(&bot.ledger_id, bot.deposit_id, sats * 1000, &cfg.description)
+            .make_invoice_for(
+                &bot.ledger_id,
+                bot.deposit_id,
+                sats * 1000,
+                &cfg.description,
+            )
             .await
         {
             Ok((bolt11, _, _)) => {
@@ -893,7 +1091,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .args(["-c", &format!("{} getblockcount", cli)])
                     .output()
                     .ok()
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<u32>()
+                            .ok()
+                    });
                 if let Some(tip) = tip {
                     bot.timeout_height.store(tip + offset, Ordering::Relaxed);
                 }
@@ -904,7 +1107,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
 
-    eprintln!("running — forwarding above floor {} sats, reserve {} sats\n", cfg.floor_msats / 1000, cfg.reserve_msats / 1000);
+    eprintln!(
+        "running — forwarding above floor {} sats, reserve {} sats\n",
+        cfg.floor_msats / 1000,
+        cfg.reserve_msats / 1000
+    );
 
     // ── forward loop ──
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -972,7 +1179,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         eprintln!(
             "  · tick: available={} msat → amount={} fee={} ({} peers)",
-            available, amount_msats, fee_msats, bot.peers.len()
+            available,
+            amount_msats,
+            fee_msats,
+            bot.peers.len()
         );
         // Pick a peer and a rail: same ledger → transfer, else → Lightning.
         let peer = bot.peers[rng.gen_range(0..bot.peers.len())].clone();
@@ -1032,12 +1242,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Err(e) => {
                 bot.balance.fetch_add(total_debit, Ordering::Relaxed); // refund
-                // "still reconciling — do not retry": the operator accepted the
-                // pay and its InvoiceFulfill is settling asynchronously; the
-                // funds already moved. Not a failure — just wait it out so we
-                // don't fire a second pay against a balance it hasn't settled
-                // yet (a double-spend attempt). The next-tick balance_query
-                // picks up the real outcome.
+                                                                       // "still reconciling — do not retry": the operator accepted the
+                                                                       // pay and its InvoiceFulfill is settling asynchronously; the
+                                                                       // funds already moved. Not a failure — just wait it out so we
+                                                                       // don't fire a second pay against a balance it hasn't settled
+                                                                       // yet (a double-spend attempt). The next-tick balance_query
+                                                                       // picks up the real outcome.
                 if e.contains("reconciling") || e.contains("do not retry") {
                     eprintln!(
                         "  ⧖ {} {} msat to {}… in flight (reconciling, funds moved) — backing off",

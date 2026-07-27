@@ -53,7 +53,10 @@ impl LnurlServer {
         // ledgers relay.
         let relays = format!("{},{}", relay_messaging(), relay_ledgers());
         let child = Command::new(lnurl_bin())
-            .env("LNURL_NSEC", "4c4e55524c746573740000000000000000000000000000000000000000000001")
+            .env(
+                "LNURL_NSEC",
+                "4c4e55524c746573740000000000000000000000000000000000000000000001",
+            )
             .env("LNURL_RELAYS", relays)
             .env("LNURL_DOMAIN", domain)
             .env("LNURL_LISTEN", format!("127.0.0.1:{}", port))
@@ -97,7 +100,10 @@ impl LnurlServer {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        panic!("deposits-lnurl didn't become reachable on :{} within 10s", port);
+        panic!(
+            "deposits-lnurl didn't become reachable on :{} within 10s",
+            port
+        );
     }
 
     fn base_url(&self) -> String {
@@ -124,7 +130,8 @@ fn open_fresh_deposit(ledger: &str) -> (PathBuf, String) {
 
     let (ok, out) = wallet_open(ledger, "lnurl-zap", &nsec, &wdir, &[]);
     assert!(
-        ok && (out.contains("Deposit account created") || out.contains("Deposit account already exists")),
+        ok && (out.contains("Deposit account created")
+            || out.contains("Deposit account already exists")),
         "wallet open failed:\n{}",
         out
     );
@@ -191,7 +198,11 @@ fn lnurl_pay_flow_metadata_and_invoice() {
         resp.status()
     );
     let meta: serde_json::Value = resp.json().expect("metadata response not JSON");
-    assert_eq!(meta["tag"], "payRequest", "wrong tag in metadata: {:?}", meta);
+    assert_eq!(
+        meta["tag"], "payRequest",
+        "wrong tag in metadata: {:?}",
+        meta
+    );
     assert!(
         meta["callback"].as_str().unwrap().contains(&deposit_id),
         "callback URL doesn't reference the deposit id: {:?}",
@@ -270,7 +281,11 @@ fn lnurl_short_subdomain_rejected() {
         .build()
         .unwrap();
     let resp = http
-        .get(format!("{}/.well-known/lnurlp/{}", lnurl.base_url(), "abcd"))
+        .get(format!(
+            "{}/.well-known/lnurlp/{}",
+            lnurl.base_url(),
+            "abcd"
+        ))
         .header("Host", &short_host)
         .send()
         .expect("metadata GET");

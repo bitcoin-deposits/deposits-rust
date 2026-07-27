@@ -83,11 +83,7 @@ pub trait LightningBackend: Send + Sync {
     fn pay_invoice(&self, invoice: &str) -> Result<String, Error>;
 
     /// Pay a variable-amount BOLT11 invoice with the given amount.
-    fn pay_invoice_with_amount(
-        &self,
-        invoice: &str,
-        amount_msat: u64,
-    ) -> Result<String, Error>;
+    fn pay_invoice_with_amount(&self, invoice: &str, amount_msat: u64) -> Result<String, Error>;
 
     /// Pay a fixed-amount BOLT11 invoice, capping total routing fees at
     /// `max_fee_msat`. The operator pays outbound LN under this cap — the
@@ -96,11 +92,7 @@ pub trait LightningBackend: Send + Sync {
     /// payment, the lock resolves via InvoiceFail, and the depositor is
     /// refunded. Default impl ignores the cap and falls back to `pay_invoice`
     /// for backends that don't expose a routing-fee limit yet (lnd/cln).
-    fn pay_invoice_with_fee_cap(
-        &self,
-        invoice: &str,
-        _max_fee_msat: u64,
-    ) -> Result<String, Error> {
+    fn pay_invoice_with_fee_cap(&self, invoice: &str, _max_fee_msat: u64) -> Result<String, Error> {
         self.pay_invoice(invoice)
     }
 
@@ -132,10 +124,7 @@ pub trait LightningBackend: Send + Sync {
     /// the preimage to commit a real proof-of-payment in `InvoiceFulfill`.
     /// Returns `Ok(None)` for unknown ids or payments with no preimage
     /// (in-flight, failed, BOLT12, on-chain, etc.).
-    fn get_payment_preimage(
-        &self,
-        payment_id_hex: &str,
-    ) -> Result<Option<[u8; 32]>, Error>;
+    fn get_payment_preimage(&self, payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error>;
 
     // ── Hold invoices (Lightning bridge — DEP-10 §Receive) ─────────────────
     //
@@ -199,10 +188,7 @@ pub trait LightningBackend: Send + Sync {
     /// `htlc_expiry_height` (when the backend surfaces it) is the earliest
     /// CLTV among the held HTLCs — the bridge derives its on-ledger
     /// `TransferLock.timeout_height` from this, minus the safety margin Δ.
-    fn lookup_hold_invoice(
-        &self,
-        _payment_hash_hex: &str,
-    ) -> Result<HoldInvoiceState, Error> {
+    fn lookup_hold_invoice(&self, _payment_hash_hex: &str) -> Result<HoldInvoiceState, Error> {
         Err(Error::Protocol(
             "hold invoices not supported by this Lightning backend".to_string(),
         ))

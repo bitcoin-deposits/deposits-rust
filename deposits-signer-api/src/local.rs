@@ -120,8 +120,8 @@ impl LocalSigner {
                         index
                     ))
                 })?;
-                let path = DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index))
-                    .map_err(|e| {
+                let path =
+                    DerivationPath::from_str(&format!("m/84'/0'/0'/0/{}", index)).map_err(|e| {
                         SignerError::Crypto(format!("deposit path index={}: {}", index, e))
                     })?;
                 let derived = xpriv.derive_priv(&self.secp, &path).map_err(|e| {
@@ -179,8 +179,8 @@ impl LocalSigner {
                         change
                     )));
                 }
-                let path = DerivationPath::from_str(&format!("m/{}/{}", change, index))
-                    .map_err(|e| {
+                let path =
+                    DerivationPath::from_str(&format!("m/{}/{}", change, index)).map_err(|e| {
                         SignerError::Crypto(format!(
                             "node-wallet path change={} idx={}: {}",
                             change, index, e
@@ -232,11 +232,7 @@ impl Signer for LocalSigner {
         }
     }
 
-    fn bip340_sign(
-        &self,
-        ctx: &SignContext,
-        digest: &[u8; 32],
-    ) -> Result<[u8; 64], SignerError> {
+    fn bip340_sign(&self, ctx: &SignContext, digest: &[u8; 32]) -> Result<[u8; 64], SignerError> {
         let secret = self.resolve_key(ctx.key)?;
         let msg = Message::from_digest(*digest);
         let keypair = Keypair::from_secret_key(&self.secp, &secret);
@@ -433,14 +429,22 @@ mod tests {
         assert_eq!(p1, p2, "same inputs must yield the same preimage");
 
         let diff_ledger = s.derive_dispute_lottery_preimage("ledger-B", 7).unwrap();
-        assert_ne!(p1, diff_ledger, "different ledger must yield different preimage");
+        assert_ne!(
+            p1, diff_ledger,
+            "different ledger must yield different preimage"
+        );
 
         let diff_seq = s.derive_dispute_lottery_preimage("ledger-A", 8).unwrap();
         assert_ne!(p1, diff_seq, "different seq must yield different preimage");
 
         let other = LocalSigner::random();
-        let other_p = other.derive_dispute_lottery_preimage("ledger-A", 7).unwrap();
-        assert_ne!(p1, other_p, "different signer must yield different preimage");
+        let other_p = other
+            .derive_dispute_lottery_preimage("ledger-A", 7)
+            .unwrap();
+        assert_ne!(
+            p1, other_p,
+            "different signer must yield different preimage"
+        );
     }
 
     #[test]
@@ -470,8 +474,8 @@ mod tests {
         // Signing at KeyPath::Deposit { index } uses the m/84' path —
         // matches what derive_deposit_key_at(index) in node_cli/keys.rs
         // produces.
-        use bitcoin::Network;
         use crate::{KeyPath, SigPurpose, SignContext};
+        use bitcoin::Network;
 
         let seed = [0xDD; 32];
         let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
@@ -511,8 +515,8 @@ mod tests {
 
     #[test]
     fn deposit_key_indexes_are_distinct() {
-        use bitcoin::Network;
         use crate::{SigPurpose, SignContext};
+        use bitcoin::Network;
 
         let seed = [0xEE; 32];
         let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
@@ -521,18 +525,24 @@ mod tests {
         // Different indexes → different sigs over the same digest.
         let digest = [0x99u8; 32];
         let s0 = signer
-            .bip340_sign(&SignContext::deposit(0, SigPurpose::DepositGuarantee), &digest)
+            .bip340_sign(
+                &SignContext::deposit(0, SigPurpose::DepositGuarantee),
+                &digest,
+            )
             .unwrap();
         let s1 = signer
-            .bip340_sign(&SignContext::deposit(1, SigPurpose::DepositGuarantee), &digest)
+            .bip340_sign(
+                &SignContext::deposit(1, SigPurpose::DepositGuarantee),
+                &digest,
+            )
             .unwrap();
         assert_ne!(s0, s1);
     }
 
     #[test]
     fn wallet_keypath_distinct_per_account_change_index() {
-        use bitcoin::Network;
         use crate::{KeyPath, SigPurpose, SignContext};
+        use bitcoin::Network;
 
         let seed = [0x77; 32];
         let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
@@ -546,13 +556,19 @@ mod tests {
                     let ctx = SignContext {
                         role: crate::SigRole::NoLedger,
                         purpose: SigPurpose::Bip340Untagged,
-                        key: KeyPath::Wallet { account, change, index },
+                        key: KeyPath::Wallet {
+                            account,
+                            change,
+                            index,
+                        },
                     };
                     let sig = signer.bip340_sign(&ctx, &digest).unwrap();
                     assert!(
                         sigs.insert(sig),
                         "duplicate sig for account={} change={} index={}",
-                        account, change, index
+                        account,
+                        change,
+                        index
                     );
                 }
             }
@@ -562,8 +578,8 @@ mod tests {
 
     #[test]
     fn wallet_keypath_rejects_invalid_change() {
-        use bitcoin::Network;
         use crate::{KeyPath, SigPurpose, SignContext};
+        use bitcoin::Network;
 
         let seed = [0x88; 32];
         let xpriv = Xpriv::new_master(Network::Regtest, &seed).unwrap();
@@ -572,7 +588,11 @@ mod tests {
         let ctx = SignContext {
             role: crate::SigRole::NoLedger,
             purpose: SigPurpose::Bip340Untagged,
-            key: KeyPath::Wallet { account: 0, change: 2, index: 0 },
+            key: KeyPath::Wallet {
+                account: 0,
+                change: 2,
+                index: 0,
+            },
         };
         let err = signer.bip340_sign(&ctx, &[0u8; 32]).unwrap_err();
         assert!(
@@ -593,7 +613,11 @@ mod tests {
         let ctx = SignContext {
             role: crate::SigRole::NoLedger,
             purpose: SigPurpose::Bip340Untagged,
-            key: KeyPath::Wallet { account: 0, change: 0, index: 0 },
+            key: KeyPath::Wallet {
+                account: 0,
+                change: 0,
+                index: 0,
+            },
         };
         let err = signer.bip340_sign(&ctx, &[0u8; 32]).unwrap_err();
         assert!(
@@ -607,7 +631,8 @@ mod tests {
     fn with_nostr_secret_returns_distinct_key() {
         let op = LocalSigner::random();
         let nostr = LocalSigner::random();
-        let signer = LocalSigner::with_nostr_secret(*op.secret_key_for_test(), *nostr.secret_key_for_test());
+        let signer =
+            LocalSigner::with_nostr_secret(*op.secret_key_for_test(), *nostr.secret_key_for_test());
         // Operator-side ops use the operator secret.
         assert_eq!(signer.pubkey(), op.pubkey());
         // The issued Nostr secret matches what we passed in (and is *not*

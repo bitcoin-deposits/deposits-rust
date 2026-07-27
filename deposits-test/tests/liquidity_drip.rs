@@ -88,8 +88,8 @@ fn drip_self_liquidity_opens_funds_and_drains() {
     // ── 2. Wait for the daemon to open the buffer deposit ──
     eprintln!("[open]   waiting for daemon to allocate buffer_index");
     let opened = wait_for(STAGE_TIMEOUT, || plan_buffer_index(&alias).is_some());
-    let buffer_index = plan_buffer_index(&alias)
-        .expect("daemon never populated buffer_index within 180s");
+    let buffer_index =
+        plan_buffer_index(&alias).expect("daemon never populated buffer_index within 180s");
     assert!(
         opened,
         "daemon never opened the buffer deposit (alias={}, ledger={}…)",
@@ -104,9 +104,7 @@ fn drip_self_liquidity_opens_funds_and_drains() {
     //         single signal for open + fund + N drains. ──
     let want_ticks: u64 = 2;
     eprintln!("[ticks]  waiting for {} drain ticks", want_ticks);
-    let drained = wait_for(STAGE_TIMEOUT, || {
-        plan_ticks_completed(&alias) >= want_ticks
-    });
+    let drained = wait_for(STAGE_TIMEOUT, || plan_ticks_completed(&alias) >= want_ticks);
     let ticks_seen = plan_ticks_completed(&alias);
     assert!(
         drained,
@@ -135,7 +133,8 @@ fn drip_self_liquidity_opens_funds_and_drains() {
         drift <= 1_000_000,
         "deposits_total delta {} drifted >1M msats from expected {} — \
          either drip math is wrong or another ledger op interfered",
-        actual_delta_msats, expected_delta_msats,
+        actual_delta_msats,
+        expected_delta_msats,
     );
 
     eprintln!(
@@ -243,7 +242,10 @@ fn drip_interval_fuzz_jitters_tick_spacing() {
         assert!(
             (lo..=hi).contains(&s),
             "sample {} = {}s outside [{}, {}] — bounds check failed",
-            i, s, lo, hi,
+            i,
+            s,
+            lo,
+            hi,
         );
     }
 
@@ -253,13 +255,18 @@ fn drip_interval_fuzz_jitters_tick_spacing() {
     assert!(
         varied,
         "all {} samples equal interval ({}s) — fuzz isn't taking effect. Samples: {:?}",
-        samples.len(), interval_sec, samples,
+        samples.len(),
+        interval_sec,
+        samples,
     );
 
     eprintln!(
         "[pass]   fuzz active: {} samples in [{}, {}]s, range [{}, {}]s",
-        samples.len(), lo, hi,
-        samples.iter().min().unwrap(), samples.iter().max().unwrap()
+        samples.len(),
+        lo,
+        hi,
+        samples.iter().min().unwrap(),
+        samples.iter().max().unwrap()
     );
 }
 
@@ -273,9 +280,15 @@ fn plan_tick_state(alias: &str) -> Option<(u64, u64, u64)> {
     for plan in plans {
         if plan.get("alias").and_then(|x| x.as_str()) == Some(alias) {
             return Some((
-                plan.get("ticks_completed").and_then(|x| x.as_u64()).unwrap_or(0),
-                plan.get("last_tick_unix").and_then(|x| x.as_u64()).unwrap_or(0),
-                plan.get("next_tick_unix").and_then(|x| x.as_u64()).unwrap_or(0),
+                plan.get("ticks_completed")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                plan.get("last_tick_unix")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
+                plan.get("next_tick_unix")
+                    .and_then(|x| x.as_u64())
+                    .unwrap_or(0),
             ));
         }
     }

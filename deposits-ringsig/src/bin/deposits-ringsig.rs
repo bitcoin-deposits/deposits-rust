@@ -38,8 +38,8 @@
 use bitcoin::secp256k1::rand::rngs::OsRng;
 use bitcoin::secp256k1::{All, PublicKey as SecpPubKey, Secp256k1, SecretKey as SecpSk};
 use deposits_ringsig::wire::{
-    binding_to_hex, canonical_event_digest, ringsig_to_hex, Cover, RingsigRequest,
-    RingsigResponse, KIND_RINGSIG_COVER, KIND_RINGSIG_REQUEST, KIND_RINGSIG_RESPONSE,
+    binding_to_hex, canonical_event_digest, ringsig_to_hex, Cover, RingsigRequest, RingsigResponse,
+    KIND_RINGSIG_COVER, KIND_RINGSIG_REQUEST, KIND_RINGSIG_RESPONSE,
 };
 use deposits_ringsig::{binding, blsag, hash_point, presentation_nullifier};
 use nostr_sdk::prelude::*;
@@ -143,9 +143,8 @@ async fn link(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         i += 1;
     }
 
-    let verifier_arg = verifier_arg.ok_or(
-        "Usage: deposits-ringsig link <verifier_npub> --nsec-file <path> --relay <url>",
-    )?;
+    let verifier_arg = verifier_arg
+        .ok_or("Usage: deposits-ringsig link <verifier_npub> --nsec-file <path> --relay <url>")?;
     let verifier_xonly = parse_xonly_arg(&verifier_arg)?;
     let nsec_path = nsec_path.ok_or("--nsec-file is required")?;
     if relays.is_empty() {
@@ -228,8 +227,7 @@ async fn link(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|t| t.clone().to_vec())
         .collect();
-    let cover = Cover::from_tags(&cover_tag_rows)
-        .map_err(|e| format!("malformed cover: {}", e))?;
+    let cover = Cover::from_tags(&cover_tag_rows).map_err(|e| format!("malformed cover: {}", e))?;
 
     // ── find a ring containing our pubkey ──────────────────────────
     let our_ring = cover
@@ -475,8 +473,13 @@ fn load_nsec_file(path: &std::path::Path) -> Result<SecpSk, Box<dyn std::error::
     let trimmed = raw.trim();
     let bytes = if trimmed.starts_with("nsec1") {
         // Bech32 nsec — let nostr_sdk decode.
-        let key = SecretKey::from_bech32(trimmed)
-            .map_err(|e| format!("--nsec-file {}: invalid nsec1 bech32: {}", path.display(), e))?;
+        let key = SecretKey::from_bech32(trimmed).map_err(|e| {
+            format!(
+                "--nsec-file {}: invalid nsec1 bech32: {}",
+                path.display(),
+                e
+            )
+        })?;
         key.as_secret_bytes().to_vec()
     } else {
         hex::decode(trimmed)

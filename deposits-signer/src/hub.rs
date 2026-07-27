@@ -70,9 +70,9 @@ pub async fn run(
 
     let mut heartbeat_tick = tokio::time::interval(HEARTBEAT_INTERVAL);
     heartbeat_tick.tick().await; // consume the immediate-fire
-    // Re-Register every 5 minutes as a coarse fallback — covers the
-    // case where the hub restarted and lost our pending entry between
-    // its `since` filter window. Cheap.
+                                 // Re-Register every 5 minutes as a coarse fallback — covers the
+                                 // case where the hub restarted and lost our pending entry between
+                                 // its `since` filter window. Cheap.
     let mut reregister_tick = tokio::time::interval(Duration::from_secs(300));
     reregister_tick.tick().await;
 
@@ -143,7 +143,10 @@ fn handle_from_hub(msg: HubMessage, accepted: &mut bool) {
             tracing::debug!("hub: StatusReq received (not implemented)");
         }
         other => {
-            tracing::debug!("hub: unexpected inbound {:?}", std::mem::discriminant(&other));
+            tracing::debug!(
+                "hub: unexpected inbound {:?}",
+                std::mem::discriminant(&other)
+            );
         }
     }
 }

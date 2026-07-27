@@ -133,15 +133,18 @@ impl HubLock {
 
             // LOCK_NB: fail fast on contention instead of blocking
             // until the other process exits.
-            let rc =
-                unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+            let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if rc != 0 {
                 let mut buf = String::new();
                 let pid = match (&file).read_to_string(&mut buf) {
                     Ok(_) => buf.trim().to_string(),
                     Err(_) => "unknown".to_string(),
                 };
-                let pid = if pid.is_empty() { "unknown".to_string() } else { pid };
+                let pid = if pid.is_empty() {
+                    "unknown".to_string()
+                } else {
+                    pid
+                };
                 return Err(LockError::Held { lockfile, pid });
             }
 

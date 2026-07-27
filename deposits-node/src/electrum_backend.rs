@@ -112,9 +112,11 @@ impl ElectrumBackend {
             stream
                 .flush()
                 .map_err(|e| Error::Wallet(format!("electrum flush {}: {}", method, e)))?;
-            let mut reader = BufReader::new(stream.try_clone().map_err(|e| {
-                Error::Wallet(format!("electrum stream clone: {}", e))
-            })?);
+            let mut reader = BufReader::new(
+                stream
+                    .try_clone()
+                    .map_err(|e| Error::Wallet(format!("electrum stream clone: {}", e)))?,
+            );
             let mut line = String::new();
             reader
                 .read_line(&mut line)
@@ -160,13 +162,15 @@ impl ElectrumBackend {
         };
 
         let resp: ElectrumRpcResponse<R> = serde_json::from_str(&line).map_err(|e| {
-            Error::Wallet(format!("electrum parse {}: {} (raw: {})", method, e, line.trim()))
+            Error::Wallet(format!(
+                "electrum parse {}: {} (raw: {})",
+                method,
+                e,
+                line.trim()
+            ))
         })?;
         if let Some(err) = resp.error {
-            return Err(Error::Wallet(format!(
-                "electrum {} error: {}",
-                method, err
-            )));
+            return Err(Error::Wallet(format!("electrum {} error: {}", method, err)));
         }
         resp.result.ok_or_else(|| {
             Error::Wallet(format!(
@@ -233,8 +237,7 @@ impl ChainBackend for ElectrumBackend {
     }
 
     fn get_block_hash(&self, height: u32) -> Result<bitcoin::BlockHash, Error> {
-        let hex_str: String =
-            self.call("blockchain.block.header", serde_json::json!([height]))?;
+        let hex_str: String = self.call("blockchain.block.header", serde_json::json!([height]))?;
         block_hash_from_header_hex(&hex_str)
     }
 
@@ -287,10 +290,7 @@ impl ChainBackend for ElectrumBackend {
         Ok(None)
     }
 
-    fn get_tx(
-        &self,
-        txid: &bitcoin::Txid,
-    ) -> Result<Option<bitcoin::Transaction>, Error> {
+    fn get_tx(&self, txid: &bitcoin::Txid) -> Result<Option<bitcoin::Transaction>, Error> {
         // verbose=false returns raw hex. Map known "not found" error to None;
         // surface other errors.
         let result: Result<String, Error> = self.call(
@@ -302,9 +302,8 @@ impl ChainBackend for ElectrumBackend {
                 use bitcoin::consensus::deserialize;
                 let bytes = hex::decode(&hex_str)
                     .map_err(|e| Error::Wallet(format!("electrum tx hex: {}", e)))?;
-                let tx: bitcoin::Transaction = deserialize(&bytes).map_err(|e| {
-                    Error::Wallet(format!("electrum tx consensus decode: {}", e))
-                })?;
+                let tx: bitcoin::Transaction = deserialize(&bytes)
+                    .map_err(|e| Error::Wallet(format!("electrum tx consensus decode: {}", e)))?;
                 Ok(Some(tx))
             }
             Err(e) => {
@@ -318,10 +317,7 @@ impl ChainBackend for ElectrumBackend {
         }
     }
 
-    fn get_tx_block_height(
-        &self,
-        txid: &bitcoin::Txid,
-    ) -> Result<Option<u32>, Error> {
+    fn get_tx_block_height(&self, txid: &bitcoin::Txid) -> Result<Option<u32>, Error> {
         // verbose=true returns a JSON object with `confirmations` and
         // `blockhash`. Mempool: no blockhash, confirmations=0 or absent.
         let result: Result<TxGetVerbose, Error> = self.call(
@@ -352,11 +348,7 @@ impl ChainBackend for ElectrumBackend {
         self.get_block_height_if_in_best_chain(&bh)
     }
 
-    fn is_output_unspent(
-        &self,
-        txid: &bitcoin::Txid,
-        vout: u32,
-    ) -> Result<Option<bool>, Error> {
+    fn is_output_unspent(&self, txid: &bitcoin::Txid, vout: u32) -> Result<Option<bool>, Error> {
         // Electrum keys outputs by scripthash, not outpoint. Two round
         // trips: fetch the tx to learn the output's scriptpubkey, then
         // look it up in the script's listunspent.
@@ -369,12 +361,12 @@ impl ChainBackend for ElectrumBackend {
             None => return Ok(None),
         };
         let sh = scripthash_hex(&output.script_pubkey);
-        let unspents: Vec<ScripthashUnspent> = self.call(
-            "blockchain.scripthash.listunspent",
-            serde_json::json!([sh]),
-        )?;
+        let unspents: Vec<ScripthashUnspent> =
+            self.call("blockchain.scripthash.listunspent", serde_json::json!([sh]))?;
         let txid_hex = txid.to_string();
-        let is_unspent = unspents.iter().any(|u| u.tx_hash == txid_hex && u.tx_pos == vout);
+        let is_unspent = unspents
+            .iter()
+            .any(|u| u.tx_hash == txid_hex && u.tx_pos == vout);
         Ok(Some(is_unspent))
     }
 
@@ -383,10 +375,8 @@ impl ChainBackend for ElectrumBackend {
         script: &bitcoin::Script,
     ) -> Result<Option<UnspentOutput>, Error> {
         let sh = scripthash_hex(script);
-        let unspents: Vec<ScripthashUnspent> = self.call(
-            "blockchain.scripthash.listunspent",
-            serde_json::json!([sh]),
-        )?;
+        let unspents: Vec<ScripthashUnspent> =
+            self.call("blockchain.scripthash.listunspent", serde_json::json!([sh]))?;
         let first = match unspents.into_iter().next() {
             Some(u) => u,
             None => return Ok(None),
@@ -412,10 +402,8 @@ impl ChainBackend for ElectrumBackend {
         // touches the script by consuming the output), so walk the
         // history and find the tx whose inputs include the outpoint.
         let sh = scripthash_hex(script);
-        let history: Vec<ScripthashHistoryItem> = self.call(
-            "blockchain.scripthash.get_history",
-            serde_json::json!([sh]),
-        )?;
+        let history: Vec<ScripthashHistoryItem> =
+            self.call("blockchain.scripthash.get_history", serde_json::json!([sh]))?;
         let funding_txid_hex = outpoint.txid.to_string();
         for item in history {
             // Skip the funding tx itself — it pays TO the script, it
@@ -439,8 +427,10 @@ impl ChainBackend for ElectrumBackend {
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, Error> {
         use bitcoin::consensus::serialize;
         let hex_str = hex::encode(serialize(tx));
-        let _accepted_txid: String =
-            self.call("blockchain.transaction.broadcast", serde_json::json!([hex_str]))?;
+        let _accepted_txid: String = self.call(
+            "blockchain.transaction.broadcast",
+            serde_json::json!([hex_str]),
+        )?;
         Ok(tx.compute_txid())
     }
 }
@@ -454,8 +444,8 @@ fn header_hash(header: &[u8]) -> bitcoin::BlockHash {
 }
 
 fn block_hash_from_header_hex(hex_str: &str) -> Result<bitcoin::BlockHash, Error> {
-    let bytes = hex::decode(hex_str)
-        .map_err(|e| Error::Wallet(format!("electrum header hex: {}", e)))?;
+    let bytes =
+        hex::decode(hex_str).map_err(|e| Error::Wallet(format!("electrum header hex: {}", e)))?;
     if bytes.len() != 80 {
         return Err(Error::Wallet(format!(
             "electrum header length {} != 80",

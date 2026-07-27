@@ -57,7 +57,9 @@ use deposits_core::fraud::{BlockOracle, FraudBroadcast, LedgerProvider};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::tlv::TlvDecode;
 use deposits_core::types::{LedgerState, SignedLedgerUpdate};
-use deposits_nostr::{ledger_tag, NostrTransport, KIND_FRAUD_PROOF, KIND_LEDGER_UPDATE, TAG_LEDGER_ID};
+use deposits_nostr::{
+    ledger_tag, NostrTransport, KIND_FRAUD_PROOF, KIND_LEDGER_UPDATE, TAG_LEDGER_ID,
+};
 use nostr_sdk::{Filter, Kind, Timestamp};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -156,7 +158,10 @@ pub fn validate_ledger_chain(chain: &[SignedLedgerUpdate]) -> ChainValidation {
         .first()
         .and_then(|u| LedgerOperation::tlv_decode(&u.message).ok());
     let Some(first) = ordered.first() else {
-        return ChainValidation { accepted, stopped_reason: Some("empty chain".to_string()) };
+        return ChainValidation {
+            accepted,
+            stopped_reason: Some("empty chain".to_string()),
+        };
     };
     let (seed_operator, seed_reserves, seed_genesis) = match seed_op {
         Some(LedgerOperation::LedgerOpen {
@@ -196,7 +201,10 @@ pub fn validate_ledger_chain(chain: &[SignedLedgerUpdate]) -> ChainValidation {
         }
     }
 
-    ChainValidation { accepted, stopped_reason: None }
+    ChainValidation {
+        accepted,
+        stopped_reason: None,
+    }
 }
 
 // ============================================================================
@@ -460,25 +468,27 @@ struct PassStats {
 /// Run one full sync pass: discover all ledgers, fetch+validate+persist each
 /// (main chain + fork branches), verify+persist fraud proofs, and backfill the
 /// relay with anything it's missing. Returns the pass stats.
-async fn sync_pass(
-    transport: &NostrTransport,
-    archive_dir: &PathBuf,
-    backfill: bool,
-) -> PassStats {
+async fn sync_pass(transport: &NostrTransport, archive_dir: &PathBuf, backfill: bool) -> PassStats {
     let mut stats = PassStats::default();
 
     // 1. Discover every ledger from a single all-ledgers 9100 pull.
     let all_updates = fetch_updates_paginated(transport, None).await;
     let ledger_ids: HashSet<String> = all_updates.iter().map(|u| u.ledger_id_hex()).collect();
     stats.ledgers_seen = ledger_ids.len();
-    tracing::info!("archive: discovered {} ledger(s) on relay", ledger_ids.len());
+    tracing::info!(
+        "archive: discovered {} ledger(s) on relay",
+        ledger_ids.len()
+    );
 
     // Group the bulk pull by ledger so we usually avoid a second per-ledger
     // fetch. For deep ledgers a targeted re-fetch fills any gap the bulk
     // pagination missed.
     let mut by_ledger: HashMap<String, Vec<SignedLedgerUpdate>> = HashMap::new();
     for u in &all_updates {
-        by_ledger.entry(u.ledger_id_hex()).or_default().push(u.clone());
+        by_ledger
+            .entry(u.ledger_id_hex())
+            .or_default()
+            .push(u.clone());
     }
 
     // Accumulate validated main chains for the fraud verifier's provider.
@@ -569,7 +579,11 @@ async fn sync_pass(
                 );
             }
             if !fork_accepted.is_empty() {
-                match DepositsHandler::archive_append_updates_at(archive_dir, fork_key, &fork_accepted) {
+                match DepositsHandler::archive_append_updates_at(
+                    archive_dir,
+                    fork_key,
+                    &fork_accepted,
+                ) {
                     Ok(n) if n > 0 => {
                         stats.forks_archived += 1;
                         tracing::info!(
@@ -579,7 +593,9 @@ async fn sync_pass(
                         );
                     }
                     Ok(_) => {}
-                    Err(e) => tracing::error!("archive: failed to persist fork {}: {}", fork_key, e),
+                    Err(e) => {
+                        tracing::error!("archive: failed to persist fork {}: {}", fork_key, e)
+                    }
                 }
             }
         }
@@ -741,7 +757,9 @@ fn parse_args(args: &[String]) -> Result<ArchiveArgs, String> {
             }
             "--archive-dir" => {
                 i += 1;
-                archive_dir = Some(PathBuf::from(args.get(i).ok_or("--archive-dir needs a value")?));
+                archive_dir = Some(PathBuf::from(
+                    args.get(i).ok_or("--archive-dir needs a value")?,
+                ));
             }
             // --network is accepted for symmetry with other subcommands and to
             // pin the operator's mental model; the archivist validates purely
@@ -760,7 +778,11 @@ fn parse_args(args: &[String]) -> Result<ArchiveArgs, String> {
         return Err("at least one --relay <url> is required".to_string());
     }
     let archive_dir = archive_dir.ok_or("--archive-dir <path> is required")?;
-    Ok(ArchiveArgs { relays, archive_dir, once })
+    Ok(ArchiveArgs {
+        relays,
+        archive_dir,
+        once,
+    })
 }
 
 /// `deposits-node archive` — see module docs.
@@ -913,7 +935,10 @@ mod tests {
         operator_sign(&mut g, &op_sk);
 
         let res = validate_ledger_chain(&[g]);
-        assert!(res.accepted.is_empty(), "a floating tail must not be archived");
+        assert!(
+            res.accepted.is_empty(),
+            "a floating tail must not be archived"
+        );
         assert!(res.stopped_reason.is_some());
     }
 
@@ -929,7 +954,11 @@ mod tests {
         operator_sign(&mut bad, &op_sk);
 
         let res = validate_ledger_chain(&[g, bad]);
-        assert_eq!(res.accepted.len(), 1, "content_hash mismatch must be dropped");
+        assert_eq!(
+            res.accepted.len(),
+            1,
+            "content_hash mismatch must be dropped"
+        );
     }
 
     #[test]
@@ -948,7 +977,10 @@ mod tests {
         let ledger_id = g.ledger_id_hex();
         let split = split_main_and_forks(&ledger_id, &[g]);
         assert_eq!(split.main.len(), 1);
-        assert!(split.forks.is_empty(), "a linear chain has no fork branches");
+        assert!(
+            split.forks.is_empty(),
+            "a linear chain has no fork branches"
+        );
     }
 
     #[test]
@@ -1039,7 +1071,8 @@ mod tests {
         let n = DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, &[g.clone()]).unwrap();
         assert_eq!(n, 1);
         // Re-appending the same update writes nothing (content_hash dedup).
-        let n2 = DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, &[g.clone()]).unwrap();
+        let n2 =
+            DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, &[g.clone()]).unwrap();
         assert_eq!(n2, 0, "append-only + deduped: no duplicate rows");
 
         // Read back through the SAME reader the daemon healer uses.

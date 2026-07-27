@@ -406,9 +406,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::DisputeYield => ("DisputeYield".to_string(), None),
         LedgerOperation::DeliveryEmbed { .. } => ("DeliveryEmbed".to_string(), None),
         LedgerOperation::LedgerClose => ("LedgerClose".to_string(), None),
-        LedgerOperation::Batch(ops) => {
-            (format!("Batch ({} inner ops)", ops.len()), None)
-        }
+        LedgerOperation::Batch(ops) => (format!("Batch ({} inner ops)", ops.len()), None),
     }
 }
 
@@ -772,7 +770,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 LedgerOperation::DisputeEnter {
                     last_valid_sequence,
                     reason,
-                ..
+                    ..
                 } => {
                     in_dispute = true;
                     // Check if signer was a quorum member

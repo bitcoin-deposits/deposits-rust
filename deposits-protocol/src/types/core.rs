@@ -150,8 +150,8 @@ impl FeeStructure {
         let fixed_fee = (self.annualized_msats as u128 * blocks) / BLOCKS_PER_YEAR;
 
         // Percentage fee portion (pro-rated)
-        let bps_fee = (balance as u128 * self.annualized_bps as u128 * blocks)
-            / (BLOCKS_PER_YEAR * 10_000);
+        let bps_fee =
+            (balance as u128 * self.annualized_bps as u128 * blocks) / (BLOCKS_PER_YEAR * 10_000);
 
         let total = fixed_fee + bps_fee;
         u64::try_from(total).unwrap_or(u64::MAX)
@@ -1323,7 +1323,10 @@ mod fee_assessment_tests {
         assert_eq!(d.calculate_fees_due(900_000 + fees.frequency_blocks - 1), 0);
         // Exactly one period → one period's fee.
         let at_boundary = d.calculate_fees_due(900_000 + fees.frequency_blocks);
-        assert_eq!(at_boundary, fees.calculate_fee(d.balance, fees.frequency_blocks));
+        assert_eq!(
+            at_boundary,
+            fees.calculate_fee(d.balance, fees.frequency_blocks)
+        );
         assert!(at_boundary > 0);
     }
 }

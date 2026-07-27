@@ -759,7 +759,9 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 amount: 100_000_000,
                 quorum_expiry: 1000,
                 ledger_hash: h32(),
-                quorum_members: vec![deposits_protocol::messages::QuorumMemberRef::pubkey_only(pk())],
+                quorum_members: vec![deposits_protocol::messages::QuorumMemberRef::pubkey_only(
+                    pk(),
+                )],
                 collateral_amount: 50_000_000,
                 protocol_version: None,
             },
@@ -784,7 +786,10 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         ),
         (
             "DepositClose",
-            LedgerOperation::DepositClose { deposit_id: did(), commitment: None },
+            LedgerOperation::DepositClose {
+                deposit_id: did(),
+                commitment: None,
+            },
         ),
         (
             "FeeChange",
@@ -982,8 +987,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
             LedgerOperation::DisputeEnter {
                 last_valid_sequence: 10,
                 reason: "hash_chain_broken".into(),
-            anchor_block_hash: None,
-            anchor_block_height: None,
+                anchor_block_hash: None,
+                anchor_block_height: None,
             },
         ),
         (

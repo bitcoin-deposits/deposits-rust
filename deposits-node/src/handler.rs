@@ -53,7 +53,9 @@ struct LedgerEntry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum LedgerLogRow {
-    Role { role: LedgerRole },
+    Role {
+        role: LedgerRole,
+    },
     State(LedgerState),
     Update(SignedLedgerUpdate),
     /// Nostr `created_at` (unix-seconds) for the update whose `content_hash`
@@ -61,7 +63,10 @@ enum LedgerLogRow {
     /// timestamp so the event id is stable and relays dedupe. Last-wins on
     /// load; written incrementally on record and snapshotted on compaction.
     /// Older binaries skip this unknown row (parse error → warn+continue).
-    CreatedAt { content_hash: String, ts: u64 },
+    CreatedAt {
+        content_hash: String,
+        ts: u64,
+    },
 }
 
 /// Request to persist ledgers (sent from handler to persistence thread)
@@ -832,13 +837,14 @@ impl DepositsHandler {
         // DisputeEnter/DisputeArmed is the fork owner.
         if is_fork_file {
             use deposits_core::messages::LedgerOperation;
-            let fork_owner = ledger.history.iter().find_map(|u| {
-                match LedgerOperation::tlv_decode(&u.message) {
+            let fork_owner = ledger
+                .history
+                .iter()
+                .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
                     Ok(LedgerOperation::DisputeEnter { .. })
                     | Ok(LedgerOperation::DisputeArmed { .. }) => Some(u.operator_id),
                     _ => None,
-                }
-            });
+                });
             if let Some(owner) = fork_owner {
                 if ledger.state.parent_pubkey != owner {
                     tracing::debug!(
@@ -2062,7 +2068,10 @@ impl DepositsHandler {
             let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
                 Ok(o) => o,
                 Err(e) => {
-                    return Err(format!("decode op at seq {}: {}", update.sequence_number, e))
+                    return Err(format!(
+                        "decode op at seq {}: {}",
+                        update.sequence_number, e
+                    ))
                 }
             };
             match ledger.apply_and_check(&op, update.block_height) {
@@ -2141,8 +2150,7 @@ impl DepositsHandler {
 
             // Idempotent across periodic retries of the claim task.
             let already = ledger.history.iter().any(|u| {
-                u.sequence_number == update.sequence_number
-                    && u.content_hash == update.content_hash
+                u.sequence_number == update.sequence_number && u.content_hash == update.content_hash
             });
             if already {
                 return Ok(false);
@@ -2191,11 +2199,7 @@ impl DepositsHandler {
     /// cosigned it — so adopting it is correct, not a trust concession. Returns
     /// the number of updates applied. Split from the relay fetch (in
     /// `Node::catch_up_owned_ledger`) so the decision is unit-testable.
-    pub fn adopt_owned_updates(
-        &self,
-        ledger_id: &str,
-        fetched: Vec<SignedLedgerUpdate>,
-    ) -> usize {
+    pub fn adopt_owned_updates(&self, ledger_id: &str, fetched: Vec<SignedLedgerUpdate>) -> usize {
         let (local_next_seq, local_tip_hash, operator) = {
             let ledgers = self.ledgers.lock().unwrap();
             let Some(arc) = ledgers.get(ledger_id) else {
@@ -2465,7 +2469,14 @@ mod tests {
             let (handler, _rx) =
                 DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
             let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            let ledger_id = handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
             arc.write().unwrap().history.push(update.clone());
             // The commit path inserts into the EventStore before broadcasting;
             // mirror that so record_created_at's live-cache write lands.
@@ -2488,8 +2499,7 @@ mod tests {
         // Session 2: fresh handler over the same data dir — simulates the
         // `deposits-hub bootstrap` restart. The timestamp must come back.
         {
-            let (handler, _rx) =
-                DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
+            let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
             let restored = handler
                 .event_store
                 .lock()
@@ -2532,7 +2542,14 @@ mod tests {
         let (handler, _rx) =
             DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
         let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        let ledger_id = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
 
         // Build a 10-deep chain. seq 0 stands in for the genesis LedgerOpen,
         // seq 4 for the early QuorumBegin; both use distinct content_hash tags.
@@ -2582,11 +2599,12 @@ mod tests {
 
         // (3) Heal diff over the DISK history against an EMPTY relay (post-wipe):
         // the missing set is the whole chain, INCLUDING genesis + QuorumBegin.
-        let empty_relay: std::collections::HashSet<[u8; 32]> =
-            std::collections::HashSet::new();
+        let empty_relay: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
         let missing_from_disk = missing_updates(&empty_relay, &disk, HEAL_BATCH_LIMIT);
-        let missing_disk_seqs: Vec<u64> =
-            missing_from_disk.iter().map(|u| u.sequence_number).collect();
+        let missing_disk_seqs: Vec<u64> = missing_from_disk
+            .iter()
+            .map(|u| u.sequence_number)
+            .collect();
         assert_eq!(
             missing_disk_seqs,
             (0..CHAIN_LEN).collect::<Vec<_>>(),
@@ -2660,7 +2678,14 @@ mod tests {
         let (handler, _rx) =
             DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
         let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        let ledger_id = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
 
         const CHAIN_LEN: u64 = 10;
         const GENESIS_TAG: u8 = 0x00; // seq 0 → LedgerOpen
@@ -2674,7 +2699,10 @@ mod tests {
         handler.persist_ledger_to_disk(&ledger_id).unwrap();
         // Append the rest one at a time as the live path does.
         for seq in 1..CHAIN_LEN {
-            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
             handler.persist_ledger_to_disk(&ledger_id).unwrap();
         }
 
@@ -2761,14 +2789,24 @@ mod tests {
             let (handler, _rx) =
                 DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
             let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            let ledger_id = handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
             arc.write()
                 .unwrap()
                 .history
                 .push(mk_update(op_pk, 0, GENESIS_TAG));
             handler.persist_ledger_to_disk(&ledger_id).unwrap();
             for seq in 1..CHAIN_LEN {
-                arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+                arc.write()
+                    .unwrap()
+                    .history
+                    .push(mk_update(op_pk, seq, seq as u8));
                 handler.persist_ledger_to_disk(&ledger_id).unwrap();
             }
             handler.compact_ledger(&ledger_id).unwrap();

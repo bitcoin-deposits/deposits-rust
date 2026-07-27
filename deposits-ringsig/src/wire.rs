@@ -246,9 +246,7 @@ pub enum RingsigRequest {
         payload: serde_json::Value,
     },
     #[serde(rename = "continuation")]
-    Continuation {
-        payload: serde_json::Value,
-    },
+    Continuation { payload: serde_json::Value },
 }
 
 /// Response body sent under kind 25503.
@@ -319,11 +317,7 @@ mod tests {
 
     #[test]
     fn cover_rejects_missing_metadata() {
-        let tags = vec![vec![
-            "ring".to_string(),
-            "r1".to_string(),
-            "aa".to_string(),
-        ]];
+        let tags = vec![vec!["ring".to_string(), "r1".to_string(), "aa".to_string()]];
         assert!(Cover::from_tags(&tags).is_err());
     }
 

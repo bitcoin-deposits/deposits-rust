@@ -96,7 +96,9 @@ struct PaymentInfo {
 }
 
 fn deserialize_status<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where D: serde::Deserializer<'de> {
+where
+    D: serde::Deserializer<'de>,
+{
     use serde::de;
     struct V;
     impl<'de> de::Visitor<'de> for V {
@@ -104,7 +106,9 @@ where D: serde::Deserializer<'de> {
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
             f.write_str("status number or string")
         }
-        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u8, E> { Ok(v as u8) }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<u8, E> {
+            Ok(v as u8)
+        }
         fn visit_str<E: de::Error>(self, v: &str) -> Result<u8, E> {
             match v.to_uppercase().as_str() {
                 "PENDING" => Ok(0),
@@ -150,7 +154,11 @@ impl LdkCli {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!("ldk-server-cli failed: {} {}", stderr.trim(), stdout.trim()));
+            return Err(format!(
+                "ldk-server-cli failed: {} {}",
+                stderr.trim(),
+                stdout.trim()
+            ));
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
@@ -161,22 +169,22 @@ impl LdkCli {
         let output = self
             .run_command(&["bolt11-receive", &amount_str, "--description", description])
             .await?;
-        let resp: Bolt11ReceiveResponse =
-            serde_json::from_str(&output).map_err(|e| format!("Failed to parse invoice response: {}", e))?;
+        let resp: Bolt11ReceiveResponse = serde_json::from_str(&output)
+            .map_err(|e| format!("Failed to parse invoice response: {}", e))?;
         Ok(resp.invoice)
     }
 
     async fn pay_invoice(&self, invoice: &str) -> Result<String, String> {
         let output = self.run_command(&["bolt11-send", invoice]).await?;
-        let resp: Bolt11SendResponse =
-            serde_json::from_str(&output).map_err(|e| format!("Failed to parse payment response: {}", e))?;
+        let resp: Bolt11SendResponse = serde_json::from_str(&output)
+            .map_err(|e| format!("Failed to parse payment response: {}", e))?;
         Ok(resp.payment_id)
     }
 
     async fn list_payments(&self) -> Result<Vec<PaymentInfo>, String> {
         let output = self.run_command(&["list-payments"]).await?;
-        let resp: ListPaymentsResponse =
-            serde_json::from_str(&output).map_err(|e| format!("Failed to parse payments: {}", e))?;
+        let resp: ListPaymentsResponse = serde_json::from_str(&output)
+            .map_err(|e| format!("Failed to parse payments: {}", e))?;
         Ok(resp.list)
     }
 }
@@ -211,7 +219,10 @@ fn parse_lightning_address(address: &str) -> Result<(&str, &str), String> {
     Ok((user, domain))
 }
 
-async fn resolve_lightning_address(http: &reqwest::Client, address: &str) -> Result<LnurlPayResponse, String> {
+async fn resolve_lightning_address(
+    http: &reqwest::Client,
+    address: &str,
+) -> Result<LnurlPayResponse, String> {
     let (user, domain) = parse_lightning_address(address)?;
 
     let url = format!("https://{}/.well-known/lnurlp/{}", domain, user);
@@ -291,10 +302,7 @@ async fn check_nip05(
     }
 
     // Fetch
-    let url = format!(
-        "https://{}/.well-known/nostr.json?name={}",
-        domain, user
-    );
+    let url = format!("https://{}/.well-known/nostr.json?name={}", domain, user);
 
     let resp = match state.http.get(&url).send().await {
         Ok(r) => r,
@@ -331,7 +339,10 @@ async fn check_nip05(
 /// Compute routing fee in msat for a given amount through a sequence of route hint hops.
 /// Walks hops from last to first since each hop's fee is based on what it forwards
 /// (which includes fees of subsequent hops).
-fn compute_route_hint_fee_msat(hops: &[lightning_types::routing::RouteHintHop], amount_msat: u64) -> u64 {
+fn compute_route_hint_fee_msat(
+    hops: &[lightning_types::routing::RouteHintHop],
+    amount_msat: u64,
+) -> u64 {
     let mut forwarded_msat = amount_msat;
     let mut total_fee_msat: u64 = 0;
     for hop in hops.iter().rev() {
@@ -364,7 +375,11 @@ async fn estimate_fee_from_lnurl(
     let invoice = match Bolt11Invoice::from_str(&invoice_str) {
         Ok(inv) => inv,
         Err(e) => {
-            log::warn!("Fee probe invoice parse failed (using fallback {}): {}", fallback_sats, e);
+            log::warn!(
+                "Fee probe invoice parse failed (using fallback {}): {}",
+                fallback_sats,
+                e
+            );
             return fallback_sats;
         }
     };
@@ -372,7 +387,10 @@ async fn estimate_fee_from_lnurl(
     let hints = invoice.route_hints();
     if hints.is_empty() {
         // No route hints = well-connected node, fees likely minimal
-        log::info!("No route hints in probe invoice, using fallback {} sats", fallback_sats);
+        log::info!(
+            "No route hints in probe invoice, using fallback {} sats",
+            fallback_sats
+        );
         return fallback_sats;
     }
 
@@ -544,8 +562,7 @@ struct AppState {
     /// is the bound pubkey `P` we recorded on the first valid request
     /// — a second first-contact whose recomputed `I` matches but whose
     /// `P` differs is a forgery attempt and gets rejected.
-    ringsig_bindings:
-        RwLock<HashMap<(String, [u8; 33]), bitcoin::secp256k1::PublicKey>>,
+    ringsig_bindings: RwLock<HashMap<(String, [u8; 33]), bitcoin::secp256k1::PublicKey>>,
 }
 
 // -- Event handling --
@@ -614,15 +631,11 @@ fn unwrap_request(state: &Arc<AppState>, event: &Event) -> Result<(PublicKey, St
     let seal_pubkey_hex = seal["pubkey"]
         .as_str()
         .ok_or_else(|| "seal missing pubkey".to_string())?;
-    let requester_pk = PublicKey::from_hex(seal_pubkey_hex)
-        .map_err(|e| format!("seal pubkey: {}", e))?;
+    let requester_pk =
+        PublicKey::from_hex(seal_pubkey_hex).map_err(|e| format!("seal pubkey: {}", e))?;
 
-    let rumor_json = nip04::decrypt(
-        my_sk,
-        &requester_pk,
-        seal["content"].as_str().unwrap_or(""),
-    )
-    .map_err(|e| format!("rumor decrypt: {}", e))?;
+    let rumor_json = nip04::decrypt(my_sk, &requester_pk, seal["content"].as_str().unwrap_or(""))
+        .map_err(|e| format!("rumor decrypt: {}", e))?;
     let rumor: serde_json::Value =
         serde_json::from_str(&rumor_json).map_err(|e| format!("rumor parse: {}", e))?;
     let rumor_content = rumor["content"].as_str().unwrap_or("").to_string();
@@ -730,11 +743,20 @@ async fn handle_link(
     // from whatever key carries day-to-day requests.
     match check_nip05(state, address, requester).await {
         Ok(true) => {
-            log::info!("NIP-05 verified signer {} for {} → attesting {}", requester, address, target);
+            log::info!(
+                "NIP-05 verified signer {} for {} → attesting {}",
+                requester,
+                address,
+                target
+            );
             return publish_attestation(state, &target, "nip05", Some(address), None).await;
         }
         Ok(false) => {
-            log::debug!("NIP-05 not available for {} -> {}, proceeding with challenge", requester, address);
+            log::debug!(
+                "NIP-05 not available for {} -> {}, proceeding with challenge",
+                requester,
+                address
+            );
         }
         Err(e) => {
             log::warn!("NIP-05 check failed: {}", e);
@@ -825,7 +847,11 @@ async fn handle_link(
         created_at: Utc::now(),
     };
 
-    state.sessions.write().await.insert(session_id.clone(), session);
+    state
+        .sessions
+        .write()
+        .await
+        .insert(session_id.clone(), session);
 
     let resp = LinkResponse {
         session_id,
@@ -879,10 +905,17 @@ async fn handle_challenge(
         .unwrap());
     }
 
-    log::info!("Payment confirmed for session {}, sending challenges", session_id);
+    log::info!(
+        "Payment confirmed for session {}, sending challenges",
+        session_id
+    );
 
     // Generate random partition
-    let amounts = random_partition(&mut rand::thread_rng(), state.challenge_sats, state.num_payments);
+    let amounts = random_partition(
+        &mut rand::thread_rng(),
+        state.challenge_sats,
+        state.num_payments,
+    );
     log::info!("Challenge amounts: {:?}", amounts);
 
     // Pay each amount to the lightning address
@@ -948,7 +981,11 @@ async fn handle_verify(
     }
 
     let (expected, expires_at) = match &session.state {
-        SessionState::ChallengeSent { amounts, expires_at, .. } => (amounts.clone(), *expires_at),
+        SessionState::ChallengeSent {
+            amounts,
+            expires_at,
+            ..
+        } => (amounts.clone(), *expires_at),
         _ => return Err("Invalid session state for verify".to_string()),
     };
 
@@ -968,7 +1005,10 @@ async fn handle_verify(
 
     if submitted_sorted != expected_sorted {
         // Decrement attempts
-        if let SessionState::ChallengeSent { attempts_remaining, .. } = &mut session.state {
+        if let SessionState::ChallengeSent {
+            attempts_remaining, ..
+        } = &mut session.state
+        {
             *attempts_remaining = attempts_remaining.saturating_sub(1);
             if *attempts_remaining == 0 {
                 session.state = SessionState::Failed {
@@ -1435,15 +1475,14 @@ async fn cover_builder_loop(state: Arc<AppState>, cfg: CoverConfig) {
 
 async fn handle_ringsig_event(state: &Arc<AppState>, event: &Event) {
     // Decide the dispatch from the event content's `action` field.
-    let req: deposits_ringsig::wire::RingsigRequest =
-        match serde_json::from_str(&event.content) {
-            Ok(r) => r,
-            Err(e) => {
-                log::warn!("ringsig: invalid request body from {}: {}", event.pubkey, e);
-                let _ = send_ringsig_error(state, event, "invalid_request", &e.to_string()).await;
-                return;
-            }
-        };
+    let req: deposits_ringsig::wire::RingsigRequest = match serde_json::from_str(&event.content) {
+        Ok(r) => r,
+        Err(e) => {
+            log::warn!("ringsig: invalid request body from {}: {}", event.pubkey, e);
+            let _ = send_ringsig_error(state, event, "invalid_request", &e.to_string()).await;
+            return;
+        }
+    };
 
     let result = match req {
         deposits_ringsig::wire::RingsigRequest::FirstContact { .. } => {
@@ -1466,16 +1505,9 @@ async fn handle_ringsig_event(state: &Arc<AppState>, event: &Event) {
     }
 }
 
-async fn handle_ringsig_first_contact(
-    state: &Arc<AppState>,
-    event: &Event,
-) -> Result<(), String> {
+async fn handle_ringsig_first_contact(state: &Arc<AppState>, event: &Event) -> Result<(), String> {
     // ─── 1. Pull the tags we need ──────────────────────────────────
-    let tags_vec: Vec<Vec<String>> = event
-        .tags
-        .iter()
-        .map(|t| t.clone().to_vec())
-        .collect();
+    let tags_vec: Vec<Vec<String>> = event.tags.iter().map(|t| t.clone().to_vec()).collect();
 
     let p_tag = tag_first_value(&tags_vec, "p")?;
     let cover_d_tag = tag_nth_value(&tags_vec, "cover", 1)?;
@@ -1519,8 +1551,7 @@ async fn handle_ringsig_first_contact(
     // Convert member hex pubkeys (xonly, 32 bytes) into PublicKeys.
     // Members are stored xonly in covers because they're Nostr npubs;
     // bLSAG operates over compressed (33-byte) so we lift each one.
-    let mut ring_pks: Vec<bitcoin::secp256k1::PublicKey> =
-        Vec::with_capacity(ring.members.len());
+    let mut ring_pks: Vec<bitcoin::secp256k1::PublicKey> = Vec::with_capacity(ring.members.len());
     for m in &ring.members {
         let pk = lift_xonly_hex(m).map_err(|e| format!("ring member `{}`: {}", m, e))?;
         ring_pks.push(pk);
@@ -1564,21 +1595,16 @@ async fn handle_ringsig_first_contact(
         .map_err(|e| format!("ring signature: {:?}", e))?;
 
     // ─── 6. Verify the bound-pubkey binding proof ──────────────────
-    let bound_p = lift_xonly_hex(&pubkey_hex)
-        .map_err(|e| format!("bound pubkey lift: {}", e))?;
+    let bound_p = lift_xonly_hex(&pubkey_hex).map_err(|e| format!("bound pubkey lift: {}", e))?;
     deposits_ringsig::binding::verify(&secp, &bound_p, &ringsig, &binding)
         .map_err(|e| format!("binding proof: {:?}", e))?;
 
     // ─── 7. Recompute the presentation nullifier ───────────────────
-    let ctx = format!(
-        "{}/{}",
-        state.keys.public_key().to_hex(),
-        cover.d_tag
-    );
+    let ctx = format!("{}/{}", state.keys.public_key().to_hex(), cover.d_tag);
     let expected_nullifier =
         deposits_ringsig::presentation_nullifier(&ringsig.key_image, ctx.as_bytes());
-    let provided_nullifier = hex::decode(nullifier_hex.trim())
-        .map_err(|e| format!("nullifier hex: {}", e))?;
+    let provided_nullifier =
+        hex::decode(nullifier_hex.trim()).map_err(|e| format!("nullifier hex: {}", e))?;
     if provided_nullifier.len() != 32 || provided_nullifier[..] != expected_nullifier[..] {
         return Err("nullifier tag does not match the recomputed presentation hash".to_string());
     }
@@ -1619,8 +1645,8 @@ async fn handle_ringsig_first_contact(
         allowlist_npub: None,
         nullifier: Some(hex::encode(expected_nullifier)),
     };
-    let attestation_json = serde_json::to_string(&attestation)
-        .map_err(|e| format!("attestation serialize: {}", e))?;
+    let attestation_json =
+        serde_json::to_string(&attestation).map_err(|e| format!("attestation serialize: {}", e))?;
     let attestation_event = EventBuilder::new(Kind::Custom(KIND_ATTESTATION), &attestation_json)
         .tag(Tag::public_key(bound_p_nostr))
         .sign_with_keys(&state.keys)
@@ -1661,10 +1687,7 @@ async fn handle_ringsig_first_contact(
     .await
 }
 
-async fn fetch_cover_event(
-    state: &Arc<AppState>,
-    cover_d_tag: &str,
-) -> Result<Event, String> {
+async fn fetch_cover_event(state: &Arc<AppState>, cover_d_tag: &str) -> Result<Event, String> {
     let filter = Filter::new()
         .kind(Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_COVER))
         .author(state.keys.public_key())
@@ -1727,8 +1750,7 @@ async fn send_ringsig_response(
     request_event: &Event,
     body: deposits_ringsig::wire::RingsigResponse,
 ) -> Result<(), String> {
-    let content = serde_json::to_string(&body)
-        .map_err(|e| format!("response serialize: {}", e))?;
+    let content = serde_json::to_string(&body).map_err(|e| format!("response serialize: {}", e))?;
     let event = EventBuilder::new(
         Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_RESPONSE),
         &content,
@@ -1828,9 +1850,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_FEE_CACHE_SECS); // same default as fee cache
 
-    let attestation_relay_urls: Option<Vec<String>> = std::env::var("VERIFY_ATTESTATION_RELAYS")
-        .ok()
-        .map(|s| {
+    let attestation_relay_urls: Option<Vec<String>> =
+        std::env::var("VERIFY_ATTESTATION_RELAYS").ok().map(|s| {
             s.split(',')
                 .map(|r| r.trim().to_string())
                 .filter(|r| !r.is_empty())
@@ -1848,7 +1869,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(ref att_relays) = attestation_relay_urls {
         log::info!("  attestation relays: {:?}", att_relays);
     }
-    log::info!("  challenge: {} sats across {} payments ({} attempts)", challenge_sats, num_payments, max_attempts);
+    log::info!(
+        "  challenge: {} sats across {} payments ({} attempts)",
+        challenge_sats,
+        num_payments,
+        max_attempts
+    );
     if premium_sats > 0 {
         log::info!("  premium: {} sats", premium_sats);
     }
@@ -1896,7 +1922,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create separate attestation client if different relays are configured
     let attestation_client = if let Some(ref att_urls) = attestation_relay_urls {
         #[allow(deprecated)]
-        let att_opts = Options::default().connection_timeout(Some(std::time::Duration::from_secs(30)));
+        let att_opts =
+            Options::default().connection_timeout(Some(std::time::Duration::from_secs(30)));
         let att_client = Client::builder()
             .signer(keys.clone())
             .opts(att_opts)
@@ -1931,14 +1958,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let our_pubkey = keys.public_key();
     let verify_filter = Filter::new()
         .kind(Kind::Custom(KIND_VERIFY_REQUEST))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), [our_pubkey.to_hex()])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [our_pubkey.to_hex()],
+        )
         .since(Timestamp::now());
     let ringsig_filter = Filter::new()
         .kind(Kind::Custom(deposits_ringsig::wire::KIND_RINGSIG_REQUEST))
-        .custom_tag(SingleLetterTag::lowercase(Alphabet::P), [our_pubkey.to_hex()])
+        .custom_tag(
+            SingleLetterTag::lowercase(Alphabet::P),
+            [our_pubkey.to_hex()],
+        )
         .since(Timestamp::now());
 
-    client.subscribe(vec![verify_filter, ringsig_filter], None).await?;
+    client
+        .subscribe(vec![verify_filter, ringsig_filter], None)
+        .await?;
     log::info!(
         "Subscribed to kinds {} (verify) and {} (ringsig)",
         KIND_VERIFY_REQUEST,
@@ -1955,8 +1990,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         client: client.clone(),
         attestation_client,
         http: {
-            let mut builder = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30));
+            let mut builder =
+                reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
             // Trust additional CA cert for test environments (self-signed NIP-05/LNURL servers)
             if let Some(ca_path) = env_or_file("VERIFY_CA_CERT") {
                 let ca_pem = std::fs::read(&ca_path)
@@ -1976,8 +2011,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         timeout_secs,
         fee_cache_secs,
         nip05_cache_secs,
-        allowlist_file: env_or_file("VERIFY_ALLOWLIST_FILE")
-            .map(std::path::PathBuf::from),
+        allowlist_file: env_or_file("VERIFY_ALLOWLIST_FILE").map(std::path::PathBuf::from),
         ringsig_bindings: RwLock::new(HashMap::new()),
     });
 
@@ -2420,7 +2454,8 @@ mod tests {
             invoice: "lnbc1...".to_string(),
             amount_sats: 1030,
         };
-        let json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(json["session_id"], "abc");
         assert_eq!(json["amount_sats"], 1030);
     }
@@ -2441,7 +2476,8 @@ mod tests {
             status: "error".to_string(),
             message: Some("something broke".to_string()),
         };
-        let json: serde_json::Value = serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&resp).unwrap()).unwrap();
         assert_eq!(json["message"], "something broke");
     }
 
@@ -2598,7 +2634,10 @@ mod tests {
         };
 
         // Simulate a wrong guess decrementing
-        if let SessionState::ChallengeSent { attempts_remaining, .. } = &mut state {
+        if let SessionState::ChallengeSent {
+            attempts_remaining, ..
+        } = &mut state
+        {
             *attempts_remaining -= 1;
             assert_eq!(*attempts_remaining, 2);
             *attempts_remaining -= 1;
@@ -2619,13 +2658,19 @@ mod tests {
         };
 
         // Last attempt, wrong guess
-        if let SessionState::ChallengeSent { attempts_remaining, .. } = &mut state {
+        if let SessionState::ChallengeSent {
+            attempts_remaining, ..
+        } = &mut state
+        {
             *attempts_remaining = attempts_remaining.saturating_sub(1);
             assert_eq!(*attempts_remaining, 0);
         }
 
         // Should transition to Failed
-        if let SessionState::ChallengeSent { attempts_remaining, .. } = &state {
+        if let SessionState::ChallengeSent {
+            attempts_remaining, ..
+        } = &state
+        {
             if *attempts_remaining == 0 {
                 state = SessionState::Failed {
                     reason: "Max attempts exceeded".to_string(),

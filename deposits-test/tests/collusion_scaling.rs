@@ -9,10 +9,10 @@
 //!
 //! The question: at what K/N ratio does the coalition profit?
 
+use deposits_protocol::types::*;
 use deposits_test::adversarial::*;
 use deposits_test::docker::InvariantBoundarySearch;
 use deposits_test::*;
-use deposits_protocol::types::*;
 use std::collections::HashSet;
 
 // =========================================================================

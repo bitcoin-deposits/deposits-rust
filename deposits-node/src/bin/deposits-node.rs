@@ -50,8 +50,8 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
     let _flame_guard: Option<tracing_flame::FlushGuard<std::io::BufWriter<std::fs::File>>> = {
         use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-        let env_filter = EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| EnvFilter::new("info"));
+        let env_filter =
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
         // tracing writes to stderr so subcommands that produce parseable
         // stdout output (e.g. `transport-pubkey` printing a single hex

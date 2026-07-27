@@ -4,11 +4,11 @@
 //! A defense that holds at 4 operators but breaks at 12 is a scaling bug.
 
 use deposits_core::ledger::Ledger;
+use deposits_protocol::messages::LedgerOperation;
+use deposits_protocol::types::*;
 use deposits_test::adversarial::*;
 use deposits_test::docker::InvariantBoundarySearch;
 use deposits_test::*;
-use deposits_protocol::messages::LedgerOperation;
-use deposits_protocol::types::*;
 
 fn operator_names(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("op_{}", i)).collect()
@@ -245,11 +245,7 @@ fn scaling_witness_verification() {
             .op(&names[0])
             .ledger
             .state
-            .apply_with_verifier(
-                &bad_op,
-                &deposits_core::dep16::Dep16Authorizer::new(),
-                0,
-            )
+            .apply_with_verifier(&bad_op, &deposits_core::dep16::Dep16Authorizer::new(), 0)
             .unwrap();
 
         let detected = !violations.is_empty();

@@ -89,7 +89,8 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
     let funding_update = real_anchored.first().unwrap();
     let proof_update = *real_anchored.last().unwrap();
     assert_ne!(
-        funding_update.block_hash, proof_update.block_hash,
+        funding_update.block_hash,
+        proof_update.block_hash,
         "need distinct block_hashes between funding and proof anchors; got identical {}",
         hex::encode(funding_update.block_hash)
     );
@@ -128,8 +129,7 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
     // ── 3. BIP-340 sign the offer message with peer's operator key ──
     let cosigner_secret = derive_operator_secret_for_op(peer_op_idx);
     let secp = bitcoin::secp256k1::Secp256k1::new();
-    let cosigner_keypair =
-        bitcoin::secp256k1::Keypair::from_secret_key(&secp, &cosigner_secret);
+    let cosigner_keypair = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &cosigner_secret);
     let cosigner_pubkey = cosigner_keypair.public_key();
     // Accused operator pubkey = the operator who issued the offer (op0).
     // Read from any update on op0's accused ledger — operator_id is
@@ -146,7 +146,9 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
         &cosigner_ledger_hash,
     );
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
-    let cosign_signature = secp.sign_schnorr_no_aux_rand(&msg, &cosigner_keypair).serialize();
+    let cosign_signature = secp
+        .sign_schnorr_no_aux_rand(&msg, &cosigner_keypair)
+        .serialize();
     eprintln!(
         "[cosig]    cosigner={}…  sig={}…",
         &hex::encode(cosigner_pubkey.serialize())[..16],

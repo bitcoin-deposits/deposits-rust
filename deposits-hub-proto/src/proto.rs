@@ -137,7 +137,6 @@ pub enum HubMessage {
         #[serde(default)]
         node_stats: Option<NodeStats>,
     },
-
 }
 
 /// Self-encrypted hub state snapshot. Lives on the relay as a

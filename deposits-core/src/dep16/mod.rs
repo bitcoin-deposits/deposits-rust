@@ -165,7 +165,10 @@ mod tests {
         let state = ProtocolLedgerState::empty();
 
         let verdict = evaluate(&d, &op, &state, &witness, &verifier).expect("evaluate");
-        assert!(verdict, "K signed the operation preimage; the descriptor accepts");
+        assert!(
+            verdict,
+            "K signed the operation preimage; the descriptor accepts"
+        );
     }
 
     /// Negative case: a different message under the same key produces a different operation

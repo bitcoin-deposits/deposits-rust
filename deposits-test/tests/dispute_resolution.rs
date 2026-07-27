@@ -1,8 +1,8 @@
 //! Dispute resolution: enter, arm, acquire/yield state transitions.
 
 use deposits_core::ledger::Ledger;
-use deposits_test::*;
 use deposits_protocol::types::{DisputeState, QuorumState};
+use deposits_test::*;
 
 fn setup_quorum_network() -> TestNetwork {
     let mut net = TestNetwork::new(&["alice", "bob", "charlie"], 1_000_000);

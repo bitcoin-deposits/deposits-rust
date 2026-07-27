@@ -219,9 +219,10 @@ fn cosign_rejects_close_with_balance() {
     );
     credit_deposit(&mut ledger, dep, 1000);
 
-    let result = ledger
-        .state
-        .apply(&LedgerOperation::DepositClose { deposit_id: dep, commitment: None, });
+    let result = ledger.state.apply(&LedgerOperation::DepositClose {
+        deposit_id: dep,
+        commitment: None,
+    });
     assert!(result.is_err(), "Should reject close with non-zero balance");
 }
 
@@ -393,7 +394,8 @@ fn open_invoice_lock_cleared_on_fail() {
     // (TransferFeeSchedule::default().fixed_msats = 2).
     let deposit = ledger.state.deposits.get(&dep).unwrap();
     assert_eq!(
-        deposit.balance, 10_000 - 2,
+        deposit.balance,
+        10_000 - 2,
         "Balance should be restored after fail minus fixed operator fee"
     );
     assert_eq!(

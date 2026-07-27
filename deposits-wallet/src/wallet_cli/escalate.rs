@@ -65,10 +65,12 @@ pub async fn escalate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         i += 1;
     }
 
-    let member_ledger = member_ledger
-        .ok_or("Missing --member-ledger <hex>: the quorum member's ledger id where the embed should land")?;
-    let request_hash_hex = request_hash_hex
-        .ok_or("Missing --request-hash <hex>: 32-byte SHA256 of the original signed request payload")?;
+    let member_ledger = member_ledger.ok_or(
+        "Missing --member-ledger <hex>: the quorum member's ledger id where the embed should land",
+    )?;
+    let request_hash_hex = request_hash_hex.ok_or(
+        "Missing --request-hash <hex>: 32-byte SHA256 of the original signed request payload",
+    )?;
     let target_ledger = target_ledger
         .ok_or("Missing --target-ledger <hex>: the operator's ledger id where the request should have been processed")?;
     let target_operator = target_operator
@@ -76,13 +78,22 @@ pub async fn escalate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // Sanity-check hex inputs early so the wallet doesn't pay relay
     // round-trip for a malformed request.
-    if hex::decode(&request_hash_hex).map(|b| b.len() != 32).unwrap_or(true) {
+    if hex::decode(&request_hash_hex)
+        .map(|b| b.len() != 32)
+        .unwrap_or(true)
+    {
         return Err("--request-hash must be 32 bytes (64 hex chars)".into());
     }
-    if hex::decode(&target_ledger).map(|b| b.len() != 32).unwrap_or(true) {
+    if hex::decode(&target_ledger)
+        .map(|b| b.len() != 32)
+        .unwrap_or(true)
+    {
         return Err("--target-ledger must be 32 bytes (64 hex chars)".into());
     }
-    if hex::decode(&target_operator).map(|b| b.len() != 33).unwrap_or(true) {
+    if hex::decode(&target_operator)
+        .map(|b| b.len() != 33)
+        .unwrap_or(true)
+    {
         return Err("--target-operator must be 33 bytes (66 hex chars, compressed pubkey)".into());
     }
 
@@ -94,7 +105,10 @@ pub async fn escalate(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .clone();
 
     let secret = super::derive_secret_key(&config.seed, config.network)?;
-    let transport = NostrTransportBuilder::new(secret).relay(&relay_url).build().await?;
+    let transport = NostrTransportBuilder::new(secret)
+        .relay(&relay_url)
+        .build()
+        .await?;
 
     println!(
         "Sending delivery_embed request to member {}...",

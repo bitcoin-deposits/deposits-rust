@@ -32,15 +32,9 @@ fn input_sort_order_is_lexicographic_by_txid_then_vout() {
     // under different sort schemes (e.g. by-amount, by-pubkey-of-owner)
     // and confirm the lex-by-txid sort produces the expected order.
     use bitcoin::hashes::Hash;
-    let txid_a = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-        [0x11; 32],
-    ));
-    let txid_b = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-        [0x22; 32],
-    ));
-    let txid_c = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(
-        [0x33; 32],
-    ));
+    let txid_a = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x11; 32]));
+    let txid_b = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x22; 32]));
+    let txid_c = Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array([0x33; 32]));
 
     // Build outpoints in an arbitrary order with different vouts.
     let mut outpoints = vec![

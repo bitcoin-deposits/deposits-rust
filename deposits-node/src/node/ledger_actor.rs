@@ -317,10 +317,7 @@ impl LedgerActor {
     /// trigger: when any DisputeArmed lands on a fork, wake `Node`
     /// to check whether confiscation is ready, instead of waiting
     /// for the next periodic.
-    fn handle_fork_branch_update(
-        &mut self,
-        update: &deposits_core::types::SignedLedgerUpdate,
-    ) {
+    fn handle_fork_branch_update(&mut self, update: &deposits_core::types::SignedLedgerUpdate) {
         use deposits_core::messages::LedgerOperation;
         use deposits_core::tlv::TlvDecode;
 
@@ -390,8 +387,7 @@ impl LedgerActor {
             let staged = ledger
                 .stage_operation(operation, block_height, block_hash)
                 .map_err(|e| format!("stage failed: {}", e))?;
-            let quorum_active =
-                ledger.state.quorum_state == deposits_core::QuorumState::Active;
+            let quorum_active = ledger.state.quorum_state == deposits_core::QuorumState::Active;
             let members: Vec<PublicKey> = ledger
                 .state
                 .quorum_members
@@ -406,8 +402,8 @@ impl LedgerActor {
         //    the state machine PreQuorum -> Active and so needs
         //    member attestation even though state is still PreQuorum
         //    at stage time).
-        let is_first_quorum_begin = !quorum_active
-            && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
+        let is_first_quorum_begin =
+            !quorum_active && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
         if quorum_active || is_first_quorum_begin {
             let threshold = members.len() / 2 + 1;
             let (tx, rx) = oneshot::channel::<Result<Vec<CosignEntry>, String>>();
@@ -447,10 +443,7 @@ impl LedgerActor {
             use deposits_signer_api::SignContext;
             let digest = staged.update.operator_sign_digest_v1();
             let ledger_id_bytes = self.ledger.read().unwrap().ledger_id();
-            let ctx = SignContext::operator_update(
-                ledger_id_bytes,
-                staged.update.sequence_number,
-            );
+            let ctx = SignContext::operator_update(ledger_id_bytes, staged.update.sequence_number);
             staged.update.operator_signature = self
                 .signer
                 .bip340_sign(&ctx, &digest)
@@ -544,4 +537,3 @@ impl LedgerActor {
         );
     }
 }
-

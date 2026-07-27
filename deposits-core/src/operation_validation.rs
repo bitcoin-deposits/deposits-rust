@@ -971,8 +971,9 @@ pub fn validate_quorum_add_member_blob(
     let digest = quorum_member_response_digest(response_bytes);
     use bitcoin::secp256k1::schnorr::Signature;
     use bitcoin::secp256k1::{Message, Secp256k1};
-    let sig = Signature::from_slice(signature)
-        .map_err(|_| "QuorumAddMember.member_signature: invalid 64-byte schnorr signature".to_string())?;
+    let sig = Signature::from_slice(signature).map_err(|_| {
+        "QuorumAddMember.member_signature: invalid 64-byte schnorr signature".to_string()
+    })?;
     let msg = Message::from_digest(digest);
     let secp = Secp256k1::verification_only();
     let (xonly, _) = decoded.member_pubkey.x_only_public_key();
@@ -991,7 +992,11 @@ pub fn validate_quorum_add_member_blob(
     }
     check("min_fee_bps", loose_min_fee_bps, decoded.min_fee_bps)?;
     check("min_fee_fixed", loose_min_fee_fixed, decoded.min_fee_fixed)?;
-    check("max_fee_period", loose_max_fee_period, decoded.max_fee_period)?;
+    check(
+        "max_fee_period",
+        loose_max_fee_period,
+        decoded.max_fee_period,
+    )?;
     check(
         "membership_until",
         loose_membership_until,
@@ -1022,7 +1027,11 @@ pub fn validate_quorum_add_member_blob(
         loose_max_descriptor_bytes,
         decoded.max_descriptor_bytes,
     )?;
-    check("compensation_bps", loose_compensation_bps, decoded.compensation_bps)?;
+    check(
+        "compensation_bps",
+        loose_compensation_bps,
+        decoded.compensation_bps,
+    )?;
     check(
         "compensation_deposit_id",
         loose_compensation_deposit_id,
@@ -1171,10 +1180,8 @@ mod tests {
         ) -> (Vec<u8>, [u8; 64], PublicKey) {
             let kp = Keypair::from_seckey_slice(secp, member_sk).unwrap();
             let member_pk = PublicKey::from_keypair(&kp);
-            let op_pk = PublicKey::from_secret_key(
-                secp,
-                &SecretKey::from_slice(&[7u8; 32]).unwrap(),
-            );
+            let op_pk =
+                PublicKey::from_secret_key(secp, &SecretKey::from_slice(&[7u8; 32]).unwrap());
             let r = QuorumMemberResponse {
                 response_version: QUORUM_MEMBER_RESPONSE_VERSION,
                 member_pubkey: member_pk,
@@ -1212,7 +1219,18 @@ mod tests {
                 "ab".repeat(32).as_str(),
                 None,
                 None,
-                None, None, None, None, None, None, None, None, None, None, None, None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
             )
             .is_ok());
         }
@@ -1226,8 +1244,18 @@ mod tests {
                 "cd".repeat(32).as_str(),
                 Some(&bytes),
                 None,
-                Some(100), None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                Some(100),
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             )
             .unwrap_err();
             assert!(err.contains("member_signature is missing"), "{}", err);
@@ -1242,8 +1270,18 @@ mod tests {
                 "cd".repeat(32).as_str(),
                 Some(&bytes),
                 Some(&sig),
-                Some(100), None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                Some(100),
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             );
             assert!(r.is_ok(), "{:?}", r);
         }
@@ -1258,8 +1296,17 @@ mod tests {
                 Some(&bytes),
                 Some(&sig),
                 Some(101), // operator-rewritten
-                None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             )
             .unwrap_err();
             assert!(err.contains("min_fee_bps mismatch"), "{}", err);
@@ -1276,8 +1323,18 @@ mod tests {
                 "cd".repeat(32).as_str(),
                 Some(&bytes),
                 Some(&bad_sig),
-                Some(100), None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                Some(100),
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             )
             .unwrap_err();
             assert!(err.contains("BIP-340 verify failed"), "{}", err);
@@ -1294,11 +1351,25 @@ mod tests {
                 "cd".repeat(32).as_str(),
                 Some(&bytes),
                 Some(&sig),
-                Some(100), None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                Some(100),
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             )
             .unwrap_err();
-            assert!(err.contains("does not match outer quorum_member"), "{}", err);
+            assert!(
+                err.contains("does not match outer quorum_member"),
+                "{}",
+                err
+            );
         }
 
         #[test]
@@ -1310,8 +1381,18 @@ mod tests {
                 "ee".repeat(32).as_str(), // different ledger
                 Some(&bytes),
                 Some(&sig),
-                Some(100), None, Some(2016), Some(900_000),
-                None, None, None, None, None, Some(300), None, None,
+                Some(100),
+                None,
+                Some(2016),
+                Some(900_000),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(300),
+                None,
+                None,
             )
             .unwrap_err();
             assert!(
@@ -1419,7 +1500,11 @@ mod tests {
     // ─── validate_fee_minimum ──────────────────────────────────────────
 
     fn fee(annualized_msats: u64, bps: u16, period: u32) -> FeeStructure {
-        FeeStructure { annualized_msats, annualized_bps: bps, frequency_blocks: period }
+        FeeStructure {
+            annualized_msats,
+            annualized_bps: bps,
+            frequency_blocks: period,
+        }
     }
 
     #[test]
@@ -1506,20 +1591,18 @@ mod tests {
         #[test]
         fn oracle_doesnt_know_the_hash() {
             let oracle = oracle_with(&[(HASH_A, 949_000)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_B, 949_000, 146, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_B, 949_000, 146, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("not in canonical chain"), "{}", err);
         }
 
         #[test]
         fn oracle_disagrees_with_asserted_height() {
             let oracle = oracle_with(&[(HASH_A, 949_000)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_A, 949_999, 146, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_A, 949_999, 146, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("oracle height 949000"), "{}", err);
             assert!(err.contains("asserted 949999"), "{}", err);
         }
@@ -1528,20 +1611,18 @@ mod tests {
         fn anchor_at_expiry_is_not_yet_past_deadline() {
             // anchor_block_height must STRICTLY exceed quorum_expiry.
             let oracle = oracle_with(&[(HASH_A, 948_254)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_A, 948_254, 146, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_A, 948_254, 146, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("does not exceed"), "{}", err);
         }
 
         #[test]
         fn anchor_before_expiry_rejected() {
             let oracle = oracle_with(&[(HASH_A, 948_000)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_A, 948_000, 146, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_A, 948_000, 146, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("does not exceed"), "{}", err);
         }
 
@@ -1549,10 +1630,9 @@ mod tests {
         fn stale_fork_point_rejected() {
             // last_valid_sequence < tip → forking from stale state.
             let oracle = oracle_with(&[(HASH_A, 949_000)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_A, 949_000, 145, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_A, 949_000, 145, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("stale state"), "{}", err);
             assert!(err.contains("145"), "{}", err);
             assert!(err.contains("146"), "{}", err);
@@ -1563,10 +1643,9 @@ mod tests {
             // last_valid_sequence > tip is also nonsensical (can't fork
             // from an update we haven't seen).
             let oracle = oracle_with(&[(HASH_A, 949_000)]);
-            let err = validate_dispute_enter_quorum_expired(
-                &HASH_A, 949_000, 200, 948_254, 146, &oracle,
-            )
-            .unwrap_err();
+            let err =
+                validate_dispute_enter_quorum_expired(&HASH_A, 949_000, 200, 948_254, 146, &oracle)
+                    .unwrap_err();
             assert!(err.contains("stale state"), "{}", err);
         }
     }

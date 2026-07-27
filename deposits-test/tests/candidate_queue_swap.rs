@@ -54,8 +54,7 @@ fn op_first_owned_ledger(i: usize) -> String {
         let stem = name.trim_end_matches(".jsonl").to_string();
         let history = read_ledger_history(&op_data_dir(i), &stem);
         for u in &history {
-            if let Ok(LedgerOperation::QuorumBegin { .. }) =
-                LedgerOperation::tlv_decode(&u.message)
+            if let Ok(LedgerOperation::QuorumBegin { .. }) = LedgerOperation::tlv_decode(&u.message)
             {
                 if u.operator_id == want {
                     return stem;
@@ -110,7 +109,9 @@ fn auto_quorum_refresh_consumes_candidate_to_replace_dead_member() {
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             original_expiry = quorum_expiry;
-            ruleset_name = protocol_version.clone().unwrap_or_else(|| "legacy".to_string());
+            ruleset_name = protocol_version
+                .clone()
+                .unwrap_or_else(|| "legacy".to_string());
             active_pubkeys = quorum_members.iter().map(|m| m.pubkey).collect();
             break;
         }
@@ -297,8 +298,7 @@ fn auto_quorum_refresh_consumes_candidate_to_replace_dead_member() {
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             if quorum_expiry > original_expiry {
-                let members: Vec<PublicKey> =
-                    quorum_members.iter().map(|m| m.pubkey).collect();
+                let members: Vec<PublicKey> = quorum_members.iter().map(|m| m.pubkey).collect();
                 if members.contains(&candidate_pk) && !members.contains(&victim_pk) {
                     swap_observed = true;
                     eprintln!(

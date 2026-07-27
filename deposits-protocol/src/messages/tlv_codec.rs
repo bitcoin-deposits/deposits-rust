@@ -76,7 +76,7 @@ mod ledger_op_tlv {
     // Per-deposit dep-16 replay-protection fields (phase 3)
     pub const NONCE: u64 = 288; // u64, per-deposit monotonic nonce
     pub const EXPIRY: u64 = 290; // u32, block height after which the signature is invalid
-    // Quorum/Collateral ledger binding fields
+                                 // Quorum/Collateral ledger binding fields
     pub const MEMBER_LEDGER_ID: u64 = 114;
     // 124 was COLLATERAL_LEDGER_ID (removed with collateral-in-UTXO migration)
     // Descriptor-based deposit fields
@@ -265,7 +265,9 @@ impl TlvEncode for LedgerOperation {
                 // Member ledger_ids: parallel array, each entry is
                 // `u8 len || ledger_id_bytes`. Skipped entirely if all
                 // entries are empty (older producers / legacy callers).
-                let any_lids = quorum_members.iter().any(|m| !m.member_ledger_id.is_empty());
+                let any_lids = quorum_members
+                    .iter()
+                    .any(|m| !m.member_ledger_id.is_empty());
                 let mut lids_bytes = Vec::new();
                 if any_lids {
                     for m in quorum_members {
@@ -550,8 +552,12 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(TRANSFER_ID, transfer_id)
                     .witness_field(SCRIPT_WITNESS, script_witness);
                 builder = write_commitment(builder, commitment, BALANCE_AFTER, LOCKED_AFTER);
-                builder =
-                    write_commitment(builder, dest_commitment, DEST_BALANCE_AFTER, DEST_LOCKED_AFTER);
+                builder = write_commitment(
+                    builder,
+                    dest_commitment,
+                    DEST_BALANCE_AFTER,
+                    DEST_LOCKED_AFTER,
+                );
             }
             Self::TransferFail {
                 transfer_id,
@@ -779,9 +785,8 @@ impl TlvDecode for LedgerOperation {
                     if loff + len > lids_bytes.len() {
                         break;
                     }
-                    ledger_ids.push(
-                        String::from_utf8_lossy(&lids_bytes[loff..loff + len]).into_owned()
-                    );
+                    ledger_ids
+                        .push(String::from_utf8_lossy(&lids_bytes[loff..loff + len]).into_owned());
                     loff += len;
                 }
                 let quorum_members: Vec<QuorumMemberRef> = pubkeys
@@ -949,7 +954,8 @@ impl TlvDecode for LedgerOperation {
                 max_descriptor_bytes: reader.read_u32_opt(MAX_DESCRIPTOR_BYTES)?,
                 compensation_bps: reader.read_u16_opt(COMPENSATION_BPS)?,
                 compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
-                compensation_frequency_blocks: reader.read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
+                compensation_frequency_blocks: reader
+                    .read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
                 member_response: reader.read_raw_opt(MEMBER_RESPONSE).map(|b| b.to_vec()),
                 member_signature: reader.read_bytes_opt(MEMBER_SIGNATURE)?,
             }),
@@ -1011,7 +1017,7 @@ impl TlvDecode for LedgerOperation {
                     target_reserves,
                     replacement_collateral,
                 })
-            },
+            }
             80 => Ok(Self::DeliveryEmbed {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 target_ledger_id: reader.read_bytes(TARGET_LEDGER_ID)?,
@@ -1339,7 +1345,6 @@ impl TlvDecode for SyncResponseMsg {
     }
 }
 
-
 // ============================================================================
 // TLV Encoding for Coordination Messages
 // ============================================================================
@@ -1556,7 +1561,8 @@ impl TlvDecode for CoordinationMsg {
                 signature: reader.read_bytes(SIGNATURE)?,
                 compensation_bps: reader.read_u16_opt(COMPENSATION_BPS)?,
                 compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
-                compensation_frequency_blocks: reader.read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
+                compensation_frequency_blocks: reader
+                    .read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
             }),
             3 => {
                 // Decode Vec<u64> from concatenated big-endian bytes
@@ -2518,7 +2524,9 @@ mod tests {
 
         if let LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness, .. } = decoded
+            script_witness,
+            ..
+        } = decoded
         {
             assert_eq!(transfer_id, [0xCDu8; 32]);
             assert_eq!(script_witness.stack.len(), 1);
@@ -2615,7 +2623,9 @@ mod tests {
 
         if let LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness, .. } = decoded
+            script_witness,
+            ..
+        } = decoded
         {
             assert_eq!(transfer_id, [0xAAu8; 32]);
             assert_eq!(script_witness.stack.len(), 2);

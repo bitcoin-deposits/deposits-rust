@@ -160,10 +160,7 @@ impl Node {
             let map = self.ledger_actors.lock().unwrap();
             map.get(ledger_id)
                 .ok_or_else(|| {
-                    Error::Protocol(format!(
-                        "No actor for ledger {} — cannot commit",
-                        ledger_id
-                    ))
+                    Error::Protocol(format!("No actor for ledger {} — cannot commit", ledger_id))
                 })?
                 .inbox
                 .clone()
@@ -1124,7 +1121,10 @@ mod obligation_tests {
             .sum();
         let reserves_cap = 15_600_000u64;
         assert!(obligation <= reserves_cap, "true obligation fits reserves");
-        assert!(buggy > reserves_cap, "buggy formula falsely exceeds reserves");
+        assert!(
+            buggy > reserves_cap,
+            "buggy formula falsely exceeds reserves"
+        );
     }
 
     #[test]
@@ -1137,4 +1137,3 @@ mod obligation_tests {
         );
     }
 }
-

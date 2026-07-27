@@ -643,7 +643,9 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
         }
         LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness, .. } => {
+            script_witness,
+            ..
+        } => {
             // Witness stack[0] is 32 bytes for both HTLC preimage and PTLC
             // scalar — same shape on the wire, different downstream meaning.
             // We can't tell which it is at decode time without consulting the
@@ -669,7 +671,10 @@ fn decode_update_event(event: &Event, our_deposit_ids: &[String]) -> Option<Upda
 
 fn extract_lock_kind_from_script(script: &str) -> Option<LockKind> {
     // "sha256(abcdef...)" → HTLC; "pointlock(abcdef...)" → PTLC.
-    if let Some(inner) = script.strip_prefix("sha256(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = script
+        .strip_prefix("sha256(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let bytes = hex::decode(inner).ok()?;
         if bytes.len() != 32 {
             return None;
@@ -2067,7 +2072,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     continue;
                                 }
                             };
-                            let t = match bitcoin::secp256k1::SecretKey::from_slice(&ps.blinding_t) {
+                            let t = match bitcoin::secp256k1::SecretKey::from_slice(&ps.blinding_t)
+                            {
                                 Ok(t) => t,
                                 Err(_) => {
                                     eprintln!("  [SKIP] stored t is not a valid scalar");
@@ -2088,7 +2094,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             // Leg 2 locks against P (the unblinded sender point).
-                            LockKind::Ptlc { point_p_b: ps.point_p }
+                            LockKind::Ptlc {
+                                point_p_b: ps.point_p,
+                            }
                         }
                     };
 
@@ -2348,7 +2356,9 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
         "htlc" => {
             let hash_hex = match params["hash"].as_str() {
                 Some(s) if s.len() == 64 => s.to_string(),
-                _ => return serde_json::json!({"success": false, "error": "hash must be 64 hex chars"}),
+                _ => {
+                    return serde_json::json!({"success": false, "error": "hash must be 64 hex chars"})
+                }
             };
             let hash: [u8; 32] = match hex::decode(&hash_hex) {
                 Ok(b) if b.len() == 32 => {
@@ -2359,14 +2369,19 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
                 _ => return serde_json::json!({"success": false, "error": "invalid hash"}),
             };
             let mut extras = serde_json::Map::new();
-            extras.insert("lock_type".to_string(), serde_json::Value::String("htlc".into()));
+            extras.insert(
+                "lock_type".to_string(),
+                serde_json::Value::String("htlc".into()),
+            );
             extras.insert("hash".to_string(), serde_json::Value::String(hash_hex));
             (hash, None, extras)
         }
         "ptlc" => {
             let point_p_hex = match params["point_p"].as_str() {
                 Some(s) if s.len() == 66 => s.to_string(),
-                _ => return serde_json::json!({"success": false, "error": "point_p must be 66 hex chars (33-byte compressed secp point)"}),
+                _ => {
+                    return serde_json::json!({"success": false, "error": "point_p must be 66 hex chars (33-byte compressed secp point)"})
+                }
             };
             let point_p_bytes = match hex::decode(&point_p_hex) {
                 Ok(b) if b.len() == 33 => b,
@@ -2411,8 +2426,14 @@ fn process_route_request(params: &serde_json::Value, state: &SharedState) -> ser
             let route_key = lock_kind_route_key(&lock_kind);
 
             let mut extras = serde_json::Map::new();
-            extras.insert("lock_type".to_string(), serde_json::Value::String("ptlc".into()));
-            extras.insert("point_p".to_string(), serde_json::Value::String(point_p_hex));
+            extras.insert(
+                "lock_type".to_string(),
+                serde_json::Value::String("ptlc".into()),
+            );
+            extras.insert(
+                "point_p".to_string(),
+                serde_json::Value::String(point_p_hex),
+            );
             extras.insert(
                 "blinding_point".to_string(),
                 serde_json::Value::String(blinding_point_hex),

@@ -103,11 +103,7 @@ async fn danger_forge_non_conforming_cosig(
     }
 
     let config = parse_config(&config_args)?;
-    let relay_url = config
-        .relays
-        .first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
 
     let secp = Secp256k1::new();
     let operator_secret = super::derive_operator_secret(&config.seed, config.network)?;
@@ -118,7 +114,11 @@ async fn danger_forge_non_conforming_cosig(
     let (_ledger_id_hex, ledger) = node
         .get_ledger_with_id(reserves_id)
         .ok_or_else(|| format!("Ledger not found: {}", reserves_id))?;
-    let last = ledger.history.last().ok_or("Ledger has no history")?.clone();
+    let last = ledger
+        .history
+        .last()
+        .ok_or("Ledger has no history")?
+        .clone();
     let next_seq = last.sequence_number + 1;
     let prev_chain_hash = last.chain_hash();
 
@@ -181,9 +181,7 @@ async fn danger_forge_non_conforming_cosig(
         .iter()
         .map(|(kp, pk)| CosignEntry {
             cosigner_pubkey: *pk,
-            cosign_signature: secp
-                .sign_schnorr_no_aux_rand(&cosign_msg, kp)
-                .serialize(),
+            cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
             member_ledger_hash: [0u8; 32],
         })
         .collect();
@@ -276,9 +274,7 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
     use sha2::{Digest, Sha256};
 
     if args.is_empty() {
-        eprintln!(
-            "Usage: deposits-node danger fork-update <reserves_id> [--cosigner-seed <hex>]+"
-        );
+        eprintln!("Usage: deposits-node danger fork-update <reserves_id> [--cosigner-seed <hex>]+");
         return Ok(());
     }
 
@@ -312,11 +308,7 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
     }
 
     let config = parse_config(&config_args)?;
-    let relay_url = config
-        .relays
-        .first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
     let data_dir = config.data_dir.clone();
 
     let secp = Secp256k1::new();
@@ -401,9 +393,7 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
             .iter()
             .map(|(kp, pk)| CosignEntry {
                 cosigner_pubkey: *pk,
-                cosign_signature: secp
-                    .sign_schnorr_no_aux_rand(&cosign_msg, kp)
-                    .serialize(),
+                cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
                 member_ledger_hash: [0u8; 32], // not relevant for this scenario
             })
             .collect();
@@ -444,12 +434,15 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
         update
     };
 
-    let message_type =
-        deposits_core::messages::LedgerOperation::message_type_from_bytes(&msg_a);
+    let message_type = deposits_core::messages::LedgerOperation::message_type_from_bytes(&msg_a);
     let update_a = build_update(msg_a, message_type);
     let update_b = build_update(msg_b, message_type);
 
-    println!("Forked updates at seq={} prev_hash={}", next_seq, hex::encode(prev_chain_hash));
+    println!(
+        "Forked updates at seq={} prev_hash={}",
+        next_seq,
+        hex::encode(prev_chain_hash)
+    );
     // Full hashes on dedicated, parseable lines so an integration test
     // can pull them out of stdout deterministically.
     println!("U_A content_hash={}", hex::encode(update_a.content_hash));
@@ -528,11 +521,7 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
         i += 1;
     }
     let config = parse_config(&config_args)?;
-    let relay_url = config
-        .relays
-        .first()
-        .ok_or("No relay configured")?
-        .clone();
+    let relay_url = config.relays.first().ok_or("No relay configured")?.clone();
     let data_dir = config.data_dir.clone();
 
     let secp = Secp256k1::new();
@@ -564,7 +553,7 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
     // Forge: set cosignatures to a single CosignEntry with the stale hash.
     let cosignatures = vec![CosignEntry {
         cosigner_pubkey: operator_pubkey, // anyone valid; verifier only checks
-                                          // the member_ledger_hash field
+        // the member_ledger_hash field
         cosign_signature: [0u8; 64],
         member_ledger_hash: stale_member_hash,
     }];
@@ -611,10 +600,7 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
         "  Stale hash:  {}...",
         &hex::encode(stale_member_hash)[..16]
     );
-    println!(
-        "  Content:     {}...",
-        &hex::encode(content_hash)[..16]
-    );
+    println!("  Content:     {}...", &hex::encode(content_hash)[..16]);
     println!();
 
     let transport = NostrTransportBuilder::new(secret_key)
@@ -637,9 +623,9 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
 /// Publish an invalid ledger update to test recovery mechanisms.
 /// WARNING: This creates non-conforming updates that break protocol rules.
 async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::nostr::NostrTransportBuilder;
     use bitcoin::secp256k1::{Message, Secp256k1, SecretKey};
     use deposits_core::SignedLedgerUpdate;
-    use crate::nostr::NostrTransportBuilder;
     use sha2::{Digest, Sha256};
 
     if args.len() < 2 {
@@ -902,7 +888,10 @@ pub(crate) fn append_update_to_local_jsonl(
     // wire shape: a SignedLedgerUpdate flattened with `"type":"Update"`.
     let mut value = serde_json::to_value(update)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("type".to_string(), serde_json::Value::String("Update".into()));
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("Update".into()),
+        );
     }
     let json = serde_json::to_string(&value)?;
 

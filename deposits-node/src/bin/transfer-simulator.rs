@@ -694,8 +694,7 @@ async fn batch_open_deposits(
         let secret_key = derive_secret_key_at_index(seed, network, key_index)?;
         let pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
         let descriptor = format!("pk({})", hex::encode(pubkey.serialize()));
-        let deposit_id =
-            deposits_core::types::compute_deposit_id(&descriptor);
+        let deposit_id = deposits_core::types::compute_deposit_id(&descriptor);
         dep_infos.push(DepInfo {
             alias: alias.clone(),
             ledger_id,

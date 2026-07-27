@@ -233,9 +233,7 @@ impl Wallet {
         // Check unspent. is_output_unspent returns Some(true) for unspent,
         // Some(false) for spent, None for unknown (treat as unspent — the
         // tx exists per the get_tx above, so the output exists too).
-        let unspent = backend
-            .is_output_unspent(&txid, vout)?
-            .unwrap_or(true);
+        let unspent = backend.is_output_unspent(&txid, vout)?.unwrap_or(true);
         if !unspent {
             return Ok(None);
         }

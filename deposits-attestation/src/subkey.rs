@@ -27,8 +27,8 @@
 //! ```
 
 use bitcoin::hashes::{sha256, Hash};
-use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use bitcoin::secp256k1::schnorr::Signature;
+use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey};
 use serde::{Deserialize, Serialize};
 
 /// Nostr event kind for subkey management (replaceable: 10000-19999).
@@ -58,7 +58,11 @@ pub struct SubkeyManagement {
 ///
 /// The message is `SHA256("nostr301:<hex-subkey-pubkey>")`.
 pub fn attestation_digest(subkey_pubkey: &XOnlyPublicKey) -> [u8; 32] {
-    let msg = format!("{}{}", ATTESTATION_PREFIX, hex::encode(subkey_pubkey.serialize()));
+    let msg = format!(
+        "{}{}",
+        ATTESTATION_PREFIX,
+        hex::encode(subkey_pubkey.serialize())
+    );
     sha256::Hash::hash(msg.as_bytes()).to_byte_array()
 }
 
@@ -111,13 +115,13 @@ pub fn validate_event_tags(
     account_pubkey_hex: &str,
     attestation_hex: &str,
 ) -> Result<XOnlyPublicKey, String> {
-    let account_bytes = hex::decode(account_pubkey_hex)
-        .map_err(|_| "Invalid account pubkey hex".to_string())?;
+    let account_bytes =
+        hex::decode(account_pubkey_hex).map_err(|_| "Invalid account pubkey hex".to_string())?;
     let account_pubkey = XOnlyPublicKey::from_slice(&account_bytes)
         .map_err(|_| "Invalid account pubkey".to_string())?;
 
-    let subkey_bytes = hex::decode(subkey_pubkey_hex)
-        .map_err(|_| "Invalid subkey pubkey hex".to_string())?;
+    let subkey_bytes =
+        hex::decode(subkey_pubkey_hex).map_err(|_| "Invalid subkey pubkey hex".to_string())?;
     let subkey_pubkey = XOnlyPublicKey::from_slice(&subkey_bytes)
         .map_err(|_| "Invalid subkey pubkey".to_string())?;
 
@@ -135,14 +139,13 @@ pub fn is_revoked(management_content: &str, subkey_pubkey_hex: &str) -> bool {
         Err(_) => return false,
     };
     let normalized = subkey_pubkey_hex.to_lowercase();
-    mgmt.revoked_subkeys.iter().any(|k| k.to_lowercase() == normalized)
+    mgmt.revoked_subkeys
+        .iter()
+        .any(|k| k.to_lowercase() == normalized)
 }
 
 /// Build the JSON content for a Kind 10301 subkey management event.
-pub fn build_management_content(
-    inbox_keys: &[&str],
-    revoked_subkeys: &[&str],
-) -> String {
+pub fn build_management_content(inbox_keys: &[&str], revoked_subkeys: &[&str]) -> String {
     let mgmt = SubkeyManagement {
         inbox_keys: inbox_keys.iter().map(|s| s.to_string()).collect(),
         revoked_subkeys: revoked_subkeys.iter().map(|s| s.to_string()).collect(),
@@ -172,7 +175,11 @@ mod tests {
 
         let attestation = create_attestation(&account_secret, &subkey_pubkey);
         assert_eq!(attestation.len(), 128); // 64 bytes hex-encoded
-        assert!(verify_attestation(&account_pubkey, &subkey_pubkey, &attestation));
+        assert!(verify_attestation(
+            &account_pubkey,
+            &subkey_pubkey,
+            &attestation
+        ));
     }
 
     #[test]
@@ -182,7 +189,11 @@ mod tests {
         let (_, subkey_pubkey) = test_keypair(0xBB);
 
         let attestation = create_attestation(&account_secret, &subkey_pubkey);
-        assert!(!verify_attestation(&other_pubkey, &subkey_pubkey, &attestation));
+        assert!(!verify_attestation(
+            &other_pubkey,
+            &subkey_pubkey,
+            &attestation
+        ));
     }
 
     #[test]
@@ -192,7 +203,11 @@ mod tests {
         let (_, other_subkey) = test_keypair(0xCC);
 
         let attestation = create_attestation(&account_secret, &subkey_pubkey);
-        assert!(!verify_attestation(&account_pubkey, &other_subkey, &attestation));
+        assert!(!verify_attestation(
+            &account_pubkey,
+            &other_subkey,
+            &attestation
+        ));
     }
 
     #[test]
@@ -200,8 +215,16 @@ mod tests {
         let (_, account_pubkey) = test_keypair(0xAA);
         let (_, subkey_pubkey) = test_keypair(0xBB);
 
-        assert!(!verify_attestation(&account_pubkey, &subkey_pubkey, "not_hex"));
-        assert!(!verify_attestation(&account_pubkey, &subkey_pubkey, "deadbeef"));
+        assert!(!verify_attestation(
+            &account_pubkey,
+            &subkey_pubkey,
+            "not_hex"
+        ));
+        assert!(!verify_attestation(
+            &account_pubkey,
+            &subkey_pubkey,
+            "deadbeef"
+        ));
         assert!(!verify_attestation(
             &account_pubkey,
             &subkey_pubkey,
@@ -276,10 +299,7 @@ mod tests {
     fn is_revoked_true() {
         let (_, subkey_pubkey) = test_keypair(0xBB);
         let hex_pk = hex::encode(subkey_pubkey.serialize());
-        let content = format!(
-            r#"{{"inbox_keys": [], "revoked_subkeys": ["{}"]}}"#,
-            hex_pk
-        );
+        let content = format!(r#"{{"inbox_keys": [], "revoked_subkeys": ["{}"]}}"#, hex_pk);
         assert!(is_revoked(&content, &hex_pk));
     }
 
@@ -317,10 +337,7 @@ mod tests {
 
     #[test]
     fn build_management_content_roundtrip() {
-        let content = build_management_content(
-            &["aabb", "ccdd"],
-            &["eeff"],
-        );
+        let content = build_management_content(&["aabb", "ccdd"], &["eeff"]);
         let parsed: SubkeyManagement = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.inbox_keys, vec!["aabb", "ccdd"]);
         assert_eq!(parsed.revoked_subkeys, vec!["eeff"]);

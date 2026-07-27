@@ -129,7 +129,12 @@ fn auto_dispute_fires_when_quorum_expires() {
                 {
                     // Found a fork compound-key file. Open it and look
                     // for a DisputeEnter with anchor fields.
-                    let stem = entry.path().file_stem().unwrap().to_string_lossy().into_owned();
+                    let stem = entry
+                        .path()
+                        .file_stem()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned();
                     let h = read_ledger_history(&op_data_dir(op_idx), &stem);
                     for u in &h {
                         if let Ok(LedgerOperation::DisputeEnter {
@@ -168,7 +173,11 @@ fn auto_dispute_fires_when_quorum_expires() {
     );
 
     // ── 4. Verify the anchor fields satisfy our invariants ──
-    let stem = fork_path.file_stem().unwrap().to_string_lossy().into_owned();
+    let stem = fork_path
+        .file_stem()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
     let fork_history = read_ledger_history(&op_data_dir(op_idx), &stem);
     let dispute_enter = fork_history
         .iter()

@@ -94,8 +94,11 @@ fn fraud_proof_triggers_dispute_state() {
         }
     };
     let ledger = victim.victim_ledger.clone();
-    let cosigner_op_indices: Vec<usize> =
-        victim.members.iter().map(|(op_idx, _, _)| *op_idx).collect();
+    let cosigner_op_indices: Vec<usize> = victim
+        .members
+        .iter()
+        .map(|(op_idx, _, _)| *op_idx)
+        .collect();
     eprintln!(
         "[setup] accused=op{} ledger={}… cosigners={:?}",
         accused_op_idx,
@@ -144,7 +147,10 @@ fn fraud_proof_triggers_dispute_state() {
     let disputer_op = cosigner_op_indices[0];
     let disputer_seed = op_seed(disputer_op);
     let disputer_dir = op_data_dir(disputer_op);
-    eprintln!("[dispute] op{} publishes kind:9103 via `recovery start`", disputer_op);
+    eprintln!(
+        "[dispute] op{} publishes kind:9103 via `recovery start`",
+        disputer_op
+    );
     let out = Command::new(&node)
         .args(["recovery", "start", &ledger])
         .args(["--reason", "integration test: forged invalid-hash"])

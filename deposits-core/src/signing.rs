@@ -347,7 +347,9 @@ pub fn sign_op(
             expiry,
             timeout_height,
             fee,
-            witness: _, .. } => LedgerOperation::InvoiceLock {
+            witness: _,
+            ..
+        } => LedgerOperation::InvoiceLock {
             deposit_id,
             amount,
             payment_id,
@@ -367,7 +369,9 @@ pub fn sign_op(
             withdrawal_id,
             nonce,
             expiry,
-            witness: _, .. } => LedgerOperation::OnchainLock {
+            witness: _,
+            ..
+        } => LedgerOperation::OnchainLock {
             deposit_id,
             amount,
             fee_sats,
@@ -389,7 +393,9 @@ pub fn sign_op(
             transfer_id,
             nonce,
             expiry,
-            witness: _, .. } => LedgerOperation::TransferLock {
+            witness: _,
+            ..
+        } => LedgerOperation::TransferLock {
             transfer_nonce,
             source_deposit_id,
             destination_deposit_id,
@@ -418,7 +424,9 @@ pub fn sign_op(
         },
         LedgerOperation::TransferComplete {
             transfer_id,
-            script_witness: _, .. } => LedgerOperation::TransferComplete {
+            script_witness: _,
+            ..
+        } => LedgerOperation::TransferComplete {
             transfer_id,
             script_witness: witness,
             commitment: None,

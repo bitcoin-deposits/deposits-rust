@@ -11,7 +11,9 @@
 //! mismatch, seq redundancy, missing predecessor).
 
 use bitcoin::secp256k1::{Keypair, Message, Secp256k1, SecretKey};
-use deposits_protocol::fraud::{verify_non_conforming_update, FraudEvidence, FraudProof, FraudProofType};
+use deposits_protocol::fraud::{
+    verify_non_conforming_update, FraudEvidence, FraudProof, FraudProofType,
+};
 use deposits_protocol::tlv::TlvEncode;
 use deposits_protocol::types::SignedLedgerUpdate;
 use sha2::{Digest, Sha256};

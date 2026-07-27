@@ -126,11 +126,7 @@ impl BitcoindRpcBackend {
             AuthSource::UserPass { user, pass } => Ok((user.clone(), pass.clone())),
             AuthSource::CookieFile(path) => {
                 let s = std::fs::read_to_string(path).map_err(|e| {
-                    Error::Wallet(format!(
-                        "read bitcoind cookie {}: {}",
-                        path.display(),
-                        e
-                    ))
+                    Error::Wallet(format!("read bitcoind cookie {}: {}", path.display(), e))
                 })?;
                 let (u, p) = s.trim_end().split_once(':').ok_or_else(|| {
                     Error::Wallet(format!(
@@ -287,28 +283,28 @@ impl ChainBackend for BitcoindRpcBackend {
         }
     }
 
-    fn get_tx(
-        &self,
-        txid: &bitcoin::Txid,
-    ) -> Result<Option<bitcoin::Transaction>, Error> {
+    fn get_tx(&self, txid: &bitcoin::Txid) -> Result<Option<bitcoin::Transaction>, Error> {
         // verbosity=0 returns serialized hex (matches what we want to decode).
         // RPC error -5 → unknown txid → Ok(None). Requires -txindex=1 for
         // unrelated txs; without it bitcoind only knows its own wallet txs.
-        let result: Result<String, Error> =
-            self.call("getrawtransaction", serde_json::json!([txid.to_string(), 0]));
+        let result: Result<String, Error> = self.call(
+            "getrawtransaction",
+            serde_json::json!([txid.to_string(), 0]),
+        );
         match result {
             Ok(hex_str) => {
                 use bitcoin::consensus::deserialize;
                 let bytes = hex::decode(&hex_str)
                     .map_err(|e| Error::Wallet(format!("bitcoind tx hex: {}", e)))?;
-                let tx: bitcoin::Transaction = deserialize(&bytes).map_err(|e| {
-                    Error::Wallet(format!("bitcoind tx consensus decode: {}", e))
-                })?;
+                let tx: bitcoin::Transaction = deserialize(&bytes)
+                    .map_err(|e| Error::Wallet(format!("bitcoind tx consensus decode: {}", e)))?;
                 Ok(Some(tx))
             }
             Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("error -5") || msg.contains("No such mempool or blockchain transaction") {
+                if msg.contains("error -5")
+                    || msg.contains("No such mempool or blockchain transaction")
+                {
                     Ok(None)
                 } else {
                     Err(e)
@@ -317,10 +313,7 @@ impl ChainBackend for BitcoindRpcBackend {
         }
     }
 
-    fn get_tx_block_height(
-        &self,
-        txid: &bitcoin::Txid,
-    ) -> Result<Option<u32>, Error> {
+    fn get_tx_block_height(&self, txid: &bitcoin::Txid) -> Result<Option<u32>, Error> {
         // verbose=true (or verbosity=1) returns the JSON header. Look up
         // the blockhash + walk into getblock for the height. If
         // confirmations is None or 0, it's mempool / not confirmed.
@@ -349,11 +342,7 @@ impl ChainBackend for BitcoindRpcBackend {
         }
     }
 
-    fn is_output_unspent(
-        &self,
-        txid: &bitcoin::Txid,
-        vout: u32,
-    ) -> Result<Option<bool>, Error> {
+    fn is_output_unspent(&self, txid: &bitcoin::Txid, vout: u32) -> Result<Option<bool>, Error> {
         // gettxout: include_mempool=true (third positional arg).
         // Returns null when the output is spent OR doesn't exist; we
         // distinguish those two cases by following up with get_tx if needed.
@@ -450,9 +439,7 @@ impl ChainBackend for BitcoindRpcBackend {
             let block_bytes = hex::decode(&block_hex)
                 .map_err(|e| Error::Wallet(format!("bitcoind block hex: {}", e)))?;
             let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)
-                .map_err(|e| {
-                    Error::Wallet(format!("bitcoind block consensus decode: {}", e))
-                })?;
+                .map_err(|e| Error::Wallet(format!("bitcoind block consensus decode: {}", e)))?;
             for tx in block.txdata {
                 if tx.input.iter().any(|i| i.previous_output == *outpoint) {
                     return Ok(Some(tx));

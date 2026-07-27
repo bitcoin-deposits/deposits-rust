@@ -162,8 +162,12 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
     let forged = accused_history
         .iter()
         .rev()
-        .find(|u| !u.cosignatures.is_empty()
-            && u.cosignatures.iter().any(|c| c.member_ledger_hash == stale_hash))
+        .find(|u| {
+            !u.cosignatures.is_empty()
+                && u.cosignatures
+                    .iter()
+                    .any(|c| c.member_ledger_hash == stale_hash)
+        })
         .expect("forged stale-cosig update should be in op0's history");
     let stale_update_seq = forged.sequence_number;
     let stale_update_content = forged.content_hash;

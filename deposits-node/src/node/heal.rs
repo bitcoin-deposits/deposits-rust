@@ -89,7 +89,9 @@ impl Node {
             let ledgers = match self.handler.ledgers.try_lock() {
                 Ok(l) => l,
                 Err(_) => {
-                    tracing::warn!("auto_heal_ledgers: ledgers lock contended, skipping this cycle");
+                    tracing::warn!(
+                        "auto_heal_ledgers: ledgers lock contended, skipping this cycle"
+                    );
                     return;
                 }
             };
@@ -121,7 +123,10 @@ impl Node {
     /// Heal a single owned ledger. Returns the number of updates re-published
     /// this pass (0 if the relay already holds the full chain, or if the ledger
     /// is not owned / not present locally).
-    pub(crate) async fn heal_owned_ledger(self: &Arc<Self>, ledger_id: &str) -> Result<usize, Error> {
+    pub(crate) async fn heal_owned_ledger(
+        self: &Arc<Self>,
+        ledger_id: &str,
+    ) -> Result<usize, Error> {
         // Own-ledger guard: healing re-lands OUR authored chain. Joined ledgers
         // are intentionally skipped (see module docs) to avoid duplicate fan-out.
         let is_own = {
@@ -155,7 +160,11 @@ impl Node {
         // invariant: we only ever re-publish updates we hold AND have persisted
         // (validated) — never anything fabricated.
         let disk_history = self.handler.read_persisted_history(ledger_id);
-        let history_source = if disk_history.is_some() { "disk" } else { "memory" };
+        let history_source = if disk_history.is_some() {
+            "disk"
+        } else {
+            "memory"
+        };
 
         // Clone the missing subset out while holding the read lock (for the
         // in-memory fallback), then release it before awaiting the broadcasts.
@@ -332,6 +341,10 @@ mod tests {
         let relay = present(&[]);
         let missing = missing_updates(&relay, &history, 3);
         let seqs: Vec<u64> = missing.iter().map(|u| u.sequence_number).collect();
-        assert_eq!(seqs, vec![0, 1, 2], "batch takes the oldest `limit`, oldest-first");
+        assert_eq!(
+            seqs,
+            vec![0, 1, 2],
+            "batch takes the oldest `limit`, oldest-first"
+        );
     }
 }

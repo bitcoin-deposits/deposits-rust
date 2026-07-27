@@ -23,6 +23,7 @@
 use bitcoin::secp256k1::{
     ecdsa, Keypair, Message, PublicKey, Secp256k1, SecretKey, XOnlyPublicKey,
 };
+use deposits_signer::framing::{read_frame, write_frame, FrameError};
 use deposits_signer_api::{
     wire::{
         auth_digest, hello_ack_digest, Auth, Hello, HelloAck, SignErrorKind, SignOp, SignRequest,
@@ -30,7 +31,6 @@ use deposits_signer_api::{
     },
     SigPurpose, SignContext, Signer, SignerError,
 };
-use deposits_signer::framing::{read_frame, write_frame, FrameError};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Mutex};
@@ -384,11 +384,7 @@ impl Signer for RemoteSigner {
         }
     }
 
-    fn bip340_sign(
-        &self,
-        ctx: &SignContext,
-        digest: &[u8; 32],
-    ) -> Result<[u8; 64], SignerError> {
+    fn bip340_sign(&self, ctx: &SignContext, digest: &[u8; 32]) -> Result<[u8; 64], SignerError> {
         match self.rpc(ctx, SignOp::Bip340 { digest: *digest })? {
             SignResult::Bip340Sig { sig } => Ok(sig),
             SignResult::Error { kind, message } => Err(map_sign_result_to_error(kind, message)),
@@ -479,10 +475,7 @@ impl Signer for RemoteSigner {
         }
     }
 
-    fn pubkey_at(
-        &self,
-        key_path: deposits_signer_api::KeyPath,
-    ) -> Result<PublicKey, SignerError> {
+    fn pubkey_at(&self, key_path: deposits_signer_api::KeyPath) -> Result<PublicKey, SignerError> {
         let ctx = SignContext::no_ledger(SigPurpose::Bip340Untagged);
         match self.rpc(&ctx, SignOp::PubkeyAt { key_path })? {
             SignResult::PubkeyAt { pubkey } => Ok(pubkey),

@@ -107,8 +107,10 @@ async fn handle_connection(
             "EVENT" => {
                 let Some(event) = arr.get(1) else { continue };
                 let kind = event.get("kind").and_then(|k| k.as_u64()).unwrap_or(0);
-                let event_created_at =
-                    event.get("created_at").and_then(|c| c.as_u64()).unwrap_or(0);
+                let event_created_at = event
+                    .get("created_at")
+                    .and_then(|c| c.as_u64())
+                    .unwrap_or(0);
                 let event_p_tags: Vec<String> = event
                     .get("tags")
                     .and_then(|t| t.as_array())

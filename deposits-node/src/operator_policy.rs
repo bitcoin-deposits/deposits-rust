@@ -137,9 +137,8 @@ impl OperatorPolicy {
     pub fn save(&self, data_dir: &Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(data_dir)?;
         let path = Self::path(data_dir);
-        let pretty = serde_json::to_string_pretty(self).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let pretty = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         std::fs::write(&path, pretty)
     }
 
@@ -148,10 +147,7 @@ impl OperatorPolicy {
     /// remain `None` if they were never set). Returns `true` if at least
     /// one CLI flag was applied — caller uses that to decide whether to
     /// persist the updated policy back to disk.
-    pub fn overlay_fee_args(
-        &mut self,
-        args: &crate::node_cli::FeeScheduleArgs,
-    ) -> bool {
+    pub fn overlay_fee_args(&mut self, args: &crate::node_cli::FeeScheduleArgs) -> bool {
         let mut touched = false;
         if let Some(v) = args.annual_fee_bps {
             self.annual_fee_bps = Some(v);

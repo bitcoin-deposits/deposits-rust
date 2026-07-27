@@ -386,11 +386,16 @@ mod recovery_voter_derivation_tests {
 
         let mut got: Vec<XOnlyPublicKey> = voters.clone();
         got.sort_by_key(|k| k.serialize());
-        let mut want: Vec<XOnlyPublicKey> =
-            vec![m1, m2, m3].iter().map(|p| p.x_only_public_key().0).collect();
+        let mut want: Vec<XOnlyPublicKey> = vec![m1, m2, m3]
+            .iter()
+            .map(|p| p.x_only_public_key().0)
+            .collect();
         want.sort_by_key(|k| k.serialize());
 
-        assert_eq!(got, want, "recovery voters must be QB members minus operator");
+        assert_eq!(
+            got, want,
+            "recovery voters must be QB members minus operator"
+        );
         assert!(
             !voters.contains(&fork_added.x_only_public_key().0),
             "fork-time QuorumAddMember must not leak into recovery voters"
@@ -426,8 +431,10 @@ mod recovery_voter_derivation_tests {
         sorted.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 
         // Canonical (on-chain) recovery voters = QB members minus operator.
-        let canonical_voters: Vec<XOnlyPublicKey> =
-            vec![m1, m2, m3].iter().map(|p| p.x_only_public_key().0).collect();
+        let canonical_voters: Vec<XOnlyPublicKey> = vec![m1, m2, m3]
+            .iter()
+            .map(|p| p.x_only_public_key().0)
+            .collect();
         let canonical_threshold = (canonical_voters.len() / 2) + 1;
         let onchain_addr = LotteryScriptBuilder::new(
             sorted.clone(),
@@ -471,8 +478,7 @@ mod recovery_voter_derivation_tests {
         );
 
         // Old stub: recovery voters = DisputeArmed participants → wrong addr.
-        let stub_voters: Vec<XOnlyPublicKey> =
-            sorted.iter().map(|p| p.pubkey).collect();
+        let stub_voters: Vec<XOnlyPublicKey> = sorted.iter().map(|p| p.pubkey).collect();
         let stub_threshold = (stub_voters.len() / 2) + 1;
         let stub_addr = LotteryScriptBuilder::new(
             sorted.clone(),
@@ -611,15 +617,8 @@ impl Node {
                 )
                 .await
             {
-                Ok(()) => tracing::info!(
-                    "Auto-dispute fired for expired ledger {}",
-                    ledger_prefix
-                ),
-                Err(e) => tracing::warn!(
-                    "Auto-dispute for {} failed: {}",
-                    ledger_prefix,
-                    e
-                ),
+                Ok(()) => tracing::info!("Auto-dispute fired for expired ledger {}", ledger_prefix),
+                Err(e) => tracing::warn!("Auto-dispute for {} failed: {}", ledger_prefix, e),
             }
         }
     }
@@ -668,8 +667,8 @@ impl Node {
             // e.g. JSONL truncated by a disk-full mid-write).
             // Re-publishing DisputeEnter on a Disputed/Armed fork would
             // be rejected by `validate_operation` anyway.
-            let already_disputed = fork_ledger.state.dispute_state
-                != deposits_core::types::DisputeState::Normal;
+            let already_disputed =
+                fork_ledger.state.dispute_state != deposits_core::types::DisputeState::Normal;
 
             if already_disputed {
                 tracing::info!("Already have DisputeEnter on fork");
@@ -878,9 +877,7 @@ impl Node {
         // `[17, 16+N]` band. Falls back to the local fork history if the
         // relay fetch yields nothing (offline / relay hiccup).
         let arm_n: usize = {
-            let fetched = self
-                .fetch_all_ledger_updates_paginated(ledger_id)
-                .await;
+            let fetched = self.fetch_all_ledger_updates_paginated(ledger_id).await;
             let from_relay = dispute_lottery_n_from_history(&fetched);
             match from_relay {
                 Some(n) => n,
@@ -911,13 +908,12 @@ impl Node {
             // same `commitment_hash` so the lottery commitment is
             // immutable (otherwise a disputant could grind for a
             // winning commit after observing the entropy block).
-            let prior_arm: Option<deposits_core::messages::LedgerOperation> = fork_ledger
-                .history
-                .iter()
-                .rev()
-                .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-                    Ok(op @ LedgerOperation::DisputeArmed { .. }) => Some(op),
-                    _ => None,
+            let prior_arm: Option<deposits_core::messages::LedgerOperation> =
+                fork_ledger.history.iter().rev().find_map(|u| {
+                    match LedgerOperation::tlv_decode(&u.message) {
+                        Ok(op @ LedgerOperation::DisputeArmed { .. }) => Some(op),
+                        _ => None,
+                    }
                 });
 
             let prior_collateral_was_none = matches!(
@@ -933,57 +929,48 @@ impl Node {
             if already_armed && !prior_collateral_was_none {
                 tracing::info!("Already have DisputeArmed on fork (with replacement_collateral)");
             } else {
-                let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) =
-                    if let Some(LedgerOperation::DisputeArmed { commitment_hash, .. }) =
-                        &prior_arm
-                    {
-                        // Re-arm: reuse the prior commitment_hash to
-                        // keep the lottery commitment immutable.
-                        tracing::info!(
-                            "Re-arming with prior commitment_hash {} (collateral upgrade)",
-                            hex::encode(commitment_hash)
-                        );
-                        (*commitment_hash, true)
-                    } else {
-                        // First arm: derive the preimage from the
-                        // signer's identity secret. The signer returns a
-                        // fixed 32-byte HMAC *seed*; we shape it into a
-                        // preimage whose *length* carries the lottery
-                        // entropy and lands in `[17, 16+N]` for this
-                        // dispute's disputant count `N` (= Q, from the
-                        // fork's QuorumBegin — see `dispute_lottery_n`).
-                        // The same seed + same `N` at reveal time
-                        // reproduces the identical bytes, so we never
-                        // persist it to disk and a disk-full event can't
-                        // lose the dispute, while `HASH160(preimage)`
-                        // stays consistent between commit and reveal.
-                        let seed = self
-                            .handler
-                            .signer
-                            .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
-                            .map_err(|e| {
-                                Error::Protocol(format!(
-                                    "derive lottery preimage: {}",
-                                    e
-                                ))
-                            })?;
-                        // `N` (= Q) was resolved above from the canonical
-                        // relay chain, before this write-lock was taken.
-                        let n = arm_n;
-                        let preimage =
-                            deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
-                                &seed, n,
-                            )
-                            .map_err(|e| {
-                                Error::Protocol(format!(
-                                    "shape lottery preimage: {}",
-                                    e
-                                ))
-                            })?;
-                        let h: [u8; 20] =
-                            *hash160::Hash::hash(&preimage).as_byte_array();
-                        (h, true)
-                    };
+                let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) = if let Some(
+                    LedgerOperation::DisputeArmed {
+                        commitment_hash, ..
+                    },
+                ) = &prior_arm
+                {
+                    // Re-arm: reuse the prior commitment_hash to
+                    // keep the lottery commitment immutable.
+                    tracing::info!(
+                        "Re-arming with prior commitment_hash {} (collateral upgrade)",
+                        hex::encode(commitment_hash)
+                    );
+                    (*commitment_hash, true)
+                } else {
+                    // First arm: derive the preimage from the
+                    // signer's identity secret. The signer returns a
+                    // fixed 32-byte HMAC *seed*; we shape it into a
+                    // preimage whose *length* carries the lottery
+                    // entropy and lands in `[17, 16+N]` for this
+                    // dispute's disputant count `N` (= Q, from the
+                    // fork's QuorumBegin — see `dispute_lottery_n`).
+                    // The same seed + same `N` at reveal time
+                    // reproduces the identical bytes, so we never
+                    // persist it to disk and a disk-full event can't
+                    // lose the dispute, while `HASH160(preimage)`
+                    // stays consistent between commit and reveal.
+                    let seed = self
+                        .handler
+                        .signer
+                        .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
+                        .map_err(|e| Error::Protocol(format!("derive lottery preimage: {}", e)))?;
+                    // `N` (= Q) was resolved above from the canonical
+                    // relay chain, before this write-lock was taken.
+                    let n = arm_n;
+                    let preimage =
+                        deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
+                            &seed, n,
+                        )
+                        .map_err(|e| Error::Protocol(format!("shape lottery preimage: {}", e)))?;
+                    let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+                    (h, true)
+                };
                 let _ = preimage_was_persisted;
 
                 // Use P2WPKH address derived from our operator pubkey for target_reserves
@@ -1000,65 +987,65 @@ impl Node {
                 // `obligations × (collateral / reserves) + fee_estimate`.
                 // The disputant's UTXO must sit at the operator's P2WPKH
                 // address — that's what RC4's claim-TX builder signs against.
-                let replacement_collateral = {
-                    use crate::node::replacement_collateral::{
-                        compute_required_replacement_sats, CollateralPolicy,
-                    };
-                    let obligations_msat = fork_ledger.state.total_deposit_balance();
-                    let collateral_msat = fork_ledger.state.collateral_amount;
-                    let reserves_msat = fork_ledger.state.reserves_amount;
-                    let policy = CollateralPolicy::default();
-                    let required_sats = compute_required_replacement_sats(
-                        obligations_msat,
-                        collateral_msat,
-                        reserves_msat,
-                        &policy,
-                    )
-                    .unwrap_or(0);
-                    let op_script = bitcoin::Address::p2wpkh(
-                        &compressed,
-                        self.wallet.network(),
-                    )
-                    .script_pubkey();
-                    match self.wallet.find_utxo_for_script(&op_script) {
-                        Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
-                            let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
-                            tracing::info!(
+                let replacement_collateral =
+                    {
+                        use crate::node::replacement_collateral::{
+                            compute_required_replacement_sats, CollateralPolicy,
+                        };
+                        let obligations_msat = fork_ledger.state.total_deposit_balance();
+                        let collateral_msat = fork_ledger.state.collateral_amount;
+                        let reserves_msat = fork_ledger.state.reserves_amount;
+                        let policy = CollateralPolicy::default();
+                        let required_sats = compute_required_replacement_sats(
+                            obligations_msat,
+                            collateral_msat,
+                            reserves_msat,
+                            &policy,
+                        )
+                        .unwrap_or(0);
+                        let op_script =
+                            bitcoin::Address::p2wpkh(&compressed, self.wallet.network())
+                                .script_pubkey();
+                        match self.wallet.find_utxo_for_script(&op_script) {
+                            Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
+                                let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
+                                tracing::info!(
                                 "Auto-arm replacement collateral: {} sats from {}:{} (required {})",
                                 value_sats, outpoint.txid, outpoint.vout, required_sats
                             );
-                            Some(deposits_core::messages::ReplacementCollateral {
-                                txid: txid_bytes,
-                                vout: outpoint.vout,
-                                amount: value_sats,
-                            })
-                        }
-                        Ok(Some((_, value_sats))) => {
-                            tracing::warn!(
-                                "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
+                                Some(deposits_core::messages::ReplacementCollateral {
+                                    txid: txid_bytes,
+                                    vout: outpoint.vout,
+                                    amount: value_sats,
+                                })
+                            }
+                            Ok(Some((_, value_sats))) => {
+                                tracing::warn!(
+                                    "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
                                  required ≥ {} — declaring None and falling back to a \
                                  path strict cosigners will refuse",
-                                value_sats, required_sats
-                            );
-                            None
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                "Auto-arm: no UTXO found at operator-key P2WPKH; \
+                                    value_sats,
+                                    required_sats
+                                );
+                                None
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    "Auto-arm: no UTXO found at operator-key P2WPKH; \
                                  declaring no replacement_collateral"
-                            );
-                            None
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Auto-arm: esplora failure searching operator-key UTXO: {} \
+                                );
+                                None
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Auto-arm: esplora failure searching operator-key UTXO: {} \
                                  — declaring no replacement_collateral",
-                                e
-                            );
-                            None
+                                    e
+                                );
+                                None
+                            }
                         }
-                    }
-                };
+                    };
 
                 // For a re-arm (prior arm had collateral=None), abort if
                 // we still don't have a funded UTXO — publishing
@@ -1216,10 +1203,7 @@ impl Node {
         let filter = Filter::new()
             .kind(Kind::Custom(crate::nostr::KIND_LEDGER_REQUEST))
             .author(nostr_xonly)
-            .custom_tag(
-                crate::nostr::TAG_LEDGER_REQ,
-                [ledger_id],
-            )
+            .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id])
             .limit(50);
         let events = match self
             .nostr
@@ -1233,7 +1217,10 @@ impl Node {
         let found = events.iter().any(|e| {
             e.tags.iter().any(|tag| {
                 tag.kind() == TagKind::custom("action")
-                    && tag.content().map(|c| c == "lottery_reveal").unwrap_or(false)
+                    && tag
+                        .content()
+                        .map(|c| c == "lottery_reveal")
+                        .unwrap_or(false)
             })
         });
         if found {
@@ -1376,10 +1363,7 @@ impl Node {
 
     /// Try to claim or yield for a specific ledger
     /// Returns Ok(true) if completed, Ok(false) if not ready, Err if failed
-    pub(crate) async fn try_lottery_claim_or_yield(
-        &self,
-        ledger_id: &str,
-    ) -> Result<bool, Error> {
+    pub(crate) async fn try_lottery_claim_or_yield(&self, ledger_id: &str) -> Result<bool, Error> {
         use crate::nostr::{KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 
@@ -1492,9 +1476,9 @@ impl Node {
         use bitcoin::hashes::{hash160, Hash as _};
         let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
         for (_pubkey, participant) in &participants {
-            let matched = revealed_preimages.iter().find(|p| {
-                hash160::Hash::hash(p).to_byte_array() == participant.commitment_hash
-            });
+            let matched = revealed_preimages
+                .iter()
+                .find(|p| hash160::Hash::hash(p).to_byte_array() == participant.commitment_hash);
             match matched {
                 Some(preimage) => ordered_preimages.push(preimage.clone()),
                 None => {
@@ -2202,8 +2186,7 @@ impl Node {
             if u.cosignatures.is_empty() {
                 continue;
             }
-            let Some(&governing_qb) =
-                qb_seqs.iter().filter(|&&s| s <= u.sequence_number).max()
+            let Some(&governing_qb) = qb_seqs.iter().filter(|&&s| s <= u.sequence_number).max()
             else {
                 continue; // pre-quorum update — not confiscation-relevant
             };
@@ -2641,10 +2624,7 @@ impl Node {
                             // Keep the latest QuorumBegin (highest sequence) since
                             // multiple rotations may exist on the relay.
                             let seq = update.sequence_number;
-                            if latest_quorum_begin_seq
-                                .map(|cur| seq > cur)
-                                .unwrap_or(true)
-                            {
+                            if latest_quorum_begin_seq.map(|cur| seq > cur).unwrap_or(true) {
                                 latest_quorum_begin_seq = Some(seq);
                                 reserves_address = Some(reserves_id);
                                 ledger_hash = Some(lh);
@@ -2813,7 +2793,10 @@ impl Node {
                     Some(pt) => Some(pt),
                     None => match self.fetch_equivocation_inline_evidence(&ledger_id).await {
                         Some(pt) => Some(pt),
-                        None => self.fetch_non_conforming_cosig_inline_evidence(&ledger_id).await,
+                        None => {
+                            self.fetch_non_conforming_cosig_inline_evidence(&ledger_id)
+                                .await
+                        }
                     },
                 },
             };
@@ -2885,11 +2868,8 @@ impl Node {
             // ruleset would produce the wrong scriptPubKey.
             let voter_set = VoterSet::new(original_operator, quorum_members.clone());
             let voter_count = voter_set.all_voters().len();
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(
-                ruleset_at_qb.as_deref(),
-            );
-            let threshold_config =
-                (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
+            let ruleset = deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
+            let threshold_config = (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
             let taproot_builder = TapscriptReservesBuilder::new(
                 voter_set.clone(),
@@ -2942,13 +2922,10 @@ impl Node {
             // degraded = fewer recovery-quorum sigs required. Skip
             // requires_tie_breaker (operator-alone), which the
             // recovery quorum can't satisfy by definition.
-            let current_height = self
-                .wallet
-                .get_block_height()
-                .ok()
-                .unwrap_or(0);
+            let current_height = self.wallet.get_block_height().ok().unwrap_or(0);
             let (tier_index, tier) = {
-                let mut chosen: Option<(usize, &deposits_core::tapscript_reserves::ThresholdTier)> = None;
+                let mut chosen: Option<(usize, &deposits_core::tapscript_reserves::ThresholdTier)> =
+                    None;
                 for (idx, t) in threshold_config.tiers.iter().enumerate() {
                     if t.requires_tie_breaker {
                         continue; // Tier 3 — operator only, recovery quorum can't sign
@@ -2985,9 +2962,8 @@ impl Node {
             // Tier 0 has timelock_blocks=0 → unchanged. Tier 1+ require
             // nLockTime ≥ quorum_expiry + offset so the OP_CLTV in the
             // tier's leaf script is satisfied.
-            confiscation_tx.lock_time = bitcoin::absolute::LockTime::from_consensus(
-                tier.timelock_blocks,
-            );
+            confiscation_tx.lock_time =
+                bitcoin::absolute::LockTime::from_consensus(tier.timelock_blocks);
 
             // Build leaf script and compute sighash
             let leaf_script = match taproot_builder.build_threshold_leaf(&tier) {
@@ -3257,9 +3233,7 @@ impl Node {
         // Paginated relay fetch — bloated forks would otherwise
         // hide DisputeArmed at the tail beyond a single 500-event
         // window.
-        let paginated_updates = self
-            .fetch_all_ledger_updates_paginated(ledger_id)
-            .await;
+        let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
         if paginated_updates.is_empty() {
             return Err(Error::Protocol(
                 "Failed to fetch ledger updates from relay".to_string(),
@@ -3559,7 +3533,12 @@ mod recovery_chaining_tests {
     /// same way the recovery builders and `append_operation_with_block` do:
     /// SHA256(seq_le || prev || message). A non-zero operator_signature is
     /// stamped so `chain_hash()` (which folds it in) is meaningful.
-    fn signed(seq: u64, operator: PublicKey, op: &LedgerOperation, prev: [u8; 32]) -> SignedLedgerUpdate {
+    fn signed(
+        seq: u64,
+        operator: PublicKey,
+        op: &LedgerOperation,
+        prev: [u8; 32],
+    ) -> SignedLedgerUpdate {
         let message = op.tlv_encode();
         let mut hash_input = Vec::new();
         hash_input.extend_from_slice(&seq.to_le_bytes());
@@ -3686,7 +3665,9 @@ mod recovery_chaining_tests {
             amount: 900_000,
             quorum_expiry: 1_000_000,
             ledger_hash: u1.content_hash,
-            quorum_members: vec![deposits_core::messages::QuorumMemberRef::pubkey_only(winner)],
+            quorum_members: vec![deposits_core::messages::QuorumMemberRef::pubkey_only(
+                winner,
+            )],
             collateral_amount: 0,
             protocol_version: None,
         };

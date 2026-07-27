@@ -63,8 +63,7 @@ pub async fn send_admin_request(
         return Err(AdminError::NoRelays);
     }
     let secret = bitcoin::secp256k1::SecretKey::from_slice(
-        &hex::decode(hub_secret_hex)
-            .map_err(|e| AdminError::HubSecret(format!("hex: {}", e)))?,
+        &hex::decode(hub_secret_hex).map_err(|e| AdminError::HubSecret(format!("hex: {}", e)))?,
     )
     .map_err(|e| AdminError::HubSecret(format!("parse: {}", e)))?;
 

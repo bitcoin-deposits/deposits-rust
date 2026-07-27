@@ -753,7 +753,9 @@ fn validate_per_op_as_cosigner(
         LedgerOperation::FeeCollect {
             deposit_id,
             amount,
-            block_height, .. } => {
+            block_height,
+            ..
+        } => {
             op_val::validate_fee_collect_by_id(&ledger, deposit_id, *amount, *block_height).is_ok()
         }
         LedgerOperation::LedgerClose => op_val::validate_ledger_close(&ledger).is_ok(),
@@ -1243,7 +1245,10 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
             }
         }) {
             return Some(GeneratedOp {
-                op: LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
+                op: LedgerOperation::DepositClose {
+                    deposit_id: did,
+                    commitment: None,
+                },
                 record_deposit: None,
                 record_pending: None,
                 record_invoice: None,
@@ -1639,7 +1644,10 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
         // DepositClose on a deposit with non-zero balance → rejected.
         let (did, _, _) = pick_deposit(op, rng)?;
         return Some(GeneratedOp {
-            op: LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
+            op: LedgerOperation::DepositClose {
+                deposit_id: did,
+                commitment: None,
+            },
             record_deposit: None,
             record_pending: None,
             record_invoice: None,
@@ -1720,7 +1728,11 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
         // asserts that equality); the saturating fold and a wrapping incremental
         // cache only diverge once the sum actually overflows u64.
         let (did, _, _) = pick_deposit(op, rng)?;
-        let amount = if rng.range(2) == 0 { 0 } else { u64::MAX / 4096 };
+        let amount = if rng.range(2) == 0 {
+            0
+        } else {
+            u64::MAX / 4096
+        };
         return Some(GeneratedOp {
             op: LedgerOperation::OnchainCredit {
                 txid: [0xBA; 32],

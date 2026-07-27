@@ -366,21 +366,23 @@ fn signer_backed_daemon_init_path_round_trips() {
     let mut daemon_data_dir = std::env::temp_dir();
     daemon_data_dir.push(format!("dnode-l1-{}", suffix));
     std::fs::create_dir_all(&daemon_data_dir).unwrap();
-    let node_transport_secret =
-        Node::load_or_init_transport_secret(&daemon_data_dir).unwrap();
+    let node_transport_secret = Node::load_or_init_transport_secret(&daemon_data_dir).unwrap();
 
     // Derive the daemon's transport pubkey to allowlist it.
     let secp = Secp256k1::new();
-    let node_pubkey =
-        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &node_transport_secret);
+    let node_pubkey = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &node_transport_secret);
 
     // Spawn the signer with the daemon's transport pubkey allowlisted.
     let (proc, signer_pubkey) = spawn_signer(operator_seed, node_pubkey);
 
     // This is what init.rs's RemoteSigner branch does, end-to-end.
-    let remote =
-        RemoteSigner::connect(&proc.socket, node_transport_secret, signer_pubkey, Network::Bitcoin)
-        .expect("signer-backed Node init path must connect");
+    let remote = RemoteSigner::connect(
+        &proc.socket,
+        node_transport_secret,
+        signer_pubkey,
+        Network::Bitcoin,
+    )
+    .expect("signer-backed Node init path must connect");
 
     // Exercise both the operator-protocol sign path and the Nostr-key
     // issuance — the two things Node::new actually calls before passing
@@ -400,10 +402,15 @@ fn signer_backed_daemon_init_path_round_trips() {
 
     // Nostr-secret issuance through the same connection.
     let issued = remote.issue_nostr_secret().expect("issue_nostr_secret");
-    let issued_pk =
-        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &
-            bitcoin::secp256k1::SecretKey::from_slice(&issued).unwrap());
-    assert_ne!(issued_pk, remote.pubkey(), "Nostr key must differ from operator");
+    let issued_pk = bitcoin::secp256k1::PublicKey::from_secret_key(
+        &secp,
+        &bitcoin::secp256k1::SecretKey::from_slice(&issued).unwrap(),
+    );
+    assert_ne!(
+        issued_pk,
+        remote.pubkey(),
+        "Nostr key must differ from operator"
+    );
 
     let _ = std::fs::remove_dir_all(&daemon_data_dir);
 }
@@ -445,8 +452,7 @@ fn remote_signer_deposit_keypath_signs_at_correct_derivation() {
     let expected_pk = bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &expected_secret);
     let (expected_xonly, _) = expected_pk.x_only_public_key();
 
-    let sig =
-        bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).expect("sig parse");
+    let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes).expect("sig parse");
     let msg = Message::from_digest(digest);
     secp.verify_schnorr(&sig, &msg, &expected_xonly)
         .expect("sig must verify against m/84'/0'/0'/0/0 xonly pubkey");
@@ -462,7 +468,10 @@ fn remote_signer_deposit_keypath_signs_at_correct_derivation() {
     // Different indexes → different sigs.
     let ctx_3 = SignContext::deposit(3, SigPurpose::DepositGuarantee);
     let sig_3 = remote.bip340_sign(&ctx_3, &digest).unwrap();
-    assert_ne!(sig_bytes, sig_3, "different KeyPath::Deposit indexes must sign distinctly");
+    assert_ne!(
+        sig_bytes, sig_3,
+        "different KeyPath::Deposit indexes must sign distinctly"
+    );
 
     // The KeyPath::Operator path still signs with the operator key.
     let ctx_op = SignContext {
@@ -500,9 +509,9 @@ fn remote_signer_wallet_account_xpub_matches_local_derivation() {
     let secp = Secp256k1::new();
     let xpriv = Xpriv::new_master(Network::Bitcoin, &operator_seed).unwrap();
     for account in [0u32, 1, 2, 7, 100] {
-        let got = remote.wallet_account_xpub(account).unwrap_or_else(|e| {
-            panic!("wallet_account_xpub({}) failed: {:?}", account, e)
-        });
+        let got = remote
+            .wallet_account_xpub(account)
+            .unwrap_or_else(|e| panic!("wallet_account_xpub({}) failed: {:?}", account, e));
 
         let path = DerivationPath::from_str(&format!("m/86'/0'/{}'", account)).unwrap();
         let derived = xpriv.derive_priv(&secp, &path).unwrap();
@@ -551,21 +560,38 @@ fn remote_signer_pubkey_at_matches_local_derivation() {
         (KeyPath::Operator, "m/86'/0'/0'/0/0"),
         (KeyPath::Deposit { index: 0 }, "m/84'/0'/0'/0/0"),
         (KeyPath::Deposit { index: 7 }, "m/84'/0'/0'/0/7"),
-        (KeyPath::Deposit { index: 1_000_000 }, "m/84'/0'/0'/0/1000000"),
         (
-            KeyPath::Wallet { account: 3, change: 0, index: 5 },
+            KeyPath::Deposit { index: 1_000_000 },
+            "m/84'/0'/0'/0/1000000",
+        ),
+        (
+            KeyPath::Wallet {
+                account: 3,
+                change: 0,
+                index: 5,
+            },
             "m/86'/0'/3'/0/5",
         ),
         (
-            KeyPath::Wallet { account: 3, change: 1, index: 0 },
+            KeyPath::Wallet {
+                account: 3,
+                change: 1,
+                index: 0,
+            },
             "m/86'/0'/3'/1/0",
         ),
         (
-            KeyPath::NodeWallet { change: 0, index: 0 },
+            KeyPath::NodeWallet {
+                change: 0,
+                index: 0,
+            },
             "m/0/0",
         ),
         (
-            KeyPath::NodeWallet { change: 1, index: 12 },
+            KeyPath::NodeWallet {
+                change: 1,
+                index: 12,
+            },
             "m/1/12",
         ),
     ];
@@ -588,7 +614,11 @@ fn remote_signer_pubkey_at_matches_local_derivation() {
 
     // Refuses change > 1 for Wallet / NodeWallet (validation matches
     // the bip340_sign path).
-    let bad_wallet = KeyPath::Wallet { account: 0, change: 2, index: 0 };
+    let bad_wallet = KeyPath::Wallet {
+        account: 0,
+        change: 2,
+        index: 0,
+    };
     let err = remote.pubkey_at(bad_wallet).unwrap_err();
     assert!(
         format!("{:?}", err).contains("change must be 0 or 1"),
@@ -628,7 +658,11 @@ fn remote_signer_anti_equivocation_refuses_seq_regression() {
         .expect_err("repeat sign at seq=10 must be refused");
     match err {
         SignerError::PolicyRefused(msg) => {
-            assert!(msg.contains("seq regression"), "unexpected message: {}", msg);
+            assert!(
+                msg.contains("seq regression"),
+                "unexpected message: {}",
+                msg
+            );
         }
         other => panic!("expected PolicyRefused, got {:?}", other),
     }
@@ -644,8 +678,7 @@ fn remote_signer_nip04_shared_key_matches_local() {
     // The wire op that unblocks NIP-04 fallback decrypt against the
     // operator key when the daemon's self.keys is the delegate.
     let operator_seed = [0xBBu8; 32];
-    let (operator_secret, _) =
-        derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
+    let (operator_secret, _) = derive_keys_from_seed(&operator_seed, Network::Bitcoin).unwrap();
     let local = LocalSigner::new(operator_secret);
 
     let node_transport = TransportKey::random();

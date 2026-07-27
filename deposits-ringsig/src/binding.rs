@@ -91,7 +91,9 @@ pub fn verify(
     let c_scalar = Scalar::from_be_bytes(c).map_err(|_| Error::Degenerate)?;
 
     // c · P
-    let c_p = p.mul_tweak(secp, &c_scalar).map_err(|_| Error::Degenerate)?;
+    let c_p = p
+        .mul_tweak(secp, &c_scalar)
+        .map_err(|_| Error::Degenerate)?;
     // R + c·P
     let expected = proof.r.combine(&c_p).map_err(|_| Error::Degenerate)?;
 
@@ -143,8 +145,15 @@ mod tests {
             pks.push(sk.public_key(secp));
             sks.push(sk);
         }
-        let sig = blsag::sign(secp, &pks, signer, &sks[signer], b"first-contact", &mut OsRng)
-            .expect("ring sig");
+        let sig = blsag::sign(
+            secp,
+            &pks,
+            signer,
+            &sks[signer],
+            b"first-contact",
+            &mut OsRng,
+        )
+        .expect("ring sig");
         (pks, sig)
     }
 

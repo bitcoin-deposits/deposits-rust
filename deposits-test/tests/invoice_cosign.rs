@@ -100,13 +100,14 @@ async fn make_invoice_returns_valid_cosignature() {
             format!("pk({})", pk)
         }
     };
-    eprintln!("[setup]  descriptor={}…", &descriptor[..32.min(descriptor.len())]);
+    eprintln!(
+        "[setup]  descriptor={}…",
+        &descriptor[..32.min(descriptor.len())]
+    );
 
     // ── 2. Connect a Nostr transport with the wallet's signing key ──
-    let user_secret_key = bitcoin::secp256k1::SecretKey::from_slice(
-        &hex::decode(sec_hex.trim()).unwrap(),
-    )
-    .unwrap();
+    let user_secret_key =
+        bitcoin::secp256k1::SecretKey::from_slice(&hex::decode(sec_hex.trim()).unwrap()).unwrap();
     let transport = NostrTransportBuilder::new(user_secret_key)
         .relay(relay_ledgers())
         .relay(relay_messaging())
@@ -164,9 +165,7 @@ async fn make_invoice_returns_valid_cosignature() {
     let result = resp.result.expect("make_invoice success but no result");
 
     // ── 5. Sanity-check the invoice ──
-    let invoice = result["invoice"]
-        .as_str()
-        .expect("missing `invoice` field");
+    let invoice = result["invoice"].as_str().expect("missing `invoice` field");
     assert!(
         invoice.starts_with("lnbcrt"),
         "expected regtest BOLT11, got: {}",
@@ -247,8 +246,7 @@ async fn make_invoice_returns_valid_cosignature() {
     let secp = bitcoin::secp256k1::Secp256k1::verification_only();
     let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(&sig_bytes)
         .expect("signature from_slice");
-    let cosigner_compressed =
-        hex::decode(&cosigner_pubkey_hex).expect("cosigner_pubkey hex");
+    let cosigner_compressed = hex::decode(&cosigner_pubkey_hex).expect("cosigner_pubkey hex");
     assert_eq!(
         cosigner_compressed.len(),
         33,
@@ -256,9 +254,8 @@ async fn make_invoice_returns_valid_cosignature() {
         cosigner_compressed.len()
     );
     // BIP-340 verifies against the x-only (drop the parity prefix byte).
-    let cosigner_xonly =
-        bitcoin::secp256k1::XOnlyPublicKey::from_slice(&cosigner_compressed[1..])
-            .expect("cosigner xonly");
+    let cosigner_xonly = bitcoin::secp256k1::XOnlyPublicKey::from_slice(&cosigner_compressed[1..])
+        .expect("cosigner xonly");
     let msg = bitcoin::secp256k1::Message::from_digest(msg_hash);
 
     secp.verify_schnorr(&sig, &msg, &cosigner_xonly)

@@ -722,10 +722,22 @@ fn invoice_lock_preimage_changes_with_payment_hash() {
 #[test]
 fn transfer_lock_preimage_deterministic() {
     let msg1 = transfer_lock_preimage(
-        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+        [0x01; 32],
+        [0xaa; 16],
+        [0xbb; 16],
+        1000,
+        10,
+        "preimage(abc)",
+        850000,
     );
     let msg2 = transfer_lock_preimage(
-        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+        [0x01; 32],
+        [0xaa; 16],
+        [0xbb; 16],
+        1000,
+        10,
+        "preimage(abc)",
+        850000,
     );
     assert_eq!(msg1, msg2);
 }
@@ -733,10 +745,22 @@ fn transfer_lock_preimage_deterministic() {
 #[test]
 fn transfer_lock_preimage_changes_with_script() {
     let msg_a = transfer_lock_preimage(
-        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(abc)", 850000,
+        [0x01; 32],
+        [0xaa; 16],
+        [0xbb; 16],
+        1000,
+        10,
+        "preimage(abc)",
+        850000,
     );
     let msg_b = transfer_lock_preimage(
-        [0x01; 32], [0xaa; 16], [0xbb; 16], 1000, 10, "preimage(xyz)", 850000,
+        [0x01; 32],
+        [0xaa; 16],
+        [0xbb; 16],
+        1000,
+        10,
+        "preimage(xyz)",
+        850000,
     );
     assert_ne!(msg_a, msg_b);
 }
@@ -943,7 +967,9 @@ fn guarantee_matrix_default_rows_have_valid_ranges() {
 
 #[test]
 fn guarantee_matrix_internal_transfer_is_settlement_atomic() {
-    use deposits_node::nostr::{guarantee_regimes::TRANSFER_INTERNAL, GuaranteeShape, HonestyAssumption};
+    use deposits_node::nostr::{
+        guarantee_regimes::TRANSFER_INTERNAL, GuaranteeShape, HonestyAssumption,
+    };
     let matrix = LedgerAdvertisement::default_guarantees();
     let row = matrix
         .iter()

@@ -33,10 +33,7 @@ fn workspace_bin(name: &str) -> PathBuf {
     // `CARGO_MANIFEST_DIR` is set by cargo for tests.
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // workspace root is one level above `deposits-hub/`.
-    let target = manifest
-        .parent()
-        .expect("workspace root")
-        .join("target");
+    let target = manifest.parent().expect("workspace root").join("target");
     // Prefer debug, fall back to release.
     for profile in ["debug", "release"] {
         let candidate = target.join(profile).join(name);
@@ -44,7 +41,11 @@ fn workspace_bin(name: &str) -> PathBuf {
             return candidate;
         }
     }
-    panic!("could not find binary `{}` under {}", name, target.display());
+    panic!(
+        "could not find binary `{}` under {}",
+        name,
+        target.display()
+    );
 }
 
 async fn spawn_hub(
@@ -65,13 +66,16 @@ async fn spawn_hub(
     for a in extra_args {
         cmd.arg(a);
     }
-    cmd.env("RUST_LOG", "info,deposits_hub=debug,deposits_hub_proto=debug")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn deposits-hub")
+    cmd.env(
+        "RUST_LOG",
+        "info,deposits_hub=debug,deposits_hub_proto=debug",
+    )
+    .stdin(Stdio::null())
+    .stdout(Stdio::from(stdout))
+    .stderr(Stdio::from(stderr))
+    .kill_on_drop(true)
+    .spawn()
+    .expect("spawn deposits-hub")
 }
 
 /// Stage a signer data dir with a known seed and transport keypair via
@@ -134,7 +138,10 @@ async fn spawn_signer(
         .arg(relay_url)
         .arg("--hub-label")
         .arg("smoke-signer")
-        .env("RUST_LOG", "info,deposits_signer=debug,deposits_hub_proto=debug")
+        .env(
+            "RUST_LOG",
+            "info,deposits_signer=debug,deposits_hub_proto=debug",
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
@@ -288,8 +295,7 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     eprintln!("spawn-line workspace: {}", workspace_path.display());
 
     // Boot hub with auto-approve so we don't need a separate approve call.
-    let mut hub_proc =
-        spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
+    let mut hub_proc = spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Ask the hub for a launch line, the same way setup.sh does.
@@ -323,14 +329,15 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     assert!(launch_line.contains("--hub-pubkey"));
 
     // Exec it via `bash -c` — same shell invocation path as setup.sh.
-    let signer_stderr =
-        std::fs::File::create(log_dir.join("signer.stderr")).unwrap();
-    let signer_stdout =
-        std::fs::File::create(log_dir.join("signer.stdout")).unwrap();
+    let signer_stderr = std::fs::File::create(log_dir.join("signer.stderr")).unwrap();
+    let signer_stdout = std::fs::File::create(log_dir.join("signer.stdout")).unwrap();
     let mut signer_proc = Command::new("bash")
         .arg("-c")
         .arg(format!("exec {}", launch_line))
-        .env("RUST_LOG", "info,deposits_signer=debug,deposits_hub_proto=debug")
+        .env(
+            "RUST_LOG",
+            "info,deposits_signer=debug,deposits_hub_proto=debug",
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::from(signer_stdout))
         .stderr(Stdio::from(signer_stderr))
@@ -339,11 +346,9 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
         .expect("bash -c launch line");
 
     // Wait for auto-approve to land.
-    let approved = poll_hub_state(&hub_dir, |s| {
-        s.signers.values().any(|r| r.label == "op0")
-    })
-    .await
-    .expect("op0 never auto-approved within 15s");
+    let approved = poll_hub_state(&hub_dir, |s| s.signers.values().any(|r| r.label == "op0"))
+        .await
+        .expect("op0 never auto-approved within 15s");
     assert!(approved.pending.is_empty(), "pending should be empty");
     assert!(
         approved.signers.values().any(|r| r.label == "op0"),
@@ -401,8 +406,7 @@ async fn steal_takes_over_from_running_hub() {
 
     // --steal should kill the first and take over. Run it as a
     // background child so we can verify the first actually died.
-    let mut stealer_log =
-        std::fs::File::create(log_dir.join("stealer.stderr")).unwrap();
+    let mut stealer_log = std::fs::File::create(log_dir.join("stealer.stderr")).unwrap();
     let mut stealer = Command::new(workspace_bin("deposits-hub"))
         .arg("run")
         .arg("--headless")
@@ -483,8 +487,7 @@ async fn auto_approve_skips_pending_state() {
     let signer_nostr_pk = derive_signer_nostr_pk(&seed_bytes);
 
     // Hub with --auto-approve.
-    let mut hub_proc =
-        spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
+    let mut hub_proc = spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
     let mut signer_proc =
         spawn_signer(&signer_dir, &signer_socket, &hub_pk, &relay_url, &log_dir).await;
@@ -493,8 +496,14 @@ async fn auto_approve_skips_pending_state() {
     let approved = poll_hub_state(&hub_dir, |s| s.signers.contains_key(&signer_nostr_pk))
         .await
         .expect("signer never auto-approved within 15s");
-    assert!(approved.pending.is_empty(), "pending should be empty when auto-approve is on");
-    assert_eq!(approved.signers.get(&signer_nostr_pk).unwrap().label, "smoke-signer");
+    assert!(
+        approved.pending.is_empty(),
+        "pending should be empty when auto-approve is on"
+    );
+    assert_eq!(
+        approved.signers.get(&signer_nostr_pk).unwrap().label,
+        "smoke-signer"
+    );
 
     let _ = signer_proc.kill().await;
     let _ = hub_proc.kill().await;

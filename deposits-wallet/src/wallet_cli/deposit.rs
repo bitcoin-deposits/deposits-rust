@@ -2,9 +2,9 @@ use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
 use chrono::Utc;
 
 use super::{
-    deposit_record_identity, derive_secret_key, derive_secret_key_at_index,
-    load_deposit_key_index, parse_config, save_deposit_key_index, verify_offer_cosignature,
-    verify_quorum_membership, NostrTransportBuilder,
+    deposit_record_identity, derive_secret_key, derive_secret_key_at_index, load_deposit_key_index,
+    parse_config, save_deposit_key_index, verify_offer_cosignature, verify_quorum_membership,
+    NostrTransportBuilder,
 };
 
 /// Tag a deposit's `deposits.json` entry with a sync failure so
@@ -283,20 +283,19 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
             .as_ref()
             .and_then(|ad| ad.expected_responder());
         let response = match transport
-            .wait_for_valid_response(&open_request_id, 30000, |response| match (
-                expected_responder,
-                response.responder_pubkey,
-            ) {
-                (Some(expected), Some(seen)) => seen == expected,
-                // No ad fetched (legacy / discovery race) — fall back to
-                // accepting any response. Pre-existing behaviour for
-                // this code path; the filter at least shields the
-                // common ad-known case.
-                (None, _) => true,
-                // Pre-Phase-4 LedgerResponse without responder_pubkey;
-                // shouldn't happen against a current daemon but keep
-                // the path open until we drop the field's `Option`.
-                (Some(_), None) => true,
+            .wait_for_valid_response(&open_request_id, 30000, |response| {
+                match (expected_responder, response.responder_pubkey) {
+                    (Some(expected), Some(seen)) => seen == expected,
+                    // No ad fetched (legacy / discovery race) — fall back to
+                    // accepting any response. Pre-existing behaviour for
+                    // this code path; the filter at least shields the
+                    // common ad-known case.
+                    (None, _) => true,
+                    // Pre-Phase-4 LedgerResponse without responder_pubkey;
+                    // shouldn't happen against a current daemon but keep
+                    // the path open until we drop the field's `Option`.
+                    (Some(_), None) => true,
+                }
             })
             .await
         {
@@ -330,9 +329,7 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
                 .as_ref()
                 .and_then(|r| r.get("verifier_pubkey"))
                 .and_then(|v| v.as_str())
-                .ok_or(
-                    "Operator requires attestation but did not advertise a verifier_pubkey",
-                )?;
+                .ok_or("Operator requires attestation but did not advertise a verifier_pubkey")?;
             let allowed_domains: Vec<String> = response
                 .result
                 .as_ref()
@@ -358,11 +355,7 @@ pub async fn open_new_deposit(args: &[String]) -> Result<(), Box<dyn std::error:
         }
 
         if code == "not_authorized" || code == "denied" {
-            return Err(format!(
-                "Operator rejected deposit (code={}): {}",
-                code, err_str
-            )
-            .into());
+            return Err(format!("Operator rejected deposit (code={}): {}", code, err_str).into());
         }
 
         return Err(format!("deposit_open failed: {}", err_str).into());
@@ -430,7 +423,10 @@ async fn run_verification_flow(
 
     println!();
     println!("Operator requires a lightning-verify attestation.");
-    println!("  verifier:  {}...", &verifier_pubkey[..16.min(verifier_pubkey.len())]);
+    println!(
+        "  verifier:  {}...",
+        &verifier_pubkey[..16.min(verifier_pubkey.len())]
+    );
     if !allowed_domains.is_empty() {
         println!("  domains:   {}", allowed_domains.join(", "));
     }
@@ -543,9 +539,8 @@ async fn run_verification_flow(
     }
 
     // ── Round 3: submit amounts ──
-    let amounts_str = prompt_stdin(
-        "Enter the amounts you received (comma-separated, e.g. 123,456,789): ",
-    )?;
+    let amounts_str =
+        prompt_stdin("Enter the amounts you received (comma-separated, e.g. 123,456,789): ")?;
     let amounts: Vec<u64> = amounts_str
         .split(',')
         .filter_map(|s| s.trim().parse::<u64>().ok())
@@ -830,8 +825,8 @@ pub async fn list_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
             .get("created_at")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let (descriptor, deposit_id_hex) = deposit_record_identity(deposit)
-            .unwrap_or(("unknown".into(), "unknown".into()));
+        let (descriptor, deposit_id_hex) =
+            deposit_record_identity(deposit).unwrap_or(("unknown".into(), "unknown".into()));
 
         println!("  {} ", alias);
         println!("    Deposit ID:  {}", deposit_id_hex);
@@ -1120,8 +1115,7 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
                                     .and_then(|v| v.as_u64())
                                     .unwrap_or(0);
 
-                                if available_sats != current_amount
-                                    || locked_sats != current_locked
+                                if available_sats != current_amount || locked_sats != current_locked
                                 {
                                     if locked_sats > 0 {
                                         println!(
@@ -1129,10 +1123,7 @@ pub async fn sync_deposits(args: &[String]) -> Result<(), Box<dyn std::error::Er
                                             alias, available_sats, locked_sats
                                         );
                                     } else {
-                                        println!(
-                                            "  {} balance: {} sats",
-                                            alias, available_sats
-                                        );
+                                        println!("  {} balance: {} sats", alias, available_sats);
                                     }
                                     deposit["amount_sats"] = serde_json::json!(available_sats);
                                     deposit["balance_msats"] =
@@ -1331,8 +1322,7 @@ pub async fn lnurl_addresses(args: &[String]) -> Result<(), Box<dyn std::error::
         let Some(ledger_id) = d.get("ledger_id").and_then(|v| v.as_str()) else {
             continue;
         };
-        let Some((_descriptor, deposit_id_hex)) =
-            crate::wallet_cli::deposit_record_identity(d)
+        let Some((_descriptor, deposit_id_hex)) = crate::wallet_cli::deposit_record_identity(d)
         else {
             continue;
         };
@@ -1391,7 +1381,9 @@ mod lnurl_tests {
         let id = [0xABu8; 32];
         let s = bytes_to_bech32_data(&id);
         assert_eq!(s.len(), 52);
-        assert!(s.chars().all(|c| "qpzry9x8gf2tvdw0s3jn54khce6mua7l".contains(c)));
+        assert!(s
+            .chars()
+            .all(|c| "qpzry9x8gf2tvdw0s3jn54khce6mua7l".contains(c)));
         // All-zero ledger → all 'q' (the 0 symbol).
         assert_eq!(bytes_to_bech32_data(&[0u8; 32]), "q".repeat(52));
     }

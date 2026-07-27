@@ -177,8 +177,8 @@ impl HubState {
             let (sk, _pk) = secp.generate_keypair(&mut OsRng);
             let bytes = sk.secret_bytes();
             // Cast to bitcoin::secp256k1 to ensure type alignment.
-            let _: SecretKey = SecretKey::from_slice(&bytes)
-                .expect("freshly generated key is valid");
+            let _: SecretKey =
+                SecretKey::from_slice(&bytes).expect("freshly generated key is valid");
             std::fs::write(&secret_path, hex::encode(bytes))?;
             #[cfg(unix)]
             {
@@ -299,8 +299,8 @@ impl HubState {
     /// infallible for any 32 bytes that came from a CSPRNG.
     pub fn master_seed_mnemonic(dir: &Path) -> Result<String, StateError> {
         let seed = Self::load_or_init_master_seed(dir)?;
-        let mnemonic = bip39::Mnemonic::from_entropy(&seed)
-            .map_err(|e| StateError::Bip39(e.to_string()))?;
+        let mnemonic =
+            bip39::Mnemonic::from_entropy(&seed).map_err(|e| StateError::Bip39(e.to_string()))?;
         Ok(mnemonic.to_string())
     }
 
@@ -316,11 +316,7 @@ impl HubState {
     /// name. Idempotent: same name always returns the same index, even
     /// after restart. New names get the current `next_signer_index`
     /// which is then bumped + persisted.
-    pub fn signer_index_for(
-        &mut self,
-        name: &str,
-        dir: &Path,
-    ) -> Result<u32, StateError> {
+    pub fn signer_index_for(&mut self, name: &str, dir: &Path) -> Result<u32, StateError> {
         if let Some(&i) = self.signer_indexes.get(name) {
             return Ok(i);
         }
@@ -501,7 +497,13 @@ mod tests {
         let phrase = HubState::master_seed_mnemonic(tmp.path()).unwrap();
         let words: Vec<&str> = phrase.split_whitespace().collect();
         // 32 bytes of entropy → 24-word BIP-39 phrase.
-        assert_eq!(words.len(), 24, "expected 24 words, got {}: {}", words.len(), phrase);
+        assert_eq!(
+            words.len(),
+            24,
+            "expected 24 words, got {}: {}",
+            words.len(),
+            phrase
+        );
         // Repeated calls return the same phrase (seed file is stable).
         let phrase2 = HubState::master_seed_mnemonic(tmp.path()).unwrap();
         assert_eq!(phrase, phrase2);

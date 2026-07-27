@@ -5,11 +5,11 @@
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_core::ledger::Ledger;
-use deposits_test::adversarial::*;
-use deposits_test::*;
 use deposits_protocol::messages::LedgerOperation;
 use deposits_protocol::types::*;
 use deposits_protocol::TlvDecode;
+use deposits_test::adversarial::*;
+use deposits_test::*;
 
 fn make_key(seed: u8) -> (SecretKey, PublicKey) {
     let secp = Secp256k1::new();
@@ -279,10 +279,9 @@ fn invariant_c1_witness_validity() {
     };
     let good_op = deposits_core::signing::sign_op(good_proto, &user_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
-    let (_, good_violations) = state
-        .apply_with_verifier(&good_op, &authorizer, 0)
-        .unwrap();
-    eprintln!("violations: {:?}", good_violations); assert!(good_violations.is_empty(), "C1: valid witness must pass");
+    let (_, good_violations) = state.apply_with_verifier(&good_op, &authorizer, 0).unwrap();
+    eprintln!("violations: {:?}", good_violations);
+    assert!(good_violations.is_empty(), "C1: valid witness must pass");
 
     // Forged witness (wrong key signing the same op shape — descriptor
     // expects user_pk, signature comes from attacker_sk)
@@ -300,9 +299,7 @@ fn invariant_c1_witness_validity() {
     };
     let bad_op = deposits_core::signing::sign_op(bad_proto, &attacker_sk)
         .expect("InvoiceLock signs via dep-17 preimage");
-    let (_, bad_violations) = state
-        .apply_with_verifier(&bad_op, &authorizer, 0)
-        .unwrap();
+    let (_, bad_violations) = state.apply_with_verifier(&bad_op, &authorizer, 0).unwrap();
     assert!(
         !bad_violations.is_empty(),
         "C1: forged witness must be flagged"
@@ -448,7 +445,8 @@ fn invariant_c3_signature_binding() {
         blocked: true,
         defense: DefenseLayer::Protocol,
         scaling: Scaling::Constant,
-        notes: "dep-17 preimage binds op_type, deposit_id, and every authorization parameter".into(),
+        notes: "dep-17 preimage binds op_type, deposit_id, and every authorization parameter"
+            .into(),
         steps: vec![],
     });
 }
@@ -523,7 +521,10 @@ fn invariant_s1_dispute_state_gate() {
         ),
         (
             "DepositClose",
-            LedgerOperation::DepositClose { deposit_id: did, commitment: None, },
+            LedgerOperation::DepositClose {
+                deposit_id: did,
+                commitment: None,
+            },
         ),
         (
             "FeeCollect",

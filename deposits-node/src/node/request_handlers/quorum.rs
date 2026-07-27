@@ -309,13 +309,7 @@ impl Node {
                 hash.as_byte_array(),
             ) {
                 Ok(sig) => sig,
-                Err(e) => {
-                    return (
-                        false,
-                        None,
-                        Some(format!("collateral consent sign: {}", e)),
-                    )
-                }
+                Err(e) => return (false, None, Some(format!("collateral consent sign: {}", e))),
             }
         };
 
@@ -430,9 +424,9 @@ impl Node {
         {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             use deposits_core::messages::LedgerOperation;
-            use deposits_core::validation::LedgerExport;
-            use deposits_core::types::SignedLedgerUpdate;
             use deposits_core::types::LedgerState;
+            use deposits_core::types::SignedLedgerUpdate;
+            use deposits_core::validation::LedgerExport;
             use deposits_core::{TlvDecode, TlvEncode as _};
 
             let history_b64 = match request.params.get("ledger_history") {
@@ -496,9 +490,7 @@ impl Node {
                         return (
                             false,
                             None,
-                            Some(
-                                "ledger_history[0] must be a LedgerOpen operation".to_string(),
-                            ),
+                            Some("ledger_history[0] must be a LedgerOpen operation".to_string()),
                         );
                     }
                 },
@@ -525,11 +517,8 @@ impl Node {
             }
 
             // The computed ledger_id must match the claimed operator_ledger_id.
-            let computed_ledger_id = LedgerState::compute_ledger_id(
-                &claimed_operator,
-                &reserves_id,
-                genesis_block,
-            );
+            let computed_ledger_id =
+                LedgerState::compute_ledger_id(&claimed_operator, &reserves_id, genesis_block);
             if hex::encode(computed_ledger_id) != operator_ledger_id {
                 return (
                     false,
@@ -585,13 +574,7 @@ impl Node {
                 hash.as_byte_array(),
             ) {
                 Ok(sig) => sig,
-                Err(e) => {
-                    return (
-                        false,
-                        None,
-                        Some(format!("collateral consent sign: {}", e)),
-                    )
-                }
+                Err(e) => return (false, None, Some(format!("collateral consent sign: {}", e))),
             }
         };
 
@@ -642,15 +625,12 @@ impl Node {
             Err(e) => return (false, None, Some(format!("our pubkey: {}", e))),
         };
         let response_blob = {
-            use deposits_core::types::{
-                QuorumMemberResponse, QUORUM_MEMBER_RESPONSE_VERSION,
-            };
+            use deposits_core::types::{QuorumMemberResponse, QUORUM_MEMBER_RESPONSE_VERSION};
             use deposits_core::TlvEncode as _;
-            let supported_rulesets: Vec<String> =
-                deposits_core::ruleset::all_supported_names()
-                    .iter()
-                    .map(|s| s.to_string())
-                    .collect();
+            let supported_rulesets: Vec<String> = deposits_core::ruleset::all_supported_names()
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
             let r = QuorumMemberResponse {
                 response_version: QUORUM_MEMBER_RESPONSE_VERSION,
                 member_pubkey: our_pubkey,
@@ -678,18 +658,13 @@ impl Node {
             use deposits_core::types::quorum_member_response_digest;
             use deposits_signer_api::{SigPurpose, SignContext};
             let digest = quorum_member_response_digest(&response_blob);
-            match self.handler.signer.bip340_sign(
-                &SignContext::no_ledger(SigPurpose::Bip340Untagged),
-                &digest,
-            ) {
+            match self
+                .handler
+                .signer
+                .bip340_sign(&SignContext::no_ledger(SigPurpose::Bip340Untagged), &digest)
+            {
                 Ok(sig) => sig,
-                Err(e) => {
-                    return (
-                        false,
-                        None,
-                        Some(format!("member response sign: {}", e)),
-                    )
-                }
+                Err(e) => return (false, None, Some(format!("member response sign: {}", e))),
             }
         };
 
@@ -765,7 +740,11 @@ impl Node {
         // Fail fast on an unknown ruleset with a clear message (conformance
         // would also reject it, but only after building/cosigning).
         if deposits_core::ruleset::lookup(&new_version).is_none() {
-            return (false, None, Some(format!("unknown ruleset {:?}", new_version)));
+            return (
+                false,
+                None,
+                Some(format!("unknown ruleset {:?}", new_version)),
+            );
         }
 
         let op = deposits_core::messages::LedgerOperation::QuorumUpgrade {
@@ -832,10 +811,7 @@ impl Node {
         // Optional amount_sats — used only by the genesis path (no
         // legacy reserves UTXO). Ignored when rotating an existing
         // reserves UTXO; that path uses the existing UTXO's amount.
-        let amount_sats = request
-            .params
-            .get("amount_sats")
-            .and_then(|v| v.as_u64());
+        let amount_sats = request.params.get("amount_sats").and_then(|v| v.as_u64());
 
         // Optional protocol_version override. Falls back to the
         // ledger's currently-active ruleset if absent.
@@ -885,5 +861,4 @@ impl Node {
             }
         }
     }
-
 }

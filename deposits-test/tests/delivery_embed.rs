@@ -100,9 +100,17 @@ fn wallet_escalate_lands_delivery_embed_on_member_ledger() {
     };
     // The hub cluster advertises operators as `node{i}` (not `op{i}`);
     // pick a different node than the member as the complaint target.
-    let target_op_name = if member_op_idx == 0 { op_name(1) } else { op_name(0) };
+    let target_op_name = if member_op_idx == 0 {
+        op_name(1)
+    } else {
+        op_name(0)
+    };
     let (target_ledger, target_pubkey) = discover_ledger_for_operator(&target_op_name);
-    eprintln!("[setup] target ({}) ledger: {}…", target_op_name, &target_ledger[..16]);
+    eprintln!(
+        "[setup] target ({}) ledger: {}…",
+        target_op_name,
+        &target_ledger[..16]
+    );
     eprintln!("[setup] target pubkey: {}…", &target_pubkey[..16]);
     eprintln!(
         "[setup] member (op{}) ledger (embed target): {}…",
@@ -157,7 +165,10 @@ fn wallet_escalate_lands_delivery_embed_on_member_ledger() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     eprintln!("[wallet] stdout:\n{}", stdout);
     if !out.status.success() {
-        panic!("wallet escalate failed:\nstdout: {}\nstderr: {}", stdout, stderr);
+        panic!(
+            "wallet escalate failed:\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        );
     }
     assert!(
         stdout.contains("Embed committed on member ledger"),

@@ -31,7 +31,9 @@ pub async fn liquidity_command(args: &[String]) -> Result<(), Box<dyn std::error
 }
 
 fn print_usage() {
-    eprintln!("Usage: deposits-node liquidity <drip-create|drip-list|drip-pause|drip-resume|drip-remove>");
+    eprintln!(
+        "Usage: deposits-node liquidity <drip-create|drip-list|drip-pause|drip-resume|drip-remove>"
+    );
     eprintln!();
     eprintln!("  drip-create <alias> <ledger_id> --initial-sats N --decrement-sats M \\");
     eprintln!("              --interval-sec S [--interval-fuzz-sec F]");
@@ -154,7 +156,9 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         next_tick_unix: 0,
         ticks_completed: 0,
     };
-    registry.insert(plan).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    registry
+        .insert(plan)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     registry.save(data_dir)?;
 
     let ticks = initial_sats / decrement_sats;
@@ -168,7 +172,10 @@ async fn drip_create(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
             decrement_sats, interval_sec, interval_fuzz_sec
         );
     } else {
-        println!("  Decrement: {} sats every {} sec", decrement_sats, interval_sec);
+        println!(
+            "  Decrement: {} sats every {} sec",
+            decrement_sats, interval_sec
+        );
     }
     println!(
         "  Lifetime:  ~{} ticks (~{} min total at full pace)",
@@ -256,7 +263,11 @@ async fn set_paused(args: &[String], paused: bool) -> Result<(), Box<dyn std::er
         .ok_or_else(|| format!("No drip plan with alias '{}'", alias))?;
     plan.paused = paused;
     registry.save(&config.data_dir)?;
-    println!("{} drip plan '{}'", if paused { "Paused" } else { "Resumed" }, alias);
+    println!(
+        "{} drip plan '{}'",
+        if paused { "Paused" } else { "Resumed" },
+        alias
+    );
     Ok(())
 }
 
@@ -283,7 +294,10 @@ async fn drip_remove(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         return Err(format!("No drip plan with alias '{}'", alias).into());
     }
     registry.save(&config.data_dir)?;
-    println!("Removed drip plan '{}'. The self-deposit (if any) is untouched.", alias);
+    println!(
+        "Removed drip plan '{}'. The self-deposit (if any) is untouched.",
+        alias
+    );
     Ok(())
 }
 
