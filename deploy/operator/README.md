@@ -15,7 +15,11 @@ containers slot in next to it.
   `-txindex=1` if you'll use `CHAIN_BACKEND=bitcoind`), or any other
   source exposing one of: esplora HTTP, electrum protocol, bitcoind RPC.
 - **A running Lightning daemon.** One of:
-  - LDK Server (via `ldk-server-cli`)
+  - **LDK Server — our fork** (`bitcoin-deposits/ldk-server`, branch
+    `deposits-hold-invoices`). Hold-invoice receive needs the fork's
+    for-hash endpoints; stock ldk-server won't work. If you don't already
+    run one, [LIGHTNING-LDK.md](./LIGHTNING-LDK.md) is the build-and-run
+    runbook.
   - LND (REST + macaroon — the most common Umbrel/Start9 choice)
   - CLN (Unix socket — needs to be reachable from inside our container,
     typically via bind mount)
@@ -91,6 +95,29 @@ The base `docker-compose.yml` does NOT try to bind-mount LN/bitcoin
 credentials. You declare those mounts in a `docker-compose.override.yml`
 that compose automatically merges in. Pick the snippet matching your
 backend:
+
+### LDK Server TLS cert (LIGHTNING_BACKEND=ldk)
+
+The image already ships `ldk-server-cli`; you only mount the server's TLS
+cert so the container can validate the REST connection. Full setup —
+building the fork, config, credentials — is in
+[LIGHTNING-LDK.md](./LIGHTNING-LDK.md).
+
+```yaml
+# docker-compose.override.yml
+services:
+  deposits-node:
+    volumes:
+      - /var/lib/ldk-server/data/tls.crt:/run/secrets/ldk-tls.cert:ro
+```
+
+Then in `.env` (see LIGHTNING-LDK.md for where each value comes from):
+```
+LDK_HOST=host.docker.internal
+LDK_PORT=3201
+LDK_API_KEY=<hex of data/<network>/api_key>
+LDK_TLS_CERT=/run/secrets/ldk-tls.cert
+```
 
 ### LND macaroon + TLS cert (LIGHTNING_BACKEND=lnd, file-based auth)
 
