@@ -165,7 +165,7 @@ where
 
     // 1. Receive Hello.
     let hello: Hello = read_frame(stream).await?;
-    if !ctx.allowlist.iter().any(|pk| *pk == hello.node_pubkey) {
+    if !ctx.allowlist.contains(&hello.node_pubkey) {
         return Err(ServerError::Handshake(format!(
             "node pubkey {} not in allowlist",
             hex::encode(hello.node_pubkey.serialize())

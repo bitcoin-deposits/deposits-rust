@@ -33,7 +33,11 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      # `-D warnings` keeps teeth for every substantive lint. The two doc-list
+      # lints are allowed: they flag cosmetic Markdown indentation inside doc
+      # comments (no code impact) and are noisy/low-value across a large tree.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+          -A clippy::doc_lazy_continuation -A clippy::doc_overindented_list_items
 
   test:
     name: Test

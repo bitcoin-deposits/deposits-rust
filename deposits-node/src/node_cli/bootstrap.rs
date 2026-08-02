@@ -289,7 +289,7 @@ async fn bootstrap_reserves(args: &[String]) -> Result<(), Box<dyn std::error::E
             Err(e) => {
                 let msg = e.to_string();
                 if msg.contains("insufficient balance") {
-                    if waited % 60 == 0 {
+                    if waited.is_multiple_of(60) {
                         println!(
                             "bootstrap reserves: waiting for funding at {} ({}s elapsed)",
                             funding_addr, waited

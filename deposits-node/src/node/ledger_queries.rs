@@ -999,7 +999,7 @@ impl Node {
         // ledger op committed. The ledger stays PreQuorum and the
         // ledger wallet still has the entry. Reuse it instead of
         // building a fresh tx.
-        let ledger_wallet = self.ensure_ledger_wallet(&ledger_id)?;
+        let ledger_wallet = self.ensure_ledger_wallet(ledger_id)?;
         let sync_err: Option<String> = match ledger_wallet.sync() {
             Ok(()) => None,
             Err(e) => {
@@ -1043,7 +1043,7 @@ impl Node {
                 // rotated key set. Fee is deducted from the reserves
                 // amount; the wpkh wallet is not consulted.
                 self.build_rotation_via_cosign(
-                    &ledger_id,
+                    ledger_id,
                     &existing,
                     quorum_members.clone(),
                     quorum_expiries.clone(),
@@ -1618,7 +1618,7 @@ impl Node {
                 // We need majority of all voters (operator + cosigners). The
                 // operator already signed; check we have ≥ cosigner_threshold
                 // from cosigners.
-                if sigs.len() - 1 >= cosigner_threshold {
+                if sigs.len() > cosigner_threshold {
                     break;
                 }
             }

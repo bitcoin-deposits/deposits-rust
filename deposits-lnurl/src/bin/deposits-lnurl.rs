@@ -947,10 +947,7 @@ fn is_publishable_relay(url: &str) -> bool {
         .or_else(|| url.strip_prefix("ws://"))
         .unwrap_or("");
     // Take the host part (everything before `:` or `/`).
-    let host = after_scheme
-        .split(|c: char| c == ':' || c == '/')
-        .next()
-        .unwrap_or("");
+    let host = after_scheme.split([':', '/']).next().unwrap_or("");
     // Require a dot — single-label hostnames are docker-internal or
     // bare hostnames that won't resolve for outside callers.
     host.contains('.') && !host.is_empty()

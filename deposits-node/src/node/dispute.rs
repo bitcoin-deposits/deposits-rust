@@ -177,7 +177,7 @@ mod confiscation_outputs_tests {
         // Any 34-byte witness-V1 script — the function doesn't introspect.
         let bytes = vec![0x51, 0x20] // OP_1 OP_PUSHBYTES_32
             .into_iter()
-            .chain(std::iter::repeat(0xAB).take(32))
+            .chain(std::iter::repeat_n(0xAB, 32))
             .collect::<Vec<u8>>();
         ScriptBuf::from(bytes)
     }
@@ -386,7 +386,7 @@ mod recovery_voter_derivation_tests {
 
         let mut got: Vec<XOnlyPublicKey> = voters.clone();
         got.sort_by_key(|k| k.serialize());
-        let mut want: Vec<XOnlyPublicKey> = vec![m1, m2, m3]
+        let mut want: Vec<XOnlyPublicKey> = [m1, m2, m3]
             .iter()
             .map(|p| p.x_only_public_key().0)
             .collect();
@@ -431,7 +431,7 @@ mod recovery_voter_derivation_tests {
         sorted.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
 
         // Canonical (on-chain) recovery voters = QB members minus operator.
-        let canonical_voters: Vec<XOnlyPublicKey> = vec![m1, m2, m3]
+        let canonical_voters: Vec<XOnlyPublicKey> = [m1, m2, m3]
             .iter()
             .map(|p| p.x_only_public_key().0)
             .collect();
@@ -929,48 +929,49 @@ impl Node {
             if already_armed && !prior_collateral_was_none {
                 tracing::info!("Already have DisputeArmed on fork (with replacement_collateral)");
             } else {
-                let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) = if let Some(
-                    LedgerOperation::DisputeArmed {
+                let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) =
+                    if let Some(LedgerOperation::DisputeArmed {
                         commitment_hash, ..
-                    },
-                ) = &prior_arm
-                {
-                    // Re-arm: reuse the prior commitment_hash to
-                    // keep the lottery commitment immutable.
-                    tracing::info!(
-                        "Re-arming with prior commitment_hash {} (collateral upgrade)",
-                        hex::encode(commitment_hash)
-                    );
-                    (*commitment_hash, true)
-                } else {
-                    // First arm: derive the preimage from the
-                    // signer's identity secret. The signer returns a
-                    // fixed 32-byte HMAC *seed*; we shape it into a
-                    // preimage whose *length* carries the lottery
-                    // entropy and lands in `[17, 16+N]` for this
-                    // dispute's disputant count `N` (= Q, from the
-                    // fork's QuorumBegin — see `dispute_lottery_n`).
-                    // The same seed + same `N` at reveal time
-                    // reproduces the identical bytes, so we never
-                    // persist it to disk and a disk-full event can't
-                    // lose the dispute, while `HASH160(preimage)`
-                    // stays consistent between commit and reveal.
-                    let seed = self
-                        .handler
-                        .signer
-                        .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
-                        .map_err(|e| Error::Protocol(format!("derive lottery preimage: {}", e)))?;
-                    // `N` (= Q) was resolved above from the canonical
-                    // relay chain, before this write-lock was taken.
-                    let n = arm_n;
-                    let preimage =
+                    }) = &prior_arm
+                    {
+                        // Re-arm: reuse the prior commitment_hash to
+                        // keep the lottery commitment immutable.
+                        tracing::info!(
+                            "Re-arming with prior commitment_hash {} (collateral upgrade)",
+                            hex::encode(commitment_hash)
+                        );
+                        (*commitment_hash, true)
+                    } else {
+                        // First arm: derive the preimage from the
+                        // signer's identity secret. The signer returns a
+                        // fixed 32-byte HMAC *seed*; we shape it into a
+                        // preimage whose *length* carries the lottery
+                        // entropy and lands in `[17, 16+N]` for this
+                        // dispute's disputant count `N` (= Q, from the
+                        // fork's QuorumBegin — see `dispute_lottery_n`).
+                        // The same seed + same `N` at reveal time
+                        // reproduces the identical bytes, so we never
+                        // persist it to disk and a disk-full event can't
+                        // lose the dispute, while `HASH160(preimage)`
+                        // stays consistent between commit and reveal.
+                        let seed = self
+                            .handler
+                            .signer
+                            .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
+                            .map_err(|e| {
+                                Error::Protocol(format!("derive lottery preimage: {}", e))
+                            })?;
+                        // `N` (= Q) was resolved above from the canonical
+                        // relay chain, before this write-lock was taken.
+                        let n = arm_n;
+                        let preimage =
                         deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
                             &seed, n,
                         )
                         .map_err(|e| Error::Protocol(format!("shape lottery preimage: {}", e)))?;
-                    let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
-                    (h, true)
-                };
+                        let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+                        (h, true)
+                    };
                 let _ = preimage_was_persisted;
 
                 // Use P2WPKH address derived from our operator pubkey for target_reserves

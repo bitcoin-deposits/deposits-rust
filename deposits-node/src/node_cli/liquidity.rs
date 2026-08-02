@@ -209,9 +209,7 @@ async fn drip_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         };
         let next_in = if p.paused {
             "—".to_string()
-        } else if p.next_tick_unix == 0 {
-            "due".to_string()
-        } else if now >= p.next_tick_unix {
+        } else if p.next_tick_unix == 0 || now >= p.next_tick_unix {
             "due".to_string()
         } else {
             format!("{}s", p.next_tick_unix - now)

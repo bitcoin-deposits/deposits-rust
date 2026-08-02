@@ -207,7 +207,7 @@ fn dispute_creates_well_formed_fork_branches() {
     let total_before_filter = forks_by_op.len();
     forks_by_op.retain(|(_, path)| {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let prefix = stem.rsplitn(2, '_').next().unwrap_or("");
+        let prefix = stem.rsplit('_').next().unwrap_or("");
         prefix != original_operator_prefix
     });
     if forks_by_op.len() != total_before_filter {

@@ -1053,16 +1053,14 @@ fn chase_reserves_chain(
 
         let cur_str = current.to_string();
         let spending = txs.iter().find(|tx| {
-            tx.get("vin")
-                .and_then(|v| v.as_array())
-                .map_or(false, |vin| {
-                    vin.iter().any(|i| {
-                        i.get("prevout")
-                            .and_then(|p| p.get("scriptpubkey_address"))
-                            .and_then(|v| v.as_str())
-                            == Some(cur_str.as_str())
-                    })
+            tx.get("vin").and_then(|v| v.as_array()).is_some_and(|vin| {
+                vin.iter().any(|i| {
+                    i.get("prevout")
+                        .and_then(|p| p.get("scriptpubkey_address"))
+                        .and_then(|v| v.as_str())
+                        == Some(cur_str.as_str())
                 })
+            })
         });
         let tx = match spending {
             Some(t) => t,
@@ -1105,7 +1103,7 @@ fn chase_reserves_chain(
             };
             // Don't backtrack — skip an output that lands at an address we
             // already walked through.
-            if visited.contains(&addr_str.to_string()) {
+            if visited.contains(addr_str) {
                 continue;
             }
             match &candidate {

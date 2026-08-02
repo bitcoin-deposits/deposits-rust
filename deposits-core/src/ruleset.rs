@@ -71,7 +71,7 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
 pub fn resolve_or_legacy(name: Option<&str>) -> &'static Ruleset {
     match name {
         None => &LEGACY,
-        Some(s) if s.is_empty() => &LEGACY,
+        Some("") => &LEGACY,
         Some(s) => lookup(s).unwrap_or(&LEGACY),
     }
 }

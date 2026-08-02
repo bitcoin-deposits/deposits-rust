@@ -3430,8 +3430,8 @@ impl NostrTransport {
             // AES-256-CBC decrypt with the shared key. Mirrors what
             // nostr/nips/nip04.rs::decrypt_to_bytes does after
             // `util::generate_shared_key`.
-            return nip04_decrypt_with_shared_key(&shared_key, ciphertext)
-                .map_err(|e| Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e)));
+            nip04_decrypt_with_shared_key(&shared_key, ciphertext)
+                .map_err(|e| Error::Nostr(format!("NIP-04 fallback AES-CBC: {}", e)))
         }
 
         #[cfg(not(feature = "signer"))]

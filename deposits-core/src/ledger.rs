@@ -1106,17 +1106,13 @@ impl Ledger {
         // also called from `validate_for_cosign` (cosigner perspective,
         // role = Partner) and would otherwise refuse every legitimate
         // cosign request for ops with author-role semantics.
-        match &operation {
-            LedgerOperation::QuorumJoin { .. } => {
-                if !self.is_operator() {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "quorum_join_wrong_role".to_string(),
-                        details: "QuorumJoin can only be added to operator's own ledger"
-                            .to_string(),
-                    });
-                }
+        if let LedgerOperation::QuorumJoin { .. } = &operation {
+            if !self.is_operator() {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "quorum_join_wrong_role".to_string(),
+                    details: "QuorumJoin can only be added to operator's own ledger".to_string(),
+                });
             }
-            _ => {}
         }
 
         self.validate_operation(&operation)?;

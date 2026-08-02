@@ -8,9 +8,9 @@
 //! 2. Pick a fresh `α` and one `s_i` per non-signer index.
 //! 3. Set `L_π = α·G`, `R_π = α·H_p(encode(P_π))`.
 //! 4. For `i = π+1, π+2, …` (mod n) until we wrap back to π:
-//!      `c_i      = H_τ(L_{i-1} || R_{i-1} || m)`
-//!      `L_i      = s_i·G          + c_i·P_i`
-//!      `R_i      = s_i·H_p(P_i)   + c_i·I`
+//!    `c_i      = H_τ(L_{i-1} || R_{i-1} || m)`
+//!    `L_i      = s_i·G          + c_i·P_i`
+//!    `R_i      = s_i·H_p(P_i)   + c_i·I`
 //! 5. Once `c_π` is fixed by the chain, close it: `s_π = α − c_π·sk`.
 //! 6. Output `(c_0, s_0, …, s_{n-1}, I)`.
 //!

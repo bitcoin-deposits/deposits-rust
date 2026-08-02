@@ -77,7 +77,7 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             raw
                         )
                     })?;
-                    if !ratio.is_finite() || ratio < 0.0 || ratio > 1.0 {
+                    if !ratio.is_finite() || !(0.0..=1.0).contains(&ratio) {
                         return Err(
                             format!("--collateral-ratio {} must be in [0.0, 1.0]", raw).into()
                         );

@@ -494,7 +494,7 @@ impl Node {
                     // Lazy-spawn an actor for this newly-imported
                     // ledger so its inbound stream gets routed through
                     // the actor's single-writer apply path.
-                    self.ensure_actor_for(&ledger_id);
+                    self.ensure_actor_for(ledger_id);
                 }
                 Err(e) => {
                     tracing::warn!("Failed to import ledger {}: {}", &ledger_id[..16], e);
@@ -1056,7 +1056,7 @@ impl Node {
                         filtered.len(),
                         filtered.last().map(|u| u.sequence_number).unwrap_or(0)
                     );
-                    self.ensure_actor_for(&ledger_id);
+                    self.ensure_actor_for(ledger_id);
                     Ok(())
                 }
                 Err(e) => {
@@ -1573,7 +1573,7 @@ impl Node {
             loop_iteration += 1;
 
             // Watchdog: log every 100th iteration so we can see if the loop is running
-            if loop_iteration % 100 == 0 {
+            if loop_iteration.is_multiple_of(100) {
                 tracing::debug!("run loop iteration {}", loop_iteration);
             }
 

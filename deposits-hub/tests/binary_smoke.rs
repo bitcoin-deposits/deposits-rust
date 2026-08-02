@@ -321,8 +321,7 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let launch_line = stdout
         .lines()
-        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
-        .last()
+        .rfind(|l| !l.starts_with('#') && !l.trim().is_empty())
         .expect("spawn-line stdout has no launch line")
         .to_string();
     assert!(launch_line.contains("deposits-signer"));
@@ -426,7 +425,7 @@ async fn steal_takes_over_from_running_hub() {
     // and it landed) — but cap the wait so a hung steal fails the test.
     let mut first_dead = false;
     for _ in 0..50 {
-        if let Some(_) = first.try_wait().expect("try_wait first") {
+        if first.try_wait().expect("try_wait first").is_some() {
             first_dead = true;
             break;
         }

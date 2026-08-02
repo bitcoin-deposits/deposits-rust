@@ -1134,7 +1134,7 @@ pub async fn run(rest: &[String]) -> Result<(), String> {
         let txid = out
             .lines()
             .find_map(|l| l.split("send-many broadcast:").nth(1))
-            .and_then(|s| s.trim().split_whitespace().next())
+            .and_then(|s| s.split_whitespace().next())
             .map(str::to_string)
             .ok_or_else(|| format!("no txid in send-many output:\n{}", out))?;
         println!("  disbursement: {}", txid);
@@ -1561,6 +1561,14 @@ fn spawn_daemon(args: &BootstrapArgs, i: u32) -> Result<(), String> {
     // `restart` regardless of the shell that launches it.
     for (k, v) in &args.daemon_env {
         c.env(k, v);
+    }
+    // The daemon now refuses to start unless a Lightning backend is chosen
+    // (or explicitly disabled). If the operator didn't configure one, default
+    // to `none` so a fresh cluster boots cleanly with Lightning off — invoices
+    // + cross-ledger disabled, same-ledger transfers fine. Enable LN by passing
+    // `--daemon-env LIGHTNING_BACKEND=ldk|lnd|cln` + that backend's vars.
+    if !args.daemon_env.contains_key("LIGHTNING_BACKEND") {
+        c.env("LIGHTNING_BACKEND", "none");
     }
     if args.network == "regtest" {
         c.arg("--fast-poll");

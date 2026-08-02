@@ -81,7 +81,7 @@ pub fn compute_required_replacement_sats(
     let scaled = (obligations_msat as u128).saturating_mul(collateral_at_qb_msat as u128)
         / (reserves_at_qb_msat as u128);
     // msat → sat (round up so the cosigner errs on the strict side).
-    let required_sats = ((scaled + 999) / 1000) as u64;
+    let required_sats = scaled.div_ceil(1000) as u64;
     Some(required_sats.saturating_add(policy.claim_fee_estimate_sats))
 }
 

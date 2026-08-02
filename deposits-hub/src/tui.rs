@@ -638,7 +638,7 @@ impl App {
         entries.sort_by(|a, b| a.1.label.cmp(&b.1.label));
         let (pk, rec) = entries.get(idx)?;
         let stats = self.node_stats.get(*pk).cloned();
-        Some(((*rec).label.clone(), stats, (*pk).clone()))
+        Some((rec.label.clone(), stats, (*pk).clone()))
     }
 
     async fn cursor_step(&mut self, delta: i32) {
@@ -1068,7 +1068,7 @@ impl App {
                 if qr_h + 4 <= block_inner.height && qr_w <= block_inner.width {
                     // Pad each line to center horizontally.
                     let pad = (block_inner.width.saturating_sub(qr_w)) / 2;
-                    let pad_str: String = std::iter::repeat(' ').take(pad as usize).collect();
+                    let pad_str: String = std::iter::repeat_n(' ', pad as usize).collect();
                     for l in &qr_lines {
                         lines.push(Line::from(format!("{}{}", pad_str, l)));
                     }
@@ -1118,8 +1118,7 @@ impl App {
         let block_inner = block.inner(inner);
         f.render_widget(block, inner);
 
-        let mut lines: Vec<Line> = Vec::new();
-        lines.push(Line::from(""));
+        let mut lines: Vec<Line> = vec![Line::from("")];
         lines.push(Line::from(Span::styled(
             "These 24 words derive every signer this hub will ever spawn.",
             Style::default().fg(Color::White),
@@ -2262,8 +2261,8 @@ impl App {
                 // pending_key is "<role>:<pk>" — strip the role prefix
                 // for display since the role is already shown next to it.
                 let pk_only = pending_key
-                    .splitn(2, ':')
-                    .nth(1)
+                    .split_once(':')
+                    .map(|x| x.1)
                     .unwrap_or(pending_key.as_str());
                 ListItem::new(format!(
                     "{:<6} {:<24} from {}  v{}  waiting {}s",

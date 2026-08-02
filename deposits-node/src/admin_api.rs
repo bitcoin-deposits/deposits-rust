@@ -447,7 +447,7 @@ fn op_name(op: &deposits_core::messages::LedgerOperation) -> &'static str {
     use deposits_core::messages::LedgerOperation as Op;
     match op {
         Op::LedgerOpen { .. } => "LedgerOpen",
-        Op::LedgerClose { .. } => "LedgerClose",
+        Op::LedgerClose => "LedgerClose",
         Op::DepositOpen { .. } => "DepositOpen",
         Op::DepositClose { .. } => "DepositClose",
         Op::FeeChange { .. } => "FeeChange",
@@ -469,7 +469,7 @@ fn op_name(op: &deposits_core::messages::LedgerOperation) -> &'static str {
         Op::DisputeEnter { .. } => "DisputeEnter",
         Op::DisputeArmed { .. } => "DisputeArmed",
         Op::DisputeAcquire { .. } => "DisputeAcquire",
-        Op::DisputeYield { .. } => "DisputeYield",
+        Op::DisputeYield => "DisputeYield",
         _ => "Other",
     }
 }

@@ -245,7 +245,7 @@ fn auto_quorum_refresh_consumes_candidate_to_replace_dead_member() {
     //       QuorumAddMember commit succeeds depends on cluster timing
     //       beyond this test's control.
     let daemon_log = op0_data_dir().join("daemon.log");
-    let candidate_prefix = format!("{}", &candidate_pk.to_string()[..16]);
+    let candidate_prefix = candidate_pk.to_string()[..16].to_string();
     let needle = format!("trying candidate {}", candidate_prefix);
     eprintln!(
         "[wait]  watching {} for 'trying candidate {}'…",

@@ -56,7 +56,7 @@ pub enum PolicyError {
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SeqState {
+pub(crate) struct SeqState {
     /// `ledger_id (hex) → max seq we've ever signed as operator on it`.
     #[serde(default)]
     operator: HashMap<String, u64>,
@@ -162,7 +162,7 @@ impl SeqPolicy {
     }
 
     #[cfg(test)]
-    pub fn snapshot_for_test(&self) -> SeqState {
+    pub(crate) fn snapshot_for_test(&self) -> SeqState {
         self.state.lock().unwrap().clone()
     }
 

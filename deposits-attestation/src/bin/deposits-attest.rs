@@ -402,7 +402,7 @@ async fn estimate_fee_from_lnurl(
     }
 
     // Convert to sats (round up)
-    let fee_sats = (max_fee_msat + 999) / 1000;
+    let fee_sats = max_fee_msat.div_ceil(1000);
     // Add a buffer for hops not in the route hint (our node -> first hint hop)
     let fee_sats = fee_sats + 1;
     log::info!(
@@ -1155,7 +1155,7 @@ async fn publish_attestation(
     );
     let message_hash = sha256::Hash::hash(signing_message.as_bytes());
     let secp = Secp256k1::signing_only();
-    let keypair = Keypair::from_secret_key(&secp, &state.keys.secret_key());
+    let keypair = Keypair::from_secret_key(&secp, state.keys.secret_key());
     let msg = Message::from_digest(message_hash.to_byte_array());
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
 
@@ -1371,7 +1371,7 @@ async fn build_and_publish_cover(state: &Arc<AppState>, cfg: &CoverConfig) -> Re
     // Each ring contains max(k_min, pct% of |F_0|) members, sampled
     // uniformly without replacement. Multiple rings → independent
     // samples that share probabilistic overlap.
-    let pct_target = ((cfg.pct as usize) * follows.len() + 99) / 100; // ceil
+    let pct_target = ((cfg.pct as usize) * follows.len()).div_ceil(100); // ceil
     let target_size = pct_target.max(cfg.k_min as usize).min(follows.len());
 
     let mut rings = Vec::with_capacity(cfg.num_rings as usize);

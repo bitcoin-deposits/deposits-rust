@@ -65,8 +65,7 @@ fn fraud_proof_inactive_quorum_triggers_confiscation() {
     let history = read_ledger_history(&op_data_dir(accused_op_idx), &accused_ledger);
     let active_update = history
         .iter()
-        .filter(|u| u.block_hash != [0u8; 32])
-        .last()
+        .rfind(|u| u.block_hash != [0u8; 32])
         .expect("accused ledger has no update with a confirmed block_hash");
     let member_active_sequence = active_update.sequence_number;
     let member_pubkey = active_update.operator_id;

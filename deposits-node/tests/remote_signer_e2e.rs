@@ -7,6 +7,10 @@
 //! work is aimed at: any future test that wants to exercise the daemon
 //! against a remote signer can crib this setup.
 
+// The signer subprocess is a long-lived daemon killed at test teardown,
+// not awaited inline.
+#![allow(clippy::zombie_processes)]
+
 use bitcoin::hashes::{sha256, Hash};
 use bitcoin::secp256k1::{Message, Secp256k1};
 use bitcoin::Network;

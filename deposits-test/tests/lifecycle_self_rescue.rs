@@ -325,7 +325,7 @@ fn quorum_repair_succeeds_at_tier0_post_expiry() {
     // Mine periodic blocks so the rotation TX gets a confirmation.
     let begin_deadline = Instant::now() + Duration::from_secs(180);
     loop {
-        if let Some(_) = begin_child.try_wait().expect("try_wait") {
+        if begin_child.try_wait().expect("try_wait").is_some() {
             break;
         }
         if Instant::now() > begin_deadline {
@@ -561,7 +561,7 @@ fn auto_quorum_refresh_self_rescues_past_expiry() {
         .expect("quorum begin spawn");
     let begin_deadline = Instant::now() + Duration::from_secs(180);
     loop {
-        if let Some(_) = begin_child.try_wait().expect("try_wait") {
+        if begin_child.try_wait().expect("try_wait").is_some() {
             break;
         }
         if Instant::now() > begin_deadline {

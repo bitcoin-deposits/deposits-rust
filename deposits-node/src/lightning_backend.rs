@@ -42,6 +42,16 @@ pub trait LightningBackend: Send + Sync {
     /// Identity and chain-tip view of the underlying node.
     fn get_node_info(&self) -> Result<NodeInfo, Error>;
 
+    /// Startup reachability probe. A configured backend MUST pass this or the
+    /// daemon refuses to start (see `deposits-node run`) — no more silent
+    /// "invoices will fail later". Default: a cheap `get_node_info` round-trip,
+    /// which proves the CLI/RPC actually resolves AND the node answers.
+    /// [`NoneBackend`] overrides it to `Ok(())` — "no Lightning" is a valid,
+    /// explicitly-chosen state, not a failure.
+    fn smoke_test(&self) -> Result<(), Error> {
+        self.get_node_info().map(|_| ())
+    }
+
     /// On-chain + lightning balances. Used by operator CLI status pages
     /// and the future web admin UI; not on the protocol hot path.
     fn get_balances(&self) -> Result<Balances, Error>;
@@ -320,24 +330,118 @@ pub enum PaymentStatus {
 /// Construction errors (missing macaroon, unreadable socket, etc.) panic
 /// — these are startup-time misconfiguration the operator needs to see
 /// immediately, not runtime errors callers should try to recover from.
+/// Message returned by every [`NoneBackend`] Lightning operation.
+const LN_DISABLED: &str = "Lightning is disabled (LIGHTNING_BACKEND=none). Set \
+    LIGHTNING_BACKEND=ldk|lnd|cln to enable invoices and cross-ledger payments.";
+
+/// The explicit "no Lightning" backend, selected by `LIGHTNING_BACKEND=none`.
+///
+/// This is the sanctioned way to run an operator without a Lightning node:
+/// same-ledger transfers still work; invoice minting and cross-ledger (LN)
+/// payments are simply unavailable and say so clearly. Every write op returns
+/// a plain-English "disabled" error instead of a cryptic `ldk-server-cli: No
+/// such file or directory`; read-only pollers get empty results so background
+/// loops (auto-settle, status) don't spam. `smoke_test` passes — "off" is a
+/// valid, deliberately-chosen state, so the startup gate lets it through.
+pub struct NoneBackend;
+
+impl LightningBackend for NoneBackend {
+    fn get_node_info(&self) -> Result<NodeInfo, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn get_balances(&self) -> Result<Balances, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn create_invoice(&self, _amount_msat: u64, _description: &str) -> Result<String, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn create_invoice_with_desc_hash(
+        &self,
+        _amount_msat: u64,
+        _desc_hash_hex: &str,
+    ) -> Result<String, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn create_invoice_any_amount(&self, _description: &str) -> Result<String, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn pay_invoice(&self, _invoice: &str) -> Result<String, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn pay_invoice_with_amount(&self, _invoice: &str, _amount_msat: u64) -> Result<String, Error> {
+        Err(Error::Protocol(LN_DISABLED.to_string()))
+    }
+    fn list_channels(&self) -> Result<Vec<ChannelInfo>, Error> {
+        Ok(Vec::new())
+    }
+    fn list_payments(&self) -> Result<Vec<PaymentInfo>, Error> {
+        Ok(Vec::new())
+    }
+    fn get_payment_preimage(&self, _payment_id_hex: &str) -> Result<Option<[u8; 32]>, Error> {
+        Ok(None)
+    }
+    /// "Off" is a valid state — let the startup gate through.
+    fn smoke_test(&self) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+/// Build the runtime Lightning backend from `LIGHTNING_BACKEND`.
+///
+/// There is deliberately NO silent default: an unset value is an error, not an
+/// implicit `ldk`. The operator must choose a backend (`ldk`/`lnd`/`cln`) or
+/// explicitly opt out with `none`. Combined with the `deposits-node run`
+/// startup smoke test, this guarantees a running daemon either has a *reachable*
+/// Lightning backend or has been told, on purpose, that it has none — never a
+/// phantom backend that fails cryptically on the first invoice.
 pub fn from_env() -> Box<dyn LightningBackend> {
-    match std::env::var("LIGHTNING_BACKEND")
-        .ok()
-        .as_deref()
-        .unwrap_or("ldk")
-    {
-        "ldk" => Box::new(crate::ldk_backend::LdkBackend::from_env()),
-        "lnd" => Box::new(
+    match std::env::var("LIGHTNING_BACKEND").ok().as_deref() {
+        None | Some("") => panic!(
+            "LIGHTNING_BACKEND is not set. Set it to \"ldk\", \"lnd\", or \"cln\" to enable \
+             Lightning, or \"none\" to run without it (invoice + cross-ledger rails disabled)."
+        ),
+        Some("none") => Box::new(NoneBackend),
+        Some("ldk") => Box::new(crate::ldk_backend::LdkBackend::from_env()),
+        Some("lnd") => Box::new(
             crate::lnd_backend::LndBackend::from_env()
                 .unwrap_or_else(|e| panic!("LND backend init failed: {}", e)),
         ),
-        "cln" => Box::new(
+        Some("cln") => Box::new(
             crate::cln_backend::ClnBackend::from_env()
                 .unwrap_or_else(|e| panic!("CLN backend init failed: {}", e)),
         ),
-        other => panic!(
-            "LIGHTNING_BACKEND={:?} not supported. Supported: \"ldk\", \"lnd\", \"cln\".",
+        Some(other) => panic!(
+            "LIGHTNING_BACKEND={:?} not supported. Supported: \"ldk\", \"lnd\", \"cln\", \"none\".",
             other
         ),
+    }
+}
+
+#[cfg(test)]
+mod none_backend_tests {
+    use super::*;
+
+    /// `LIGHTNING_BACKEND=none` disables invoice/payment ops with a clear,
+    /// actionable error, keeps read-only pollers quiet (empty, not Err), and
+    /// passes the startup smoke test so the daemon boots with LN intentionally
+    /// off. This is the sanctioned "no Lightning" state.
+    #[test]
+    fn none_backend_behaviour() {
+        let b = NoneBackend;
+        // Off is a valid state — startup gate lets it through.
+        assert!(b.smoke_test().is_ok());
+        // Write ops fail clearly, naming the knob to turn.
+        for msg in [
+            b.create_invoice(1000, "x").unwrap_err().to_string(),
+            b.create_invoice_any_amount("x").unwrap_err().to_string(),
+            b.pay_invoice("lnbc1...").unwrap_err().to_string(),
+            b.get_node_info().unwrap_err().to_string(),
+        ] {
+            assert!(msg.contains("LIGHTNING_BACKEND"), "unhelpful msg: {msg}");
+        }
+        // Read-only pollers stay quiet so background loops don't spam.
+        assert!(b.list_payments().unwrap().is_empty());
+        assert!(b.list_channels().unwrap().is_empty());
+        assert_eq!(b.get_payment_preimage("deadbeef").unwrap(), None);
     }
 }

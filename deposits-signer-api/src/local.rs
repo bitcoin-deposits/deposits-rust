@@ -324,6 +324,15 @@ impl Signer for LocalSigner {
 }
 
 #[cfg(test)]
+impl LocalSigner {
+    /// Test-only accessor for the underlying operator secret. Not exposed
+    /// outside `cfg(test)` — production code can't pull the secret back out.
+    pub fn secret_key_for_test(&self) -> &SecretKey {
+        &self.secret
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{SigPurpose, SigRole, SignContext};
@@ -640,14 +649,5 @@ mod tests {
         let issued = signer.issue_nostr_secret().unwrap();
         assert_eq!(issued, nostr.secret_key_for_test().secret_bytes());
         assert_ne!(issued, op.secret_key_for_test().secret_bytes());
-    }
-}
-
-#[cfg(test)]
-impl LocalSigner {
-    /// Test-only accessor for the underlying operator secret. Not exposed
-    /// outside `cfg(test)` — production code can't pull the secret back out.
-    pub fn secret_key_for_test(&self) -> &SecretKey {
-        &self.secret
     }
 }

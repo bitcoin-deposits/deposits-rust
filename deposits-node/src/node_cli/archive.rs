@@ -903,7 +903,7 @@ mod tests {
         let g = genesis(&op_sk, &op_pk);
 
         // A valid single-update (genesis-only) chain is accepted whole.
-        let res = validate_ledger_chain(&[g.clone()]);
+        let res = validate_ledger_chain(std::slice::from_ref(&g));
         assert_eq!(res.accepted.len(), 1, "genesis LedgerOpen should validate");
         assert!(res.stopped_reason.is_none());
 
@@ -1068,11 +1068,14 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("archive-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
-        let n = DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, &[g.clone()]).unwrap();
+        let n =
+            DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, std::slice::from_ref(&g))
+                .unwrap();
         assert_eq!(n, 1);
         // Re-appending the same update writes nothing (content_hash dedup).
         let n2 =
-            DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, &[g.clone()]).unwrap();
+            DepositsHandler::archive_append_updates_at(&tmp, &ledger_id, std::slice::from_ref(&g))
+                .unwrap();
         assert_eq!(n2, 0, "append-only + deduped: no duplicate rows");
 
         // Read back through the SAME reader the daemon healer uses.

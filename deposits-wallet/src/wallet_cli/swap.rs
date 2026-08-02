@@ -792,7 +792,7 @@ pub async fn swap_request(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("  Preimage: (generated, kept locally)");
     println!(
         "  Hash:     {}...",
-        hex::encode(hash.as_byte_array())[..16].to_string()
+        &hex::encode(hash.as_byte_array())[..16]
     );
     println!();
 

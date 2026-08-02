@@ -739,10 +739,7 @@ impl DepositsHandler {
                         "Ledger {} seq 0 is not LedgerOpen — falling back to persisted State row",
                         ledger_id
                     );
-                    match state {
-                        Some(s) => s,
-                        None => return None,
-                    }
+                    state?
                 }
             }
         } else {
@@ -1396,11 +1393,13 @@ impl DepositsHandler {
             match ledgers.get(ledger_id) {
                 Some(arc) => {
                     let mut ledger = arc.write().unwrap();
-                    if ledger.created_at.contains_key(&content_hash) {
-                        false
-                    } else {
-                        ledger.created_at.insert(content_hash, ts);
+                    if let std::collections::hash_map::Entry::Vacant(e) =
+                        ledger.created_at.entry(content_hash)
+                    {
+                        e.insert(ts);
                         true
+                    } else {
+                        false
                     }
                 }
                 None => false,

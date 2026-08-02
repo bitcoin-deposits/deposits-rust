@@ -83,6 +83,45 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         tracing::info!("Slow relays: {:?}", config.slow_relays);
     }
 
+    // Lightning backend startup gate. A configured backend must pass a smoke
+    // test (a real reachability probe) or we refuse to boot — no phantom
+    // backend that fails cryptically on the first invoice. `LIGHTNING_BACKEND=
+    // none` is the explicit opt-out (invoice + cross-ledger rails disabled).
+    // `catch_unwind` converts `from_env`'s panic paths (unset / lnd|cln
+    // misconfig) into a clean, actionable startup error.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::lightning_backend::from_env().smoke_test()
+    })) {
+        Ok(Ok(())) => {
+            if std::env::var("LIGHTNING_BACKEND").ok().as_deref() == Some("none") {
+                tracing::warn!(
+                    "Lightning disabled (LIGHTNING_BACKEND=none): invoices + cross-ledger \
+                     payments unavailable; same-ledger transfers still work"
+                );
+            } else {
+                tracing::info!(
+                    "Lightning backend '{}' reachable",
+                    std::env::var("LIGHTNING_BACKEND").unwrap_or_default()
+                );
+            }
+        }
+        Ok(Err(e)) => {
+            return Err(format!(
+                "Lightning backend smoke test failed: {e}\n\
+                 Fix the backend config (LIGHTNING_BACKEND + LDK_*/LND_*/CLN_*), or set \
+                 LIGHTNING_BACKEND=none to run without Lightning."
+            )
+            .into());
+        }
+        Err(_) => {
+            return Err(
+                "Lightning backend init failed (check LIGHTNING_BACKEND — set it to \
+                        ldk|lnd|cln, or none to run without Lightning)."
+                    .into(),
+            );
+        }
+    }
+
     let node = Arc::new(Node::new(config).await?);
 
     tracing::info!("Node ID: {}", node.node_id);

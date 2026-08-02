@@ -128,10 +128,11 @@ pub enum SigPurpose {
 /// signer-mediated access. Kept narrow on purpose: every variant the
 /// signer accepts is a privilege escalation, so each addition is
 /// deliberate.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum KeyPath {
     /// Operator/identity key. BIP-32 path `m/86'/0'/0'/0/0` against the
     /// master seed. The default for every protocol-level sign.
+    #[default]
     Operator,
     /// Internal-deposit key at `m/84'/0'/0'/0/{index}`. Same derivation
     /// `derive_deposit_key_at(index)` produces in `node_cli/keys.rs`.
@@ -151,12 +152,6 @@ pub enum KeyPath {
     /// (via [`Signer::master_xpub`]) and embeds it in a watch-only
     /// descriptor; signing routes back through the signer here.
     NodeWallet { change: u8, index: u32 },
-}
-
-impl Default for KeyPath {
-    fn default() -> Self {
-        Self::Operator
-    }
 }
 
 /// All metadata a signer needs about a single signature request.

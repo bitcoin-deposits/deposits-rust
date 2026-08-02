@@ -162,8 +162,8 @@ pub fn approve(
         .ok_or_else(|| format!("no pending entry for {}", resolved_key))?;
     // The sender pubkey is the second half of `<role>:<pk>`.
     let sender_pk = resolved_key
-        .splitn(2, ':')
-        .nth(1)
+        .split_once(':')
+        .map(|x| x.1)
         .unwrap_or(&resolved_key)
         .to_string();
     let now = unix_secs();
@@ -226,7 +226,7 @@ fn resolve_pending_key(state: &HubState, k: &str) -> Result<String, String> {
     let matches: Vec<&String> = state
         .pending
         .keys()
-        .filter(|key| key.splitn(2, ':').nth(1) == Some(k))
+        .filter(|key| key.split_once(':').map(|x| x.1) == Some(k))
         .collect();
     match matches.len() {
         0 => Err(format!("no pending entry for {}", k)),

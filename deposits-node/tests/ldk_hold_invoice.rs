@@ -21,6 +21,9 @@
 //!
 //! Skips cleanly when LDK_CLI is unset.
 
+// Payer subprocesses are killed at test teardown, not awaited inline.
+#![allow(clippy::zombie_processes)]
+
 use deposits_node::ldk_backend::{LdkBackend, LdkBackendConfig};
 use deposits_node::lightning_backend::{HoldInvoiceState, LightningBackend};
 use std::time::{Duration, Instant};

@@ -1228,7 +1228,7 @@ async fn handle_issue_hold_invoice(
         None => return err_response("bridge holds no deposit on that ledger"),
     };
 
-    if amount_x_msats < RECEIVE_MIN_AMOUNT_MSATS || amount_x_msats > RECEIVE_MAX_AMOUNT_MSATS {
+    if !(RECEIVE_MIN_AMOUNT_MSATS..=RECEIVE_MAX_AMOUNT_MSATS).contains(&amount_x_msats) {
         return err_response(format!(
             "amount_msats out of range [{}, {}]",
             RECEIVE_MIN_AMOUNT_MSATS, RECEIVE_MAX_AMOUNT_MSATS

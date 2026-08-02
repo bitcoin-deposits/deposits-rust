@@ -322,7 +322,7 @@ impl HubState {
         }
         let i = self.next_signer_index;
         self.signer_indexes.insert(name.to_string(), i);
-        self.next_signer_index = i.checked_add(1).unwrap_or(u32::MAX);
+        self.next_signer_index = i.saturating_add(1);
         self.save(dir)?;
         Ok(i)
     }

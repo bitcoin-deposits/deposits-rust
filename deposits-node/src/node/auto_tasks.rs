@@ -996,7 +996,6 @@ impl Node {
             // refresh / candidate-queue / rotation runs as long as it
             // needs.
             let node = Arc::clone(self);
-            let snap = snap;
             tokio::spawn(async move {
                 node.run_quorum_refresh_for(snap, current_block, threshold_blocks)
                     .await;

@@ -279,7 +279,7 @@ impl Node {
         // need the descriptor (conformance does the witness check at
         // stage time) but the block still does the deposit-exists
         // and timeout-height preflight validations.
-        let _ = {
+        {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let ledger_arc = match ledgers.get(ledger_id) {
                 Some(l) => l.clone(),

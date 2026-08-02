@@ -29,10 +29,10 @@ async fn register_and_ack_round_trip() {
     let hub_secret = fresh_secret_hex();
     let signer_secret = fresh_secret_hex();
 
-    let hub = HubTransport::connect(&hub_secret, &[url.clone()])
+    let hub = HubTransport::connect(&hub_secret, std::slice::from_ref(&url))
         .await
         .expect("hub connect");
-    let signer = HubTransport::connect(&signer_secret, &[url.clone()])
+    let signer = HubTransport::connect(&signer_secret, std::slice::from_ref(&url))
         .await
         .expect("signer connect");
 

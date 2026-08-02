@@ -1723,7 +1723,7 @@ pub async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Err
         return Ok(());
     }
 
-    println!("{:>5}  {:<18} {:>14}  {}", "seq", "op", "amount", "detail");
+    println!("{:>5}  {:<18} {:>14}  detail", "seq", "op", "amount");
     println!("{}", "-".repeat(70));
 
     let mut net_msat: i128 = 0;
@@ -1744,7 +1744,7 @@ pub async fn show_history(args: &[String]) -> Result<(), Box<dyn std::error::Err
         };
         let row = describe_op(&op, &my_deposit_id);
         let amount_str = match row.delta_msat {
-            Some(d) if d == 0 => "—".to_string(),
+            Some(0) => "—".to_string(),
             Some(d) => format_signed_msat_as_sats(d),
             None => "—".to_string(),
         };

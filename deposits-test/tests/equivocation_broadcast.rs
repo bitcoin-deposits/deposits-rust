@@ -72,7 +72,7 @@ fn equivocation_chain_continuity_keeps_quorum_consistent() {
     );
     let cosigner_seeds: Vec<String> = quorum_pubkeys
         .iter()
-        .filter_map(|pk_hex| op_idx_for_pubkey(pk_hex).map(|i| op_seed(i)))
+        .filter_map(|pk_hex| op_idx_for_pubkey(pk_hex).map(op_seed))
         .collect();
     assert_eq!(
         cosigner_seeds.len(),

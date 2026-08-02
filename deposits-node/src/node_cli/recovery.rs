@@ -294,7 +294,7 @@ pub async fn recovery_reconstruct_taproot(
         None => {
             let mut operator_ledgers: Vec<String> = Vec::new();
             for e in std::fs::read_dir(&ledgers_dir)?.filter_map(|e| e.ok()) {
-                if e.path().extension().map_or(true, |x| x != "jsonl") {
+                if e.path().extension().is_none_or(|x| x != "jsonl") {
                     continue;
                 }
                 let raw = match std::fs::read_to_string(e.path()) {
@@ -302,7 +302,7 @@ pub async fn recovery_reconstruct_taproot(
                     Err(_) => continue,
                 };
                 // Role line is the first record; check it cheaply.
-                let is_operator = raw.lines().next().map_or(false, |l| {
+                let is_operator = raw.lines().next().is_some_and(|l| {
                     serde_json::from_str::<serde_json::Value>(l)
                         .ok()
                         .and_then(|v| {
@@ -379,7 +379,7 @@ pub async fn recovery_reconstruct_taproot(
             let pk: Option<Vec<u8>> = m
                 .get("pubkey")
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
-            pk.map(|b| hex::encode(b))
+            pk.map(hex::encode)
         })
         .collect();
     if member_pks.is_empty() {
@@ -3561,7 +3561,6 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         script_pubkey: reserves_addr.script_pubkey(),
     }];
 
-    let mut confiscation_tx = confiscation_tx; // Make mutable
     let mut sighash_cache = SighashCache::new(&confiscation_tx);
     let sighash = sighash_cache
         .taproot_script_spend_signature_hash(
@@ -5100,7 +5099,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         rc_sig_bytes.push(EcdsaSighashType::All as u8);
         let mut rc_witness = Witness::new();
         rc_witness.push(&rc_sig_bytes);
-        rc_witness.push(&our_pubkey.serialize());
+        rc_witness.push(our_pubkey.serialize());
         claim_tx.input[1].witness = rc_witness;
     }
 
@@ -6840,7 +6839,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             sig_bytes.push(EcdsaSighashType::All as u8);
             let mut w = Witness::new();
             w.push(&sig_bytes);
-            w.push(&our_pubkey.serialize());
+            w.push(our_pubkey.serialize());
             witnesses[i] = Some(w);
             println!("    Input {} signed locally (us)", i);
         } else {
@@ -6965,7 +6964,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             pending.remove(&req_id);
         }
 
-        for (_, idx) in &pending {
+        for idx in pending.values() {
             println!("    Input {} timed out waiting for signature", idx);
         }
     }

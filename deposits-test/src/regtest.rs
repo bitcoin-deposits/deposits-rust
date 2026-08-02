@@ -965,7 +965,7 @@ pub fn lifecycle_expiry(op_idx: usize, ledger_id: &str) -> Option<(u32, u32)> {
         let exp = entry.get("quorum_expiry").and_then(|x| x.as_u64())? as u32;
         // Duplicate rows can appear when fork-branches surface in the
         // lifecycle view — take the highest expiry the daemon knows.
-        if best.map_or(true, |(_, prev_exp)| exp > prev_exp) {
+        if best.is_none_or(|(_, prev_exp)| exp > prev_exp) {
             best = Some((tip, exp));
         }
     }
@@ -1741,6 +1741,8 @@ pub fn spawn_op0(extra_env: &[(&str, &str)]) {
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
+    // Long-lived daemon: intentionally not awaited (pid tracked on disk).
+    #[allow(clippy::zombie_processes)]
     let child = cmd.spawn().expect("op0 spawn failed");
     let _ = std::fs::write(dir.join("daemon.pid"), child.id().to_string());
     std::thread::sleep(Duration::from_secs(6));

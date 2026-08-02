@@ -65,7 +65,7 @@ impl HubLock {
     /// or `kill -9` manually.
     pub fn acquire_or_steal(data_dir: &Path) -> Result<Self, LockError> {
         match Self::acquire(data_dir) {
-            Ok(h) => return Ok(h),
+            Ok(h) => Ok(h),
             Err(LockError::Held { pid, .. }) => {
                 let pid_num: i32 = match pid.parse() {
                     Ok(n) => n,
@@ -128,6 +128,9 @@ impl HubLock {
                 .create(true)
                 .read(true)
                 .write(true)
+                // Advisory lock file — keep any existing contents (matches the
+                // prior no-truncate default; clippy::suspicious_open_options).
+                .truncate(false)
                 .open(&lockfile)
                 .map_err(|e| LockError::Open(lockfile.clone(), e))?;
 
@@ -151,7 +154,7 @@ impl HubLock {
             // Truncate + record our pid so a contending caller can
             // print something useful. Best-effort — the lock semantics
             // don't depend on this succeeding.
-            let _ = (&file).set_len(0);
+            let _ = file.set_len(0);
             let _ = (&file).write_all(format!("{}\n", std::process::id()).as_bytes());
 
             Ok(Self { _file: file })
