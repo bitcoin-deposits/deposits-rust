@@ -15,11 +15,10 @@ containers slot in next to it.
   `-txindex=1` if you'll use `CHAIN_BACKEND=bitcoind`), or any other
   source exposing one of: esplora HTTP, electrum protocol, bitcoind RPC.
 - **A running Lightning daemon.** One of:
-  - **LDK Server — our fork** (`bitcoin-deposits/ldk-server`, branch
-    `deposits-hold-invoices`). Hold-invoice receive needs the fork's
-    for-hash endpoints; stock ldk-server won't work. If you don't already
-    run one, [LIGHTNING-LDK.md](./LIGHTNING-LDK.md) is the build-and-run
-    runbook.
+  - **LDK Server — our fork** (`bitcoin-deposits/ldk-server`). Hold-invoice
+    receive needs the fork's for-hash endpoints; stock ldk-server won't work.
+    If you don't already run one, [LIGHTNING-LDK.md](./LIGHTNING-LDK.md) is
+    the build-and-run runbook.
   - LND (REST + macaroon — the most common Umbrel/Start9 choice)
   - CLN (Unix socket — needs to be reachable from inside our container,
     typically via bind mount)

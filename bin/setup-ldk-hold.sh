@@ -14,7 +14,7 @@
 # This exercises BOTH halves of our fork work end-to-end:
 #   - the for-hash command set (bolt11-receive-for-hash / claim / fail)
 #   - the GetClaimableDetails endpoint + PaymentClaimable event tracking
-#     (the claim_deadline plumbing added on the deposits-hold-invoices branch)
+#     (the claim_deadline plumbing added in our ldk-server fork)
 #
 # Usage:
 #   ./bin/setup-ldk-hold.sh         # build (if needed) + start + channel

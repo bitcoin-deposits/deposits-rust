@@ -14,7 +14,7 @@ know, holds the incoming HTLC in the `Accepted` state, and only settles once
 the depositor reveals the preimage on-ledger (DEP-10). Upstream ldk-server
 has no API for this. Our fork
 ([`bitcoin-deposits/ldk-server`](https://github.com/bitcoin-deposits/ldk-server),
-branch **`deposits-hold-invoices`**) adds:
+`main`) adds:
 
 - `bolt11-receive-for-hash` — issue an invoice for a caller-supplied hash
 - `bolt11-claim` / `bolt11-fail` — settle or cancel a held HTLC
@@ -28,12 +28,11 @@ fails at the first `bolt11-receive-for-hash` call.
 
 ## 1. Build
 
-Needs a Rust toolchain. The fork's `deposits-hold-invoices` branch is the one
-you want — the repo's `main` tracks upstream (which has since moved to gRPC),
-so the `-b` flag matters:
+Needs a Rust toolchain. The fork's `main` *is* the REST build you want (it
+does not track upstream, which has moved to gRPC — see the repo's FORK.md):
 
 ```bash
-git clone -b deposits-hold-invoices https://github.com/bitcoin-deposits/ldk-server.git
+git clone https://github.com/bitcoin-deposits/ldk-server.git
 cd ldk-server
 cargo build --release -p ldk-server -p ldk-server-cli
 # binaries: ./target/release/ldk-server  and  ./target/release/ldk-server-cli
