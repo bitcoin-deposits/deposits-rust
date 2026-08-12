@@ -26,15 +26,11 @@ branch **`deposits-hold-invoices`**) adds:
 Point `LIGHTNING_BACKEND=ldk` at a stock ldk-server and invoice receive
 fails at the first `bolt11-receive-for-hash` call.
 
-> **Prerequisite (project state):** the fork repo is not published yet — it
-> currently lives only as a local/backup remote. Until
-> `github.com/bitcoin-deposits/ldk-server` is public, build from the branch
-> you already have checked out. The clone command below assumes the public
-> repo; substitute your local checkout path in the meantime.
-
 ## 1. Build
 
-Needs a Rust toolchain. Release build:
+Needs a Rust toolchain. The fork's `deposits-hold-invoices` branch is the one
+you want — the repo's `main` tracks upstream (which has since moved to gRPC),
+so the `-b` flag matters:
 
 ```bash
 git clone -b deposits-hold-invoices https://github.com/bitcoin-deposits/ldk-server.git
