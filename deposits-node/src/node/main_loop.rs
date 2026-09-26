@@ -708,6 +708,15 @@ impl Node {
                 &ledger_id[..16.min(ledger_id.len())], pages, page_count, fresh, until_ts, page_min_ts,
             );
 
+            // Stop once a page reaches what we already hold: walking the whole
+            // chain (47k updates, 14 pages) for a member one update behind put
+            // the main loop 5-9 s behind and every cosign it owed timed out.
+            if local_tip_seq > 0
+                && all_fetched.iter().any(|u| u.sequence_number <= local_tip_seq)
+            {
+                break;
+            }
+
             // A page with no new events means we've walked the whole chain (or
             // the relay is re-serving the boundary); bail after a few stalls.
             match plan_reimport_page(fresh, page_min_ts, pages, max_pages, &mut stalls) {
