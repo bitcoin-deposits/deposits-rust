@@ -1297,6 +1297,48 @@ impl DepositsHandler {
         Some(updates)
     }
 
+    /// The first `n` updates (sequence 0..n) of a ledger's persisted chain,
+    /// in order, reading the JSONL only as far as it must.
+    ///
+    /// [`Self::read_persisted_history`] reads and parses the whole file, which
+    /// for a busy ledger is gigabytes (2.1 GB for a 141k-update ledger on the
+    /// cl-deposits devnet): 20 s and as much RAM per call. The genesis prefix
+    /// sits at the top of an append-only log, so stream it, parse only
+    /// `Update` rows, and stop once 0..n are all present. A log whose early
+    /// updates are scattered (compaction) is read to the end, as before.
+    pub fn read_persisted_history_prefix(&self, ledger_id: &str, n: u64) -> Option<Vec<SignedLedgerUpdate>> {
+        Self::read_persisted_history_prefix_at(&self.data_dir, ledger_id, n)
+    }
+
+    /// Static core of [`Self::read_persisted_history_prefix`], for tests.
+    pub fn read_persisted_history_prefix_at(
+        data_dir: &std::path::Path,
+        ledger_id: &str,
+        n: u64,
+    ) -> Option<Vec<SignedLedgerUpdate>> {
+        use std::io::BufRead;
+        let ledger_file = data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let reader = std::io::BufReader::new(fs::File::open(&ledger_file).ok()?);
+        let mut by_seq: std::collections::BTreeMap<u64, SignedLedgerUpdate> = Default::default();
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if !line.starts_with("{\"type\":\"Update\"") {
+                continue;
+            }
+            if let Ok(LedgerLogRow::Update(u)) = serde_json::from_str::<LedgerLogRow>(&line) {
+                if u.sequence_number < n {
+                    by_seq.entry(u.sequence_number).or_insert(u);
+                    if by_seq.len() as u64 == n {
+                        break;
+                    }
+                }
+            }
+        }
+        Some(by_seq.into_values().collect())
+    }
+
     /// Append accepted updates to `{data_dir}/ledgers/{ledger_id}.jsonl` in the
     /// same append-only `LedgerLogRow::Update` format the daemon persists —
     /// deduped by `content_hash` against what the file already holds, and NEVER
@@ -2910,5 +2952,44 @@ mod tests {
 
         // Queue should be empty after drain
         assert!(handler.drain_events().is_empty());
+    }
+
+    /// The consent piggyback reads only the head of the persisted log: the
+    /// first `n` updates from genesis, in order, even with RAM truncated —
+    /// and the whole chain when it is shorter than `n`.
+    #[test]
+    fn persisted_history_prefix_reads_genesis_span_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+        let (handler, _rx) =
+            DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
+        let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        for seq in 0..10u64 {
+            let u = mk_update(op_pk, seq, seq as u8);
+            arc.write().unwrap().history.push(u.clone());
+            handler.insert_event(&u);
+        }
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        DepositsHandler::truncate_history(&arc, 3);
+
+        let seqs = |v: Vec<SignedLedgerUpdate>| v.iter().map(|u| u.sequence_number).collect::<Vec<_>>();
+        let head = handler.read_persisted_history_prefix(&ledger_id, 4).expect("JSONL exists");
+        assert_eq!(seqs(head.clone()), vec![0, 1, 2, 3]);
+        assert_eq!(head[0].content_hash[0], 0x00, "starts at the genesis update");
+        let full = handler.read_persisted_history(&ledger_id).unwrap();
+        assert_eq!(head, full[..4].to_vec(), "same updates as the full reader");
+        assert_eq!(
+            seqs(handler.read_persisted_history_prefix(&ledger_id, 40).unwrap()),
+            (0..10).collect::<Vec<_>>(),
+            "a chain shorter than n comes back whole"
+        );
+        assert!(handler.read_persisted_history_prefix("00".repeat(32).as_str(), 4).is_none());
     }
 }

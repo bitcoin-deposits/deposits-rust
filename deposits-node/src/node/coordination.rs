@@ -585,11 +585,8 @@ impl Node {
                 Some(p) => p,
                 None => self
                     .handler
-                    .read_persisted_history(our_ledger_id)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .take(CONSENT_HISTORY_MAX)
-                    .collect(),
+                    .read_persisted_history_prefix(our_ledger_id, CONSENT_HISTORY_MAX as u64)
+                    .unwrap_or_default(),
             };
             let sent = prefix.iter().map(|u| BASE64.encode(u.tlv_encode())).collect();
             (sent, tip)
