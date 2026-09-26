@@ -542,13 +542,25 @@ impl Node {
         our_ledger_id: &str,
         proposed_terms: ConsentProposedTerms<'_>,
     ) -> Result<ConsentResult, Error> {
-        // Piggyback our full ledger history so the member can validate the
-        // chain end-to-end (LedgerOpen → tip) and import the ledger before
-        // attesting. Without this the member would have to scrape the relay
-        // — which races against the operator's own publish path and silently
-        // produces "consenting blind" memberships when the import doesn't
-        // land in time. Same shape as the cosign piggyback above.
-        let history_b64: Vec<String> = {
+        // Piggyback our ledger history so the member can validate the chain
+        // from LedgerOpen and import the ledger before attesting. Without this
+        // the member would have to scrape the relay — which races against the
+        // operator's own publish path and silently produces "consenting blind"
+        // memberships when the import doesn't land in time.
+        //
+        // Bounded: the whole history of a busy ledger does not fit in one
+        // event (108k updates ≈ 100 MB; relays cap messages at a few MB). A
+        // relay that drops the oversized event also drops our connection, so
+        // every rotation attempt cost us our subscriptions and the rotation
+        // never happened (cl-deposits docs/REDTEAM.md finding #2). And a
+        // relay that carries it is not enough: nostr-sdk drops any received
+        // event over 70 kB (RelayLimits MAX_EVENT_SIZE), so a member on this
+        // client never sees it. Past CONSENT_HISTORY_MAX (~1 kB of base64 per
+        // update) we send the LedgerOpen-rooted prefix plus `ledger_sequence`;
+        // the member's import keeps any longer replica it already holds and
+        // gap-fills the rest like any other update gap. cl-deposits sends 40.
+        const CONSENT_HISTORY_MAX: usize = 40;
+        let (history_b64, tip_seq): (Vec<String>, u64) = {
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
             use deposits_core::TlvEncode;
 
@@ -556,18 +568,38 @@ impl Node {
             let arc = ledgers.get(our_ledger_id).ok_or_else(|| {
                 Error::Protocol(format!("Our ledger not found: {}", our_ledger_id))
             })?;
-            let ledger = arc.read().unwrap();
-            ledger
-                .history
-                .iter()
-                .map(|u| BASE64.encode(u.tlv_encode()))
-                .collect()
+            let arc = arc.clone();
+            drop(ledgers);
+            let (tip, in_memory) = {
+                let ledger = arc.read().unwrap();
+                let tip = ledger.history.last().map(|u| u.sequence_number).unwrap_or(0);
+                // In-memory history is capped to the most recent entries
+                // (handler::history_retain); only when it still starts at the
+                // LedgerOpen can the prefix come from it.
+                let rooted = ledger.history.first().map(|u| u.sequence_number) == Some(0);
+                let prefix: Option<Vec<_>> = rooted
+                    .then(|| ledger.history.iter().take(CONSENT_HISTORY_MAX).cloned().collect());
+                (tip, prefix)
+            };
+            let prefix = match in_memory {
+                Some(p) => p,
+                None => self
+                    .handler
+                    .read_persisted_history(our_ledger_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .take(CONSENT_HISTORY_MAX)
+                    .collect(),
+            };
+            let sent = prefix.iter().map(|u| BASE64.encode(u.tlv_encode())).collect();
+            (sent, tip)
         };
 
         let mut params = serde_json::json!({
             "operator_pubkey": self.node_id_hex,
             "operator_ledger_id": our_ledger_id,
             "ledger_history": history_b64,
+            "ledger_sequence": tip_seq,
             "chosen_ruleset": proposed_terms.chosen_ruleset,
         });
         if let Some(v) = proposed_terms.min_fee_bps {
@@ -608,9 +640,15 @@ impl Node {
             &member_ledger_id[..16],
         );
 
-        // Aligned with cosign timeout above: sub-1s is the target, 10s is the
-        // safety net under burst load.
-        let deadline = std::time::Duration::from_secs(10);
+        // Not the cosign budget: granting consent includes the member's own
+        // QuorumJoin cosign round (10s on its own) plus importing and
+        // validating our ledger, behind whatever its loop is already doing.
+        // At 10s a busy member's grant arrived after we had given up, every
+        // cycle (a devnet ref↔ref rotation answered at 16s). Per-ledger
+        // refresh runs detached (auto_quorum_refresh), so no outer budget
+        // cuts this short. cl-deposits waits 60s.
+        const CONSENT_TIMEOUT_SECS: u64 = 60;
+        let deadline = std::time::Duration::from_secs(CONSENT_TIMEOUT_SECS);
 
         let result = tokio::select! {
             result = rx => {
@@ -627,7 +665,7 @@ impl Node {
             _ = tokio::time::sleep(deadline) => {
                 let mut pending = self.pending_consent_requests.lock().unwrap();
                 pending.remove(&request_id);
-                Err(Error::Protocol("Consent request timed out after 10s".to_string()))
+                Err(Error::Protocol(format!("Consent request timed out after {}s", CONSENT_TIMEOUT_SECS)))
             }
         };
 

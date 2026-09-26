@@ -551,9 +551,14 @@ impl Node {
                     )),
                 );
             }
+            // A long ledger arrives as a LedgerOpen-rooted prefix plus
+            // `ledger_sequence` (see request_consent); the rest gap-fills.
+            let claimed_tip = request.params.get("ledger_sequence").and_then(|v| v.as_u64());
             tracing::info!(
-                "Validated and imported operator ledger {}... before consenting",
-                &operator_ledger_id[..16]
+                "Validated and imported operator ledger {}... before consenting ({} updates sent, operator tip {:?})",
+                &operator_ledger_id[..16],
+                history_b64.len(),
+                claimed_tip
             );
             self.ensure_actor_for(&operator_ledger_id);
         }
