@@ -278,6 +278,7 @@ impl Node {
             sent_events: Mutex::new(std::collections::HashSet::new()),
             sent_events_prev: Mutex::new(std::collections::HashSet::new()),
             revealed_ledgers: Mutex::new(std::collections::HashSet::new()),
+            expiry_stand_down_running: std::sync::atomic::AtomicBool::new(false),
             resync_last_broadcast: Mutex::new(HashMap::new()),
             active_ledger_tasks: Mutex::new(HashMap::new()),
             ledger_workers: Mutex::new(HashMap::new()),

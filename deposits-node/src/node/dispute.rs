@@ -553,16 +553,12 @@ impl Node {
         // confiscation window to re-establish via `quorum repair`
         // before partner cosigners race to confiscate. Override via
         // `DEPOSITS_AUTO_DISPUTE_GRACE_BLOCKS` for test/dev.
-        const DEFAULT_GRACE_BLOCKS: u32 = 720;
-        let grace_blocks: u32 = std::env::var("DEPOSITS_AUTO_DISPUTE_GRACE_BLOCKS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(DEFAULT_GRACE_BLOCKS);
+        let grace_blocks = super::expiry_watch::auto_dispute_grace_blocks();
 
         // Snapshot: which ledgers are we a quorum member of that have
         // passed expiry by more than the grace period? Take a copy
         // under the lock so we can release before doing async work.
-        let candidates: Vec<(String, u64)> = {
+        let candidates: Vec<(String, u64, bitcoin::secp256k1::PublicKey)> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut out = Vec::new();
             for (key, arc) in ledgers.iter() {
@@ -593,17 +589,40 @@ impl Node {
                     continue;
                 }
                 let tip_seq = l.state.sequence;
-                out.push((key.clone(), tip_seq));
+                out.push((key.clone(), tip_seq, l.state.parent_pubkey));
             }
             out
         };
 
-        for (ledger_id, tip_seq) in candidates {
+        for (ledger_id, tip_seq, operator) in candidates {
+            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
+
+            // Judge only a current replica. One that missed the operator's
+            // QuorumBegin shows the old expiry and would accuse an operator
+            // who rotated: ref3 held ledger C at 67859 while the relay carried
+            // 101369 and C's quorum ran to 8888, and fired every minute. Queue
+            // it for gap-fill instead; the replica lane catches it up.
+            let relay_tip = self.relay_tip_seq(&ledger_id, &operator).await;
+            if super::expiry_watch::replica_behind_relay(tip_seq, relay_tip) {
+                tracing::info!(
+                    "Ledger {} looks past quorum_expiry (current block {}) but our replica \
+                     (seq {}) is behind the operator's on the relay ({:?}): not judging it",
+                    ledger_prefix,
+                    current_height,
+                    tip_seq,
+                    relay_tip
+                );
+                self.stale_joined_ledgers
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.clone());
+                continue;
+            }
+
             // Always invoke `auto_arm_for_dispute_with_anchor`; it is
             // idempotent (skips when a prior DisputeArmed already
             // declares replacement_collateral) and handles the re-arm
             // case (prior arm had None, now we have a funded UTXO).
-            let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
             tracing::warn!(
                 "Auto-dispute: ledger {} is past quorum_expiry (current block {}), firing fork-branch DisputeEnter",
                 ledger_prefix,
@@ -1719,6 +1738,49 @@ impl Node {
             );
         }
 
+        Ok(())
+    }
+
+    /// Withdraw our armed dispute on `fork_key`: append `DisputeYield` to the
+    /// fork (it is then Tombstoned, so the confiscation and lottery tasks,
+    /// which drive only Armed forks, pass it by), sign, persist, and publish
+    /// it. Used when the dispute's ground went away
+    /// (`expiry_watch::stand_down_reestablished_expiry_disputes`). A fork
+    /// write like `auto_arm_for_dispute_with_anchor`'s: the fork has no actor,
+    /// and its only other writer does not touch it once it is Tombstoned.
+    pub(crate) async fn withdraw_dispute(&self, fork_key: &str, height: u32) -> Result<(), Error> {
+        use deposits_core::messages::LedgerOperation;
+
+        let fork_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(fork_key)
+            .cloned()
+            .ok_or_else(|| Error::Protocol(format!("Fork not found: {}", fork_key)))?;
+        let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+        {
+            let mut fork = fork_arc.write().unwrap();
+            fork.append_operation_with_block(LedgerOperation::DisputeYield, height, block_hash)
+                .map_err(|e| Error::Protocol(format!("DisputeYield refused: {:?}", e)))?;
+            if let Some(update) = fork.history.last_mut() {
+                update.operator_id = self.node_id;
+            }
+        }
+        self.sign_last_update(fork_key)?;
+        if let Err(e) = self.handler.persist_ledger_to_disk(fork_key) {
+            tracing::warn!("Failed to persist withdrawn fork {}: {}", fork_key, e);
+        }
+        let update = fork_arc.read().unwrap().history.last().cloned();
+        if let Some(update) = update {
+            self.nostr
+                .broadcast_ledger_update(&update)
+                .await
+                .map_err(|e| {
+                    Error::Protocol(format!("Failed to broadcast DisputeYield: {:?}", e))
+                })?;
+        }
         Ok(())
     }
 

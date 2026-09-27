@@ -17,6 +17,9 @@
 //! * `dispute.rs::auto_arm_for_dispute_with_anchor` (the three
 //!   sequential fork-branch writes are single-writer by design;
 //!   `auto_arm` is the sole writer to a given fork).
+//! * `dispute.rs::withdraw_dispute` (the `DisputeYield` that ends a
+//!   fork whose dispute was withdrawn; Tombstoned, auto_arm cannot
+//!   append to it after).
 //!
 //! Any new direct write outside this allowlist fails this test —
 //! caught at compile/test time instead of by a downstream race.

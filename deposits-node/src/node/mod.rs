@@ -407,6 +407,8 @@ pub struct Node {
     /// the durable backing store is the kind:9100 reveal request on
     /// the relay, queried on first access per ledger after restart.
     pub(crate) revealed_ledgers: Mutex<std::collections::HashSet<String>>,
+    /// A `stand_down_reestablished_expiry_disputes` run is in flight.
+    pub(crate) expiry_stand_down_running: std::sync::atomic::AtomicBool,
 
     /// Last-broadcast timestamp per `(ledger_id, from_seq)` rolled-back
     /// resync range. The relay's pub/sub fans a single broadcast out
@@ -590,6 +592,7 @@ impl Node {
 pub mod auto_tasks;
 pub mod coordination;
 pub mod dispute;
+pub mod expiry_watch;
 pub mod heal;
 pub mod inbound;
 pub mod init;

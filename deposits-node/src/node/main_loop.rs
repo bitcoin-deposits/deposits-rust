@@ -54,6 +54,26 @@ pub(crate) fn plan_reimport_page(
     }
 }
 
+/// Whether a backward reimport walk has reached our tip: it holds the
+/// operator's update AT `local_next_seq`, the one that chains onto what we
+/// hold. Any lower sequence is not enough: a heal pass republishes old
+/// updates with a fresh `created_at`, and a member's fork branch shares the
+/// ledger's tag at the fork's sequences. On the devnet ref3's replica of
+/// ledger C (next seq 67860) met a heal pass's 7,067 republished updates
+/// (seqs 17862-24928, all stamped the second between 67867 and 67868); the
+/// walk stopped on them one page short of 67860-67867, so every reimport
+/// began at 67868, broke the chain there and applied nothing.
+pub(crate) fn reimport_reached_tip(
+    fetched: &[deposits_core::SignedLedgerUpdate],
+    local_next_seq: u64,
+    operator: &bitcoin::secp256k1::PublicKey,
+) -> bool {
+    local_next_seq > 0
+        && fetched
+            .iter()
+            .any(|u| u.sequence_number == local_next_seq && u.operator_id == *operator)
+}
+
 impl Node {
     /// Start listening for messages
     pub async fn start(&self) -> Result<(), Error> {
@@ -630,12 +650,15 @@ impl Node {
             }
         }
 
-        let local_tip_seq = {
+        let (local_tip_seq, local_operator) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .get(ledger_id)
-                .map(|arc| arc.read().unwrap().next_sequence())
-                .unwrap_or(0)
+                .map(|arc| {
+                    let l = arc.read().unwrap();
+                    (l.next_sequence(), Some(l.state.operator_key))
+                })
+                .unwrap_or((0, None))
         };
 
         // Paginate the FULL chain by walking created_at BACKWARDS. The relay
@@ -716,8 +739,11 @@ impl Node {
             // Stop once a page reaches what we already hold: walking the whole
             // chain (47k updates, 14 pages) for a member one update behind put
             // the main loop 5-9 s behind and every cosign it owed timed out.
-            if local_tip_seq > 0
-                && all_fetched.iter().any(|u| u.sequence_number <= local_tip_seq)
+            // "Reaches" means the operator's update at our next sequence, not
+            // any lower one (see `reimport_reached_tip`).
+            if local_operator
+                .map(|op| reimport_reached_tip(&all_fetched, local_tip_seq, &op))
+                .unwrap_or(false)
             {
                 break;
             }
@@ -1627,6 +1653,22 @@ impl Node {
                 // Lightweight block height sync (2 HTTP requests)
                 if let Err(e) = self.sync_block_height() {
                     tracing::warn!("Block height sync failed: {}", e);
+                }
+
+                // Withdraw expiry disputes whose quorum came back. Its
+                // confiscation check pages the ledger's history from the relay,
+                // which on a deep ledger outlasts the 10 s cap on the periodic
+                // tasks below; so it runs on its own, one run at a time.
+                if !self
+                    .expiry_stand_down_running
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let node = Arc::clone(self);
+                    tokio::spawn(async move {
+                        node.stand_down_reestablished_expiry_disputes().await;
+                        node.expiry_stand_down_running
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    });
                 }
 
                 // Spawn cosign-heavy periodic tasks as background work so the main
@@ -2665,6 +2707,55 @@ mod pagination_tests {
             plan_reimport_page(500, Some(1), 50, 50, &mut stalls),
             ReimportPage::Stop
         );
+    }
+
+    fn upd(
+        seq: u64,
+        operator_id: bitcoin::secp256k1::PublicKey,
+    ) -> deposits_core::SignedLedgerUpdate {
+        deposits_core::SignedLedgerUpdate {
+            message: Vec::new(),
+            message_type: 0x8001,
+            operator_id,
+            ledger_id: [0u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+        }
+    }
+
+    fn key(seed: u8) -> bitcoin::secp256k1::PublicKey {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &SecretKey::from_slice(&[seed; 32]).unwrap(),
+        )
+    }
+
+    /// ref3 on ledger C (next seq 67860): the newest pages held 67868..101369
+    /// plus a heal pass's republished 17862..24928, and the walk stopped on
+    /// those, a page short of 67860..67867. Only the operator's update at our
+    /// next sequence means the walk has reached us.
+    #[test]
+    fn reimport_stops_only_at_the_update_that_bridges_our_tip() {
+        use super::reimport_reached_tip;
+        let (operator, member) = (key(1), key(2));
+        let mut fetched: Vec<_> = (67_868..67_900).map(|s| upd(s, operator)).collect();
+        fetched.extend((17_862..17_900).map(|s| upd(s, operator)));
+        // our own fork branch at the fork's sequences, same ledger tag
+        fetched.extend((67_860..67_864).map(|s| upd(s, member)));
+        assert!(!reimport_reached_tip(&fetched, 67_860, &operator));
+        fetched.push(upd(67_860, operator));
+        assert!(reimport_reached_tip(&fetched, 67_860, &operator));
+        // No local ledger: walk the whole chain.
+        assert!(!reimport_reached_tip(&fetched, 0, &operator));
     }
 
     /// No oldest timestamp (empty page decoded to nothing) ends the walk.
