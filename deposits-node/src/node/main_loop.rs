@@ -42,8 +42,13 @@ pub(crate) fn plan_reimport_page(
         return ReimportPage::Stop;
     }
     // `until` is inclusive, so keep the oldest timestamp and let dedup drop the
-    // boundary events we've already ingested.
+    // boundary events we've already ingested — unless the page brought nothing
+    // new: then it lay entirely in seconds already walked and the same `until`
+    // returns the same page. A second holding a full page of updates (a heal
+    // pass) ended every walk there; step past it (see deposits-nostr
+    // `plan_paged_fetch`).
     match page_min_ts {
+        Some(ts) if fresh == 0 => ReimportPage::Continue { until_ts: ts.saturating_sub(1) },
         Some(ts) => ReimportPage::Continue { until_ts: ts },
         None => ReimportPage::Stop,
     }
@@ -2610,13 +2615,34 @@ mod pagination_tests {
         for _ in 0..3 {
             assert_eq!(
                 plan_reimport_page(0, Some(42), 5, 50, &mut stalls),
-                ReimportPage::Continue { until_ts: 42 }
+                ReimportPage::Continue { until_ts: 41 }
             );
         }
         assert_eq!(
             plan_reimport_page(0, Some(42), 5, 50, &mut stalls),
             ReimportPage::Stop
         );
+    }
+
+    /// A second holding a full page (a heal pass publishes 500 in one second):
+    /// the next inclusive-until page is the same one, nothing new. Step below
+    /// that second rather than stalling on it and ending the walk there.
+    #[test]
+    fn a_page_with_nothing_new_steps_past_its_second() {
+        let mut stalls = 0;
+        assert_eq!(
+            plan_reimport_page(500, Some(1_000), 1, 50, &mut stalls),
+            ReimportPage::Continue { until_ts: 1_000 }
+        );
+        assert_eq!(
+            plan_reimport_page(0, Some(1_000), 2, 50, &mut stalls),
+            ReimportPage::Continue { until_ts: 999 }
+        );
+        assert_eq!(
+            plan_reimport_page(120, Some(990), 3, 50, &mut stalls),
+            ReimportPage::Continue { until_ts: 990 }
+        );
+        assert_eq!(stalls, 0);
     }
 
     /// A page with new events resets the stall counter, so an intermittent empty

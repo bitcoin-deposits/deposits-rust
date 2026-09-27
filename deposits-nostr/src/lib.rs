@@ -5871,7 +5871,16 @@ fn plan_paged_fetch(
     if pages >= max_pages {
         return PagedFetchStep::Stop;
     }
+    // A page with nothing new sat entirely inside seconds we have already
+    // walked: the relay returns the newest `limit` events at or before `until`,
+    // so asking for the same `until` again returns the same page. When one
+    // second holds a full page (a heal pass publishes 500 updates in the same
+    // second) that page was all the walk ever saw below it, and the "stall"
+    // ended the walk there: heal then saw 22k of a 141k-update chain, judged
+    // the rest missing, and re-published it 500 at a time in one second —
+    // building the next wall. Step past the second instead.
     match oldest_secs {
+        Some(s) if fresh == 0 => PagedFetchStep::Continue { until_secs: s.saturating_sub(1) },
         Some(s) => PagedFetchStep::Continue { until_secs: s },
         None => PagedFetchStep::Stop,
     }
@@ -5898,7 +5907,7 @@ mod paged_fetch_tests {
         for _ in 0..3 {
             assert_eq!(
                 plan_paged_fetch(0, Some(7), 5, 10_000, &mut stalls),
-                PagedFetchStep::Continue { until_secs: 7 }
+                PagedFetchStep::Continue { until_secs: 6 }
             );
         }
         assert_eq!(
@@ -5915,6 +5924,26 @@ mod paged_fetch_tests {
         assert_eq!(stalls, 2);
         plan_paged_fetch(300, Some(7), 3, 10_000, &mut stalls);
         assert_eq!(stalls, 0);
+    }
+
+    #[test]
+    fn a_page_with_nothing_new_steps_past_its_second() {
+        // 500 events in one second: the next inclusive-until page is the same
+        // 500, nothing new — the walk must continue below that second.
+        let mut stalls = 0;
+        assert_eq!(
+            plan_paged_fetch(500, Some(1_000), 1, 10_000, &mut stalls),
+            PagedFetchStep::Continue { until_secs: 1_000 }
+        );
+        assert_eq!(
+            plan_paged_fetch(0, Some(1_000), 2, 10_000, &mut stalls),
+            PagedFetchStep::Continue { until_secs: 999 }
+        );
+        assert_eq!(
+            plan_paged_fetch(200, Some(990), 3, 10_000, &mut stalls),
+            PagedFetchStep::Continue { until_secs: 990 }
+        );
+        assert_eq!(stalls, 0, "progress below the wall resets the stall count");
     }
 
     #[test]
