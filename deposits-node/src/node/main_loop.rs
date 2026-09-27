@@ -79,6 +79,11 @@ impl Node {
     pub async fn start(&self) -> Result<(), Error> {
         self.nostr.start_listening().await?;
 
+        // Ledgers whose JSONL skips sequences were replayed into wrong state:
+        // fill the holes from the relay and rebuild them before the run loop
+        // applies anything to them.
+        self.repair_damaged_ledgers().await;
+
         // Auto-subscribe to ledger requests/disputes for all our ledgers
         // Collect all ledger IDs we care about (owned + joined)
         let mut ledger_ids: Vec<String> = Vec::new();
@@ -846,6 +851,8 @@ impl Node {
                 // The full history is refetched from the relay below, so
                 // the loser converges onto — never loses — the ledger.
                 self.handler.ledgers.lock().unwrap().remove(ledger_id);
+                // The chain from genesis replaces this one: rewrite the file.
+                self.handler.forget_persisted(ledger_id);
                 self.cosign_member_cache.lock().unwrap().remove(ledger_id);
                 self.invalidate_joined_ledger_cache();
                 need_full_reimport = true;
@@ -889,6 +896,8 @@ impl Node {
                 );
                 // Remove the corrupted ledger so the slow path can rebuild
                 self.handler.ledgers.lock().unwrap().remove(ledger_id);
+                // The chain from genesis replaces this one: rewrite the file.
+                self.handler.forget_persisted(ledger_id);
                 self.cosign_member_cache.lock().unwrap().remove(ledger_id);
                 self.invalidate_joined_ledger_cache();
                 need_full_reimport = true;
@@ -1801,19 +1810,21 @@ impl Node {
                 // at the same ceiling as the owned cap (`HISTORY_RETAIN`, 50k) so
                 // joined replicas keep as much of the recent chain hot in RAM as
                 // owned ledgers do; the on-disk copy is always complete regardless.
+                // Like compaction it drops only updates already written
+                // (`cap_history`); a bare drain here would take unwritten ones
+                // with it.
                 if let Ok(ledgers) = self.handler.ledgers.try_lock() {
                     const JOINED_HISTORY_RETAIN: usize = 50_000;
                     for (lid, arc) in ledgers.iter() {
-                        let mut ledger = arc.write().unwrap();
-                        let len = ledger.history.len();
-                        if len > JOINED_HISTORY_RETAIN * 2 {
-                            let before = len;
-                            ledger.history.drain(..len - JOINED_HISTORY_RETAIN);
+                        let before = arc.read().unwrap().history.len();
+                        if before > JOINED_HISTORY_RETAIN * 2 {
+                            let after =
+                                self.handler.cap_history(lid, arc, JOINED_HISTORY_RETAIN);
                             tracing::debug!(
                                 "Truncated history for {}: {} -> {} entries",
                                 &lid[..16.min(lid.len())],
                                 before,
-                                ledger.history.len()
+                                after
                             );
                         }
                     }

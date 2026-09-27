@@ -673,8 +673,11 @@ impl Node {
         if inbound.update.operator_id != self.node_id && !inbound.update.cosignatures.is_empty() {
             let non_conforming = {
                 let l = ledger_arc.read().unwrap();
+                // A replica replayed across a hole in its JSONL holds wrong
+                // balances; it does not judge (ref3 disputed C at 67860 so).
                 if inbound.update.operator_id == l.state.parent_pubkey
                     && inbound.update.sequence_number == l.next_sequence()
+                    && !self.handler.is_damaged(&inbound.ledger_id)
                 {
                     deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
                         .ok()

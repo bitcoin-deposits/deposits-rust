@@ -598,6 +598,7 @@ pub mod inbound;
 pub mod init;
 pub mod ledger_actor;
 pub mod ledger_queries;
+pub mod ledger_repair;
 pub mod lottery_recovery;
 pub mod main_loop;
 pub mod operations;

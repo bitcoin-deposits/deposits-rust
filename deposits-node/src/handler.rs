@@ -114,9 +114,24 @@ pub struct DepositsHandler {
     /// Controlled by DEPOSITS_ENABLE_METRICS_EMITTER env var
     enable_metrics_emitter: bool,
 
-    /// Tracks how many updates have been persisted to disk per ledger.
-    /// Used for append-only writes: only new updates beyond this count are appended.
-    persisted_update_counts: Mutex<HashMap<String, usize>>,
+    /// Per ledger, the sequence of the first update not yet written to its
+    /// JSONL (absent: the file has not been written this session, so the next
+    /// persist writes it whole). A SEQUENCE, not an index into the in-memory
+    /// `history`: the old index cursor was re-based by compaction and
+    /// overwritten by a persist that straddled one, and each of those counted
+    /// updates as written that never were (see `compact_ledger`). Only ever
+    /// raised, by the persist that wrote the updates below it.
+    persisted_next_seq: Mutex<HashMap<String, u64>>,
+
+    /// One persist at a time per ledger: two appends to the same file must
+    /// not interleave their rows, nor an append race a full rewrite.
+    persist_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+
+    /// Ledgers whose JSONL skips sequences, with the missing ones, found at
+    /// load (see [`sequence_gaps`]). A replica replayed across a hole folds
+    /// into wrong balances; `Node` repairs these from the relay at startup
+    /// and does not judge (dispute) one it could not repair.
+    damaged_ledgers: Mutex<HashMap<String, Vec<SequenceGap>>>,
 
     /// Tracks last-seen modification times for ledger JSONL files.
     /// Used to avoid re-parsing files that haven't changed.
@@ -130,6 +145,62 @@ pub struct DepositsHandler {
     /// Content-addressed event store for ledger sync.
     /// Events are indexed by content_hash with memoized validation.
     pub event_store: Mutex<EventStore>,
+}
+
+/// A run of sequences a ledger's JSONL skips: `first..=last` are missing
+/// between two updates it holds. The neighbours' hashes pin what belongs
+/// there: the run must chain from `after` (the `chain_hash` of `first - 1`)
+/// to `before` (the `previous_hash` of `last + 1`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SequenceGap {
+    pub first: u64,
+    pub last: u64,
+    pub after: [u8; 32],
+    pub before: [u8; 32],
+    /// Operator of the update before the run: who must have signed it.
+    pub operator: PublicKey,
+}
+
+/// The runs of sequences missing from `history` (sorted by sequence, one
+/// update per sequence, as the loader leaves it) between its first and last.
+pub(crate) fn sequence_gaps(history: &[SignedLedgerUpdate]) -> Vec<SequenceGap> {
+    history
+        .windows(2)
+        .filter(|w| w[1].sequence_number > w[0].sequence_number + 1)
+        .map(|w| SequenceGap {
+            first: w[0].sequence_number + 1,
+            last: w[1].sequence_number - 1,
+            after: w[0].chain_hash(),
+            before: w[1].previous_hash,
+            operator: w[0].operator_id,
+        })
+        .collect()
+}
+
+/// `gaps` as a short list for a log line: "53330, 60353" or "121035-122035".
+pub(crate) fn describe_gaps(gaps: &[SequenceGap]) -> String {
+    let mut parts: Vec<String> = gaps
+        .iter()
+        .take(12)
+        .map(|g| {
+            if g.first == g.last {
+                g.first.to_string()
+            } else {
+                format!("{}-{}", g.first, g.last)
+            }
+        })
+        .collect();
+    if gaps.len() > 12 {
+        parts.push(format!("… ({} runs)", gaps.len()));
+    }
+    parts.join(", ")
+}
+
+/// One append persist, between reading what to write and recording it written.
+struct PersistAppend {
+    history_len: usize,
+    updates: Vec<SignedLedgerUpdate>,
+    state: Option<LedgerState>,
 }
 
 impl DepositsHandler {
@@ -197,22 +268,20 @@ impl DepositsHandler {
             Mutex::new(store)
         };
 
-        // Apply the in-memory cap to each freshly-loaded ledger, then initialize
-        // the append cursor from the CAPPED length. `persisted_update_counts` is
-        // an index into the in-memory `history` Vec (append writes
-        // `history[previously_saved..]`), so it must equal the RAM length after
-        // capping — the disk file already holds the full chain, and the next
-        // append adds only updates past the retained tail. Capping here (rather
-        // than waiting for the next compaction) re-establishes the durable-disk /
-        // capped-RAM invariant immediately on restart.
+        // Apply the in-memory cap to each freshly-loaded ledger, and start the
+        // append cursor past the loaded tip: everything loaded came from the
+        // file, so it is all written. Capping here (rather than waiting for
+        // the next compaction) re-establishes the durable-disk / capped-RAM
+        // invariant immediately on restart.
+        let damaged_ledgers = Mutex::new(Self::find_damaged_ledgers(&ledgers));
         let retain = Self::history_retain();
-        let persisted_update_counts = {
-            let mut counts = HashMap::new();
+        let persisted_next_seq = {
+            let mut next = HashMap::new();
             for (id, arc) in &ledgers {
-                let capped_len = Self::truncate_history(arc, retain);
-                counts.insert(id.clone(), capped_len);
+                Self::truncate_history(arc, retain);
+                next.insert(id.clone(), Self::next_seq_after(&arc.read().unwrap().history));
             }
-            Mutex::new(counts)
+            Mutex::new(next)
         };
 
         let handler = Self {
@@ -225,7 +294,9 @@ impl DepositsHandler {
             wallet,
             data_dir,
             enable_metrics_emitter,
-            persisted_update_counts,
+            persisted_next_seq,
+            persist_locks: Mutex::new(HashMap::new()),
+            damaged_ledgers,
             last_file_modtimes: Mutex::new(HashMap::new()),
             appends_since_compaction: Mutex::new(HashMap::new()),
             event_store,
@@ -369,10 +440,7 @@ impl DepositsHandler {
         // stale joined-copy State/Role on disk and the next daemon start would
         // reload the pre-promotion ledger. Reset the append cursor so the
         // persist does a clean rewrite from the promoted ledger.
-        self.persisted_update_counts
-            .lock()
-            .unwrap()
-            .remove(ledger_id);
+        self.forget_persisted(ledger_id);
         self.persist_ledger_to_disk(ledger_id)?;
         tracing::info!(
             "Promoted resolved dispute fork {} to operate base ledger {} as new custodian",
@@ -473,7 +541,7 @@ impl DepositsHandler {
 
     /// Save all ledgers to disk (full rewrite / compaction).
     /// Takes a snapshot under the mutex (fast), then writes synchronously.
-    /// Resets persisted_update_counts so subsequent appends start from the new baseline.
+    /// Records each ledger written through its snapshot's tip.
     fn save_ledgers_to_disk(&self) -> Result<(), String> {
         // Take a snapshot while holding the mutex (fast - just clones the data)
         let ledgers_snapshot = {
@@ -492,11 +560,11 @@ impl DepositsHandler {
         // for CLI processes (the caller must not exit before the write completes).
         Self::save_ledgers_to_disk_impl(&ledgers_snapshot, &self.data_dir);
 
-        // Reset persisted counts to match what we just wrote
-        let mut counts = self.persisted_update_counts.lock().unwrap();
+        // Record what we just wrote: each snapshot through its tip.
+        let mut next = self.persisted_next_seq.lock().unwrap();
         let mut compaction = self.appends_since_compaction.lock().unwrap();
         for (id, ledger) in &ledgers_snapshot {
-            counts.insert(id.clone(), ledger.history.len());
+            next.insert(id.clone(), Self::next_seq_after(&ledger.history));
             compaction.insert(id.clone(), 0);
         }
 
@@ -984,7 +1052,7 @@ impl DepositsHandler {
         let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
         let mut ledgers = self.ledgers.lock().unwrap();
-        let mut counts = self.persisted_update_counts.lock().unwrap();
+        let mut counts = self.persisted_next_seq.lock().unwrap();
 
         // Read and parse ONLY the changed files (not all files)
         for (ledger_id, path) in &changed_files {
@@ -1011,8 +1079,9 @@ impl DepositsHandler {
                             new_updates.push(update.clone());
                         }
                     }
+                    let next = Self::next_seq_after(&disk_ledger.history);
                     ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger)));
-                    counts.insert(ledger_id.clone(), disk_len);
+                    counts.insert(ledger_id.clone(), next);
                     changes += 1;
                 }
             } else {
@@ -1025,8 +1094,9 @@ impl DepositsHandler {
                 for update in &disk_ledger.history {
                     new_updates.push(update.clone());
                 }
+                let next = Self::next_seq_after(&disk_ledger.history);
                 ledgers.insert(ledger_id.clone(), Arc::new(RwLock::new(disk_ledger)));
-                counts.insert(ledger_id.clone(), disk_len);
+                counts.insert(ledger_id.clone(), next);
                 changes += 1;
             }
         }
@@ -1464,15 +1534,24 @@ impl DepositsHandler {
     pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
-        // Read counts snapshot, then release lock immediately to avoid holding
-        // it across I/O (which deadlocks with background compact_ledger).
-        let previously_saved = self
-            .persisted_update_counts
+        // One persist at a time for this ledger, held across the I/O. Only
+        // persists take it, and a persist takes no other lock while holding a
+        // ledger lock, so it cannot deadlock with compaction or the actor.
+        let persist_lock = self
+            .persist_locks
+            .lock()
+            .unwrap()
+            .entry(ledger_id.to_string())
+            .or_default()
+            .clone();
+        let _persisting = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        let next_seq = self
+            .persisted_next_seq
             .lock()
             .unwrap()
             .get(ledger_id)
-            .copied()
-            .unwrap_or(0);
+            .copied();
 
         // Get Arc clone
         let ledger_arc = {
@@ -1483,32 +1562,28 @@ impl DepositsHandler {
                 .clone()
         };
 
-        if previously_saved == 0 {
+        if next_seq.is_none() {
             // First save — write State + the FULL in-memory history to disk.
             //
             // DURABILITY: the on-disk JSONL must hold the complete chain. In
             // the common case first-save runs on a fresh, small ledger whose
             // in-memory `history` IS the full chain, so `retain=None` (write
             // everything) is exactly right. On the reload path the append
-            // cursor is initialized from `history.len()` (see `Self::new`), so
+            // cursor is initialized past the loaded tip (see `Self::new`), so
             // this branch only fires when the file has never been written —
-            // never after a truncating reload. Writing the untruncated history
-            // here is what keeps genesis/QuorumBegin durable from the start.
+            // never after a truncating reload — or when a caller replaced the
+            // chain and asked for a rewrite (`forget_persisted`). Writing the
+            // untruncated history here is what keeps genesis/QuorumBegin
+            // durable from the start.
             let ledger = ledger_arc.read().unwrap();
             let history_len = ledger.history.len();
+            let written_next = Self::next_seq_after(&ledger.history);
             Self::save_ledger_to_disk_streaming(ledger_id, &ledger, &self.data_dir, None);
             drop(ledger);
+            self.mark_persisted(ledger_id, written_next);
 
             // Cap ONLY RAM; the disk file above holds the full chain.
-            let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
-
-            // Append cursor = capped in-memory length (index into the RAM Vec).
-            // Disk already holds `history_len` entries; subsequent appends add
-            // only updates past the retained tail.
-            self.persisted_update_counts
-                .lock()
-                .unwrap()
-                .insert(ledger_id.to_string(), final_len);
+            let final_len = self.cap_history(ledger_id, &ledger_arc, Self::history_retain());
             self.appends_since_compaction
                 .lock()
                 .unwrap()
@@ -1523,57 +1598,25 @@ impl DepositsHandler {
                     total_elapsed
                 );
             }
-        } else {
-            // Check if there are new entries to persist
-            let (history_len, new_count) = {
-                let ledger = ledger_arc.read().unwrap();
-                let len = ledger.history.len();
-                (len, len.saturating_sub(previously_saved))
-            };
-
-            if new_count > 0 {
-                let appends = self
-                    .appends_since_compaction
-                    .lock()
-                    .unwrap()
-                    .get(ledger_id)
-                    .copied()
-                    .unwrap_or(0);
-                let ledger = ledger_arc.read().unwrap();
-                let write_state = appends % 100 == 0;
-                let state_clone = if write_state {
-                    Some(ledger.state.clone())
-                } else {
-                    None
-                };
-                let new_updates: Vec<_> = ledger.history[previously_saved..].to_vec();
-                drop(ledger);
-
-                Self::append_updates_to_disk(
-                    ledger_id,
-                    state_clone.as_ref(),
-                    &new_updates,
-                    &self.data_dir,
+        } else if let Some(append) =
+            self.persist_append_snapshot(ledger_id, &ledger_arc, next_seq.unwrap_or(0))
+        {
+            Self::append_updates_to_disk(
+                ledger_id,
+                append.state.as_ref(),
+                &append.updates,
+                &self.data_dir,
+            );
+            self.persist_append_commit(ledger_id, &append);
+            let total_elapsed = t0.elapsed();
+            if total_elapsed.as_millis() > 1 {
+                tracing::info!(
+                    "[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append{}",
+                    append.history_len,
+                    append.updates.len(),
+                    total_elapsed,
+                    if append.state.is_some() { " (with state)" } else { "" }
                 );
-
-                // Re-lock to update counts after I/O
-                self.persisted_update_counts
-                    .lock()
-                    .unwrap()
-                    .insert(ledger_id.to_string(), history_len);
-                *self
-                    .appends_since_compaction
-                    .lock()
-                    .unwrap()
-                    .entry(ledger_id.to_string())
-                    .or_insert(0) += new_count;
-
-                let total_elapsed = t0.elapsed();
-                if total_elapsed.as_millis() > 1 {
-                    tracing::info!("[PROFILE] persist_ledger_to_disk: {} entries (+{}), total={:?}, mode=append{}",
-                        history_len, new_updates.len(), total_elapsed,
-                        if write_state { " (with state)" } else { "" });
-                }
             }
         }
 
@@ -1591,6 +1634,169 @@ impl DepositsHandler {
 
         crate::metrics::record_persist_ledger_duration(t0.elapsed());
         Ok(())
+    }
+
+    /// Every loaded ledger whose JSONL skips sequences, logged loudly: its
+    /// replay folded across the hole, so its balances are wrong from there.
+    fn find_damaged_ledgers(
+        ledgers: &HashMap<String, Arc<RwLock<Ledger>>>,
+    ) -> HashMap<String, Vec<SequenceGap>> {
+        let mut damaged = HashMap::new();
+        for (id, arc) in ledgers {
+            let gaps = sequence_gaps(&arc.read().unwrap().history);
+            if gaps.is_empty() {
+                continue;
+            }
+            let missing: u64 = gaps.iter().map(|g| g.last - g.first + 1).sum();
+            tracing::error!(
+                "Ledger {} JSONL is missing {} update(s): {}. Its state is replayed across \
+                 the hole and is wrong from seq {}; repairing from the relay",
+                id,
+                missing,
+                describe_gaps(&gaps),
+                gaps[0].first
+            );
+            damaged.insert(id.clone(), gaps);
+        }
+        damaged
+    }
+
+    /// Ledgers whose JSONL skips sequences, as found at load (or left after
+    /// a repair).
+    pub(crate) fn damaged_ledgers(&self) -> Vec<(String, Vec<SequenceGap>)> {
+        self.damaged_ledgers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, gaps)| (id.clone(), gaps.clone()))
+            .collect()
+    }
+
+    /// Whether `ledger_id`'s replica was replayed across a hole in its JSONL
+    /// and is not repaired: its balances and quorum are not to be judged.
+    pub(crate) fn is_damaged(&self, ledger_id: &str) -> bool {
+        self.damaged_ledgers.lock().unwrap().contains_key(ledger_id)
+    }
+
+    /// Write `fills` (verified updates for `ledger_id`'s holes) into its JSONL
+    /// and rebuild the ledger from the file in place, so its state is folded
+    /// over the whole chain. The `Arc` is kept (the actor holds it). For
+    /// startup, before anything is applied to the ledger: the rebuild takes
+    /// the file as the truth. Returns the gaps still left.
+    pub(crate) fn repair_ledger_gaps(
+        &self,
+        ledger_id: &str,
+        fills: &[SignedLedgerUpdate],
+    ) -> Result<Vec<SequenceGap>, String> {
+        let persist_lock = self
+            .persist_locks
+            .lock()
+            .unwrap()
+            .entry(ledger_id.to_string())
+            .or_default()
+            .clone();
+        let _persisting = persist_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The daemon's own append (a leading newline per row): the file ends
+        // without one, so a row-then-newline append would glue onto its last.
+        Self::append_updates_to_disk(ledger_id, None, fills, &self.data_dir);
+        let path = self
+            .data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let mut fresh = Self::load_single_ledger_from_jsonl(ledger_id, &path)
+            .ok_or_else(|| format!("reload {}", ledger_id))?;
+        let gaps = sequence_gaps(&fresh.history);
+        let next = Self::next_seq_after(&fresh.history);
+        let retain = Self::history_retain();
+        let len = fresh.history.len();
+        if len > retain {
+            fresh.history.drain(..len - retain);
+        }
+        let arc = self
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .cloned()
+            .ok_or_else(|| format!("Ledger not found: {}", ledger_id))?;
+        *arc.write().unwrap() = fresh;
+        self.mark_persisted(ledger_id, next);
+        let mut damaged = self.damaged_ledgers.lock().unwrap();
+        if gaps.is_empty() {
+            damaged.remove(ledger_id);
+        } else {
+            damaged.insert(ledger_id.to_string(), gaps.clone());
+        }
+        Ok(gaps)
+    }
+
+    /// The sequence after the last update in `history` (0 if empty): what an
+    /// append cursor reads once `history` is all written.
+    fn next_seq_after(history: &[SignedLedgerUpdate]) -> u64 {
+        history.last().map_or(0, |u| u.sequence_number + 1)
+    }
+
+    /// Record `ledger_id`'s JSONL as written below `next_seq`. Never lowers
+    /// the cursor: a persist that finishes after a later one has nothing to
+    /// take back.
+    fn mark_persisted(&self, ledger_id: &str, next_seq: u64) {
+        let mut next = self.persisted_next_seq.lock().unwrap();
+        let entry = next.entry(ledger_id.to_string()).or_insert(next_seq);
+        *entry = (*entry).max(next_seq);
+    }
+
+    /// Forget what was written for `ledger_id`, so its next persist rewrites
+    /// the whole file from memory: for a caller that replaced the chain (a
+    /// promoted fork, a re-import from genesis) rather than extending it.
+    pub(crate) fn forget_persisted(&self, ledger_id: &str) {
+        self.persisted_next_seq.lock().unwrap().remove(ledger_id);
+    }
+
+    /// Step 1 of an append persist: the updates at or past `next_seq`, read
+    /// under the ledger lock. Found from the tail, by sequence, so nothing
+    /// that trims the front of `history` in the meantime can shift it.
+    fn persist_append_snapshot(
+        &self,
+        ledger_id: &str,
+        ledger_arc: &Arc<RwLock<Ledger>>,
+        next_seq: u64,
+    ) -> Option<PersistAppend> {
+        let ledger = ledger_arc.read().unwrap();
+        let history_len = ledger.history.len();
+        let start = ledger
+            .history
+            .iter()
+            .rposition(|u| u.sequence_number < next_seq)
+            .map_or(0, |i| i + 1);
+        if start == history_len {
+            return None;
+        }
+        let appends = self
+            .appends_since_compaction
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .copied()
+            .unwrap_or(0);
+        let state = (appends % 100 == 0).then(|| ledger.state.clone());
+        Some(PersistAppend {
+            history_len,
+            updates: ledger.history[start..].to_vec(),
+            state,
+        })
+    }
+
+    /// Step 3 of an append persist, after the rows are on disk: raise the
+    /// cursor past what this persist wrote, whatever ran meanwhile.
+    fn persist_append_commit(&self, ledger_id: &str, append: &PersistAppend) {
+        self.mark_persisted(ledger_id, Self::next_seq_after(&append.updates));
+        *self
+            .appends_since_compaction
+            .lock()
+            .unwrap()
+            .entry(ledger_id.to_string())
+            .or_insert(0) += append.updates.len();
     }
 
     /// Full-compaction threshold (appends since last compaction). PROD DEFAULT:
@@ -1635,13 +1841,19 @@ impl DepositsHandler {
     /// seq 0 / QuorumBegin from the durable log once a ledger passed the retain
     /// window — the data-loss bug this closes.
     ///
-    /// So compaction's job is now purely: (1) cap RAM via `truncate_history`,
-    /// and (2) re-base the append cursor. `persisted_update_counts` is an INDEX
-    /// into the in-memory Vec (append writes `history[previously_saved..]`), so
-    /// after truncation it must equal the new (capped) in-memory length — the
-    /// disk already holds everything up to the tip, and the next append picks up
-    /// from the retained tail. It does NOT track the on-disk length (which is
-    /// larger and keeps growing).
+    /// So compaction's job is purely to cap RAM, and it drops only updates
+    /// already written ([`Self::cap_history`]). It no longer touches the
+    /// append cursor. When the cursor was an index into the in-memory Vec,
+    /// compaction re-based it to the capped length, and two things lost
+    /// updates from replicas' JSONLs (whose applies come from the actor, the
+    /// relay reimport and the event store, concurrently with this task):
+    ///   - an update applied but not yet persisted when compaction ran was
+    ///     re-based as written and never was (ref3's C: seqs 53330, 60353);
+    ///   - a persist straddling the compaction stored its pre-compaction
+    ///     length as the cursor afterwards, so the next ~1000 appends were
+    ///     skipped (ref2's F: 121035-122035, after `compact_ledger: RAM
+    ///     51001→50000` then `persist_ledger_to_disk: 51001 entries`).
+    /// The cursor is now a sequence only persists raise.
     pub fn compact_ledger(&self, ledger_id: &str) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
@@ -1655,16 +1867,10 @@ impl DepositsHandler {
 
         let history_len = ledger_arc.read().unwrap().history.len();
 
-        // Cap ONLY RAM. Disk keeps the full append-only chain untouched.
-        let final_len = Self::truncate_history(&ledger_arc, Self::history_retain());
+        // Cap ONLY RAM, and only what is written. Disk keeps the full
+        // append-only chain untouched.
+        let final_len = self.cap_history(ledger_id, &ledger_arc, Self::history_retain());
 
-        // Re-base the append cursor to the capped in-memory length. Everything
-        // up to the tip is already on disk (appended incrementally), so the next
-        // persist appends only genuinely-new updates past the retained tail.
-        self.persisted_update_counts
-            .lock()
-            .unwrap()
-            .insert(ledger_id.to_string(), final_len);
         self.appends_since_compaction
             .lock()
             .unwrap()
@@ -1685,15 +1891,52 @@ impl DepositsHandler {
         Ok(())
     }
 
-    /// Truncate in-memory history to at most `retain` entries.
+    /// Truncate in-memory history to at most `retain` entries, all of which
+    /// must be on disk (the load path: everything came from the file).
     /// Returns the new history length.
     fn truncate_history(ledger_arc: &Arc<RwLock<Ledger>>, retain: usize) -> usize {
+        Self::truncate_history_below(ledger_arc, retain, u64::MAX)
+    }
+
+    /// Truncate in-memory history to at most `retain` entries, dropping only
+    /// updates below sequence `written_below`: one not yet written stays in
+    /// RAM until a persist has it on disk. Returns the new history length.
+    fn truncate_history_below(
+        ledger_arc: &Arc<RwLock<Ledger>>,
+        retain: usize,
+        written_below: u64,
+    ) -> usize {
         let mut ledger = ledger_arc.write().unwrap();
         let len = ledger.history.len();
         if len > retain {
-            ledger.history.drain(..len - retain);
+            let written = ledger
+                .history
+                .iter()
+                .take(len - retain)
+                .take_while(|u| u.sequence_number < written_below)
+                .count();
+            ledger.history.drain(..written);
         }
         ledger.history.len()
+    }
+
+    /// Cap `ledger_id`'s in-memory history at `retain`, keeping anything its
+    /// JSONL does not yet hold. Every RAM trim of a live ledger goes through
+    /// here. Returns the new history length.
+    pub(crate) fn cap_history(
+        &self,
+        ledger_id: &str,
+        ledger_arc: &Arc<RwLock<Ledger>>,
+        retain: usize,
+    ) -> usize {
+        let written_below = self
+            .persisted_next_seq
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .copied()
+            .unwrap_or(0);
+        Self::truncate_history_below(ledger_arc, retain, written_below)
     }
 
     /// Maximum history entries to retain IN MEMORY. This caps ONLY the
@@ -2795,6 +3038,199 @@ mod tests {
         );
     }
 
+    /// A retain=3 handler holding one persisted ledger of seqs 0..10; the
+    /// guard restores the env when dropped.
+    fn compaction_race_fixture(
+        temp_dir: &TempDir,
+    ) -> (DepositsHandler, Arc<RwLock<Ledger>>, String, PublicKey) {
+        let wallet = create_mock_wallet(temp_dir);
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            PublicKey::from_secret_key(&bitcoin::secp256k1::Secp256k1::new(), &sk)
+        };
+        let (handler, _rx) = DepositsHandler::new(
+            test_local_signer(),
+            wallet,
+            temp_dir.path().to_path_buf(),
+            false,
+        );
+        let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        for seq in 0..10u64 {
+            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        }
+        (handler, arc, ledger_id, op_pk)
+    }
+
+    struct RetainEnv;
+    impl RetainEnv {
+        fn set(n: &str) -> Self {
+            std::env::set_var("DEPOSITS_HISTORY_RETAIN", n);
+            RetainEnv
+        }
+    }
+    impl Drop for RetainEnv {
+        fn drop(&mut self) {
+            std::env::remove_var("DEPOSITS_HISTORY_RETAIN");
+        }
+    }
+
+    fn disk_seqs(handler: &DepositsHandler, ledger_id: &str) -> Vec<u64> {
+        handler
+            .read_persisted_history(ledger_id)
+            .unwrap()
+            .iter()
+            .map(|u| u.sequence_number)
+            .collect()
+    }
+
+    /// Compaction runs between an apply and its persist (the replica paths
+    /// push under the ledger lock, drop it, then persist; a reimport batch
+    /// pushes many). The updates applied but not yet written must still reach
+    /// the JSONL. ref3's C lost seqs 53330 and 60353 this way.
+    #[test]
+    fn compaction_between_apply_and_persist_loses_nothing() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _retain = RetainEnv::set("3");
+        let temp_dir = TempDir::new().unwrap();
+        let (handler, arc, ledger_id, op_pk) = compaction_race_fixture(&temp_dir);
+
+        // A batch applied to memory (seqs 10..13), not yet persisted...
+        for seq in 10..13u64 {
+            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+        }
+        // ...when the background compaction runs.
+        handler.compact_ledger(&ledger_id).unwrap();
+        // The apply path's persist, then the next update as usual.
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        arc.write().unwrap().history.push(mk_update(op_pk, 13, 13));
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+
+        assert_eq!(disk_seqs(&handler, &ledger_id), (0..14).collect::<Vec<_>>());
+    }
+
+    /// Compaction runs while a persist is writing (it reads what to write,
+    /// the compaction truncates RAM, then the persist records its cursor).
+    /// ref2's replica of F logged exactly this at 2026-09-25 08:32:36:
+    /// `compact_ledger: RAM 51001→50000`, then `persist_ledger_to_disk: 51001
+    /// entries (+1)`, and lost the next 1,001 updates (121035-122035).
+    #[test]
+    fn compaction_during_a_persist_loses_nothing() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _retain = RetainEnv::set("3");
+        let temp_dir = TempDir::new().unwrap();
+        let (handler, arc, ledger_id, op_pk) = compaction_race_fixture(&temp_dir);
+        handler.compact_ledger(&ledger_id).unwrap();
+
+        arc.write().unwrap().history.push(mk_update(op_pk, 10, 10));
+        let cursor = *handler.persisted_next_seq.lock().unwrap().get(&ledger_id).unwrap();
+        let append = handler
+            .persist_append_snapshot(&ledger_id, &arc, cursor)
+            .expect("seq 10 to write");
+        DepositsHandler::append_updates_to_disk(
+            &ledger_id,
+            append.state.as_ref(),
+            &append.updates,
+            &handler.data_dir,
+        );
+        handler.compact_ledger(&ledger_id).unwrap();
+        handler.persist_append_commit(&ledger_id, &append);
+
+        for seq in 11..16u64 {
+            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        }
+        assert_eq!(disk_seqs(&handler, &ledger_id), (0..16).collect::<Vec<_>>());
+    }
+
+    /// No trim of RAM drops an update the JSONL does not hold yet: the
+    /// periodic cap of a replica's history (a bare `drain` before) and
+    /// compaction both go through `cap_history`.
+    #[test]
+    fn trimming_ram_keeps_unwritten_updates() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _retain = RetainEnv::set("3");
+        let temp_dir = TempDir::new().unwrap();
+        let (handler, arc, ledger_id, op_pk) = compaction_race_fixture(&temp_dir);
+        handler.compact_ledger(&ledger_id).unwrap();
+        for seq in 10..16u64 {
+            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+        }
+        // Six unwritten on top of three written: only the written may go.
+        assert_eq!(handler.cap_history(&ledger_id, &arc, 1), 6);
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        assert_eq!(handler.cap_history(&ledger_id, &arc, 1), 1);
+        assert_eq!(disk_seqs(&handler, &ledger_id), (0..16).collect::<Vec<_>>());
+    }
+
+    /// A JSONL that skips sequences is found at load and the ledger marked
+    /// damaged; writing the missing updates in rebuilds it from the whole file
+    /// and clears the mark (the relay fetch and link check are in
+    /// `node::ledger_repair`).
+    #[test]
+    fn a_jsonl_with_holes_is_found_at_load_and_repaired_in_place() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            PublicKey::from_secret_key(&bitcoin::secp256k1::Secp256k1::new(), &sk)
+        };
+        let all: Vec<SignedLedgerUpdate> =
+            (0..12u64).map(|s| mk_update(op_pk, s, s as u8)).collect();
+        let ledger_id = {
+            let (handler, _rx) =
+                DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
+            let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            assert!(handler.damaged_ledgers().is_empty());
+            // Written with 4 and 7-8 missing, as the race left replicas.
+            for u in &all {
+                if ![4, 7, 8].contains(&u.sequence_number) {
+                    arc.write().unwrap().history.push(u.clone());
+                }
+            }
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+            ledger_id
+        };
+
+        let (handler, _rx) = DepositsHandler::new(test_local_signer(), wallet, data_dir, false);
+        let damaged = handler.damaged_ledgers();
+        assert_eq!(damaged.len(), 1);
+        assert_eq!(damaged[0].0, ledger_id);
+        assert_eq!(
+            damaged[0].1.iter().map(|g| (g.first, g.last)).collect::<Vec<_>>(),
+            vec![(4, 4), (7, 8)]
+        );
+        assert_eq!(describe_gaps(&damaged[0].1), "4, 7-8");
+        assert!(handler.is_damaged(&ledger_id));
+
+        // One run filled: still damaged, the other remains.
+        let left = handler
+            .repair_ledger_gaps(&ledger_id, &[all[4].clone()])
+            .unwrap();
+        assert_eq!(left.iter().map(|g| (g.first, g.last)).collect::<Vec<_>>(), vec![(7, 8)]);
+        assert!(handler.is_damaged(&ledger_id));
+        let left = handler
+            .repair_ledger_gaps(&ledger_id, &[all[7].clone(), all[8].clone()])
+            .unwrap();
+        assert!(left.is_empty());
+        assert!(!handler.is_damaged(&ledger_id));
+        assert_eq!(disk_seqs(&handler, &ledger_id), (0..12).collect::<Vec<_>>());
+        let arc = handler.ledgers.lock().unwrap().get(&ledger_id).unwrap().clone();
+        assert_eq!(
+            arc.read().unwrap().history.iter().map(|u| u.sequence_number).collect::<Vec<_>>(),
+            (0..12).collect::<Vec<_>>(),
+            "rebuilt from the whole file"
+        );
+        // Appends continue past the tip.
+        arc.write().unwrap().history.push(mk_update(op_pk, 12, 12));
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        assert_eq!(disk_seqs(&handler, &ledger_id), (0..13).collect::<Vec<_>>());
+    }
+
     /// Restart survival: a full (untruncated) JSONL on disk reloads into a
     /// handler that (a) exposes the FULL chain via `read_persisted_history`
     /// (genesis present) and (b) caps the in-memory `history` to the retain
@@ -2888,17 +3324,17 @@ mod tests {
             "restart re-applies the in-memory cap (retain=3 tail)"
         );
 
-        // Append cursor equals the capped RAM length so the next append targets
-        // the retained tail (not an out-of-bounds full-disk index).
+        // The append cursor starts past the loaded tip: everything loaded is
+        // on disk, and the next append writes seq 10 on.
         assert_eq!(
             *handler2
-                .persisted_update_counts
+                .persisted_next_seq
                 .lock()
                 .unwrap()
                 .get(&ledger_id)
                 .unwrap(),
-            3,
-            "append cursor re-based to capped in-memory length on restart"
+            CHAIN_LEN,
+            "append cursor starts past the loaded tip on restart"
         );
     }
 

@@ -562,8 +562,10 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut out = Vec::new();
             for (key, arc) in ledgers.iter() {
-                // Skip fork compound keys (they end with `_NNNNNN_HEX16`).
-                if key.len() != 64 {
+                // Skip fork compound keys (they end with `_NNNNNN_HEX16`),
+                // and a replica replayed across a hole in its JSONL (its
+                // quorum may be one a missing QuorumBegin replaced).
+                if key.len() != 64 || self.handler.is_damaged(key) {
                     continue;
                 }
                 let l = arc.read().unwrap();
