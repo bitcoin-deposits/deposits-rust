@@ -522,6 +522,11 @@ pub struct Node {
     /// Key is the ledger prefix (from custody_armed marker).
     pending_confiscations: Mutex<HashMap<String, PendingConfiscation>>,
 
+    /// Pending `lottery_recovery_sign` requests for unclaimable lotteries,
+    /// keyed by ledger id (see `lottery_recovery`).
+    pending_lottery_recoveries:
+        Mutex<HashMap<String, lottery_recovery::PendingLotteryRecovery>>,
+
     /// Joined ledger IDs detected as stale during cosign requests.
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
     stale_joined_ledgers: Mutex<std::collections::HashSet<String>>,
@@ -590,6 +595,7 @@ pub mod inbound;
 pub mod init;
 pub mod ledger_actor;
 pub mod ledger_queries;
+pub mod lottery_recovery;
 pub mod main_loop;
 pub mod operations;
 pub mod replacement_collateral;

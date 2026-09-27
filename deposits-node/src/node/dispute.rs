@@ -1365,148 +1365,56 @@ impl Node {
     /// Try to claim or yield for a specific ledger
     /// Returns Ok(true) if completed, Ok(false) if not ready, Err if failed
     pub(crate) async fn try_lottery_claim_or_yield(&self, ledger_id: &str) -> Result<bool, Error> {
-        use crate::nostr::{KIND_LEDGER_REQUEST, KIND_LEDGER_UPDATE};
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-
-        use bitcoin::secp256k1::PublicKey;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::tapscript_reserves::{LotteryOutput, LotteryParticipant};
-        use deposits_core::{SignedLedgerUpdate, TlvDecode};
-
-        use nostr_sdk::{Filter, Kind, TagKind};
+        use super::lottery_recovery::{lottery_claimability, LotteryClaimability};
+        use deposits_core::tapscript_reserves::LotteryOutput;
 
         let our_pubkey = self.node_id;
 
-        // Use the slow relay client for historical fetch
-        let client = self.nostr.fetch_client();
-
-        // Paginated fetch — bloated forks (thousands of duplicate
-        // QuorumAddMember rows pre-2d3ae43 dedup-fix) overflow a
-        // single 500-event window and would hide DisputeArmed at
-        // the tail.
-        let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
-        // Build a fake `Events`-shaped iterable below by walking the
-        // already-decoded updates; the old code path encoded
-        // SignedLedgerUpdate inside an `Event.content`, but
-        // `fetch_all_ledger_updates_paginated` returns decoded
-        // SignedLedgerUpdates directly.
-        let _ = client; // pagination uses node.nostr.fetch_client internally
-
-        // Fetch lottery reveals
-        let reveal_filter = Filter::new()
-            .kind(Kind::Custom(KIND_LEDGER_REQUEST))
-            .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id])
-            .limit(100);
-
-        let reveal_events = client
-            .fetch_events(vec![reveal_filter], None)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch reveals: {}", e)))?;
-
-        // Extract DisputeArmed participants
-        let mut participants: Vec<(PublicKey, LotteryParticipant)> = Vec::new();
-        let mut our_armed: Option<SignedLedgerUpdate> = None;
-
-        for update in &paginated_updates {
-            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                if let LedgerOperation::DisputeArmed {
-                    commitment_hash,
-                    target_reserves,
-                    ..
-                } = op
-                {
-                    let x_only = update.operator_id.x_only_public_key().0;
-                    participants.push((
-                        update.operator_id,
-                        LotteryParticipant::new(x_only, commitment_hash, target_reserves),
-                    ));
-                    if update.operator_id == our_pubkey {
-                        our_armed = Some(update.clone());
-                    }
-                }
-            }
-        }
-
-        if participants.is_empty() {
-            return Err(Error::Protocol(
-                "No DisputeArmed participants found".to_string(),
-            ));
-        }
-
-        let our_armed = our_armed
+        // Participants (DisputeArmed, sorted by x-only key), the preimages
+        // revealed so far (matched by commitment hash), and the recovery
+        // voters from the latest QuorumBegin — the set
+        // `initiate_confiscations` committed to when it paid the lottery
+        // UTXO. Any other set yields a different Taproot address and the
+        // claim finds no UTXO to spend.
+        let ctx = self.lottery_context(ledger_id).await?;
+        let our_armed = ctx
+            .our_armed
+            .clone()
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
 
-        // Sort participants by x-only pubkey for deterministic order
-        participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
-
-        // Collect revealed preimages.
-        //
-        // Preimages are matched to participants by HASH160(preimage) ==
-        // commitment_hash, NOT by the reveal event's author key. The
-        // reveal is a Nostr request authored by the node's Nostr/delegate
-        // key, which is NOT the same as the participant's on-chain
-        // (bitcoin x-only) operator key committed in DisputeArmed. Keying
-        // the preimage map by `event.pubkey` and looking it up by the
-        // participant's x-only key therefore never matched, and the claim
-        // stalled forever on "Missing preimage from participant". The
-        // commitment hash is the authorless, cryptographically-bound link.
-        let mut revealed_preimages: Vec<Vec<u8>> = Vec::new();
-        for event in reveal_events.iter() {
-            let is_lottery_reveal = event.tags.iter().any(|tag| {
-                tag.kind() == TagKind::custom("action")
-                    && tag
-                        .content()
-                        .map(|c| c == "lottery_reveal")
-                        .unwrap_or(false)
-            });
-
-            if is_lottery_reveal {
-                if let Ok(content) = serde_json::from_str::<serde_json::Value>(&event.content) {
-                    if let Some(preimage_hex) = content.get("preimage").and_then(|v| v.as_str()) {
-                        if let Ok(preimage) = hex::decode(preimage_hex) {
-                            if !revealed_preimages.contains(&preimage) {
-                                revealed_preimages.push(preimage);
-                            }
-                        }
-                    }
-                }
+        let ordered_preimages: Vec<Vec<u8>> = match lottery_claimability(&ctx.preimages) {
+            LotteryClaimability::Claimable => ctx.preimages.iter().flatten().cloned().collect(),
+            // Not all commitments revealed yet — not an error, just wait
+            // for the remaining reveal(s).
+            LotteryClaimability::Unknown => return Ok(false),
+            // Preimages committed under N = Q, claim leaf built for the k
+            // who armed: this one can never be claimed. Recover it through
+            // the CSV-144 leaf instead of waiting on a claim that cannot
+            // verify (see `lottery_recovery`).
+            LotteryClaimability::Unclaimable {
+                preimage_len,
+                max_len,
+            } => {
+                tracing::debug!(
+                    "Lottery for {} cannot be claimed: preimage length {} out of 17..{}",
+                    &ledger_id[..16],
+                    preimage_len,
+                    max_len
+                );
+                return self
+                    .recover_unclaimable_lottery(ledger_id, &ctx, &our_armed)
+                    .await;
             }
-        }
-
-        // Match each participant to a revealed preimage by commitment hash.
-        use bitcoin::hashes::{hash160, Hash as _};
-        let mut ordered_preimages: Vec<Vec<u8>> = Vec::new();
-        for (_pubkey, participant) in &participants {
-            let matched = revealed_preimages
-                .iter()
-                .find(|p| hash160::Hash::hash(p).to_byte_array() == participant.commitment_hash);
-            match matched {
-                Some(preimage) => ordered_preimages.push(preimage.clone()),
-                None => {
-                    // Not all commitments revealed yet — not an error,
-                    // just wait for the remaining reveal(s).
-                    return Ok(false);
-                }
-            }
-        }
+        };
+        let participants = ctx.participants.clone();
+        let (recovery_voters, recovery_threshold) =
+            (ctx.recovery_voters.clone(), ctx.recovery_threshold);
 
         // Determine winner
         let winner_index = LotteryOutput::calculate_winner(&ordered_preimages)
             .map_err(|e| Error::Protocol(format!("Failed to calculate winner: {:?}", e)))?;
 
         let (winner_pubkey, _winner_participant) = &participants[winner_index];
-
-        // Recovery voters for the on-chain lottery address MUST come from
-        // the ledger's latest QuorumBegin (minus operator) — the same set
-        // `initiate_confiscations` committed to when it paid the lottery
-        // UTXO. Any other set yields a different Taproot address and the
-        // claim finds no UTXO to spend.
-        let (recovery_voters, recovery_threshold) =
-            recovery_voters_from_updates(&paginated_updates).ok_or_else(|| {
-                Error::Protocol(
-                    "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
-                )
-            })?;
 
         if *winner_pubkey == our_pubkey {
             // WE WON - claim the lottery
@@ -2599,6 +2507,7 @@ impl Node {
             let mut latest_quorum_begin_seq: Option<u64> = None;
             let mut quorum_expiry_at_qb: u32 = 0;
             let mut ruleset_at_qb: Option<String> = None;
+            let mut armed_heights: HashMap<XOnlyPublicKey, u32> = HashMap::new();
 
             for update in &paginated_updates {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
@@ -2639,6 +2548,7 @@ impl Node {
                         LedgerOperation::DisputeArmed {
                             commitment_hash,
                             target_reserves,
+                            armed_block,
                             ..
                         } => {
                             let x_only = update.operator_id.x_only_public_key().0;
@@ -2650,6 +2560,9 @@ impl Node {
                                     target_reserves,
                                 ));
                             }
+                            // Each armer's first arm (a re-arm repeats it).
+                            let h = armed_heights.entry(x_only).or_insert(armed_block);
+                            *h = (*h).min(armed_block);
                         }
                         _ => {}
                     }
@@ -2700,6 +2613,50 @@ impl Node {
 
             // Filter out original operator from quorum_members (VoterSet adds operator as tie_breaker)
             quorum_members.retain(|pk| *pk != original_operator);
+
+            // Wait for full arming. Every armer committed its lottery
+            // preimage under N = Q (the recovery voters, `arm_n`), but the
+            // claim leaf is built below for the k = participants.len() who
+            // armed, with an OP_SIZE bound of 16 + k: with k < Q only
+            // (k/Q)^k of lotteries can ever be claimed, and the rest wait
+            // for the recovery leaves (`lottery_recovery`). So give the
+            // others FULL_ARMING_WAIT_BLOCKS before confiscating without
+            // them. The reference has no arm window (it never sets
+            // dispute_arm_blocks) and would confiscate as soon as a second
+            // member armed, so the wait runs from the second arm's height:
+            // the point where it would otherwise confiscate. cl-deposits
+            // waits the same 720 blocks past its arm window.
+            let (q, k) = (quorum_members.len(), participants.len());
+            if k < q {
+                let mut heights: Vec<u32> = armed_heights.values().copied().collect();
+                heights.sort_unstable();
+                let deadline = heights
+                    .get(1)
+                    .copied()
+                    .unwrap_or(0)
+                    .saturating_add(super::lottery_recovery::FULL_ARMING_WAIT_BLOCKS);
+                let height = self.wallet.get_block_height().ok().unwrap_or(0);
+                if height < deadline {
+                    tracing::debug!(
+                        "{} of {} armed for ledger {}; waiting for the rest until block {} \
+                         (now {})",
+                        k,
+                        q,
+                        ledger_prefix,
+                        deadline,
+                        height
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    "Confiscating ledger {} with {} of {} armed (full-arming wait ended at \
+                     block {}): its lottery may not be claimable",
+                    ledger_prefix,
+                    k,
+                    q,
+                    deadline
+                );
+            }
 
             tracing::info!("All {} participants armed for ledger {}..., initiating confiscation ({} quorum members)",
                 participants.len(), ledger_prefix, quorum_members.len());

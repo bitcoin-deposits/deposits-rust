@@ -323,6 +323,7 @@ impl Node {
             joined_ledger_cache_versions: Mutex::new(HashMap::new()),
             imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_confiscations: Mutex::new(HashMap::new()),
+            pending_lottery_recoveries: Mutex::new(HashMap::new()),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             last_relay_fetch_times: Mutex::new(HashMap::new()),
             cosign_member_cache: Mutex::new(HashMap::new()),
