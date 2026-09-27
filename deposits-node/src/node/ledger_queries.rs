@@ -1008,32 +1008,63 @@ impl Node {
             }
         };
 
+        let (is_active, pre_quorum, committed_reserves_key) = {
+            let l = ledger_arc.read().unwrap();
+            (
+                l.state.quorum_state == QuorumState::Active,
+                l.state.quorum_state == QuorumState::PreQuorum,
+                l.state.reserves_key.clone(),
+            )
+        };
+        let recorded = ledger_wallet.taproot_reserves();
+
+        // A rotation broadcast but never committed: the refresh branch below
+        // persists the new vault right after broadcast, so on an Active ledger
+        // a recorded vault that is NOT the one the last QuorumBegin committed
+        // (`reserves_key`) is ours, in flight. Resume it — wait for depth,
+        // cosign, commit — exactly as `pending_resume` does for a first
+        // QuorumBegin. Rebuilding would spend the old vault a second time: it
+        // is already spent by the tx that funded this one, and every retry
+        // dead-ends in `bad-txns-inputs-missingorspent` until the quorum
+        // expires (cl-deposits devnet, ledger 1306e885, after a restart during
+        // the confirmation wait).
+        let uncommitted_rotation = if is_active {
+            recorded
+                .clone()
+                .filter(|t| t.taproot_output.address.to_string() != committed_reserves_key)
+        } else {
+            None
+        };
+        if let Some(t) = &uncommitted_rotation {
+            if t.quorum_members != quorum_members {
+                return Err(Error::Protocol(format!(
+                    "ledger {}: a rotation to {} ({}:{}) was broadcast but never committed, \
+                     and the staged members have changed since; the old vault is spent, so \
+                     a fresh rotation cannot be built. Restore the staged set the in-flight \
+                     vault was built for, or recover through the quorum.",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    t.taproot_output.address,
+                    t.outpoint.txid,
+                    t.outpoint.vout
+                )));
+            }
+        }
+
         // Detect a refresh case: ledger is already Active and has an
         // existing on-chain reserves UTXO. We rotate by spending the
         // existing UTXO via quorum cosign (tier-0 majority leaf) into
         // a new Taproot output with the staged (`next_quorum_members`)
         // key set. Fee is deducted from the reserves amount.
-        let refresh_existing = {
-            let l = ledger_arc.read().unwrap();
-            let is_active = l.state.quorum_state == QuorumState::Active;
-            drop(l);
-            if is_active {
-                ledger_wallet.taproot_reserves()
-            } else {
-                None
-            }
+        let refresh_existing = if is_active && uncommitted_rotation.is_none() {
+            recorded.clone()
+        } else {
+            None
         };
 
-        let pending_resume = {
-            let pre_quorum =
-                ledger_arc.read().unwrap().state.quorum_state == QuorumState::PreQuorum;
-            if pre_quorum {
-                ledger_wallet
-                    .taproot_reserves()
-                    .filter(|t| t.quorum_members == quorum_members)
-            } else {
-                None
-            }
+        let pending_resume = if pre_quorum {
+            recorded.filter(|t| t.quorum_members == quorum_members)
+        } else {
+            uncommitted_rotation
         };
 
         let (result, pending_taproot): (TaprootReservesCreateResult, TaprootReservesInfo) =
@@ -1042,15 +1073,30 @@ impl Node {
                 // via majority cosign into a new Taproot output with the
                 // rotated key set. Fee is deducted from the reserves
                 // amount; the wpkh wallet is not consulted.
-                self.build_rotation_via_cosign(
-                    ledger_id,
-                    &existing,
-                    quorum_members.clone(),
-                    quorum_expiries.clone(),
-                    ledger_hash,
-                    &new_ruleset_name,
-                )
-                .await?
+                let (result, pending) = self
+                    .build_rotation_via_cosign(
+                        ledger_id,
+                        &existing,
+                        quorum_members.clone(),
+                        quorum_expiries.clone(),
+                        ledger_hash,
+                        &new_ruleset_name,
+                    )
+                    .await?;
+                // The rotation tx is broadcast and has spent the old vault.
+                // Persist the new one NOW, as the fresh-build branch does, so
+                // a crash or restart before Phase 5 resumes it (see
+                // `uncommitted_rotation`) instead of losing the only record
+                // of where the reserves went.
+                if let Err(e) = ledger_wallet.commit_taproot_reserves(pending.clone()) {
+                    tracing::warn!(
+                        "failed to persist rotated taproot reserves before conf-wait for \
+                         ledger {} ({}): a restart during the wait would lose the new vault",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        e
+                    );
+                }
+                (result, pending)
             } else if let Some(existing) = pending_resume {
                 tracing::info!(
                     "Detected half-finished QuorumBegin: reusing taproot UTXO {}:{} ({}sat) — \
