@@ -537,6 +537,11 @@ pub struct Node {
     /// retried every periodic (see `fork_publish`).
     pending_fork_publications: Mutex<std::collections::HashSet<String>>,
 
+    /// Preimages from `lottery_reveal` requests received live, by ledger id.
+    /// The request kind is ephemeral: the relay does not keep it to fetch
+    /// back later (see `lottery_recovery::revealed_lottery_preimages`).
+    seen_lottery_reveals: Mutex<HashMap<String, Vec<Vec<u8>>>>,
+
     /// Rate-limiter for background relay fetches of stale joined ledgers.
     /// Tracks when each ledger was last fetched from relay (30s cooldown per ledger).
     last_relay_fetch_times: Mutex<HashMap<String, std::time::Instant>>,

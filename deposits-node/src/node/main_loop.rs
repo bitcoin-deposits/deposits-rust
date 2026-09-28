@@ -563,6 +563,21 @@ impl Node {
         &self,
         ledger_id: &str,
     ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+        self.fetch_ledger_updates_paginated_filtered(ledger_id, &[])
+            .await
+    }
+
+    /// Like [`Self::fetch_all_ledger_updates_paginated`], restricted to the
+    /// operations whose discriminants are in `op_types` (the relay-indexed
+    /// `t` tag every update carries); all operations when it is empty. A
+    /// dispute stage that needs only LedgerOpen, QuorumBegin and
+    /// DisputeArmed gets a handful of events instead of paging a deep
+    /// ledger's whole chain (C: ~25,000 events) inside a 10 s periodic.
+    pub(crate) async fn fetch_ledger_updates_paginated_filtered(
+        &self,
+        ledger_id: &str,
+        op_types: &[u8],
+    ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use deposits_core::TlvDecode;
         use nostr_sdk::{Filter, Kind, Timestamp};
@@ -591,6 +606,12 @@ impl Node {
                     [crate::nostr::ledger_tag(ledger_id)],
                 )
                 .limit(Self::RELAY_FETCH_PAGE_LIMIT);
+            if !op_types.is_empty() {
+                filter = filter.custom_tag(
+                    crate::nostr::TAG_OP_TYPE,
+                    op_types.iter().map(|t| t.to_string()),
+                );
+            }
             if let Some(ts) = until_ts {
                 filter = filter.until(Timestamp::from(ts));
             }

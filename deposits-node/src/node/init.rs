@@ -327,6 +327,7 @@ impl Node {
             pending_lottery_recoveries: Mutex::new(HashMap::new()),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_fork_publications: Mutex::new(std::collections::HashSet::new()),
+            seen_lottery_reveals: Mutex::new(HashMap::new()),
             last_relay_fetch_times: Mutex::new(HashMap::new()),
             cosign_member_cache: Mutex::new(HashMap::new()),
             dirty_ledgers: Mutex::new(std::collections::HashSet::new()),

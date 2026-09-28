@@ -331,6 +331,54 @@ pub(crate) fn check_lottery_recovery_proposal(
     Ok(())
 }
 
+/// Operation discriminants (`t` tag) a lottery is rebuilt from: LedgerOpen,
+/// QuorumBegin, DisputeArmed.
+pub(crate) const LOTTERY_OP_TYPES: [u8; 3] = [1, 12, 57];
+
+/// Whether `updates` hold what a lottery is rebuilt from: the LedgerOpen,
+/// a QuorumBegin and at least one DisputeArmed. A `t`-filtered fetch that
+/// misses any of them (an update published without the tag) falls back to
+/// the whole chain.
+pub(crate) fn lottery_updates_complete(updates: &[deposits_core::SignedLedgerUpdate]) -> bool {
+    use deposits_core::messages::LedgerOperation;
+    let (mut open, mut qb, mut armed) = (false, false, false);
+    for u in updates {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::LedgerOpen { .. }) => open = true,
+            Ok(LedgerOperation::QuorumBegin { .. }) => qb = true,
+            Ok(LedgerOperation::DisputeArmed { .. }) => armed = true,
+            _ => {}
+        }
+    }
+    open && qb && armed
+}
+
+/// For each participant, the revealed preimage whose HASH160 is its
+/// commitment, if any.
+pub(crate) fn match_revealed_preimages(
+    participants: &[(bitcoin::secp256k1::PublicKey, LotteryParticipant)],
+    revealed: &[Vec<u8>],
+) -> Vec<Option<Vec<u8>>> {
+    use bitcoin::hashes::{hash160, Hash as _};
+    participants
+        .iter()
+        .map(|(_, p)| {
+            revealed
+                .iter()
+                .find(|r| hash160::Hash::hash(r).to_byte_array() == p.commitment_hash)
+                .cloned()
+        })
+        .collect()
+}
+
+/// The preimage of a `lottery_reveal` request's JSON params or content.
+pub(crate) fn reveal_request_preimage(params: &serde_json::Value) -> Option<Vec<u8>> {
+    params
+        .get("preimage")?
+        .as_str()
+        .and_then(|h| hex::decode(h).ok())
+}
+
 /// The public state of a dispute's lottery, rebuilt from the relay.
 pub(crate) struct LotteryContext {
     /// DisputeArmed participants, one per armer, sorted by x-only key (the
@@ -379,21 +427,10 @@ impl Node {
         use deposits_core::messages::LedgerOperation;
         use nostr_sdk::{Filter, Kind, TagKind};
 
-        // Paginated fetch — bloated forks (thousands of duplicate
-        // QuorumAddMember rows pre-2d3ae43 dedup-fix) overflow a single
-        // 500-event window and would hide DisputeArmed at the tail.
-        let updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
-
-        let reveal_filter = Filter::new()
-            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_REQUEST))
-            .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id])
-            .limit(100);
-        let reveal_events = self
-            .nostr
-            .fetch_client()
-            .fetch_events(vec![reveal_filter], None)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to fetch reveals: {}", e)))?;
+        // Only the operations the lottery is built from (LedgerOpen,
+        // QuorumBegin, DisputeArmed): a handful of events, not a deep
+        // ledger's whole chain inside the claim task's 10 s periodic.
+        let updates = self.fetch_lottery_updates(ledger_id).await;
 
         // One participant per armer: a re-arm (collateral upgrade) repeats
         // DisputeArmed with the same commitment, and a duplicate would put
@@ -434,45 +471,13 @@ impl Node {
         participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
 
         // Preimages are matched to participants by HASH160(preimage) ==
-        // commitment_hash, NOT by the reveal event's author key. The
-        // reveal is a Nostr request authored by the node's Nostr/delegate
-        // key, which is NOT the same as the participant's on-chain
-        // (bitcoin x-only) operator key committed in DisputeArmed. Keying
-        // the preimage map by `event.pubkey` and looking it up by the
-        // participant's x-only key therefore never matched, and the claim
-        // stalled forever on "Missing preimage from participant". The
-        // commitment hash is the authorless, cryptographically-bound link.
-        let mut revealed: Vec<Vec<u8>> = Vec::new();
-        for event in reveal_events.iter() {
-            let is_lottery_reveal = event.tags.iter().any(|tag| {
-                tag.kind() == TagKind::custom("action")
-                    && tag
-                        .content()
-                        .map(|c| c == "lottery_reveal")
-                        .unwrap_or(false)
-            });
-            if !is_lottery_reveal {
-                continue;
-            }
-            if let Some(preimage) = serde_json::from_str::<serde_json::Value>(&event.content)
-                .ok()
-                .and_then(|c| c.get("preimage")?.as_str().map(str::to_string))
-                .and_then(|h| hex::decode(h).ok())
-            {
-                if !revealed.contains(&preimage) {
-                    revealed.push(preimage);
-                }
-            }
-        }
-        let preimages = participants
-            .iter()
-            .map(|(_, p)| {
-                revealed
-                    .iter()
-                    .find(|r| hash160::Hash::hash(r).to_byte_array() == p.commitment_hash)
-                    .cloned()
-            })
-            .collect();
+        // commitment_hash, NOT by who published them: the reveal is authored
+        // by the node's Nostr/delegate key, not the participant's operator
+        // key committed in DisputeArmed. The commitment hash is the
+        // authorless, cryptographically-bound link, so a preimage from any
+        // source can be trusted once it matches.
+        let revealed = self.revealed_lottery_preimages(ledger_id, &updates).await;
+        let preimages = match_revealed_preimages(&participants, &revealed);
 
         // Recovery voters MUST come from the latest QuorumBegin (minus
         // operator): the set the confiscation's lottery output commits to.
@@ -493,6 +498,113 @@ impl Node {
             original_operator,
             our_armed,
         })
+    }
+
+    /// The lottery's updates from the relay: `t`-filtered to
+    /// [`LOTTERY_OP_TYPES`], the whole chain only when that comes back
+    /// incomplete.
+    pub(crate) async fn fetch_lottery_updates(
+        &self,
+        ledger_id: &str,
+    ) -> Vec<deposits_core::SignedLedgerUpdate> {
+        let updates = self
+            .fetch_ledger_updates_paginated_filtered(ledger_id, &LOTTERY_OP_TYPES)
+            .await;
+        if lottery_updates_complete(&updates) {
+            return updates;
+        }
+        tracing::debug!(
+            "Lottery ops for {} incomplete by op-type tag ({} found); fetching the whole chain",
+            &ledger_id[..16.min(ledger_id.len())],
+            updates.len()
+        );
+        self.fetch_all_ledger_updates_paginated(ledger_id).await
+    }
+
+    /// Every preimage revealed for `ledger_id` that we can get at. The
+    /// `lottery_reveal` request is kind 20101, an ephemeral kind the relay
+    /// does not store, so fetching it back (the only source this used to
+    /// read) finds nothing unless the relay happens to keep ephemerals; on
+    /// the signet devnet it found nothing, and the winner never claimed.
+    /// So also: the durable Kind 9106 reveals (ours and cl-deposits', which
+    /// publishes both), the reveal requests this daemon received live, and
+    /// our own preimage, which we derive.
+    pub(crate) async fn revealed_lottery_preimages(
+        &self,
+        ledger_id: &str,
+        updates: &[deposits_core::SignedLedgerUpdate],
+    ) -> Vec<Vec<u8>> {
+        use nostr_sdk::{Filter, Kind, TagKind};
+
+        let mut revealed: Vec<Vec<u8>> = Vec::new();
+        let mut add = |p: Vec<u8>, revealed: &mut Vec<Vec<u8>>| {
+            if !revealed.contains(&p) {
+                revealed.push(p);
+            }
+        };
+
+        // Durable Kind 9106 reveals.
+        match self.nostr.fetch_custody_lottery_reveals(ledger_id).await {
+            Ok(reveals) => {
+                for r in reveals {
+                    if let Ok(p) = hex::decode(&r.preimage_hex) {
+                        add(p, &mut revealed);
+                    }
+                }
+            }
+            Err(e) => tracing::debug!("Kind 9106 reveal fetch failed: {}", e),
+        }
+
+        // Reveal requests seen live.
+        if let Some(seen) = self.seen_lottery_reveals.lock().unwrap().get(ledger_id) {
+            for p in seen {
+                add(p.clone(), &mut revealed);
+            }
+        }
+
+        // Reveal requests, if the relay kept any.
+        let reveal_filter = Filter::new()
+            .kind(Kind::Custom(crate::nostr::KIND_LEDGER_REQUEST))
+            .custom_tag(crate::nostr::TAG_LEDGER_REQ, [ledger_id])
+            .limit(100);
+        if let Ok(events) = self
+            .nostr
+            .fetch_client()
+            .fetch_events(vec![reveal_filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        {
+            for event in events.iter() {
+                let is_lottery_reveal = event.tags.iter().any(|tag| {
+                    tag.kind() == TagKind::custom("action")
+                        && tag
+                            .content()
+                            .map(|c| c == "lottery_reveal")
+                            .unwrap_or(false)
+                });
+                if !is_lottery_reveal {
+                    continue;
+                }
+                if let Some(p) = serde_json::from_str::<serde_json::Value>(&event.content)
+                    .ok()
+                    .and_then(|c| reveal_request_preimage(&c))
+                {
+                    add(p, &mut revealed);
+                }
+            }
+        }
+
+        // Our own, derived, whether or not our reveal made it back to us;
+        // but only once we have revealed it. Otherwise a loser could see
+        // everyone else's reveal, yield (which tombstones its fork, and the
+        // reveal task then skips it) and never reveal, and the winner could
+        // never claim. The reveal task publishes it within a periodic.
+        if self.have_revealed_lottery(ledger_id).await {
+            if let Some(p) = self.own_lottery_preimage(ledger_id, updates) {
+                add(p, &mut revealed);
+            }
+        }
+
+        revealed
     }
 
     fn lottery_outpoint_file(&self, ledger_id: &str) -> PathBuf {
@@ -1196,6 +1308,177 @@ mod tests {
         assert!(
             check_lottery_recovery_proposal(unclaimable, 200, &sweep, &sweep.tx, &[1u8; 32])
                 .is_err()
+        );
+    }
+
+    // ── The winner never claimed (devnet, ledger C, 2026-09-28) ──────────
+    //
+    // ref3 won C's lottery (cld3 18 bytes, cld4 17, ref3 18: sum of
+    // contributions 5, 5 mod 3 = 2) but saw no reveal at all: it read only
+    // `lottery_reveal` requests back from the relay, kind 20101, which the
+    // relay does not store. These pin the sources it reads now.
+
+    fn preimage(len: usize, fill: u8) -> Vec<u8> {
+        vec![fill; len]
+    }
+
+    fn commit(p: &[u8]) -> [u8; 20] {
+        use bitcoin::hashes::{hash160, Hash as _};
+        hash160::Hash::hash(p).to_byte_array()
+    }
+
+    /// Three participants in canonical x-only order, the winner's
+    /// (index 2) preimage 18 bytes as ref3's was.
+    fn devnet_c_lottery() -> (
+        Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>,
+        [Vec<u8>; 3],
+    ) {
+        let mut keys: Vec<bitcoin::secp256k1::PublicKey> = (1..=3u8).map(pubkey).collect();
+        keys.sort_by(|a, b| {
+            a.x_only_public_key()
+                .0
+                .serialize()
+                .cmp(&b.x_only_public_key().0.serialize())
+        });
+        let preimages = [preimage(18, 0xA1), preimage(17, 0xB2), preimage(18, 0xC3)];
+        let participants = keys
+            .iter()
+            .zip(preimages.iter())
+            .map(|(k, p)| {
+                (
+                    *k,
+                    LotteryParticipant::new(k.x_only_public_key().0, commit(p), "tb1pw".into()),
+                )
+            })
+            .collect();
+        (participants, preimages)
+    }
+
+    #[test]
+    fn two_durable_reveals_and_our_own_make_the_lottery_claimable() {
+        let (participants, [cld3, cld4, ours]) = devnet_c_lottery();
+        // Before: nothing came back from the relay.
+        assert_eq!(
+            lottery_claimability(&match_revealed_preimages(&participants, &[])),
+            LotteryClaimability::Unknown
+        );
+        // The two Kind 9106 reveals alone are not enough...
+        let from_9106 = vec![cld4.clone(), cld3.clone()];
+        assert_eq!(
+            lottery_claimability(&match_revealed_preimages(&participants, &from_9106)),
+            LotteryClaimability::Unknown
+        );
+        // ...with our own (derived) preimage the lottery is claimable, and
+        // we (index 2) win: (2 + 1 + 2) mod 3.
+        let revealed = vec![cld4, cld3, ours.clone()];
+        let matched = match_revealed_preimages(&participants, &revealed);
+        assert_eq!(
+            lottery_claimability(&matched),
+            LotteryClaimability::Claimable
+        );
+        let ordered: Vec<Vec<u8>> = matched.into_iter().flatten().collect();
+        assert_eq!(ordered[2], ours);
+        assert_eq!(LotteryOutput::calculate_winner(&ordered).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_preimage_matches_only_its_own_commitment() {
+        let (participants, [a, _, _]) = devnet_c_lottery();
+        let stray = preimage(18, 0xEE);
+        let matched = match_revealed_preimages(&participants, &[stray, a.clone()]);
+        assert_eq!(matched, vec![Some(a), None, None]);
+    }
+
+    #[test]
+    fn reveal_request_params_yield_the_preimage() {
+        let p = serde_json::json!({"ledger_id": "ab", "preimage": "7f387fb7"});
+        assert_eq!(
+            reveal_request_preimage(&p),
+            Some(vec![0x7f, 0x38, 0x7f, 0xb7])
+        );
+        assert_eq!(
+            reveal_request_preimage(&serde_json::json!({"ledger_id": "ab"})),
+            None
+        );
+        assert_eq!(
+            reveal_request_preimage(&serde_json::json!({"preimage": "zz"})),
+            None
+        );
+    }
+
+    fn update_with(
+        op: &deposits_core::messages::LedgerOperation,
+    ) -> deposits_core::SignedLedgerUpdate {
+        use deposits_core::TlvEncode;
+        deposits_core::SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0,
+            operator_id: pubkey(1),
+            ledger_id: [7u8; 32],
+            sequence_number: 0,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            cosign_signature: [0u8; 64],
+            operator_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_tag_filtered_fetch_is_used_only_when_complete() {
+        use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+        let open = update_with(&LedgerOperation::LedgerOpen {
+            operator_id: pubkey(1),
+            reserves_id: "r".into(),
+            genesis_block: 0,
+            reserves_amount: 1,
+            collateral_amount: 1,
+        });
+        let qb = update_with(&LedgerOperation::QuorumBegin {
+            reserves_id: "r".into(),
+            spending_txid: [0; 32],
+            new_outpoint_txid: [0; 32],
+            new_outpoint_vout: 0,
+            amount: 1,
+            quorum_expiry: 1,
+            ledger_hash: [0; 32],
+            quorum_members: vec![QuorumMemberRef::pubkey_only(pubkey(2))],
+            collateral_amount: 1,
+            protocol_version: None,
+        });
+        let armed = update_with(&LedgerOperation::DisputeArmed {
+            armed_block: 1,
+            commitment_hash: [1; 20],
+            target_reserves: "tb1pw".into(),
+            replacement_collateral: None,
+        });
+        assert!(lottery_updates_complete(&[
+            open.clone(),
+            qb.clone(),
+            armed.clone()
+        ]));
+        assert!(!lottery_updates_complete(&[qb.clone(), armed.clone()]));
+        assert!(!lottery_updates_complete(&[open.clone(), armed]));
+        assert!(!lottery_updates_complete(&[open, qb]));
+        // The discriminants the relay filter asks for are these ops'.
+        assert_eq!(
+            LOTTERY_OP_TYPES,
+            [
+                LedgerOperation::LedgerOpen {
+                    operator_id: pubkey(1),
+                    reserves_id: String::new(),
+                    genesis_block: 0,
+                    reserves_amount: 0,
+                    collateral_amount: 0,
+                }
+                .discriminant(),
+                12,
+                57
+            ]
         );
     }
 }

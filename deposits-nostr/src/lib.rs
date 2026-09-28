@@ -650,6 +650,19 @@ pub struct CustodyLotteryReveal {
     pub timestamp: u64,
 }
 
+/// The digest a custody-lottery reveal's signature covers:
+/// `sha256("CustodyLotteryReveal:" || ledger_id_hex || 0x00 || preimage)`
+/// (cl-deposits `reveal-message`).
+pub fn custody_lottery_reveal_digest(ledger_id: &str, preimage: &[u8]) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash};
+    let mut input = Vec::new();
+    input.extend_from_slice(b"CustodyLotteryReveal:");
+    input.extend_from_slice(ledger_id.as_bytes());
+    input.push(0x00);
+    input.extend_from_slice(preimage);
+    sha256::Hash::hash(&input).to_byte_array()
+}
+
 /// Information about a quorum member in a ledger advertisement
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct QuorumMemberInfo {
@@ -3232,27 +3245,39 @@ impl NostrTransport {
         preimage: &[u8],
         keypair: &bitcoin::secp256k1::Keypair,
     ) -> Result<String, Error> {
-        use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{Message, Secp256k1};
 
-        let mut sighash_input = Vec::new();
-        sighash_input.extend_from_slice(b"CustodyLotteryReveal:");
-        sighash_input.extend_from_slice(ledger_id.as_bytes());
-        sighash_input.push(0x00);
-        sighash_input.extend_from_slice(preimage);
-
-        let sighash = sha256::Hash::hash(&sighash_input);
-        let secp = Secp256k1::new();
-        let msg = Message::from_digest(sighash.to_byte_array());
-        let signature = secp.sign_schnorr(&msg, keypair);
-
+        let msg = Message::from_digest(custody_lottery_reveal_digest(ledger_id, preimage));
+        let signature = Secp256k1::new().sign_schnorr(&msg, keypair);
         let member_pubkey = hex::encode(keypair.public_key().serialize());
+        self.publish_signed_custody_lottery_reveal(
+            ledger_id,
+            preimage,
+            &member_pubkey,
+            &signature.serialize(),
+        )
+        .await
+    }
 
+    /// Publish a custody-lottery reveal already signed (over
+    /// [`custody_lottery_reveal_digest`]) by `member_pubkey_hex` (compressed,
+    /// hex): the daemon's path, whose operator key lives in the signer.
+    ///
+    /// Tagged both ways the reveal is looked up: `d` = the 16-hex ledger tag
+    /// (this crate's convention) and `l` = the full ledger id (cl-deposits',
+    /// whose reveals carry only `l`), plus `member`.
+    pub async fn publish_signed_custody_lottery_reveal(
+        &self,
+        ledger_id: &str,
+        preimage: &[u8],
+        member_pubkey_hex: &str,
+        signature: &[u8; 64],
+    ) -> Result<String, Error> {
         let reveal = CustodyLotteryReveal {
-            member_pubkey: member_pubkey.clone(),
+            member_pubkey: member_pubkey_hex.to_string(),
             ledger_id: ledger_id.to_string(),
             preimage_hex: hex::encode(preimage),
-            signature: hex::encode(signature.serialize()),
+            signature: hex::encode(signature),
             event_id: String::new(),
             timestamp: 0,
         };
@@ -3263,9 +3288,13 @@ impl NostrTransport {
         let event = EventBuilder::new(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL), &content)
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_tag(ledger_id)],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
                 [ledger_id],
             ))
-            .tag(Tag::custom(TagKind::custom("member"), [&member_pubkey]))
+            .tag(Tag::custom(TagKind::custom("member"), [member_pubkey_hex]))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign reveal event: {}", e)))?;
 
@@ -3278,7 +3307,7 @@ impl NostrTransport {
         tracing::info!(
             "Published custody-lottery reveal: ledger={}, member={}, event={}, preimage_len={}",
             &ledger_id[..16.min(ledger_id.len())],
-            &member_pubkey[..16],
+            &member_pubkey_hex[..16.min(member_pubkey_hex.len())],
             &event_id[..16],
             preimage.len()
         );
@@ -3286,29 +3315,40 @@ impl NostrTransport {
         Ok(event_id)
     }
 
-    /// Fetch all custody-lottery reveals for a given ledger.
+    /// Fetch all custody-lottery reveals for a given ledger: those tagged
+    /// `d` with the ledger tag and those tagged `l` with the full id
+    /// (cl-deposits), de-duplicated by event.
     ///
     /// The caller is expected to filter by the disputant set (membership
     /// in the original dispute) and verify each reveal's signature
-    /// against its `member_pubkey` before passing the preimages to
+    /// against its `member_pubkey`, or match each preimage to a
+    /// participant's commitment hash, before passing the preimages to
     /// `LotteryOutput::calculate_winner`.
     pub async fn fetch_custody_lottery_reveals(
         &self,
         ledger_id: &str,
     ) -> Result<Vec<CustodyLotteryReveal>, Error> {
-        let filter = Filter::new()
-            .kind(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL))
-            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
+        let filters = vec![
+            Filter::new()
+                .kind(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL))
+                .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]),
+            Filter::new()
+                .kind(Kind::Custom(KIND_CUSTODY_LOTTERY_REVEAL))
+                .custom_tag(TAG_LEDGER_REQ, [ledger_id]),
+        ];
 
         let events = self
             .client
-            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .fetch_events(filters, Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch reveals: {}", e)))?;
 
         let mut reveals = Vec::new();
         for event in events.iter() {
             if let Ok(mut reveal) = serde_json::from_str::<CustodyLotteryReveal>(&event.content) {
+                if reveal.ledger_id != ledger_id {
+                    continue;
+                }
                 reveal.event_id = event.id.to_hex();
                 reveal.timestamp = event.created_at.as_u64();
                 reveals.push(reveal);
@@ -5766,6 +5806,29 @@ mod custody_lottery_reveal_tests {
         );
         // Sits in the dispute-related cluster (9100-9106).
         assert_eq!(KIND_CUSTODY_LOTTERY_REVEAL, 9106);
+    }
+
+    /// cl-deposits' Kind 9106 reveal for ledger C on the signet devnet
+    /// (member cld3): its signature verifies over
+    /// `custody_lottery_reveal_digest`, so the daemon's reveals, signed over
+    /// the same digest, are ones cl accepts; and its content parses.
+    #[test]
+    fn custody_lottery_reveal_digest_matches_cl_deposits() {
+        use bitcoin::secp256k1::{schnorr, Message, PublicKey, Secp256k1};
+        let content = r#"{"member_pubkey":"0249323bfc17e1df7c0c7c17494031cf51ba6a71fee6c7e0a9425a7cb3bdf0b7a3","ledger_id":"eff805009bb9a7e3bd31dd24cf93ec3b08ac0dac24e81c27abb3b27a03a2db1a","preimage_hex":"7f387fb7348a65c032588108023f55037b","signature":"d498e9ff47bbe535d8e5bd97d57e736838d3d2f6c48c2d4d12c9b7a20f531601bb4e443ed232406b9573495c8ff4e5396dfaa25ef8fbe95c42ab19c077c6e8ea"}"#;
+        let reveal: CustodyLotteryReveal = serde_json::from_str(content).unwrap();
+        let preimage = hex::decode(&reveal.preimage_hex).unwrap();
+        assert_eq!(preimage.len(), 17);
+        let member: PublicKey = reveal.member_pubkey.parse().unwrap();
+        let sig = schnorr::Signature::from_slice(&hex::decode(&reveal.signature).unwrap()).unwrap();
+        let digest = custody_lottery_reveal_digest(&reveal.ledger_id, &preimage);
+        Secp256k1::verification_only()
+            .verify_schnorr(
+                &sig,
+                &Message::from_digest(digest),
+                &member.x_only_public_key().0,
+            )
+            .expect("cl's reveal signature verifies over our digest");
     }
 }
 

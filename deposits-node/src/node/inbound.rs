@@ -250,6 +250,15 @@ impl Node {
             }
             "custodian_query" => self.process_custodian_query_request(&request).await,
             "lottery_reveal" => {
+                // Keep the preimage: the request is ephemeral, so the relay
+                // will not hand it back when the claim task looks for it.
+                if let Some(p) = super::lottery_recovery::reveal_request_preimage(&request.params) {
+                    let mut seen = self.seen_lottery_reveals.lock().unwrap();
+                    let list = seen.entry(request.ledger_id.clone()).or_default();
+                    if !list.contains(&p) {
+                        list.push(p);
+                    }
+                }
                 // When we see another participant's reveal, auto-reveal ours
                 self.auto_reveal_preimage(&request.ledger_id).await;
                 (true, None, None) // No response needed

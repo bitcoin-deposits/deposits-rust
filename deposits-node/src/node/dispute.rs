@@ -1156,6 +1156,24 @@ impl Node {
     /// fork tracking key. Returns `None` if we have no fork for this
     /// ledger.
     async fn lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
+        // `N` (= Q) comes from the ledger's latest QuorumBegin on the relay,
+        // the SAME source the confiscation build uses for the on-chain
+        // `OP_SIZE` bounds; only the lottery's ops are fetched.
+        let fetched = self.fetch_lottery_updates(ledger_id).await;
+        self.own_lottery_preimage(ledger_id, &fetched)
+    }
+
+    /// Our lottery preimage for `ledger_id`, with `N` taken from `updates`
+    /// (falling back to the local fork history). Tries the legacy on-disk
+    /// file first (random preimages from pre-derivation arms that still need
+    /// to resolve), then derives from the signer using the fork's
+    /// `last_valid_seq` parsed from the fork tracking key. `None` if we have
+    /// no fork for this ledger.
+    pub(crate) fn own_lottery_preimage(
+        &self,
+        ledger_id: &str,
+        updates: &[deposits_core::SignedLedgerUpdate],
+    ) -> Option<Vec<u8>> {
         let preimage_file = self.data_dir.join(format!(
             "lottery_preimage_{}.hex",
             &ledger_id[..16.min(ledger_id.len())]
@@ -1168,28 +1186,19 @@ impl Node {
             }
         }
         let fork_key = self.handler.find_our_fork(ledger_id)?;
-        // Fork key format: `<ledger_id>_<seq:06>_<pk_prefix_16hex>`.
-        // The ledger_id is fixed-length 64 hex; seq starts at 65.
-        let after_id = fork_key.get(65..)?;
-        let seq_end = after_id.find('_')?;
-        let last_valid_seq: u64 = after_id[..seq_end].parse().ok()?;
+        let last_valid_seq = super::fork_publish::fork_key_last_valid_seq(&fork_key)?;
         // The signer returns a fixed 32-byte HMAC *seed*; the on-chain
         // lottery selects the winner from the preimage *length*, so we
         // shape the seed into a preimage whose length lands in the valid
-        // range `[17, 16+N]` for this dispute's disputant count `N`.
-        // `N` (= Q) is derived from the ledger's canonical relay chain —
-        // the SAME source the confiscation build uses for the on-chain
-        // `OP_SIZE` bounds — so arm-time and reveal-time derive the
-        // identical `N` and the committed `HASH160(preimage)` matches the
-        // revealed bytes. Falls back to the local fork history if the
-        // relay fetch yields nothing.
+        // range `[17, 16+N]` for this dispute's disputant count `N`, the
+        // same `N` at arm time and reveal time so `HASH160(preimage)`
+        // matches the commitment.
         let seed = self
             .handler
             .signer
             .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
             .ok()?;
-        let fetched = self.fetch_all_ledger_updates_paginated(ledger_id).await;
-        let n = dispute_lottery_n_from_history(&fetched)
+        let n = dispute_lottery_n_from_history(updates)
             .or_else(|| self.dispute_lottery_n(&fork_key))?;
         deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(&seed, n).ok()
     }
@@ -1231,6 +1240,18 @@ impl Node {
             }
         }
         use nostr_sdk::{Filter, Kind, TagKind};
+        // Our durable Kind 9106 reveal (the request below is ephemeral and
+        // a relay that drops ephemerals never returns it).
+        let our_member = hex::encode(self.node_id.serialize());
+        if let Ok(reveals) = self.nostr.fetch_custody_lottery_reveals(ledger_id).await {
+            if reveals.iter().any(|r| r.member_pubkey == our_member) {
+                self.revealed_ledgers
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.to_string());
+                return true;
+            }
+        }
         let delegate = match self.nostr.delegate_pubkey() {
             Some(pk) => pk.x_only_public_key().0,
             None => return false,
@@ -1328,6 +1349,34 @@ impl Node {
                 tracing::error!("Failed to send reveal: {:?}", e);
             }
         }
+
+        // And durably: the request above is kind 20101, ephemeral, so a
+        // relay does not keep it for anyone who was not listening, or
+        // restarts. Kind 9106, signed by our operator key over the reveal
+        // digest, is the form cl-deposits verifies and keeps.
+        let digest = crate::nostr::custody_lottery_reveal_digest(ledger_id, &preimage);
+        match self.handler.signer.bip340_sign(
+            &deposits_signer_api::SignContext::no_ledger(
+                deposits_signer_api::SigPurpose::Bip340Untagged,
+            ),
+            &digest,
+        ) {
+            Ok(sig) => {
+                if let Err(e) = self
+                    .nostr
+                    .publish_signed_custody_lottery_reveal(
+                        ledger_id,
+                        &preimage,
+                        &hex::encode(self.node_id.serialize()),
+                        &sig,
+                    )
+                    .await
+                {
+                    tracing::error!("Failed to publish Kind 9106 reveal: {}", e);
+                }
+            }
+            Err(e) => tracing::error!("Failed to sign Kind 9106 reveal: {}", e),
+        }
     }
 
     /// Auto-claim or yield for any pending lottery disputes
@@ -1394,7 +1443,7 @@ impl Node {
                     }
                 }
                 Err(e) => {
-                    tracing::debug!("Lottery claim/yield not ready for {}: {}", ledger_prefix, e);
+                    tracing::warn!("Lottery claim/yield for {} failed: {}", ledger_prefix, e);
                 }
             }
         }
@@ -1423,8 +1472,17 @@ impl Node {
         let ordered_preimages: Vec<Vec<u8>> = match lottery_claimability(&ctx.preimages) {
             LotteryClaimability::Claimable => ctx.preimages.iter().flatten().cloned().collect(),
             // Not all commitments revealed yet — not an error, just wait
-            // for the remaining reveal(s).
-            LotteryClaimability::Unknown => return Ok(false),
+            // for the remaining reveal(s). Said at info: a claim that
+            // waits forever on reveals it cannot see must show in the log.
+            LotteryClaimability::Unknown => {
+                tracing::info!(
+                    "Lottery for {}: {} of {} preimages revealed, waiting",
+                    &ledger_id[..16],
+                    ctx.preimages.iter().filter(|p| p.is_some()).count(),
+                    ctx.preimages.len()
+                );
+                return Ok(false);
+            }
             // Preimages committed under N = Q, claim leaf built for the k
             // who armed: this one can never be claimed. Recover it through
             // the CSV-144 leaf instead of waiting on a claim that cannot
@@ -3272,7 +3330,7 @@ impl Node {
         // Paginated relay fetch — bloated forks would otherwise
         // hide DisputeArmed at the tail beyond a single 500-event
         // window.
-        let paginated_updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        let paginated_updates = self.fetch_lottery_updates(ledger_id).await;
         if paginated_updates.is_empty() {
             return Err(Error::Protocol(
                 "Failed to fetch ledger updates from relay".to_string(),
