@@ -1357,11 +1357,10 @@ impl Node {
         request: &crate::nostr::LedgerRequest,
     ) -> Result<(), String> {
         use crate::node::replacement_collateral::{
-            check_inequality, compute_required_replacement_sats, CollateralCheck, CollateralPolicy,
+            check_inequality, collateral_basis_at, CollateralCheck, CollateralPolicy,
         };
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use deposits_core::messages::ReplacementCollateral;
-        use deposits_core::types::LedgerState;
         use deposits_core::SignedLedgerUpdate;
         use nostr_sdk::prelude::*;
 
@@ -1408,60 +1407,17 @@ impl Node {
             .map(|u| u.operator_id)
             .ok_or_else(|| "could not find ledger genesis".to_string())?;
 
-        // Replay LedgerState through lvs, capturing the latest QuorumBegin.
-        // The initial state's specific fields don't matter — apply(LedgerOpen)
-        // at seq 0 will overwrite operator_key/reserves_key/etc.
-        let mut state = LedgerState::new(original_operator, String::new(), 0);
-        let mut latest_qb_collateral_msat: u64 = 0;
-        let mut latest_qb_reserves_msat: u64 = 0;
-        let mut latest_qb_seq: i64 = -1;
-        for update in &updates {
-            if update.operator_id != original_operator {
-                continue;
-            }
-            if update.sequence_number > last_valid_sequence {
-                break;
-            }
-            let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
-                Ok(o) => o,
-                Err(e) => {
-                    return Err(format!(
-                        "decode error at seq {}: {}",
-                        update.sequence_number, e
-                    ));
-                }
-            };
-            if let deposits_core::messages::LedgerOperation::QuorumBegin {
-                amount,
-                collateral_amount,
-                ..
-            } = &op
-            {
-                if (update.sequence_number as i64) > latest_qb_seq {
-                    latest_qb_seq = update.sequence_number as i64;
-                    latest_qb_collateral_msat = *collateral_amount;
-                    latest_qb_reserves_msat = *amount;
-                }
-            }
-            state = state
-                .apply(&op)
-                .map_err(|e| format!("replay failed at seq {}: {:?}", update.sequence_number, e))?;
-        }
-        if latest_qb_seq < 0 {
-            // No QuorumBegin yet — there's no committed quorum to dispute,
-            // so the request itself is malformed. Refuse.
-            return Err("no QuorumBegin observed at or before last_valid_sequence".into());
-        }
-
-        let obligations_msat = state.total_deposit_balance();
+        // Obligations at `last_valid_sequence`, the fork point, never the
+        // disputed tip: a fraudulent credit past lvs must not raise the bond
+        // an honest disputant has to post.
+        let basis = collateral_basis_at(&updates, original_operator, last_valid_sequence)?;
+        let obligations_msat = basis.obligations_msat;
+        let latest_qb_collateral_msat = basis.qb_collateral_msat;
+        let latest_qb_reserves_msat = basis.qb_reserves_msat;
         let policy = CollateralPolicy::default();
-        let required_sats = compute_required_replacement_sats(
-            obligations_msat,
-            latest_qb_collateral_msat,
-            latest_qb_reserves_msat,
-            &policy,
-        )
-        .ok_or_else(|| "QuorumBegin reserves were zero".to_string())?;
+        let required_sats = basis
+            .required_sats(&policy)
+            .ok_or_else(|| "QuorumBegin reserves were zero".to_string())?;
         tracing::info!(
             "    Required replacement collateral ≥ {} sats (obligations_msat={}, ratio={}/{})",
             required_sats,

@@ -1009,65 +1009,76 @@ impl Node {
                 // `obligations × (collateral / reserves) + fee_estimate`.
                 // The disputant's UTXO must sit at the operator's P2WPKH
                 // address — that's what RC4's claim-TX builder signs against.
-                let replacement_collateral =
-                    {
-                        use crate::node::replacement_collateral::{
-                            compute_required_replacement_sats, CollateralPolicy,
-                        };
-                        let obligations_msat = fork_ledger.state.total_deposit_balance();
-                        let collateral_msat = fork_ledger.state.collateral_amount;
-                        let reserves_msat = fork_ledger.state.reserves_amount;
-                        let policy = CollateralPolicy::default();
-                        let required_sats = compute_required_replacement_sats(
-                            obligations_msat,
-                            collateral_msat,
-                            reserves_msat,
-                            &policy,
-                        )
-                        .unwrap_or(0);
-                        let op_script =
-                            bitcoin::Address::p2wpkh(&compressed, self.wallet.network())
-                                .script_pubkey();
-                        match self.wallet.find_utxo_for_script(&op_script) {
-                            Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
-                                let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
-                                tracing::info!(
-                                "Auto-arm replacement collateral: {} sats from {}:{} (required {})",
-                                value_sats, outpoint.txid, outpoint.vout, required_sats
-                            );
-                                Some(deposits_core::messages::ReplacementCollateral {
-                                    txid: txid_bytes,
-                                    vout: outpoint.vout,
-                                    amount: value_sats,
-                                })
-                            }
-                            Ok(Some((_, value_sats))) => {
-                                tracing::warn!(
-                                    "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
-                                 required ≥ {} — declaring None and falling back to a \
-                                 path strict cosigners will refuse",
-                                    value_sats,
-                                    required_sats
-                                );
-                                None
-                            }
-                            Ok(None) => {
-                                tracing::warn!(
-                                    "Auto-arm: no UTXO found at operator-key P2WPKH; \
-                                 declaring no replacement_collateral"
-                                );
-                                None
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Auto-arm: esplora failure searching operator-key UTXO: {} \
-                                 — declaring no replacement_collateral",
-                                    e
-                                );
-                                None
-                            }
-                        }
+                let replacement_collateral = {
+                    use crate::node::replacement_collateral::{
+                        compute_required_replacement_sats, CollateralPolicy,
                     };
+                    // The fork's state is the ledger at `last_valid_seq`
+                    // (rebuilt from genesis by `fork_state_at`) plus our
+                    // DisputeEnter/QuorumAddMember, which move no
+                    // balances: obligations at the fork point, as
+                    // DEP-06 §Phase 1 and the cosigners' check
+                    // (`collateral_basis_at`) have it, never the
+                    // disputed tip's. Reserves and collateral change
+                    // only at LedgerOpen/QuorumBegin, so these are the
+                    // latest QuorumBegin's, as the cosigners use.
+                    let obligations_msat = fork_ledger.state.total_deposit_balance();
+                    let collateral_msat = fork_ledger.state.collateral_amount;
+                    let reserves_msat = fork_ledger.state.reserves_amount;
+                    let policy = CollateralPolicy::default();
+                    let required_sats = compute_required_replacement_sats(
+                        obligations_msat,
+                        collateral_msat,
+                        reserves_msat,
+                        &policy,
+                    )
+                    .unwrap_or(0);
+                    let op_script = bitcoin::Address::p2wpkh(&compressed, self.wallet.network())
+                        .script_pubkey();
+                    match self.wallet.find_utxo_for_script(&op_script) {
+                        Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
+                            let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
+                            tracing::info!(
+                                "Auto-arm replacement collateral: {} sats from {}:{} (required {}; \
+                                 obligations {} msat at seq {})",
+                                value_sats, outpoint.txid, outpoint.vout, required_sats,
+                                obligations_msat, last_valid_seq
+                            );
+                            Some(deposits_core::messages::ReplacementCollateral {
+                                txid: txid_bytes,
+                                vout: outpoint.vout,
+                                amount: value_sats,
+                            })
+                        }
+                        Ok(Some((_, value_sats))) => {
+                            tracing::warn!(
+                                "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
+                                 required ≥ {} (obligations {} msat at seq {}) — declaring \
+                                 None and falling back to a path strict cosigners will refuse",
+                                value_sats,
+                                required_sats,
+                                obligations_msat,
+                                last_valid_seq
+                            );
+                            None
+                        }
+                        Ok(None) => {
+                            tracing::warn!(
+                                "Auto-arm: no UTXO found at operator-key P2WPKH; \
+                                 declaring no replacement_collateral"
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Auto-arm: esplora failure searching operator-key UTXO: {} \
+                                 — declaring no replacement_collateral",
+                                e
+                            );
+                            None
+                        }
+                    }
+                };
 
                 // For a re-arm (prior arm had collateral=None), abort if
                 // we still don't have a funded UTXO — publishing

@@ -85,6 +85,85 @@ pub fn compute_required_replacement_sats(
     Some(required_sats.saturating_add(policy.claim_fee_estimate_sats))
 }
 
+/// The inputs to [`compute_required_replacement_sats`] for one dispute:
+/// the ledger's obligations and its latest `QuorumBegin`'s collateral and
+/// reserves, all as of the dispute's `last_valid_sequence`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollateralBasis {
+    pub obligations_msat: u64,
+    pub qb_collateral_msat: u64,
+    pub qb_reserves_msat: u64,
+    pub qb_seq: u64,
+}
+
+impl CollateralBasis {
+    pub fn required_sats(&self, policy: &CollateralPolicy) -> Option<u64> {
+        compute_required_replacement_sats(
+            self.obligations_msat,
+            self.qb_collateral_msat,
+            self.qb_reserves_msat,
+            policy,
+        )
+    }
+}
+
+/// Replay the original operator's chain through `last_valid_sequence` and
+/// return the collateral basis there (DEP-06 §Phase 1: obligations are the
+/// total owed at the fork point, so the fault itself cannot inflate the
+/// bond an honest disputant must post). `updates` is every update seen for
+/// the ledger, fork branches included, sorted by sequence; only
+/// `original_operator`'s updates at or below `last_valid_sequence` count.
+///
+/// This is the cosigner's basis in `verify_disputants_replacement_collateral`;
+/// the arming disputant's fork state (`fork_state_at`) replays the same prefix,
+/// so both sides size the bond identically.
+pub fn collateral_basis_at(
+    updates: &[deposits_core::SignedLedgerUpdate],
+    original_operator: bitcoin::secp256k1::PublicKey,
+    last_valid_sequence: u64,
+) -> Result<CollateralBasis, String> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::LedgerState;
+    use deposits_core::TlvDecode;
+
+    // The initial state's specific fields don't matter: apply(LedgerOpen)
+    // at seq 0 overwrites operator_key/reserves_key/etc.
+    let mut state = LedgerState::new(original_operator, String::new(), 0);
+    let mut latest_qb: Option<(u64, u64, u64)> = None;
+    for update in updates {
+        if update.operator_id != original_operator {
+            continue;
+        }
+        if update.sequence_number > last_valid_sequence {
+            break;
+        }
+        let op = LedgerOperation::tlv_decode(&update.message)
+            .map_err(|e| format!("decode error at seq {}: {}", update.sequence_number, e))?;
+        if let LedgerOperation::QuorumBegin {
+            amount,
+            collateral_amount,
+            ..
+        } = &op
+        {
+            if latest_qb.map_or(true, |(seq, _, _)| update.sequence_number >= seq) {
+                latest_qb = Some((update.sequence_number, *collateral_amount, *amount));
+            }
+        }
+        state = state
+            .apply(&op)
+            .map_err(|e| format!("replay failed at seq {}: {:?}", update.sequence_number, e))?;
+    }
+    // No QuorumBegin yet: there's no committed quorum to dispute.
+    let (qb_seq, qb_collateral_msat, qb_reserves_msat) = latest_qb
+        .ok_or_else(|| "no QuorumBegin observed at or before last_valid_sequence".to_string())?;
+    Ok(CollateralBasis {
+        obligations_msat: state.total_deposit_balance(),
+        qb_collateral_msat,
+        qb_reserves_msat,
+        qb_seq,
+    })
+}
+
 /// Pure inequality test, separated from I/O so it can be unit-tested.
 pub fn check_inequality(declared_sats: u64, required_sats: u64) -> CollateralCheck {
     if declared_sats < required_sats {

@@ -1597,10 +1597,11 @@ impl Node {
 
     /// Create a dispute fork of a ledger at the given divergence point.
     ///
-    /// Clones the Partner copy of the disputed ledger, truncates its history
-    /// to `last_valid_seq`, rebuilds state by replaying operations, and stores
-    /// the fork under a compound tracking key. The original Partner copy stays
-    /// untouched for evidence/auditing.
+    /// Takes the Partner copy's history up to `last_valid_seq`, rebuilds the
+    /// state there from genesis (`fork_state_at`: nothing is inherited from
+    /// the Partner copy's current state, which may include the fault), and
+    /// stores the fork under a compound tracking key. The original Partner
+    /// copy stays untouched for evidence/auditing.
     ///
     /// Returns the compound tracking key for the fork.
     pub(crate) fn create_dispute_fork(
@@ -1609,8 +1610,6 @@ impl Node {
         last_valid_seq: u64,
     ) -> Result<String, Error> {
         use crate::handler::DepositsHandler;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::TlvDecode;
 
         // Operator pubkey straight from the signer — no per-call seed
         // derivation, and no operator_secret field on Wallet anymore.
@@ -1647,49 +1646,54 @@ impl Node {
             .cloned()
             .collect();
 
-        // Rebuild state from genesis by replaying truncated history.
-        // Start with a fresh state based on the original's genesis parameters.
-        let mut fork_state = original.state.clone();
+        // Rebuild the fork's state as of `last_valid_seq` from genesis.
+        //
+        // The fork's state is the ledger AT THE FORK POINT: everything the
+        // dispute computes from it (the replacement-collateral floor in
+        // auto-arm, and the recovered ledger's balances) must exclude the
+        // fault. It used to be `original.state.clone()` with a few fields
+        // cleared and the prefix replayed on top, but the base replica has
+        // applied the faulty update (see `LedgerActor::apply_inbound`), and
+        // the clone kept every field the reset list missed, among them the
+        // cached `total_deposit_balance`. Replay then ADDED the prefix's
+        // balances to the post-fault total: on ledger C, 40,480,000,000 msat
+        // (after a fraudulent 40,000,000,000 credit) + 480,000,000 replayed,
+        // so ref3 demanded 61,445,000 sats of replacement collateral where
+        // 725,000 was right, and armed without any.
+        //
+        // In-memory history is capped (`history_retain`), so when it no
+        // longer reaches genesis the chain comes from the on-disk JSONL.
+        let replay_chain: Vec<deposits_core::SignedLedgerUpdate> =
+            if original.history.first().map(|u| u.sequence_number) == Some(0) {
+                truncated_history.clone()
+            } else {
+                self.handler
+                    .read_persisted_history(ledger_id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|u| u.sequence_number <= last_valid_seq)
+                    .collect()
+            };
+        let fork_state = match fork_state_at(&original.state, &replay_chain, last_valid_seq) {
+            Some(state) => state,
+            None => {
+                return Err(Error::Protocol(format!(
+                    "cannot rebuild ledger {} at fork point {}: no LedgerOpen (seq 0) \
+                     in memory or on disk",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    last_valid_seq
+                )));
+            }
+        };
 
-        // Reset derived state fields that will be rebuilt by replay
-        fork_state.deposits.clear();
-        fork_state.quorum_members.clear();
-        fork_state.joined_quorums.clear();
-        fork_state.pending_transfers.clear();
-        fork_state.quorum_at_fork.clear();
-        fork_state.dispute_fork_sequence = 0;
-        fork_state.dispute_state = deposits_core::types::DisputeState::Normal;
-        fork_state.reserves_amount = 0;
-        fork_state.sequence = 0;
-        fork_state.chain_tip_hash = [0u8; 32];
-
-        // Create a temporary ledger for replay
-        let mut fork = Ledger {
+        let fork = Ledger {
             state: fork_state,
             protocol: Default::default(),
             role: deposits_core::ledger::LedgerRole::Operator, // We operate the fork
-            history: truncated_history.clone(),
+            history: truncated_history,
             created_at: Default::default(),
         };
-
-        // Replay all truncated operations to rebuild state
-        for update in &truncated_history {
-            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                if let Err(e) = fork.apply_state_changes(&op) {
-                    tracing::warn!(
-                        "Fork replay seq {}: failed to apply state change: {}",
-                        update.sequence_number,
-                        e
-                    );
-                }
-            }
-        }
-
-        // Update sequence/hash from last valid update
-        if let Some(last) = truncated_history.last() {
-            fork.state.sequence = last.sequence_number;
-            fork.state.chain_tip_hash = last.chain_hash();
-        }
+        drop(original);
 
         // Store under compound key
         let fork_key = DepositsHandler::fork_tracking_key(ledger_id, last_valid_seq, &our_pubkey);
@@ -1709,6 +1713,81 @@ impl Node {
 
         Ok(fork_key)
     }
+}
+
+/// The ledger's state at `last_valid_seq`, replayed from a FRESH state over
+/// `chain` (the base replica's updates, oldest first). Nothing is carried over
+/// from `current`, which may already include the fault being disputed, except
+/// `reserves_outpoint`, which no operation sets. `None` when `chain` does not
+/// start with the seq-0 `LedgerOpen`, since then there is nothing to replay from.
+///
+/// Mirrors `Ledger::recompute_state` (the same per-update post-hooks), but a
+/// single op that fails to apply is logged and skipped rather than aborting,
+/// as the JSONL loader does, so a quirk deep in a long history cannot stop an
+/// honest member from disputing.
+pub(crate) fn fork_state_at(
+    current: &deposits_core::types::LedgerState,
+    chain: &[deposits_core::SignedLedgerUpdate],
+    last_valid_seq: u64,
+) -> Option<deposits_core::types::LedgerState> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::LedgerState;
+    use deposits_core::TlvDecode;
+
+    let genesis = chain.first().filter(|u| u.sequence_number == 0)?;
+    let (operator_id, reserves_id, genesis_block) =
+        match LedgerOperation::tlv_decode(&genesis.message) {
+            Ok(LedgerOperation::LedgerOpen {
+                operator_id,
+                reserves_id,
+                genesis_block,
+                ..
+            }) => (operator_id, reserves_id, genesis_block),
+            _ => return None,
+        };
+    let mut state = LedgerState::new(operator_id, reserves_id, genesis_block);
+    for update in chain.iter().filter(|u| u.sequence_number <= last_valid_seq) {
+        let op = match LedgerOperation::tlv_decode(&update.message) {
+            Ok(op) => op,
+            Err(e) => {
+                tracing::warn!(
+                    "Fork replay seq {}: failed to decode: {}",
+                    update.sequence_number,
+                    e
+                );
+                continue;
+            }
+        };
+        if let Err(e) = state.apply_in_place(&op) {
+            tracing::warn!(
+                "Fork replay seq {}: failed to apply state change: {}",
+                update.sequence_number,
+                e
+            );
+            continue;
+        }
+        if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
+            if update.block_height > 0 {
+                if let Some(deposit) = state.deposits.get_mut(deposit_id) {
+                    deposit.opened_at_block = update.block_height;
+                    if deposit.last_fee_assessment == 0 {
+                        deposit.last_fee_assessment = update.block_height;
+                    }
+                }
+            }
+        }
+        if matches!(op, LedgerOperation::QuorumBegin { .. }) {
+            state.note_quorum_begin(
+                update.block_height,
+                update.sequence_number,
+                update.content_hash,
+            );
+        }
+        state.sequence = update.sequence_number;
+        state.chain_tip_hash = update.chain_hash();
+    }
+    state.reserves_outpoint = current.reserves_outpoint.clone();
+    Some(state)
 }
 
 /// Two updates double-sign the same slot: same ledger + sequence + operator,
@@ -1794,5 +1873,272 @@ mod equivocation_detection_tests {
         let a = upd([1u8; 32], 11080, op, [0xAA; 32]);
         let b = upd([2u8; 32], 11080, op, [0xBB; 32]);
         assert!(!updates_equivocate(&a, &b));
+    }
+}
+
+#[cfg(test)]
+mod fork_point_collateral_tests {
+    //! Finding 9a (cl-deposits REDTEAM, 2026-09-28): a colluding operator's
+    //! non-conforming 40,000,000,000 msat credit on ledger C (obligations
+    //! 480,000,000 msat, collateral/reserves = 30e9/20e9) made the honest
+    //! disputant demand 61,445,000 sats of replacement collateral instead of
+    //! 725,000, so it armed without any. DEP-06 §Phase 1 sizes the bond from
+    //! obligations at `last_valid_sequence`. These pin both the arming side
+    //! (`fork_state_at`) and the cosigner side (`collateral_basis_at`) to that.
+    use super::fork_state_at;
+    use crate::node::replacement_collateral::{
+        collateral_basis_at, compute_required_replacement_sats, CollateralPolicy,
+    };
+    use bitcoin::hashes::{sha256, Hash};
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+    use deposits_core::types::LedgerState;
+    use deposits_core::{SignedLedgerUpdate, TlvEncode};
+
+    const RESERVES: u64 = 20_000_000_000;
+    const COLLATERAL: u64 = 30_000_000_000;
+    const HONEST: u64 = 480_000_000;
+    const FRAUD: u64 = 40_000_000_000;
+    const LVS: u64 = 3;
+
+    fn pk(seed: u8) -> PublicKey {
+        let secp = Secp256k1::new();
+        PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
+    }
+
+    fn signed(
+        seq: u64,
+        operator: PublicKey,
+        op: &LedgerOperation,
+        prev: [u8; 32],
+    ) -> SignedLedgerUpdate {
+        let message = op.tlv_encode();
+        let mut h = Vec::new();
+        h.extend_from_slice(&seq.to_le_bytes());
+        h.extend_from_slice(&prev);
+        h.extend_from_slice(&message);
+        SignedLedgerUpdate {
+            message,
+            message_type: 0x8001,
+            operator_id: operator,
+            ledger_id: [7u8; 32],
+            sequence_number: seq,
+            previous_hash: prev,
+            content_hash: *sha256::Hash::hash(&h).as_byte_array(),
+            block_height: 100 + seq as u32,
+            block_hash: [0u8; 32],
+            operator_signature: [seq as u8 + 1; 64],
+            cosign_signature: [0u8; 64],
+            cosigner_pubkey: None,
+            member_ledger_hash: None,
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn credit(n: u8, amount: u64) -> LedgerOperation {
+        LedgerOperation::OnchainCredit {
+            txid: [n; 32],
+            vout: 0,
+            deposit_id: [0xAB; 16],
+            amount,
+            funding_address: "bcrt1qfund".to_string(),
+            commitment: None,
+        }
+    }
+
+    /// seq 0 LedgerOpen, 1 QuorumBegin, 2 DepositOpen, 3 the honest credit
+    /// (the last valid update), 4 the fraudulent credit.
+    fn ledger_c() -> (PublicKey, Vec<SignedLedgerUpdate>) {
+        let operator = pk(1);
+        let ops = vec![
+            LedgerOperation::LedgerOpen {
+                operator_id: operator,
+                reserves_id: "bcrt1qreserves".to_string(),
+                genesis_block: 0,
+                reserves_amount: RESERVES,
+                collateral_amount: COLLATERAL,
+            },
+            LedgerOperation::QuorumBegin {
+                reserves_id: "bcrt1qreserves".to_string(),
+                spending_txid: [0; 32],
+                new_outpoint_txid: [1; 32],
+                new_outpoint_vout: 0,
+                amount: RESERVES,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0; 32],
+                quorum_members: vec![QuorumMemberRef::pubkey_only(pk(2))],
+                collateral_amount: COLLATERAL,
+                protocol_version: None,
+            },
+            LedgerOperation::DepositOpen {
+                deposit_id: [0xAB; 16],
+                descriptor: "wpkh(deadbeef)".to_string(),
+                fees: None,
+                transfer_fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+                commitment: None,
+            },
+            credit(1, HONEST),
+            credit(2, FRAUD),
+        ];
+        let mut chain = Vec::new();
+        let mut prev = [0u8; 32];
+        for (seq, op) in ops.iter().enumerate() {
+            let u = signed(seq as u64, operator, op, prev);
+            prev = u.chain_hash();
+            chain.push(u);
+        }
+        (operator, chain)
+    }
+
+    /// The base replica's state: it applies the non-conforming update too
+    /// (`LedgerActor::apply_inbound` logs the violations and applies).
+    fn base_state(operator: PublicKey, chain: &[SignedLedgerUpdate]) -> LedgerState {
+        use deposits_core::TlvDecode;
+        let mut state = LedgerState::new(operator, String::new(), 0);
+        for u in chain {
+            state
+                .apply_in_place(&LedgerOperation::tlv_decode(&u.message).unwrap())
+                .unwrap();
+            state.sequence = u.sequence_number;
+            state.chain_tip_hash = u.chain_hash();
+        }
+        state
+    }
+
+    fn required(obligations: u64) -> u64 {
+        compute_required_replacement_sats(
+            obligations,
+            COLLATERAL,
+            RESERVES,
+            &CollateralPolicy::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fork_state_is_the_fork_point_not_the_faulted_base() {
+        let (operator, chain) = ledger_c();
+        let base = base_state(operator, &chain);
+        assert_eq!(base.total_deposit_balance(), HONEST + FRAUD);
+
+        let fork = fork_state_at(&base, &chain, LVS).unwrap();
+        assert_eq!(fork.total_deposit_balance(), HONEST);
+        assert_eq!(
+            fork.fold_deposit_balance(),
+            HONEST,
+            "cache matches the deposits map"
+        );
+        assert_eq!(fork.sequence, LVS);
+        assert_eq!(fork.chain_tip_hash, chain[LVS as usize].chain_hash());
+        assert_eq!(
+            (fork.collateral_amount, fork.reserves_amount),
+            (COLLATERAL, RESERVES)
+        );
+        assert_eq!(fork.quorum_begin_sequence, Some(1));
+    }
+
+    #[test]
+    fn required_collateral_uses_obligations_at_the_fork_point() {
+        let (operator, chain) = ledger_c();
+        let base = base_state(operator, &chain);
+        let fork = fork_state_at(&base, &chain, LVS).unwrap();
+
+        // 480,000,000 msat × 1.5 / 1000 + 5,000: what cl pledged against.
+        let at_fork = required(fork.total_deposit_balance());
+        assert_eq!(at_fork, 725_000);
+        // The faulted tip would demand 60,725,000; the old fork rebuild
+        // (clone of the base, deposits cleared, cached total NOT cleared,
+        // prefix replayed on top) demanded 61,445,000, the logged figure.
+        assert_eq!(required(base.total_deposit_balance()), 60_725_000);
+        assert_eq!(required(HONEST + FRAUD + HONEST), 61_445_000);
+        assert!(at_fork < required(base.total_deposit_balance()));
+    }
+
+    #[test]
+    fn fork_state_ignores_the_callers_current_state() {
+        // Whatever the base replica holds (here a cached total the replay
+        // must not add to), the rebuild starts fresh.
+        let (operator, chain) = ledger_c();
+        let mut base = base_state(operator, &chain);
+        base.total_deposit_balance = u64::MAX / 2;
+        base.fees_accumulated = 12345;
+        let fork = fork_state_at(&base, &chain[..=LVS as usize], LVS).unwrap();
+        assert_eq!(fork.total_deposit_balance(), HONEST);
+        assert_eq!(fork.fees_accumulated, 0);
+    }
+
+    #[test]
+    fn fork_state_needs_genesis() {
+        let (operator, chain) = ledger_c();
+        let base = base_state(operator, &chain);
+        assert!(fork_state_at(&base, &chain[1..], LVS).is_none());
+    }
+
+    #[test]
+    fn cosigner_basis_is_the_fork_point_and_agrees_with_the_armer() {
+        let (operator, mut chain) = ledger_c();
+        // A disputant's fork-branch updates past lvs are on the relay too.
+        let disputant = pk(3);
+        chain.push(signed(LVS + 1, disputant, &credit(9, FRAUD), [9; 32]));
+        chain.sort_by_key(|u| (u.sequence_number, u.operator_id));
+
+        let basis = collateral_basis_at(&chain, operator, LVS).unwrap();
+        assert_eq!(basis.obligations_msat, HONEST);
+        assert_eq!(
+            (
+                basis.qb_collateral_msat,
+                basis.qb_reserves_msat,
+                basis.qb_seq
+            ),
+            (COLLATERAL, RESERVES, 1)
+        );
+        let policy = CollateralPolicy::default();
+        assert_eq!(basis.required_sats(&policy), Some(725_000));
+
+        // Armer and cosigner size the bond the same way.
+        let base = base_state(
+            operator,
+            &chain
+                .iter()
+                .filter(|u| u.operator_id == operator)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let fork = fork_state_at(
+            &base,
+            &chain
+                .iter()
+                .filter(|u| u.operator_id == operator)
+                .cloned()
+                .collect::<Vec<_>>(),
+            LVS,
+        )
+        .unwrap();
+        assert_eq!(
+            compute_required_replacement_sats(
+                fork.total_deposit_balance(),
+                fork.collateral_amount,
+                fork.reserves_amount,
+                &policy
+            ),
+            basis.required_sats(&policy)
+        );
+
+        // At the faulted tip the basis would include the fraud.
+        let tip = collateral_basis_at(&chain, operator, LVS + 1).unwrap();
+        assert_eq!(tip.obligations_msat, HONEST + FRAUD);
+    }
+
+    #[test]
+    fn cosigner_basis_refuses_without_a_quorum_begin() {
+        let (operator, chain) = ledger_c();
+        assert!(collateral_basis_at(&chain, operator, 0).is_err());
     }
 }
