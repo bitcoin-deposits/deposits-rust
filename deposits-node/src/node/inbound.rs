@@ -1390,56 +1390,19 @@ impl Node {
         // `proof.proof_type.is_respectful()` here and skip the cascade
         // for the respectful case.
 
-        // 5. Determine last valid sequence from the proof
-        let last_valid_seq = match &broadcast.proof.evidence {
-            deposits_core::fraud::FraudEvidence::UncreditedOnchain { proof_sequence, .. } => {
-                proof_sequence.saturating_sub(1)
-            }
-            deposits_core::fraud::FraudEvidence::UncreditedLightning { proof_sequence, .. } => {
-                proof_sequence.saturating_sub(1)
-            }
-            deposits_core::fraud::FraudEvidence::NonConforming { sequence, .. } => {
-                sequence.saturating_sub(1)
-            }
-            deposits_core::fraud::FraudEvidence::Equivocation { sequence, .. } => {
-                // Everything strictly before the double-signed seq is
-                // canonical and inherits to the fork branch.
-                sequence.saturating_sub(1)
-            }
-            deposits_core::fraud::FraudEvidence::NonConformingCosignature { .. } => {
-                // Disputed ledger is the accused's *own* (cross-ledger
-                // contagion). Their own ledger's chain is intact up to
-                // its current tip — they just put their key on bad
-                // work elsewhere. Fork at "right now," same as
-                // QuorumExpired's framing.
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
-                    .unwrap_or(0)
-            }
-            deposits_core::fraud::FraudEvidence::QuorumExpired { .. } => {
-                // QuorumExpired is respectful: the operator's chain is
-                // valid up to its current tip — they just stopped
-                // rotating before the deadline. All recorded updates
-                // remain conforming; the fork point is "right now."
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
-                    .unwrap_or(0)
-            }
-            _ => {
-                // For stale cosign and dispute dereliction, use the
-                // embedding sequence as a reference point (the fraud
-                // happened before this).
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
-                    .unwrap_or(0)
-            }
+        // 5. Determine last valid sequence from the proof: the fault's
+        //    predecessor wherever the proof names a fault on this ledger,
+        //    never the replica's tip past it (auto_arm also clamps to the
+        //    first update the replica flagged).
+        let replica_tip = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
+                .unwrap_or(0)
         };
+        let last_valid_seq =
+            fraud_proof_last_valid_seq(&broadcast.proof.evidence, ledger_id, replica_tip);
 
         tracing::warn!(
             "INITIATING DISPUTE based on fraud proof: ledger={}, last_valid_seq={}, type={:?}",
@@ -1781,6 +1744,41 @@ pub(crate) fn fork_state_at(
     Some(state)
 }
 
+/// The sequence a dispute started from a verified fraud proof on
+/// `ledger_id` forks after. Where the evidence names a fault on this ledger
+/// that is its predecessor (cl: `(1- fault-sequence)`): NonConformingUpdate's
+/// `fault_sequence`, Equivocation's `sequence`, the uncredited payments'
+/// `proof_sequence`, NonConforming's `sequence`, and NonConformingCosignature's
+/// `fault_sequence` when the fault ledger is this one. Otherwise the chain is
+/// valid up to `replica_tip`: QuorumExpired (a deadline miss), a
+/// NonConformingCosignature on another ledger (cross-ledger contagion: this
+/// ledger's own chain is intact), and the rest. Before this, NonConformingUpdate
+/// fell to the replica tip: ref3 disputed C's fault at 17,840 from 20,181.
+pub(crate) fn fraud_proof_last_valid_seq(
+    evidence: &deposits_core::fraud::FraudEvidence,
+    ledger_id: &str,
+    replica_tip: u64,
+) -> u64 {
+    use deposits_core::fraud::FraudEvidence as E;
+    let fault = match evidence {
+        E::NonConformingUpdate { fault_sequence, .. } => Some(*fault_sequence),
+        E::Equivocation { sequence, .. } => Some(*sequence),
+        E::UncreditedOnchain { proof_sequence, .. } => Some(*proof_sequence),
+        E::UncreditedLightning { proof_sequence, .. } => Some(*proof_sequence),
+        E::NonConforming { sequence, .. } => Some(*sequence),
+        E::NonConformingCosignature {
+            fault_ledger_id,
+            fault_sequence,
+            ..
+        } if fault_ledger_id.eq_ignore_ascii_case(ledger_id) => Some(*fault_sequence),
+        _ => None,
+    };
+    match fault {
+        Some(seq) => seq.saturating_sub(1),
+        None => replica_tip,
+    }
+}
+
 /// Whether `update` belongs to ledger `ledger_id`, whose `history` we hold,
 /// by what its operator signed: a genesis opening that ledger, or an
 /// update whose `previous_hash` is one of our updates' `chain_hash`. Its
@@ -1816,6 +1814,41 @@ pub(crate) fn updates_equivocate(
         && a.sequence_number == b.sequence_number
         && a.operator_id == b.operator_id
         && a.content_hash != b.content_hash
+}
+
+#[cfg(test)]
+mod fraud_proof_base_tests {
+    use super::fraud_proof_last_valid_seq;
+    use deposits_core::fraud::FraudEvidence;
+
+    const C: &str = "ab";
+
+    /// ref3 verified cl's NonConformingUpdate proof of ledger C's seq 17,840
+    /// and initiated a dispute at last_valid_seq=20181, its replica's tip.
+    #[test]
+    fn a_verified_proof_forks_before_its_fault_not_at_the_replica_tip() {
+        let ncu = FraudEvidence::NonConformingUpdate {
+            fault_sequence: 17_840,
+            fault_update_hex: String::new(),
+        };
+        assert_eq!(fraud_proof_last_valid_seq(&ncu, C, 20_181), 17_839);
+        let equivocation = FraudEvidence::Equivocation {
+            sequence: 17_840,
+            update_a_hex: String::new(),
+            update_b_hex: String::new(),
+        };
+        assert_eq!(fraud_proof_last_valid_seq(&equivocation, C, 20_181), 17_839);
+        let cosig = |ledger: &str| FraudEvidence::NonConformingCosignature {
+            fault_ledger_id: ledger.to_string(),
+            fault_sequence: 17_840,
+            governing_quorumbegin_seq: 1,
+            fault_update_hex: String::new(),
+        };
+        // On this ledger: before the fault. On another (contagion): this
+        // ledger's chain is intact, so its tip.
+        assert_eq!(fraud_proof_last_valid_seq(&cosig("AB"), C, 20_181), 17_839);
+        assert_eq!(fraud_proof_last_valid_seq(&cosig("cd"), C, 20_181), 20_181);
+    }
 }
 
 #[cfg(test)]

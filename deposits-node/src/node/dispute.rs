@@ -660,6 +660,25 @@ impl Node {
 
         let our_pubkey = self.node_id;
 
+        // Never fork past a known fault. The replica applies updates it
+        // flags as non-conforming and follows the chain past them, so a
+        // caller that took its base from the replica's tip (ref3 disputed
+        // C's fault at 17,840 from last_valid_seq=20181) would carry the
+        // fraud into the fork.
+        let requested = last_valid_seq;
+        let last_valid_seq =
+            dispute_base(requested, self.handler.first_non_conforming(ledger_id));
+        if last_valid_seq != requested {
+            tracing::warn!(
+                "Dispute on {}: last_valid_seq {} is past the first non-conforming update \
+                 (seq {}); forking at {}",
+                &ledger_id[..16.min(ledger_id.len())],
+                requested,
+                last_valid_seq + 1,
+                last_valid_seq
+            );
+        }
+
         // 0. Create a fork of the disputed ledger (or reuse existing one)
         let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
 
@@ -3809,5 +3828,34 @@ mod recovery_chaining_tests {
         assert_ne!(u2.content_hash, u2.chain_hash());
         LedgerConformanceValidator::validate_hash_chain(&[u0, u1, u2, u3_bad])
             .expect_err("content_hash-linked internal rotation op must be rejected");
+    }
+}
+
+/// The sequence a dispute forks after: the caller's `requested` base, but
+/// never at or past `first_non_conforming`, the first update on the
+/// original operator's chain known to be non-conforming.
+pub(crate) fn dispute_base(requested: u64, first_non_conforming: Option<u64>) -> u64 {
+    match first_non_conforming {
+        Some(fault) if fault <= requested => fault.saturating_sub(1),
+        _ => requested,
+    }
+}
+
+#[cfg(test)]
+mod dispute_base_tests {
+    use super::dispute_base;
+
+    #[test]
+    fn a_base_past_the_fault_is_pulled_back_before_it() {
+        // ref3 on ledger C: fault at 17,840, replica tip 20,181.
+        assert_eq!(dispute_base(20_181, Some(17_840)), 17_839);
+        assert_eq!(dispute_base(17_840, Some(17_840)), 17_839);
+    }
+
+    #[test]
+    fn a_base_before_the_fault_or_with_none_known_is_kept() {
+        assert_eq!(dispute_base(17_839, Some(17_840)), 17_839);
+        assert_eq!(dispute_base(9_000, Some(17_840)), 9_000);
+        assert_eq!(dispute_base(20_181, None), 20_181);
     }
 }

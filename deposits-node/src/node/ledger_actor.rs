@@ -270,6 +270,17 @@ impl LedgerActor {
                     "Conformance violations on inbound apply: {:?}",
                     violations
                 );
+                // The replica still applies it (and so follows the chain past
+                // it); record where it went wrong so a dispute forks before
+                // it, not at our tip. Only violations the signed evidence
+                // proves: not the ones that turn on the unsigned block_height.
+                if violations
+                    .iter()
+                    .any(deposits_core::fraud::proves_non_conformance)
+                {
+                    self.handler
+                        .note_non_conforming(&self.ledger_id, update.sequence_number);
+                }
             }
             Err(e) => {
                 tracing::warn!(

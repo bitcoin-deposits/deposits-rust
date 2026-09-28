@@ -1592,7 +1592,7 @@ fn replay_canonical(
 /// cadence, which starts from the DepositOpen's height (`FeeWindowNotElapsed`,
 /// `FeeExceedsAssessment`). Counting those would let a relay frame an honest
 /// operator by rewriting a height.
-fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
+pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
     use crate::types::ConformanceViolation as V;
     !matches!(
         v,

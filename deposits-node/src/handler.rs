@@ -133,6 +133,18 @@ pub struct DepositsHandler {
     /// and does not judge (dispute) one it could not repair.
     damaged_ledgers: Mutex<HashMap<String, Vec<SequenceGap>>>,
 
+    /// Per joined ledger, the lowest sequence whose operator update this
+    /// replica flagged as non-conforming when applying it (the replica still
+    /// applies it and follows the chain, so its tip can be past the fault).
+    /// See [`Handler::first_non_conforming`].
+    flagged_non_conforming: Mutex<HashMap<String, u64>>,
+
+    /// Per ledger, the first non-conforming update found by scanning the
+    /// history once (`find_non_conforming_update`), which covers what was
+    /// applied before this process started (the JSONL loader applies without
+    /// judging).
+    scanned_non_conforming: Mutex<HashMap<String, Option<u64>>>,
+
     /// Tracks last-seen modification times for ledger JSONL files.
     /// Used to avoid re-parsing files that haven't changed.
     last_file_modtimes: Mutex<HashMap<String, std::time::SystemTime>>,
@@ -297,6 +309,8 @@ impl DepositsHandler {
             persisted_next_seq,
             persist_locks: Mutex::new(HashMap::new()),
             damaged_ledgers,
+            flagged_non_conforming: Mutex::new(HashMap::new()),
+            scanned_non_conforming: Mutex::new(HashMap::new()),
             last_file_modtimes: Mutex::new(HashMap::new()),
             appends_since_compaction: Mutex::new(HashMap::new()),
             event_store,
@@ -1670,6 +1684,56 @@ impl DepositsHandler {
             .iter()
             .map(|(id, gaps)| (id.clone(), gaps.clone()))
             .collect()
+    }
+
+    /// Record that the replica flagged the update at `seq` on `ledger_id` as
+    /// non-conforming while applying it. Takes no ledger lock, so the ledger
+    /// actor can call it while holding the ledger's write lock.
+    pub(crate) fn note_non_conforming(&self, ledger_id: &str, seq: u64) {
+        let mut flagged = self.flagged_non_conforming.lock().unwrap();
+        let first = flagged.entry(ledger_id.to_string()).or_insert(seq);
+        *first = (*first).min(seq);
+    }
+
+    /// The first sequence on `ledger_id`'s original operator chain known to be
+    /// non-conforming: the lowest this replica flagged on apply, or found by a
+    /// one-time scan of its history. A dispute must fork before it: the
+    /// replica applies flagged updates and follows the fraudulent chain, so
+    /// its tip is not a valid base.
+    pub(crate) fn first_non_conforming(&self, ledger_id: &str) -> Option<u64> {
+        let flagged = self
+            .flagged_non_conforming
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .copied();
+        let cached = self
+            .scanned_non_conforming
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .copied();
+        let scanned = match cached {
+            Some(s) => s,
+            None => {
+                let arc = self.ledgers.lock().unwrap().get(ledger_id).cloned();
+                let s = arc.and_then(|arc| {
+                    let l = arc.read().unwrap();
+                    let operator = l.history.first().filter(|g| g.sequence_number == 0)?.operator_id;
+                    deposits_core::fraud::find_non_conforming_update(&l.history, &operator)
+                        .map(|(seq, _)| seq)
+                });
+                self.scanned_non_conforming
+                    .lock()
+                    .unwrap()
+                    .insert(ledger_id.to_string(), s);
+                s
+            }
+        };
+        match (flagged, scanned) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Whether `ledger_id`'s replica was replayed across a hole in its JSONL
@@ -3061,6 +3125,118 @@ mod tests {
             handler.persist_ledger_to_disk(&ledger_id).unwrap();
         }
         (handler, arc, ledger_id, op_pk)
+    }
+
+    /// Ledger C in miniature, as a replica holds it after following the
+    /// fraud: LedgerOpen (reserves 20e9, collateral 30e9), QuorumBegin,
+    /// DepositOpen, a 480e6 credit, the 40e9 credit at seq 4, then two more
+    /// updates on top (tip 6). Real operations, operator-signed.
+    fn replica_past_a_fault() -> (PublicKey, Vec<SignedLedgerUpdate>) {
+        use bitcoin::secp256k1::{Keypair, Message, Secp256k1};
+        use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+        use deposits_core::TlvEncode;
+        use sha2::{Digest, Sha256};
+
+        let secp = Secp256k1::new();
+        let kp = Keypair::from_secret_key(&secp, &SecretKey::from_slice(&[7u8; 32]).unwrap());
+        let op = kp.public_key();
+        let member = PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[2u8; 32]).unwrap());
+        let ledger_id = deposits_core::types::LedgerState::compute_ledger_id(&op, "tb1qres", 0);
+        let credit = |n: u8, amount: u64| LedgerOperation::OnchainCredit {
+            txid: [n; 32],
+            vout: 0,
+            deposit_id: [0xAB; 16],
+            amount,
+            funding_address: "tb1qfund".to_string(),
+            commitment: None,
+        };
+        let ops = vec![
+            LedgerOperation::LedgerOpen {
+                operator_id: op,
+                reserves_id: "tb1qres".to_string(),
+                genesis_block: 0,
+                reserves_amount: 20_000_000_000,
+                collateral_amount: 30_000_000_000,
+            },
+            LedgerOperation::QuorumBegin {
+                reserves_id: "tb1qres".to_string(),
+                spending_txid: [0; 32],
+                new_outpoint_txid: [1; 32],
+                new_outpoint_vout: 0,
+                amount: 20_000_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0; 32],
+                quorum_members: vec![QuorumMemberRef::pubkey_only(member)],
+                collateral_amount: 30_000_000_000,
+                protocol_version: None,
+            },
+            LedgerOperation::DepositOpen {
+                deposit_id: [0xAB; 16],
+                descriptor: "wpkh(deadbeef)".to_string(),
+                fees: None,
+                transfer_fees: None,
+                payment_hash: None,
+                invoice: None,
+                cosigner_guarantee_signature: None,
+                receive_requires_sig: false,
+                fee_change_after_blocks: None,
+                fee_change_notice_blocks: None,
+                fee_change_limit_bps: None,
+                commitment: None,
+            },
+            credit(1, 480_000_000),
+            credit(2, 40_000_000_000),
+            credit(3, 1),
+            credit(4, 1),
+        ];
+        let mut chain: Vec<SignedLedgerUpdate> = Vec::new();
+        for (seq, o) in ops.iter().enumerate() {
+            let mut u = mk_update(op, seq as u64, 0);
+            u.message = o.tlv_encode();
+            u.ledger_id = ledger_id;
+            u.previous_hash = chain.last().map(|p| p.chain_hash()).unwrap_or([0u8; 32]);
+            u.content_hash = u.compute_hash();
+            let digest: [u8; 32] = Sha256::digest(u.operator_signing_data()).into();
+            u.operator_signature = secp
+                .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &kp)
+                .serialize();
+            chain.push(u);
+        }
+        (op, chain)
+    }
+
+    /// A dispute forks before the first non-conforming update the replica
+    /// holds, not at its tip: found by scanning the history (what the JSONL
+    /// loader applied without judging) and by what the actor flags on apply,
+    /// whichever is lower.
+    #[test]
+    fn the_first_non_conforming_update_bounds_the_dispute_base() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let (handler, _rx) = DepositsHandler::new(
+            test_local_signer(),
+            wallet,
+            temp_dir.path().to_path_buf(),
+            false,
+        );
+        let (op, chain) = replica_past_a_fault();
+        let arc = handler.get_or_create_ledger(op, "tb1qres".to_string());
+        let ledger_key = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        arc.write().unwrap().history = chain;
+
+        assert_eq!(handler.first_non_conforming(&ledger_key), Some(4));
+        // A later flag doesn't raise it; an earlier one lowers it.
+        handler.note_non_conforming(&ledger_key, 6);
+        assert_eq!(handler.first_non_conforming(&ledger_key), Some(4));
+        // The replica's tip is 6; the dispute forks at 3.
+        assert_eq!(
+            crate::node::dispute::dispute_base(6, handler.first_non_conforming(&ledger_key)),
+            3
+        );
+        handler.note_non_conforming(&ledger_key, 2);
+        assert_eq!(handler.first_non_conforming(&ledger_key), Some(2));
+        // A ledger with nothing flagged or found keeps the caller's base.
+        assert_eq!(handler.first_non_conforming("00"), None);
     }
 
     struct RetainEnv;
