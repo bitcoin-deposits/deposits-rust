@@ -1041,48 +1041,42 @@ pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
 
 /// Verify a `NonConformingCosignature` claim.
 ///
-/// The accusation: the accused operator put their BIP-340 key on
-/// (operator-signed OR cosigned) a non-conforming update on
-/// `fault_ledger_id`. With majority-cosign in force, the only way a
-/// non-conforming update lands is collusion — every party who put a
-/// signature on it is on the hook.
+/// The accusation: the accused put their BIP-340 key on (operator-signed OR
+/// cosigned) a non-conforming update on `fault_ledger_id`. With
+/// majority-cosign in force, the only way a non-conforming update lands is
+/// collusion — every party who put a signature on it is on the hook.
 ///
-/// The disputed ledger is the accused's *own* (proof.ledger_id);
-/// the fault ledger (`fault_ledger_id` inside the evidence) is
-/// where the bad update sits. Cross-ledger contagion is the punitive
-/// vehicle.
+/// The disputed ledger is the accused's *own* (proof.ledger_id); the fault
+/// ledger (`fault_ledger_id` inside the evidence) is where the bad update
+/// sits. Cross-ledger contagion is the punitive vehicle.
 ///
 /// Checks:
-///   1. Fetch `fault_ledger_id`'s history via `LedgerProvider`.
-///      Missing → refuse (the verifier can't conclude either way
-///      without it; an honest cosigner is expected to have any
-///      ledger they cosigned for).
-///   2. Locate the update at `fault_sequence`. Missing → reject.
-///   3. The accused's pubkey must appear either as the update's
-///      `operator_id` (they issued it) or in `cosignatures[*]
-///      .cosigner_pubkey` (they cosigned it).
-///   4. The `governing_quorumbegin_seq` must (a) be ≤
-///      `fault_sequence` and (b) reference an actual `QuorumBegin`
-///      on `fault_ledger_id`. Pinning this prevents replaying the
-///      conformance check under a later rotation's rules.
-///   5. Replay history seq 0 → `fault_sequence - 1` from the
-///      derived genesis state. State carries the active ruleset
-///      forward through QuorumBegin so the conformance check at
-///      step 6 uses the rules the proof pinned to.
-///   6. Apply the fault update via `apply_with_verifier`. Any
-///      `ConformanceViolation` confirms the fraud; an empty
-///      violations vec means the proof is wrong.
+///   1. The inline fault update decodes, and its sequence and ledger match
+///      the evidence. Its operator signature verifies.
+///   2. The accused is the update's operator, or a cosigner whose
+///      cosignature on it verifies (a listed pubkey with a bogus signature
+///      is the operator's claim, not the cosigner's act).
+///   3. The fault links (`previous_hash`) to an update in `fault_history`,
+///      and that update's chain walks back by hash links to a genesis that
+///      opens `fault_ledger_id`. The fault's signatures fix that prefix; no
+///      other signature needs checking. Anything missing: fail closed.
+///   4. `governing_quorumbegin_seq` is ≤ `fault_sequence` and is a
+///      `QuorumBegin` on that prefix (pinning the ruleset).
+///   5. The prefix is replayed from genesis with the ledger's own replay
+///      step (`LedgerState::apply_update_in_place`, which records deposit
+///      open heights and the QuorumBegin as the ledger does), and the fault
+///      applied to that state. The proof holds exactly when the state
+///      machine refuses it or conformance reports a violation that proves
+///      non-conformance on the signed evidence; a fault that applies
+///      cleanly is refused.
 ///
-/// `authorizer` is the descriptor authorizer used for receive /
-/// withdraw / completion-script checks. Daemons pass `Dep16Authorizer`;
-/// pure unit tests that don't exercise descriptor-bound ops can pass
-/// `DenyAll` (which over-reports — every authorize-gated op trips —
-/// fine for ZeroAmount / ExceedsCollateral / InsufficientReserves
-/// fault patterns).
+/// As for `NonConformingUpdate`: conformance runs with `AllowAll` (an
+/// authorizer that denies would report every honest withdrawal, which is how
+/// this verifier used to accuse honest operators), and violations that turn
+/// on the unsigned `block_height` do not count (`proves_non_conformance`).
 pub fn verify_non_conforming_cosignature(
     proof: &FraudProof,
     fault_history: &[crate::types::SignedLedgerUpdate],
-    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
@@ -1097,7 +1091,7 @@ pub fn verify_non_conforming_cosignature(
         return Err("verify_non_conforming_cosignature: wrong evidence type".into());
     };
 
-    // (2) Decode the inline fault update + sanity checks.
+    // (1) Decode the inline fault update + sanity checks.
     let fault_update_bytes =
         hex::decode(fault_update_hex).map_err(|e| format!("fault_update_hex decode: {}", e))?;
     let fault_update = crate::types::SignedLedgerUpdate::tlv_decode(&fault_update_bytes)
@@ -1109,9 +1103,11 @@ pub fn verify_non_conforming_cosignature(
             fault_sequence, fault_update.sequence_number
         ));
     }
-    let fault_ledger_bytes =
-        hex::decode(fault_ledger_id).map_err(|e| format!("fault_ledger_id hex: {}", e))?;
-    if fault_ledger_bytes.len() != 32 || fault_ledger_bytes[..] != fault_update.ledger_id[..] {
+    let fault_ledger_bytes: [u8; 32] = hex::decode(fault_ledger_id)
+        .map_err(|e| format!("fault_ledger_id hex: {}", e))?
+        .try_into()
+        .map_err(|_| "fault_ledger_id must be 32 bytes".to_string())?;
+    if fault_ledger_bytes != fault_update.ledger_id {
         return Err(format!(
             "fault_ledger_id {} ≠ inline update.ledger_id {}",
             &fault_ledger_id[..16.min(fault_ledger_id.len())],
@@ -1119,14 +1115,14 @@ pub fn verify_non_conforming_cosignature(
         ));
     }
 
-    // (2a) Operator signature on the fault update verifies. Without
-    //      this, anyone could fabricate a "non-conforming update"
-    //      with random bytes and stuff in the accused's pubkey.
+    // Without this, anyone could fabricate a "non-conforming update" with
+    // random bytes and stuff in the accused's pubkey.
     fault_update
         .verify_operator_signature()
         .map_err(|e| format!("fault update operator_signature: {}", e))?;
 
-    // (3) Accused's key appears as operator_id OR cosigner.
+    // (2) The accused signed it: as operator, or with a cosignature that
+    //     verifies.
     let accused_bytes = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     if accused_bytes.len() != 33 {
         return Err(format!(
@@ -1135,21 +1131,32 @@ pub fn verify_non_conforming_cosignature(
         ));
     }
     let accused_is_operator = fault_update.operator_id.serialize() == accused_bytes[..];
-    let accused_is_cosigner = fault_update
-        .cosignatures
-        .iter()
-        .any(|e| e.cosigner_pubkey.serialize() == accused_bytes[..]);
-    if !accused_is_operator && !accused_is_cosigner {
-        return Err(format!(
-            "accused {} is not operator nor cosigner on fault update at seq {} \
-             — proof doesn't tie them to the non-conforming work",
-            &proof.accused[..16.min(proof.accused.len())],
-            fault_sequence
-        ));
+    if !accused_is_operator {
+        let Some(entry) = fault_update
+            .cosignatures
+            .iter()
+            .find(|e| e.cosigner_pubkey.serialize() == accused_bytes[..])
+        else {
+            return Err(format!(
+                "accused {} is not operator nor cosigner on fault update at seq {} \
+                 — proof doesn't tie them to the non-conforming work",
+                &proof.accused[..16.min(proof.accused.len())],
+                fault_sequence
+            ));
+        };
+        let mut only_theirs = fault_update.clone();
+        only_theirs.cosignatures = vec![entry.clone()];
+        only_theirs
+            .verify_cosign_signatures(&[entry.cosigner_pubkey], 1)
+            .map_err(|e| {
+                format!(
+                    "accused's cosignature on the fault update does not verify ({}) \
+                     — the operator listed them, they did not sign",
+                    e
+                )
+            })?;
     }
 
-    // (4) governing_quorumbegin_seq points to a real QB at-or-before
-    //     fault_sequence in the fault ledger's prior history.
     if *governing_quorumbegin_seq > *fault_sequence {
         return Err(format!(
             "governing_quorumbegin_seq {} > fault_sequence {} — \
@@ -1157,80 +1164,47 @@ pub fn verify_non_conforming_cosignature(
             governing_quorumbegin_seq, fault_sequence
         ));
     }
-    let governing_qb_update = fault_history
-        .iter()
-        .find(|u| u.sequence_number == *governing_quorumbegin_seq)
+    if *fault_sequence == 0 {
+        return Err("a seq-0 LedgerOpen has no quorum to cosign it".into());
+    }
+
+    // (3) The prefix the fault's signatures fix.
+    let index = OperatorIndex::new(fault_history, &fault_update.operator_id, *fault_sequence);
+    let linked = index
+        .at_seq(fault_sequence - 1)
+        .find(|p| p.chain_hash() == fault_update.previous_hash)
         .ok_or_else(|| {
             format!(
-                "governing_quorumbegin_seq {} not found in fault history",
-                governing_quorumbegin_seq
+                "fault update at seq {} links to no update in the fault ledger's \
+                 history — its predecessor can't be established, fail closed",
+                fault_sequence
             )
         })?;
-    let governing_qb_op = LedgerOperation::tlv_decode(&governing_qb_update.message)
-        .map_err(|e| format!("decode QB at seq {}: {}", governing_quorumbegin_seq, e))?;
-    if !matches!(governing_qb_op, LedgerOperation::QuorumBegin { .. }) {
+    let prefix = index.chain_to_genesis(linked, &fault_ledger_bytes)?;
+
+    // (4) The governing QuorumBegin is on that prefix (or is the fault).
+    let governing = if *governing_quorumbegin_seq == *fault_sequence {
+        &fault_update
+    } else {
+        prefix[*governing_quorumbegin_seq as usize]
+    };
+    if !matches!(
+        LedgerOperation::tlv_decode(&governing.message),
+        Ok(LedgerOperation::QuorumBegin { .. })
+    ) {
         return Err(format!(
             "update at governing_quorumbegin_seq {} is not a QuorumBegin",
             governing_quorumbegin_seq
         ));
     }
 
-    // (5) Replay seq 0 → fault_sequence - 1 from fault_history.
-    //     The inline fault update is applied separately in step 6.
-    // Build a fresh genesis state from the seq-0 LedgerOpen so the
-    // replay starts from the same root the operator did — not from
-    // the verifier's possibly-fresher view.
-    let seq0 = fault_history
-        .iter()
-        .find(|u| u.sequence_number == 0)
-        .ok_or_else(|| "fault history missing seq 0 LedgerOpen".to_string())?;
-    let (initial_operator, initial_reserves_id, initial_genesis_block) =
-        match LedgerOperation::tlv_decode(&seq0.message) {
-            Ok(LedgerOperation::LedgerOpen {
-                operator_id,
-                reserves_id,
-                genesis_block,
-                ..
-            }) => (operator_id, reserves_id, genesis_block),
-            _ => return Err("seq 0 is not LedgerOpen".into()),
-        };
-    let mut state = crate::types::LedgerState::new(
-        initial_operator,
-        initial_reserves_id,
-        initial_genesis_block,
-    );
-    for u in fault_history.iter() {
-        if u.sequence_number == 0 || u.sequence_number >= *fault_sequence {
-            // seq 0 was already used to seed; replays start at seq 1.
-            // Stop at seq == fault_sequence; we apply that one
-            // separately to capture violations.
-            continue;
-        }
-        let op = LedgerOperation::tlv_decode(&u.message)
-            .map_err(|e| format!("replay decode at seq {}: {}", u.sequence_number, e))?;
-        state
-            .apply_in_place(&op)
-            .map_err(|e| format!("replay apply at seq {}: {:?}", u.sequence_number, e))?;
-    }
-
-    // (6) Apply the fault update through the conformance pipeline.
-    //     Three outcomes:
-    //       - apply Err → state machine outright refuses (e.g.
-    //         unknown deposit_id, sequence mismatch); even stronger
-    //         evidence of bad cosigning than a conformance flag —
-    //         fraud confirmed.
-    //       - apply Ok(violations) with violations non-empty →
-    //         conformance violation under pinned ruleset — fraud
-    //         confirmed.
-    //       - apply Ok(violations) empty → proof wrong, reject.
-    let fault_op = LedgerOperation::tlv_decode(&fault_update.message)
-        .map_err(|e| format!("fault update decode: {}", e))?;
-    match state.apply_with_verifier(&fault_op, authorizer, fault_update.block_height) {
-        Err(_) => Ok(()),
-        Ok((_next_state, violations)) if !violations.is_empty() => Ok(()),
-        Ok(_) => Err(format!(
-            "fault update at seq {} produced no ConformanceViolation under \
-             the pinned ruleset — proof is wrong",
+    // (5) Replay and judge.
+    let state = replay_canonical(&prefix)?;
+    match fault_rejection(&state, &fault_update)? {
+        Some(_reason) => Ok(()),
+        None => Err(format!(
+            "fault update at seq {} applies cleanly with no conformance violation \
+             that the signed evidence proves — proof is wrong",
             fault_sequence
         )),
     }
@@ -1653,13 +1627,33 @@ pub fn find_non_conforming_update(
         ));
     }
 
-    // Rule breaks: the chain to the newest signed update that reaches genesis.
+    // Rule breaks along the operator's chain.
+    first_rule_break(&index, &ledger_id, |_| true, |u| confirm(u))
+        .map(|(u, reason)| (u.sequence_number, reason))
+}
+
+/// The first update, in sequence order, on the chain ending at the newest
+/// signed update by the operator that reaches `ledger_id`'s genesis (or a
+/// signed sibling linking into that chain) that is `eligible`, that the
+/// state before it refuses or flags with a violation that
+/// [`proves_non_conformance`], and that `confirm` accepts. One forward
+/// replay: each chain update is applied in place and checked on the
+/// post-state without the pre-state (a subset of the full check, so no clone
+/// per update); siblings, which are rare, get the full check on a clone.
+/// The caller's `confirm` runs the full verifier on a candidate.
+fn first_rule_break<'a>(
+    index: &OperatorIndex<'a>,
+    ledger_id: &[u8; 32],
+    eligible: impl Fn(&crate::types::SignedLedgerUpdate) -> bool,
+    confirm: impl Fn(&crate::types::SignedLedgerUpdate) -> bool,
+) -> Option<(&'a crate::types::SignedLedgerUpdate, String)> {
+    let signed = |u: &&crate::types::SignedLedgerUpdate| u.verify_operator_signature().is_ok();
     let mut tips: Vec<&crate::types::SignedLedgerUpdate> = index.by_hash.values().copied().collect();
     tips.sort_by_key(|u| std::cmp::Reverse(u.sequence_number));
     let chain = tips
         .into_iter()
         .filter(signed)
-        .find_map(|t| index.chain_to_genesis(t, &ledger_id).ok())?;
+        .find_map(|t| index.chain_to_genesis(t, ledger_id).ok())?;
 
     let mut state = replay_canonical(&chain[..1]).ok()?;
     for seq in 1..chain.len() {
@@ -1667,10 +1661,10 @@ pub fn find_non_conforming_update(
         for s in index.at_seq(seq as u64).filter(|s| {
             s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash()
         }) {
-            if signed(&s) {
+            if eligible(s) && signed(&s) {
                 if let Ok(Some(reason)) = fault_rejection(&state, s) {
                     if confirm(s) {
-                        return Some((seq as u64, reason));
+                        return Some((s, reason));
                     }
                 }
             }
@@ -1679,21 +1673,83 @@ pub fn find_non_conforming_update(
         let op = match state.apply_update_in_place(u) {
             Ok(op) => op,
             Err(e) => {
-                // Refused by the state machine (nothing was mutated).
+                // Refused by the state machine (nothing was mutated); the
+                // chain can't be replayed past it.
                 let reason = format!("state machine refuses it: {}", e);
-                return confirm(u).then_some((seq as u64, reason));
+                return (eligible(u) && confirm(u)).then_some((u, reason));
             }
         };
+        if !eligible(u) {
+            continue;
+        }
         let proving: Vec<_> = state
             .check_conformance(&op, None, &crate::types::AllowAll, u.block_height)
             .into_iter()
             .filter(proves_non_conformance)
             .collect();
         if !proving.is_empty() && confirm(u) {
-            return Some((seq as u64, format!("conformance violations: {:?}", proving)));
+            return Some((u, format!("conformance violations: {:?}", proving)));
         }
     }
     None
+}
+
+/// Find a quorum-cosigned update by `operator` in `history` that a
+/// `NonConformingCosignature` proof accusing `operator` would ground: its
+/// sequence, the governing `QuorumBegin`'s sequence, and why. The resolver's
+/// counterpart to [`find_non_conforming_update`], and linear for the same
+/// reason: one index, one forward replay (`first_rule_break`), and the
+/// candidate confirmed with [`verify_non_conforming_cosignature`].
+pub fn find_non_conforming_cosignature(
+    history: &[crate::types::SignedLedgerUpdate],
+    operator: &bitcoin::secp256k1::PublicKey,
+) -> Option<(u64, u64, String)> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::{TlvDecode, TlvEncode};
+
+    let index = OperatorIndex::new(history, operator, u64::MAX);
+    let ledger_id = index.at_seq(0).next()?.ledger_id;
+    // QuorumBegin sequences by the operator. The governing one for a fault at
+    // N is the latest at or before N; the verifier checks it is on the
+    // fault's own chain.
+    let mut qb_seqs: Vec<u64> = history
+        .iter()
+        .filter(|u| u.operator_id == *operator)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            )
+        })
+        .map(|u| u.sequence_number)
+        .collect();
+    qb_seqs.sort_unstable();
+    qb_seqs.dedup();
+    let governing =
+        |seq: u64| -> Option<u64> { qb_seqs.iter().rev().find(|&&q| q <= seq).copied() };
+    let proof_for = |u: &crate::types::SignedLedgerUpdate, qb: u64| FraudProof {
+        proof_type: FraudProofType::NonConformingCosignature,
+        accused: hex::encode(operator.serialize()),
+        ledger_id: hex::encode(ledger_id),
+        evidence: FraudEvidence::NonConformingCosignature {
+            fault_ledger_id: hex::encode(ledger_id),
+            fault_sequence: u.sequence_number,
+            governing_quorumbegin_seq: qb,
+            fault_update_hex: hex::encode(u.tlv_encode()),
+        },
+    };
+
+    let (u, reason) = first_rule_break(
+        &index,
+        &ledger_id,
+        |u| !u.cosignatures.is_empty() && governing(u.sequence_number).is_some(),
+        |u| {
+            governing(u.sequence_number).is_some_and(|qb| {
+                verify_non_conforming_cosignature(&proof_for(u, qb), history).is_ok()
+            })
+        },
+    )?;
+    Some((u.sequence_number, governing(u.sequence_number)?, reason))
 }
 
 /// Verify a `WinnerCollateralDeviation` claim.
@@ -2292,16 +2348,13 @@ pub fn verify_fraud_evidence(
                     &fault_ledger_id[..16.min(fault_ledger_id.len())]
                 )
             })?;
-            // Top-level entry uses DenyAll. Descriptor-bound conformance
-            // checks may over-report, but every NonConforming fault
-            // pattern worth disputing (ExceedsCollateral, ZeroAmount,
-            // InsufficientReserves, sequence/chain breaks) fires
-            // independent of the authorizer — and over-reporting on
-            // *honest* updates can't happen here because the cosigners
-            // only land updates that pass their own conformance check,
-            // so an honest update won't fire any violation regardless
-            // of authorizer choice.
-            verify_non_conforming_cosignature(proof, &fault_history, &crate::types::DenyAll)?;
+            // Conformance runs with AllowAll and ignores height-dependent
+            // violations (see verify_non_conforming_cosignature). This used
+            // to pass DenyAll on the argument that an honest update fires no
+            // violation whatever the authorizer; it does: DenyAll refuses
+            // every withdrawal's witness, so any honest cosigned withdrawal
+            // "proved" fraud.
+            verify_non_conforming_cosignature(proof, &fault_history)?;
         }
     }
 
