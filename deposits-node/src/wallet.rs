@@ -287,6 +287,21 @@ impl Wallet {
         }
     }
 
+    /// Our chain's block hash at `height`, if we can look it up: the cached
+    /// tip when `height` is the tip, otherwise a backend query. `None` on any
+    /// failure (callers treat that as "unknown", not as a mismatch).
+    pub fn block_hash_at(&self, height: u32) -> Option<[u8; 32]> {
+        let tip_height = *self.block_height.lock().unwrap();
+        let tip_hash = *self.block_hash.lock().unwrap();
+        if height == tip_height && tip_hash != [0u8; 32] {
+            return Some(tip_hash);
+        }
+        crate::chain_backend::from_env(&self.electrum_url)
+            .get_block_hash(height)
+            .ok()
+            .map(|h| *h.as_ref())
+    }
+
     /// Resolve an arbitrary block hash against the verifier's confirmed
     /// chain. Returns `Some(height)` iff the block is in our best
     /// chain; `None` if unknown / not confirmed / network error.

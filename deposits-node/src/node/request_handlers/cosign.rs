@@ -291,6 +291,33 @@ impl Node {
         let target_operator_id = Some(target_operator_id);
         let operator_ledger_arc = Some(operator_ledger_arc);
 
+        // Parse the v2 cosign_data (DEP-02 §Signing). Everything below reads the
+        // signed fields from here, so what we check is exactly what we sign.
+        let fields = match deposits_core::types::CosignData::parse(&cosign_data) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!("Cosign REFUSED: {}", e);
+                return (false, None, Some(e));
+            }
+        };
+        if let Err(msg) = check_cosign_header(
+            &fields,
+            sequence_number,
+            operator_ledger_arc
+                .as_ref()
+                .map(|arc| arc.read().unwrap().ledger_id()),
+            self.wallet.get_block_height().unwrap_or(0),
+            |h| self.wallet.block_hash_at(h),
+        ) {
+            tracing::warn!(
+                "Cosign REFUSED for {}... seq {}: {}",
+                &request.ledger_id[..16.min(request.ledger_id.len())],
+                sequence_number,
+                msg
+            );
+            return (false, None, Some(msg));
+        }
+
         // If we don't have the ledger locally, get the operator from the request sender
         // The sender of a cosign_update request IS the operator who needs the co-signature
         let target_operator_id = if target_operator_id.is_none() {
@@ -349,7 +376,7 @@ impl Node {
             let ledger = arc.read().unwrap();
             let expected_seq = ledger.next_sequence();
             // For an already-committed sequence, decide idempotent-vs-equivocation
-            // from the SIGNED bytes: does cosign_data (seq||prev_hash||message)
+            // from the SIGNED bytes: does cosign_data (every signed field)
             // reconstruct the exact update we hold at that seq? We deliberately do
             // NOT key off the request's content_hash_hex — it's attacker-supplied
             // and decoupled from what actually gets signed, so a requester could
@@ -361,11 +388,7 @@ impl Node {
                     .iter()
                     .rev()
                     .find(|u| u.sequence_number == sequence_number)
-                    .map(|u| {
-                        cosign_data.len() > 40
-                            && cosign_data[8..40] == u.previous_hash[..]
-                            && cosign_data[40..] == u.message[..]
-                    })
+                    .map(|u| u.cosign_fields() == fields)
             } else {
                 None
             };
@@ -545,14 +568,10 @@ impl Node {
 
         // Validate the operation before signing.
         //
-        // cosign_data = sequence_number (8 LE) || previous_hash (32) || message (TLV)
-        // Extract seq, prev_hash, and message. Verify the update chains from our local
-        // tip — if it doesn't, we haven't validated the intervening updates and MUST
-        // refuse to sign.
-        if cosign_data.len() > 40 {
-            // Extract prev_hash from cosign_data (bytes 8..40)
-            let mut cosign_prev_hash = [0u8; 32];
-            cosign_prev_hash.copy_from_slice(&cosign_data[8..40]);
+        // Verify the update chains from our local tip — if it doesn't, we haven't
+        // validated the intervening updates and MUST refuse to sign.
+        {
+            let cosign_prev_hash = fields.previous_hash;
 
             // Check chain continuity: the update must build on our validated tip
             if let Some(ref arc) = operator_ledger_arc {
@@ -576,8 +595,7 @@ impl Node {
                 }
             }
 
-            let message_bytes = &cosign_data[40..]; // skip 8 (seq) + 32 (prev_hash)
-            match LedgerOperation::tlv_decode(message_bytes) {
+            match LedgerOperation::tlv_decode(fields.message) {
                 Ok(operation) => {
                     // Validate against local ledger state
                     if let Some(ref arc) = operator_ledger_arc {
@@ -741,37 +759,14 @@ impl Node {
                     );
                 }
             }
-        } else {
-            tracing::warn!(
-                "Cosign: cosign_data too short ({} bytes)",
-                cosign_data.len()
-            );
-            return (false, None, Some("cosign_data too short".to_string()));
         }
 
-        // v1 cosig digest: tagged + length-prefixed message field. See
-        // `SignedLedgerUpdate::cosign_sign_digest_v1`. Closes the
-        // `message ↔ member_ledger_hash` boundary ambiguity that
-        // existed in the legacy `deposits/cosign` tag's flat concat.
-        // cosign_data layout in the request is
-        //   seq_le8 || previous_hash[32] || message
-        // and `message` is everything after byte 40. We rebuild the
-        // tagged digest with a `message_len_le4` between previous_hash
-        // and message, matching the v1 helper byte-for-byte.
-        use bitcoin::hashes::HashEngine;
-        const TAG: &[u8] = b"deposits/cosign/v1";
-        let tag_hash = sha256::Hash::hash(TAG);
-        let mut e = sha256::HashEngine::default();
-        e.input(tag_hash.as_byte_array());
-        e.input(tag_hash.as_byte_array());
-        e.input(&cosign_data[..8]); // seq_le8
-        e.input(&cosign_data[8..40]); // previous_hash
-        let message_bytes = &cosign_data[40..];
-        let msg_len: u32 = message_bytes.len() as u32;
-        e.input(&msg_len.to_le_bytes());
-        e.input(message_bytes);
-        e.input(&member_ledger_hash);
-        let hash = sha256::Hash::from_engine(e);
+        // DEP-02 v2 cosign digest over the exact bytes the operator sent (which
+        // parse above has checked are a well-formed cosign_data).
+        let hash = deposits_core::types::SignedLedgerUpdate::cosign_digest_for_data(
+            &cosign_data,
+            &member_ledger_hash,
+        );
 
         // Sign with Schnorr (BIP-340) via the Signer — anti-equivocation
         // policy keys off cosign_update(operator_ledger, seq, member_head).
@@ -789,7 +784,7 @@ impl Node {
                 sequence_number,
                 member_ledger_hash,
             ),
-            hash.as_byte_array(),
+            &hash,
         ) {
             Ok(s) => s,
             Err(e) => return (false, None, Some(format!("cosign sign: {}", e))),
@@ -1064,6 +1059,55 @@ pub(crate) enum CosignSeqGate {
     OutsideWindow,
 }
 
+/// Maximum distance, in blocks, between an update's `block_height` and the
+/// cosigner's own chain height.
+pub(crate) const COSIGN_MAX_BLOCK_SKEW: u32 = 6;
+
+/// Header checks a cosigner makes on the v2 `cosign_data` before signing it
+/// (DEP-02 §Signing binds `ledger_id`, `block_height` and `block_hash`):
+///
+/// - `sequence_number` is the one the request names;
+/// - `ledger_id` is the ledger we replicate and are answering about;
+/// - when our chain height is known (nonzero), `block_height` is within
+///   [`COSIGN_MAX_BLOCK_SKEW`] of it;
+/// - when `block_hash` is nonzero and we can look up our chain's hash at
+///   `block_height`, they agree. If the lookup fails we skip this check.
+pub(crate) fn check_cosign_header(
+    fields: &deposits_core::types::CosignData<'_>,
+    request_sequence: u64,
+    replica_ledger_id: Option<[u8; 32]>,
+    own_height: u32,
+    block_hash_at: impl FnOnce(u32) -> Option<[u8; 32]>,
+) -> Result<(), String> {
+    if fields.sequence_number != request_sequence {
+        return Err(format!(
+            "sequence mismatch: request says {}, cosign_data says {}",
+            request_sequence, fields.sequence_number
+        ));
+    }
+    match replica_ledger_id {
+        Some(id) if id == fields.ledger_id => {}
+        _ => return Err("ledger_id mismatch".to_string()),
+    }
+    if own_height != 0 && fields.block_height.abs_diff(own_height) > COSIGN_MAX_BLOCK_SKEW {
+        return Err(format!(
+            "block_height {} is more than {} blocks from our height {}",
+            fields.block_height, COSIGN_MAX_BLOCK_SKEW, own_height
+        ));
+    }
+    if fields.block_hash != [0u8; 32] {
+        if let Some(ours) = block_hash_at(fields.block_height) {
+            if ours != fields.block_hash {
+                return Err(format!(
+                    "block_hash mismatch at height {}",
+                    fields.block_height
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The cosigner's core safety rule, factored out pure so it's unit-testable.
 ///
 /// A correct cosigner only ever puts its signature on a STRICTLY-ADVANCING
@@ -1138,5 +1182,82 @@ mod cosign_seq_gate_tests {
     fn below_tip_but_pruned_is_refused() {
         // Below tip but not in our window → can't verify → refuse.
         assert_eq!(cosign_seq_gate(8, 10, None), CosignSeqGate::OutsideWindow);
+    }
+}
+
+#[cfg(test)]
+mod cosign_header_tests {
+    use super::{check_cosign_header, COSIGN_MAX_BLOCK_SKEW};
+    use deposits_core::types::CosignData;
+
+    fn fields(block_height: u32, block_hash: [u8; 32]) -> CosignData<'static> {
+        CosignData {
+            sequence_number: 7,
+            ledger_id: [0xaa; 32],
+            block_height,
+            block_hash,
+            previous_hash: [0xcc; 32],
+            message: &[0, 1, 42],
+        }
+    }
+
+    #[test]
+    fn accepts_matching_header() {
+        let f = fields(850_000, [0xbb; 32]);
+        assert_eq!(
+            check_cosign_header(&f, 7, Some([0xaa; 32]), 850_002, |_| Some([0xbb; 32])),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn refuses_other_ledger() {
+        let f = fields(850_000, [0xbb; 32]);
+        assert_eq!(
+            check_cosign_header(&f, 7, Some([0xab; 32]), 850_000, |_| None),
+            Err("ledger_id mismatch".to_string())
+        );
+    }
+
+    #[test]
+    fn refuses_sequence_other_than_requested() {
+        let f = fields(850_000, [0xbb; 32]);
+        assert!(check_cosign_header(&f, 8, Some([0xaa; 32]), 850_000, |_| None).is_err());
+    }
+
+    #[test]
+    fn block_height_skew() {
+        let f = fields(850_000, [0u8; 32]);
+        let ok = |own| check_cosign_header(&f, 7, Some([0xaa; 32]), own, |_| None);
+        assert!(ok(850_000 + COSIGN_MAX_BLOCK_SKEW).is_ok());
+        assert!(ok(850_000 - COSIGN_MAX_BLOCK_SKEW).is_ok());
+        assert!(ok(850_001 + COSIGN_MAX_BLOCK_SKEW).is_err());
+        assert!(ok(849_999 - COSIGN_MAX_BLOCK_SKEW).is_err());
+        // Own height unknown: no skew check.
+        assert!(ok(0).is_ok());
+        // Absent block_height is zero, which is far from any known height.
+        let z = fields(0, [0u8; 32]);
+        assert!(check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| None).is_err());
+    }
+
+    #[test]
+    fn block_hash_checked_when_known() {
+        let f = fields(850_000, [0xbb; 32]);
+        let run = |ours: Option<[u8; 32]>| {
+            check_cosign_header(&f, 7, Some([0xaa; 32]), 850_000, move |h| {
+                assert_eq!(h, 850_000);
+                ours
+            })
+        };
+        assert!(run(Some([0xbb; 32])).is_ok());
+        assert!(run(Some([0xbc; 32])).is_err());
+        // Lookup failed: skip the check.
+        assert!(run(None).is_ok());
+        // Zero block_hash: never looked up.
+        let z = fields(850_000, [0u8; 32]);
+        assert!(
+            check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| panic!("no lookup"))
+                .is_ok()
+        );
     }
 }
