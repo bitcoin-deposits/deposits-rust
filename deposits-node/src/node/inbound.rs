@@ -1766,44 +1766,13 @@ pub(crate) fn fork_state_at(
         };
     let mut state = LedgerState::new(operator_id, reserves_id, genesis_block);
     for update in chain.iter().filter(|u| u.sequence_number <= last_valid_seq) {
-        let op = match LedgerOperation::tlv_decode(&update.message) {
-            Ok(op) => op,
-            Err(e) => {
-                tracing::warn!(
-                    "Fork replay seq {}: failed to decode: {}",
-                    update.sequence_number,
-                    e
-                );
-                continue;
-            }
-        };
-        if let Err(e) = state.apply_in_place(&op) {
+        if let Err(e) = state.apply_update_in_place(update) {
             tracing::warn!(
-                "Fork replay seq {}: failed to apply state change: {}",
+                "Fork replay seq {}: failed to apply: {}",
                 update.sequence_number,
                 e
             );
-            continue;
         }
-        if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
-            if update.block_height > 0 {
-                if let Some(deposit) = state.deposits.get_mut(deposit_id) {
-                    deposit.opened_at_block = update.block_height;
-                    if deposit.last_fee_assessment == 0 {
-                        deposit.last_fee_assessment = update.block_height;
-                    }
-                }
-            }
-        }
-        if matches!(op, LedgerOperation::QuorumBegin { .. }) {
-            state.note_quorum_begin(
-                update.block_height,
-                update.sequence_number,
-                update.content_hash,
-            );
-        }
-        state.sequence = update.sequence_number;
-        state.chain_tip_hash = update.chain_hash();
     }
     state.reserves_outpoint = current.reserves_outpoint.clone();
     Some(state)

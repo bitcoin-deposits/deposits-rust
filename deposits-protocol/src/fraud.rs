@@ -1238,27 +1238,50 @@ pub fn verify_non_conforming_cosignature(
 
 /// Verify a `NonConformingUpdate` claim.
 ///
-/// The accusation: the accused operator BIP-340-signed an update on their
-/// own ledger that is structurally non-conforming — it does not chain onto
-/// the canonical tip (`previous_hash` mismatch) or its `content_hash` is not
-/// the correct `compute_hash()`. Because only the operator's key can produce
-/// the signature, and an honest operator's daemon always signs onto its
-/// current tip with a correct hash, such an update is unilateral operator
-/// fraud. This is what `recovery start`'s hash-chain scan surfaces.
+/// The accusation: the accused operator BIP-340-signed an update on their own
+/// ledger that the protocol does not allow. It is self-evident (DEP-06): the
+/// signed update is itself the evidence, so the proof verifies on it and the
+/// accused ledger's history alone, with no embedding. Two ways to be
+/// non-conforming:
 ///
-/// `history` is the accused ledger's updates (the caller supplies the full
-/// relay history). The verifier reconstructs the accused operator's canonical
-/// chain from genesis, following `chain_hash → previous_hash` links, then
-/// confirms the inline fault update fails to extend that chain.
+/// - **It does not chain.** Its `previous_hash` is not the canonical
+///   predecessor's `chain_hash` (or its `content_hash` is wrong). An honest
+///   daemon always signs onto its own tip, so this alone proves it. This is
+///   what `recovery start`'s hash-chain scan surfaces.
+/// - **It chains, but breaks a rule.** The canonical history is replayed from
+///   genesis to the fault's predecessor and the fault is applied to that
+///   state. The proof holds exactly when the state machine refuses it or
+///   conformance reports a violation: a credit past reserves
+///   (`InsufficientReserves`) or past collateral (`ExceedsCollateral`), a
+///   debit past a deposit's balance, a zero-amount lock, a wrong balance
+///   commitment, and so on. A fault that applies cleanly is conforming and
+///   the proof is refused.
 ///
-/// Fails closed: if the fault update actually conforms (valid `content_hash`
-/// AND `previous_hash` == the reconstructed predecessor's `chain_hash`), or
-/// the canonical predecessor at `fault_sequence - 1` can't be established from
-/// `history`, it returns `Err` — the proof is not demonstrated.
+/// `history` is the accused ledger's updates, in any order (the caller
+/// supplies the relay history, which nothing has authenticated). The history
+/// a chaining fault is judged on is the one its own signed `previous_hash`
+/// fixes: walked back by hash links to a genesis that opens this ledger, it
+/// is authenticated by the fault's signature alone, so only the fault and the
+/// candidates at its predecessor's sequence need a signature check. Index,
+/// walk and replay are each linear: about 160 ms for a 100,000-update ledger
+/// in a release build, where checking every update's signature took 8.7 s.
 ///
-/// A same-sequence fork whose `previous_hash` DOES match the canonical
-/// predecessor is deliberately NOT caught here — that is `Equivocation`
-/// (two operator-signed updates at one sequence), which has its own verifier.
+/// Two limits on what counts, both failing closed:
+/// - conformance runs with [`crate::types::AllowAll`]: this crate has no
+///   descriptor evaluator, and `DenyAll` would report every honest
+///   withdrawal as an `InvalidWitness`. A fault whose only defect is its
+///   witness is not proved here;
+/// - an update's `block_height` is signed by no one, so violations that turn
+///   on heights (expiry, nonce window, fee cadence) are not proof; see
+///   `proves_non_conformance`.
+///
+/// Also `Err`: the fault not signed by the accused, no signed predecessor in
+/// the history, a missing link back to genesis, a prefix that does not
+/// replay, or a fault whose operation does not decode (an honest operator on
+/// newer software may sign an operation this verifier does not know).
+///
+/// A same-sequence sibling that chains and applies cleanly is not this fault:
+/// that is `Equivocation`, which has its own verifier.
 pub fn verify_non_conforming_update(
     proof: &FraudProof,
     history: &[crate::types::SignedLedgerUpdate],
@@ -1329,9 +1352,7 @@ pub fn verify_non_conforming_update(
         return Ok(());
     }
 
-    // (7) Establish the canonical predecessor at fault_sequence - 1 by
-    //     reconstructing the accused operator's chain from genesis. seq 0
-    //     links to the all-zero previous_hash.
+    // (6a) seq 0 links to the all-zero previous_hash.
     if fault.sequence_number == 0 {
         // A seq-0 open must link to [0; 32]; anything else is non-conforming.
         return if fault.previous_hash == [0u8; 32] {
@@ -1343,64 +1364,336 @@ pub fn verify_non_conforming_update(
         };
     }
 
-    // Reconstruct the accused operator's canonical chain, following hash
-    // links forward from genesis. The fault update (wrong previous_hash)
-    // is never adopted into the chain, so this yields the honest predecessor.
-    let genesis = history
+    // (7) Index the accused's updates before the fault (one pass).
+    let index = OperatorIndex::new(history, &fault.operator_id, fault.sequence_number);
+    let pred_seq = fault.sequence_number - 1;
+
+    // The predecessors: updates at pred_seq that the accused signed. Only
+    // these need a signature check: everything before one of them is fixed by
+    // the hash chain it commits to.
+    let preds: Vec<&crate::types::SignedLedgerUpdate> = index
+        .at_seq(pred_seq)
+        .filter(|u| u.verify_operator_signature().is_ok())
+        .collect();
+    if preds.is_empty() {
+        return Err(format!(
+            "no update by the accused at seq {} in the supplied history — the \
+             predecessor can't be established, inconclusive (fail closed)",
+            pred_seq
+        ));
+    }
+
+    // (8) Structural verdict: the fault links to none of the accused's signed
+    //     updates at pred_seq, one of which reaches the ledger's genesis. An
+    //     honest update at this sequence carries previous_hash ==
+    //     predecessor.chain_hash(). (Linking to a signed sibling that is not
+    //     the one the chain continued from is Equivocation's domain: it is
+    //     judged below on the history it does link to.)
+    let Some(linked) = preds
         .iter()
-        .find(|u| u.sequence_number == 0 && u.operator_id == fault.operator_id)
-        .ok_or_else(|| {
-            "accused operator's genesis (seq 0) not in supplied history — \
-             cannot establish canonical chain (fail closed)"
-                .to_string()
-        })?;
-    let mut canonical: Vec<&crate::types::SignedLedgerUpdate> = vec![genesis];
-    loop {
-        let tip = *canonical.last().unwrap();
-        let expected_prev = tip.chain_hash();
-        let next = history.iter().find(|u| {
-            u.sequence_number == tip.sequence_number + 1
-                && u.operator_id == fault.operator_id
-                && u.previous_hash == expected_prev
+        .find(|p| p.chain_hash() == fault.previous_hash)
+    else {
+        return if preds
+            .iter()
+            .any(|p| index.chain_to_genesis(p, &fault.ledger_id).is_ok())
+        {
+            Ok(())
+        } else {
+            Err(format!(
+                "no signed predecessor at seq {} reaches this ledger's genesis \
+                 in the supplied history — inconclusive, fail closed",
+                pred_seq
+            ))
+        };
+    };
+
+    // (9) It chains, so it must break a rule. The history it chains onto is
+    //     fixed by its own signed previous_hash; replay it from genesis and
+    //     apply the fault to the predecessor's state.
+    let prefix = index.chain_to_genesis(linked, &fault.ledger_id)?;
+    let state = replay_canonical(&prefix)?;
+    match fault_rejection(&state, &fault)? {
+        Some(_reason) => Ok(()),
+        None => Err(format!(
+            "fault update at seq {} chains onto its predecessor and applies \
+             cleanly with no conformance violation — conforming, proof not \
+             demonstrated",
+            fault.sequence_number
+        )),
+    }
+}
+
+/// An operator's updates below a sequence, indexed by `chain_hash` and by
+/// sequence in one pass. Nothing here checks signatures: a chain walked
+/// backwards by `previous_hash` from an update whose signature is checked is
+/// fixed by that signature, because each `previous_hash` commits to the
+/// predecessor's `chain_hash`, which commits to its `content_hash`, which
+/// commits to its sequence, `previous_hash`, operation and cosignatures. The
+/// walk is O(n) in hashes; checking every update's signature instead cost
+/// ~90 µs each (8.7 s for 100,000 updates).
+struct OperatorIndex<'a> {
+    by_hash: std::collections::HashMap<[u8; 32], &'a crate::types::SignedLedgerUpdate>,
+    by_seq: std::collections::HashMap<u64, Vec<&'a crate::types::SignedLedgerUpdate>>,
+}
+
+impl<'a> OperatorIndex<'a> {
+    /// `operator`'s updates in `history` with sequence below `below_seq` and
+    /// a correct `content_hash`. Where two share a `chain_hash` (copies that
+    /// differ only in unhashed envelope fields) the first is kept.
+    fn new(
+        history: &'a [crate::types::SignedLedgerUpdate],
+        operator: &bitcoin::secp256k1::PublicKey,
+        below_seq: u64,
+    ) -> Self {
+        let mut by_hash = std::collections::HashMap::new();
+        let mut by_seq: std::collections::HashMap<u64, Vec<_>> = std::collections::HashMap::new();
+        for u in history {
+            if u.sequence_number < below_seq
+                && u.operator_id == *operator
                 && u.content_hash == u.compute_hash()
-        });
-        match next {
-            Some(n) => canonical.push(n),
-            None => break,
+            {
+                by_hash.entry(u.chain_hash()).or_insert(u);
+                by_seq.entry(u.sequence_number).or_default().push(u);
+            }
+        }
+        OperatorIndex { by_hash, by_seq }
+    }
+
+    fn at_seq(&self, seq: u64) -> impl Iterator<Item = &'a crate::types::SignedLedgerUpdate> + '_ {
+        self.by_seq.get(&seq).into_iter().flatten().copied()
+    }
+
+    /// The chain from the genesis to `tip`, oldest first (element `i` at
+    /// sequence `i`), following `previous_hash` back to a seq-0 update that
+    /// links to the zero hash and opens `ledger_id`. `Err` when a link is
+    /// missing from the history or the genesis opens another ledger.
+    fn chain_to_genesis(
+        &self,
+        tip: &'a crate::types::SignedLedgerUpdate,
+        ledger_id: &[u8; 32],
+    ) -> Result<Vec<&'a crate::types::SignedLedgerUpdate>, String> {
+        use crate::messages::LedgerOperation;
+        use crate::tlv::TlvDecode;
+
+        let mut chain = vec![tip];
+        while let Some(&last) = chain.last().filter(|u| u.sequence_number > 0) {
+            match self.by_hash.get(&last.previous_hash) {
+                Some(&p) if p.sequence_number + 1 == last.sequence_number => chain.push(p),
+                _ => {
+                    return Err(format!(
+                        "the update at seq {} links to one not in the supplied \
+                         history — inconclusive, fail closed",
+                        last.sequence_number
+                    ))
+                }
+            }
+        }
+        chain.reverse();
+        let genesis = chain[0];
+        let opens_ledger = genesis.previous_hash == [0u8; 32]
+            && matches!(
+                LedgerOperation::tlv_decode(&genesis.message),
+                Ok(LedgerOperation::LedgerOpen { operator_id, ref reserves_id, genesis_block, .. })
+                    if operator_id == genesis.operator_id
+                        && crate::types::LedgerState::compute_ledger_id(
+                            &operator_id, reserves_id, genesis_block,
+                        ) == *ledger_id
+            );
+        if !opens_ledger {
+            return Err("the chain's seq 0 is not this ledger's LedgerOpen by the \
+                        accused — inconclusive, fail closed"
+                .into());
+        }
+        Ok(chain)
+    }
+}
+
+/// The ledger state after `chain` (a chain from genesis), replayed from a
+/// fresh state at its seq-0 `LedgerOpen` with the same step as every other
+/// replay (`LedgerState::apply_update_in_place`). An update that fails to
+/// replay is an error: a verdict on the fault needs the exact state before it.
+fn replay_canonical(
+    chain: &[&crate::types::SignedLedgerUpdate],
+) -> Result<crate::types::LedgerState, String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let genesis = chain.first().ok_or("empty canonical chain")?;
+    let (operator_id, reserves_id, genesis_block) =
+        match LedgerOperation::tlv_decode(&genesis.message) {
+            Ok(LedgerOperation::LedgerOpen {
+                operator_id,
+                reserves_id,
+                genesis_block,
+                ..
+            }) => (operator_id, reserves_id, genesis_block),
+            _ => return Err("canonical seq 0 is not a LedgerOpen".into()),
+        };
+    let mut state = crate::types::LedgerState::new(operator_id, reserves_id, genesis_block);
+    for u in chain {
+        state.apply_update_in_place(u).map_err(|e| {
+            format!(
+                "canonical history does not replay at seq {}: {} — inconclusive, fail closed",
+                u.sequence_number, e
+            )
+        })?;
+    }
+    Ok(state)
+}
+
+/// Whether a conformance violation proves non-conformance on the signed
+/// evidence alone. Not the ones that turn on block heights: an update's
+/// `block_height` is covered by neither its `content_hash` nor its operator
+/// signature, so anyone relaying a copy can change it, and with it the
+/// expiry check (`ExpiryPassed`), the nonce window (`NonceReplay`) and the fee
+/// cadence, which starts from the DepositOpen's height (`FeeWindowNotElapsed`,
+/// `FeeExceedsAssessment`). Counting those would let a relay frame an honest
+/// operator by rewriting a height.
+fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
+    use crate::types::ConformanceViolation as V;
+    !matches!(
+        v,
+        V::ExpiryPassed { .. }
+            | V::NonceReplay { .. }
+            | V::FeeWindowNotElapsed { .. }
+            | V::FeeExceedsAssessment { .. }
+    )
+}
+
+/// Why `fault` may not follow `state`: `Some(reason)` when the state machine
+/// refuses its operation or conformance reports a violation that
+/// [`proves_non_conformance`], `None` when it applies cleanly. `Err` when its
+/// operation does not decode (not judged: fail closed). Conformance runs with
+/// `AllowAll` (see [`verify_non_conforming_update`]).
+fn fault_rejection(
+    state: &crate::types::LedgerState,
+    fault: &crate::types::SignedLedgerUpdate,
+) -> Result<Option<String>, String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+
+    let op = LedgerOperation::tlv_decode(&fault.message).map_err(|e| {
+        format!(
+            "fault update at seq {} does not decode ({}) — not judged, fail closed",
+            fault.sequence_number, e
+        )
+    })?;
+    Ok(
+        match state.apply_with_verifier(&op, &crate::types::AllowAll, fault.block_height) {
+            Err(e) => Some(format!("state machine refuses it: {}", e)),
+            Ok((_, violations)) => {
+                let proving: Vec<_> = violations
+                    .into_iter()
+                    .filter(proves_non_conformance)
+                    .collect();
+                (!proving.is_empty()).then(|| format!("conformance violations: {:?}", proving))
+            }
+        },
+    )
+}
+
+/// Find an update by `operator` in `history` that a `NonConformingUpdate`
+/// proof would ground: its sequence and why. For a node looking for a fault
+/// itself (the confiscation resolver), where calling
+/// [`verify_non_conforming_update`] once per update would replay the whole
+/// history per update.
+///
+/// Linear: one index, a hash-only scan for signed updates that link to none
+/// of the signed updates before them, then one forward replay along the chain
+/// ending at the newest signed update that reaches genesis, checking each
+/// update on it (and any signed sibling linking into it) against the state
+/// before it. The replay applies in place and checks conformance without the
+/// pre-state (a subset of the full check, so no clone per update); siblings,
+/// which are rare, get the full check on a clone. Whatever it finds is
+/// confirmed with [`verify_non_conforming_update`] before it is returned.
+/// Structural faults are preferred, newest first; otherwise the first rule
+/// break in sequence order.
+pub fn find_non_conforming_update(
+    history: &[crate::types::SignedLedgerUpdate],
+    operator: &bitcoin::secp256k1::PublicKey,
+) -> Option<(u64, String)> {
+    use crate::tlv::TlvEncode;
+
+    let confirm = |u: &crate::types::SignedLedgerUpdate| -> bool {
+        let proof = FraudProof {
+            proof_type: FraudProofType::NonConformingUpdate,
+            accused: hex::encode(operator.serialize()),
+            ledger_id: hex::encode(u.ledger_id),
+            evidence: FraudEvidence::NonConformingUpdate {
+                fault_sequence: u.sequence_number,
+                fault_update_hex: hex::encode(u.tlv_encode()),
+            },
+        };
+        verify_non_conforming_update(&proof, history).is_ok()
+    };
+
+    let index = OperatorIndex::new(history, operator, u64::MAX);
+    let genesis = index.at_seq(0).next()?;
+    let ledger_id = genesis.ledger_id;
+    let signed = |u: &&crate::types::SignedLedgerUpdate| u.verify_operator_signature().is_ok();
+
+    // Structural: an update whose sequence has predecessors, none of which it
+    // links to. Hash-only filter first; signatures only on what's left.
+    let mut breaks: Vec<&crate::types::SignedLedgerUpdate> = history
+        .iter()
+        .filter(|u| {
+            u.operator_id == *operator
+                && u.sequence_number >= 1
+                && index.by_seq.contains_key(&(u.sequence_number - 1))
+                && !index
+                    .at_seq(u.sequence_number - 1)
+                    .any(|p| p.chain_hash() == u.previous_hash)
+        })
+        .collect();
+    breaks.sort_by_key(|u| std::cmp::Reverse(u.sequence_number));
+    if let Some(u) = breaks.into_iter().filter(signed).find(|u| confirm(u)) {
+        return Some((
+            u.sequence_number,
+            "does not chain onto its predecessor".into(),
+        ));
+    }
+
+    // Rule breaks: the chain to the newest signed update that reaches genesis.
+    let mut tips: Vec<&crate::types::SignedLedgerUpdate> = index.by_hash.values().copied().collect();
+    tips.sort_by_key(|u| std::cmp::Reverse(u.sequence_number));
+    let chain = tips
+        .into_iter()
+        .filter(signed)
+        .find_map(|t| index.chain_to_genesis(t, &ledger_id).ok())?;
+
+    let mut state = replay_canonical(&chain[..1]).ok()?;
+    for seq in 1..chain.len() {
+        let pred_hash = chain[seq - 1].chain_hash();
+        for s in index.at_seq(seq as u64).filter(|s| {
+            s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash()
+        }) {
+            if signed(&s) {
+                if let Ok(Some(reason)) = fault_rejection(&state, s) {
+                    if confirm(s) {
+                        return Some((seq as u64, reason));
+                    }
+                }
+            }
+        }
+        let u = chain[seq];
+        let op = match state.apply_update_in_place(u) {
+            Ok(op) => op,
+            Err(e) => {
+                // Refused by the state machine (nothing was mutated).
+                let reason = format!("state machine refuses it: {}", e);
+                return confirm(u).then_some((seq as u64, reason));
+            }
+        };
+        let proving: Vec<_> = state
+            .check_conformance(&op, None, &crate::types::AllowAll, u.block_height)
+            .into_iter()
+            .filter(proves_non_conformance)
+            .collect();
+        if !proving.is_empty() && confirm(u) {
+            return Some((seq as u64, format!("conformance violations: {:?}", proving)));
         }
     }
-
-    // Predecessor at fault_sequence - 1 must exist on the canonical chain to
-    // make a positive judgement; absence is inconclusive (fail closed).
-    let pred_idx = (fault.sequence_number - 1) as usize;
-    let Some(predecessor) = canonical.get(pred_idx) else {
-        return Err(format!(
-            "canonical predecessor at seq {} not reconstructable from history \
-             (chain reaches seq {}) — inconclusive, fail closed",
-            fault.sequence_number - 1,
-            canonical.len().saturating_sub(1)
-        ));
-    };
-    if predecessor.sequence_number != fault.sequence_number - 1 {
-        return Err(
-            "reconstructed canonical chain has a gap before the fault sequence \
-             — inconclusive, fail closed"
-                .into(),
-        );
-    }
-
-    // (8) The verdict: the operator-signed update does not chain onto the
-    //     canonical predecessor. An honest update at this sequence would
-    //     carry previous_hash == predecessor.chain_hash().
-    if fault.previous_hash != predecessor.chain_hash() {
-        Ok(())
-    } else {
-        Err(format!(
-            "fault update at seq {} chains onto the canonical predecessor and \
-             its content_hash is valid — conforming, proof not demonstrated",
-            fault.sequence_number
-        ))
-    }
+    None
 }
 
 /// Verify a `WinnerCollateralDeviation` claim.
@@ -1951,11 +2244,10 @@ pub fn verify_fraud_evidence(
         }
         FraudProofType::NonConformingUpdate => {
             // The accused operator BIP-340-signed an update on their own ledger
-            // that doesn't chain onto the canonical tip (or carries a bad
-            // content_hash). `verify_non_conforming_update` re-derives the
-            // canonical chain from the accused's history and confirms the inline
-            // fault update fails to extend it. Fails closed if the update
-            // actually conforms or the predecessor can't be established.
+            // that doesn't chain onto the canonical tip, or chains but is
+            // refused by the state machine or conformance on the replayed
+            // canonical state. Fails closed if the update applies cleanly or
+            // the predecessor's state can't be established.
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
                 format!(
                     "accused ledger {} not available",

@@ -2267,8 +2267,9 @@ impl Node {
     /// — the operator-signed, uncosigned counterpart to
     /// [`fetch_non_conforming_cosig_inline_evidence`]. The fault is an update
     /// the *original operator* BIP-340-signed that fails to chain onto the
-    /// canonical tip (wrong `previous_hash`) or carries a bad `content_hash`.
-    /// This is what `recovery start`'s hash-chain scan detects and disputes via
+    /// canonical tip (wrong `previous_hash`) or carries a bad `content_hash`,
+    /// or that chains but breaks a rule (the state machine or conformance
+    /// refuses it on the replayed canonical state). The first is what `recovery start`'s hash-chain scan detects and disputes via
     /// kind:9103; here the cosigner independently re-derives the fault from the
     /// relay's durable copy of the bad update so the confiscation is grounded
     /// without a separately-broadcast kind:9101. No embedding needed — the bad
@@ -2277,9 +2278,8 @@ impl Node {
         &self,
         ledger_id: &str,
     ) -> Option<deposits_core::fraud::FraudProofType> {
-        use deposits_core::fraud::{FraudEvidence, FraudProof, FraudProofType};
+        use deposits_core::fraud::FraudProofType;
         use deposits_core::SignedLedgerUpdate;
-        use deposits_core::TlvEncode;
 
         let mut updates: Vec<SignedLedgerUpdate> =
             self.fetch_all_ledger_updates_paginated(ledger_id).await;
@@ -2295,28 +2295,20 @@ impl Node {
             .iter()
             .find(|u| u.sequence_number == 0)
             .map(|u| u.operator_id)?;
-        let accused = hex::encode(original_operator.serialize());
 
-        // Newest-first: a broadcast orphan is typically the operator's latest
-        // event. The first update that verifies grounds the confiscation.
-        for u in updates.iter().rev() {
-            if u.operator_id != original_operator {
-                continue;
-            }
-            let proof = FraudProof {
-                proof_type: FraudProofType::NonConformingUpdate,
-                accused: accused.clone(),
-                ledger_id: ledger_id.to_string(),
-                evidence: FraudEvidence::NonConformingUpdate {
-                    fault_sequence: u.sequence_number,
-                    fault_update_hex: hex::encode(u.tlv_encode()),
-                },
-            };
-            if deposits_core::fraud::verify_non_conforming_update(&proof, &updates).is_ok() {
-                return Some(FraudProofType::NonConformingUpdate);
-            }
-        }
-        None
+        // One linear pass (canonical rebuild, chain-break scan, one forward
+        // replay), not a full verification per update: with the state-replay
+        // verdict that would replay the whole history once per update. The
+        // candidate it returns has passed verify_non_conforming_update.
+        let (seq, reason) =
+            deposits_core::fraud::find_non_conforming_update(&updates, &original_operator)?;
+        tracing::info!(
+            "Ledger {}: NonConformingUpdate by the original operator at seq {}: {}",
+            &ledger_id[..16.min(ledger_id.len())],
+            seq,
+            reason
+        );
+        Some(FraudProofType::NonConformingUpdate)
     }
 
     /// Auto-initiate confiscation when all participants are armed

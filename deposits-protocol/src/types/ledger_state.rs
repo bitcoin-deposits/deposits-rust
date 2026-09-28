@@ -289,6 +289,51 @@ impl LedgerState {
         self.quorum_begin_hash = Some(content_hash);
     }
 
+    /// One replay step: decode `update`'s operation, apply it in place, then
+    /// run the post-hooks that need the update envelope (a DepositOpen's
+    /// `opened_at_block`, a QuorumBegin's `note_quorum_begin`) and advance
+    /// `sequence` / `chain_tip_hash`. Returns the decoded operation.
+    ///
+    /// Every replay from genesis goes through this (`Ledger::recompute_state`,
+    /// the dispute fork's `fork_state_at`, the `NonConformingUpdate` verifier),
+    /// so a state rebuilt for a proof is the state the ledger itself holds.
+    /// On error nothing has been mutated.
+    pub fn apply_update_in_place(
+        &mut self,
+        update: &crate::types::SignedLedgerUpdate,
+    ) -> crate::DepositsResult<crate::messages::LedgerOperation> {
+        use crate::messages::LedgerOperation;
+        use crate::tlv::TlvDecode;
+
+        let op = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
+            crate::DepositsError::ProtocolViolation {
+                violation_type: "replay_decode".to_string(),
+                details: format!("seq {}: {}", update.sequence_number, e),
+            }
+        })?;
+        self.apply_in_place(&op)?;
+        if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
+            if update.block_height > 0 {
+                if let Some(deposit) = self.deposits.get_mut(deposit_id) {
+                    deposit.opened_at_block = update.block_height;
+                    if deposit.last_fee_assessment == 0 {
+                        deposit.last_fee_assessment = update.block_height;
+                    }
+                }
+            }
+        }
+        if matches!(op, LedgerOperation::QuorumBegin { .. }) {
+            self.note_quorum_begin(
+                update.block_height,
+                update.sequence_number,
+                update.content_hash,
+            );
+        }
+        self.sequence = update.sequence_number;
+        self.chain_tip_hash = update.chain_hash();
+        Ok(op)
+    }
+
     /// Get the ledger_id as a hex string.
     pub fn ledger_id_hex(&self) -> String {
         hex::encode(self.ledger_id)

@@ -878,45 +878,17 @@ impl Ledger {
     ///      don't carry stale entries that make replayed InvoiceCredits trip
     ///      `duplicate_credit`.
     pub fn recompute_state(&mut self) -> DepositsResult<()> {
-        use crate::tlv::TlvDecode;
-
         let mut state = LedgerState::new(
             self.state.operator_key,
             self.state.reserves_key.clone(),
             self.state.genesis_block,
         );
 
+        // Decode, apply and the envelope post-hooks (a DepositOpen's
+        // opened_at_block, a QuorumBegin's note_quorum_begin) live in
+        // LedgerState::apply_update_in_place, shared with every replay.
         for update in &self.history {
-            let op = LedgerOperation::tlv_decode(&update.message).map_err(|e| {
-                DepositsError::ProtocolViolation {
-                    violation_type: "recompute_decode".to_string(),
-                    details: format!("seq {}: {}", update.sequence_number, e),
-                }
-            })?;
-            state.apply_in_place(&op)?;
-            // Post-hook: stamp opened_at_block for fresh deposits (block_height
-            // isn't carried in the operation itself).
-            if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
-                if update.block_height > 0 {
-                    if let Some(deposit) = state.deposits.get_mut(deposit_id) {
-                        deposit.opened_at_block = update.block_height;
-                        if deposit.last_fee_assessment == 0 {
-                            deposit.last_fee_assessment = update.block_height;
-                        }
-                    }
-                }
-            }
-            // Same idea for QuorumBegin: record where the active quorum
-            // started so duration / entry-link are reconstructable.
-            if matches!(op, LedgerOperation::QuorumBegin { .. }) {
-                state.note_quorum_begin(
-                    update.block_height,
-                    update.sequence_number,
-                    update.content_hash,
-                );
-            }
-            state.sequence = update.sequence_number;
-            state.chain_tip_hash = update.chain_hash();
+            state.apply_update_in_place(update)?;
         }
         self.state = state;
         Ok(())
