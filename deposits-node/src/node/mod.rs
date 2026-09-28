@@ -533,6 +533,10 @@ pub struct Node {
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
     stale_joined_ledgers: Mutex<std::collections::HashSet<String>>,
 
+    /// Our dispute forks whose own updates did not all reach the relay;
+    /// retried every periodic (see `fork_publish`).
+    pending_fork_publications: Mutex<std::collections::HashSet<String>>,
+
     /// Rate-limiter for background relay fetches of stale joined ledgers.
     /// Tracks when each ledger was last fetched from relay (30s cooldown per ledger).
     last_relay_fetch_times: Mutex<HashMap<String, std::time::Instant>>,
@@ -593,6 +597,7 @@ pub mod auto_tasks;
 pub mod coordination;
 pub mod dispute;
 pub mod expiry_watch;
+pub mod fork_publish;
 pub mod heal;
 pub mod inbound;
 pub mod init;

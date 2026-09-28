@@ -84,6 +84,11 @@ impl Node {
         // applies anything to them.
         self.repair_damaged_ledgers().await;
 
+        // A dispute fork whose own updates never reached the relay (lost
+        // before a restart, or by a binary that dropped them) is invisible
+        // to the other disputants: queue our live forks for publication.
+        self.queue_live_forks_for_publication();
+
         // Auto-subscribe to ledger requests/disputes for all our ledgers
         // Collect all ledger IDs we care about (owned + joined)
         let mut ledger_ids: Vec<String> = Vec::new();
@@ -1740,6 +1745,7 @@ impl Node {
                             "auto_lottery_claim_or_yield",
                             node.auto_lottery_claim_or_yield()
                         );
+                        timed_periodic!("retry_fork_publications", node.retry_fork_publications());
                         timed_periodic!("auto_confiscate", node.auto_confiscate());
                         timed_periodic!(
                             "auto_reveal_on_confiscation",

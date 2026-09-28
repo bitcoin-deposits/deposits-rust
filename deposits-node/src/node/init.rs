@@ -326,6 +326,7 @@ impl Node {
             pending_confiscations: Mutex::new(HashMap::new()),
             pending_lottery_recoveries: Mutex::new(HashMap::new()),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
+            pending_fork_publications: Mutex::new(std::collections::HashSet::new()),
             last_relay_fetch_times: Mutex::new(HashMap::new()),
             cosign_member_cache: Mutex::new(HashMap::new()),
             dirty_ledgers: Mutex::new(std::collections::HashSet::new()),
@@ -786,6 +787,7 @@ impl Node {
         };
 
         let mut count = 0;
+        let mut failed = 0usize;
         for update in &history {
             match self.nostr.broadcast_ledger_update(update).await {
                 Ok(event_id) => {
@@ -797,6 +799,7 @@ impl Node {
                     count += 1;
                 }
                 Err(e) => {
+                    failed += 1;
                     tracing::warn!(
                         "Failed to broadcast update seq={}: {}",
                         update.sequence_number,
@@ -806,6 +809,15 @@ impl Node {
             }
         }
 
+        // A partial broadcast is a failure, not a count: a caller that
+        // logged success on `Ok` hid ref3's dispute fork (see `fork_publish`).
+        if failed > 0 {
+            return Err(Error::Protocol(format!(
+                "{} of {} updates not broadcast",
+                failed,
+                history.len()
+            )));
+        }
         Ok(count)
     }
 }

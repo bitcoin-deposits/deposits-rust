@@ -1129,15 +1129,21 @@ impl Node {
         // dispute. Both `initiate_confiscations` and the
         // `confiscation_sign` gate consult that directly.
 
-        // Only broadcast if we actually added new operations to the fork.
-        // Without this guard, incoming fork events re-trigger auto_arm_for_dispute,
-        // which re-broadcasts all updates, creating an infinite feedback loop.
-        if added_new_operations {
-            if let Err(e) = self.broadcast_all_updates(&fork_key).await {
-                tracing::warn!("Failed to broadcast dispute fork updates: {}", e);
-            }
+        // Publish the fork's own updates (past the fork point; the prefix is
+        // the operator's and already on the relay), only when we added some
+        // or an earlier publication failed: incoming fork events re-trigger
+        // auto_arm_for_dispute, and re-broadcasting on every call would loop.
+        // A failure is logged and queued for the periodic retry
+        // (`fork_publish`).
+        let publication_pending = self
+            .pending_fork_publications
+            .lock()
+            .unwrap()
+            .contains(&fork_key);
+        if added_new_operations || publication_pending {
+            let _ = self.publish_fork(&fork_key).await;
         } else {
-            tracing::debug!("Fork already fully armed, skipping re-broadcast");
+            tracing::debug!("Fork already fully armed and published, skipping re-broadcast");
         }
 
         Ok(())
