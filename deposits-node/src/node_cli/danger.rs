@@ -169,28 +169,6 @@ async fn danger_forge_non_conforming_cosig(
     let message = bad_op.tlv_encode();
     let message_type = LedgerOperation::message_type_from_bytes(&message);
 
-    // cosign_data = seq || prev_hash || message
-    let mut cosign_data = Vec::new();
-    cosign_data.extend_from_slice(&next_seq.to_le_bytes());
-    cosign_data.extend_from_slice(&prev_chain_hash);
-    cosign_data.extend_from_slice(&message);
-    let cosign_msg_hash = Sha256::digest(&cosign_data);
-    let cosign_msg = Message::from_digest(cosign_msg_hash.into());
-
-    let mut entries: Vec<CosignEntry> = active_cosigners
-        .iter()
-        .map(|(kp, pk)| CosignEntry {
-            cosigner_pubkey: *pk,
-            cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
-            member_ledger_hash: [0u8; 32],
-        })
-        .collect();
-    entries.sort_by(|a, b| {
-        a.cosigner_pubkey
-            .serialize()
-            .cmp(&b.cosigner_pubkey.serialize())
-    });
-
     let mut update = SignedLedgerUpdate {
         message,
         message_type,
@@ -201,18 +179,26 @@ async fn danger_forge_non_conforming_cosig(
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
-        cosignatures: entries,
+        cosignatures: Vec::new(),
     };
+    let cosign_msg = Message::from_digest(update.cosign_digest(&[0u8; 32]));
+    update.cosignatures = active_cosigners
+        .iter()
+        .map(|(kp, pk)| CosignEntry {
+            cosigner_pubkey: *pk,
+            cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
+            member_ledger_hash: [0u8; 32],
+        })
+        .collect();
+    update.cosignatures.sort_by(|a, b| {
+        a.cosigner_pubkey
+            .serialize()
+            .cmp(&b.cosigner_pubkey.serialize())
+    });
     update.content_hash = update.compute_hash();
 
-    let signing_data = update.operator_signing_data();
-    let mut h = [0u8; 32];
-    h.copy_from_slice(&Sha256::digest(&signing_data));
-    let op_msg = Message::from_digest(h);
+    let op_msg = Message::from_digest(update.operator_digest());
     update.operator_signature = secp
         .sign_schnorr_no_aux_rand(&op_msg, &operator_keypair)
         .serialize();
@@ -381,29 +367,6 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
     // Helper: produce a fully-signed SignedLedgerUpdate at the given
     // {next_seq, prev_chain_hash} with the supplied message body.
     let build_update = |message: Vec<u8>, message_type: u16| -> SignedLedgerUpdate {
-        // cosign_data = seq || prev_hash || message
-        let mut cosign_data = Vec::new();
-        cosign_data.extend_from_slice(&next_seq.to_le_bytes());
-        cosign_data.extend_from_slice(&prev_chain_hash);
-        cosign_data.extend_from_slice(&message);
-        let cosign_msg_hash = Sha256::digest(&cosign_data);
-        let cosign_msg = Message::from_digest(cosign_msg_hash.into());
-
-        let mut entries: Vec<CosignEntry> = active_cosigners
-            .iter()
-            .map(|(kp, pk)| CosignEntry {
-                cosigner_pubkey: *pk,
-                cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
-                member_ledger_hash: [0u8; 32], // not relevant for this scenario
-            })
-            .collect();
-        // Canonical sort to match what receivers expect on TLV decode.
-        entries.sort_by(|a, b| {
-            a.cosigner_pubkey
-                .serialize()
-                .cmp(&b.cosigner_pubkey.serialize())
-        });
-
         let mut update = SignedLedgerUpdate {
             message,
             message_type,
@@ -414,19 +377,28 @@ async fn danger_fork_update(args: &[String]) -> Result<(), Box<dyn std::error::E
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
-            cosignatures: entries,
+            cosignatures: Vec::new(),
         };
+        let cosign_msg = Message::from_digest(update.cosign_digest(&[0u8; 32]));
+        update.cosignatures = active_cosigners
+            .iter()
+            .map(|(kp, pk)| CosignEntry {
+                cosigner_pubkey: *pk,
+                cosign_signature: secp.sign_schnorr_no_aux_rand(&cosign_msg, kp).serialize(),
+                member_ledger_hash: [0u8; 32], // not relevant for this scenario
+            })
+            .collect();
+        // Canonical sort to match what receivers expect on TLV decode.
+        update.cosignatures.sort_by(|a, b| {
+            a.cosigner_pubkey
+                .serialize()
+                .cmp(&b.cosigner_pubkey.serialize())
+        });
         update.content_hash = update.compute_hash();
 
         // Operator sign over content + all cosigs
-        let signing_data = update.operator_signing_data();
-        let mut h = [0u8; 32];
-        h.copy_from_slice(&Sha256::digest(&signing_data));
-        let op_msg = Message::from_digest(h);
+        let op_msg = Message::from_digest(update.operator_digest());
         update.operator_signature = secp
             .sign_schnorr_no_aux_rand(&op_msg, &operator_keypair)
             .serialize();
@@ -563,7 +535,6 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
     // wire format omits content_hash entirely; receivers recompute it on
     // decode, so we MUST use the canonical formula here or our on-disk
     // chain_hash will diverge from every other peer's view.
-    let cosign_signature = [0u8; 64];
     let mut update = SignedLedgerUpdate {
         message: message_bytes,
         message_type,
@@ -574,21 +545,14 @@ async fn danger_forge_stale_cosig(args: &[String]) -> Result<(), Box<dyn std::er
         content_hash: [0u8; 32],
         block_height,
         block_hash: [0u8; 32],
-        cosign_signature,
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures,
     };
     update.content_hash = update.compute_hash();
     let content_hash = update.content_hash;
 
-    // Sign with operator's key over operator_signing_data.
-    let signing_data = update.operator_signing_data();
-    let hash = Sha256::digest(&signing_data);
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(&hash);
-    let msg = Message::from_digest(hash_bytes);
+    // Sign with operator's key over the v2 operator digest.
+    let msg = Message::from_digest(update.operator_digest());
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &keypair);
     update.operator_signature = sig.serialize();
 
@@ -700,7 +664,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
 
             // Build the update with a WRONG previous_hash (the fraud) but an
             // otherwise well-formed body: a valid content_hash and a REAL
-            // operator signature over the canonical v1 digest. A faithful
+            // operator signature over the canonical v2 digest. A faithful
             // malicious operator signs correctly with their own key — the
             // fault is that the update doesn't chain onto the canonical tip.
             // (The old bespoke signing digest matched no format the protocol
@@ -716,14 +680,11 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
                 content_hash: [0u8; 32],
                 block_height: 0,
                 block_hash: [0u8; 32],
-                cosign_signature: [0u8; 64],
                 operator_signature: [0u8; 64],
-                cosigner_pubkey: None,
-                member_ledger_hash: None,
                 cosignatures: Vec::new(),
             };
             update.content_hash = update.compute_hash();
-            let digest = update.operator_sign_digest_v1();
+            let digest = update.operator_digest();
             let sig = secp.sign_schnorr(&Message::from_digest(digest), &secret_key.keypair(&secp));
             update.operator_signature = sig.serialize();
             update
@@ -735,48 +696,24 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let dummy_message = vec![0u8; 8];
             let message_type: u16 = 0x0001;
 
-            let computed_hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&skipped_seq.to_le_bytes());
-                hasher.update(&content_hash);
-                hasher.update(&dummy_message);
-                let result = hasher.finalize();
-                let mut hash = [0u8; 32];
-                hash.copy_from_slice(&result);
-                hash
-            };
-
-            let signing_data = {
-                let mut data = Vec::new();
-                data.extend_from_slice(&dummy_message);
-                data.extend_from_slice(&message_type.to_le_bytes());
-                data.extend_from_slice(&skipped_seq.to_le_bytes());
-                data.extend_from_slice(&content_hash);
-                data.extend_from_slice(&computed_hash);
-                data
-            };
-
-            let msg_hash = sha256_hash(&signing_data);
-            let message = Message::from_digest(msg_hash);
-            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
-            let operator_signature = sig.serialize();
-
-            SignedLedgerUpdate {
+            let mut update = SignedLedgerUpdate {
                 message: dummy_message,
                 message_type,
                 operator_id: node.node_id,
                 ledger_id: ledger.ledger_id(),
                 sequence_number: skipped_seq,
                 previous_hash: content_hash,
-                content_hash: computed_hash,
+                content_hash: [0u8; 32],
                 block_height: 0,
                 block_hash: [0u8; 32],
-                cosign_signature: [0u8; 64],
-                operator_signature,
-                cosigner_pubkey: None,
-                member_ledger_hash: None,
+                operator_signature: [0u8; 64],
                 cosignatures: Vec::new(),
-            }
+            };
+            update.content_hash = update.compute_hash();
+            let message = Message::from_digest(update.operator_digest());
+            let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
+            update.operator_signature = sig.serialize();
+            update
         }
 
         "replay" => {
@@ -787,18 +724,7 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
             let old_update = &ledger.history[ledger.history.len() / 2];
             let mut replayed = old_update.clone();
 
-            let signing_data = {
-                let mut data = Vec::new();
-                data.extend_from_slice(&replayed.message);
-                data.extend_from_slice(&replayed.message_type.to_le_bytes());
-                data.extend_from_slice(&replayed.sequence_number.to_le_bytes());
-                data.extend_from_slice(&replayed.previous_hash);
-                data.extend_from_slice(&replayed.content_hash);
-                data
-            };
-
-            let msg_hash = sha256_hash(&signing_data);
-            let message = Message::from_digest(msg_hash);
+            let message = Message::from_digest(replayed.operator_digest());
             let sig = secp.sign_schnorr(&message, &secret_key.keypair(&secp));
             replayed.operator_signature = sig.serialize();
 

@@ -458,10 +458,7 @@ fn signed_ledger_update_compute_hash_deterministic() {
         content_hash: [0u8; 32], // will be computed
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
 
@@ -485,10 +482,7 @@ fn signed_ledger_update_hash_changes_with_sequence() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
 
@@ -515,10 +509,7 @@ fn signed_ledger_update_hash_changes_with_previous_hash() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
 
@@ -545,10 +536,7 @@ fn signed_ledger_update_hash_changes_with_message() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
 
@@ -580,11 +568,12 @@ fn signed_ledger_update_tlv_round_trip() {
         content_hash: [0u8; 32],
         block_height: 800_000,
         block_hash: [0x22; 32],
-        cosign_signature: [0x33; 64],
         operator_signature: [0x44; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
-        cosignatures: vec![],
+        cosignatures: vec![deposits_core::types::CosignEntry {
+            cosigner_pubkey: test_pubkey(),
+            cosign_signature: [0x33; 64],
+            member_ledger_hash: [0x55; 32],
+        }],
     };
     update.content_hash = update.compute_hash();
 
@@ -600,7 +589,8 @@ fn signed_ledger_update_tlv_round_trip() {
     assert_eq!(decoded.content_hash, update.content_hash);
     assert_eq!(decoded.block_height, update.block_height);
     assert_eq!(decoded.operator_signature, update.operator_signature);
-    assert_eq!(decoded.cosign_signature, update.cosign_signature);
+    assert_eq!(decoded.block_hash, update.block_hash);
+    assert_eq!(decoded.cosignatures, update.cosignatures);
 }
 
 #[test]
@@ -803,10 +793,7 @@ fn hash_chain_links_correctly() {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: vec![],
         };
         update.content_hash = update.compute_hash();
@@ -840,10 +827,7 @@ fn hash_chain_detects_tampering() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
     update0.content_hash = update0.compute_hash();
@@ -858,10 +842,7 @@ fn hash_chain_detects_tampering() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: vec![],
     };
     update1.content_hash = update1.compute_hash();

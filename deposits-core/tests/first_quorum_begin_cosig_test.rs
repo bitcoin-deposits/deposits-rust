@@ -90,10 +90,7 @@ fn build_unsigned_update(operator_pk: PublicKey, op: &LedgerOperation) -> Signed
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     u.content_hash = u.compute_hash();
@@ -107,17 +104,7 @@ fn make_cosig_entry(
     member_ledger_hash: [u8; 32],
 ) -> CosignEntry {
     let secp = Secp256k1::new();
-    let tag = b"deposits/cosign";
-    let tag_hash = sha256::Hash::hash(tag);
-
-    let mut buf = Vec::new();
-    buf.extend_from_slice(tag_hash.as_byte_array());
-    buf.extend_from_slice(tag_hash.as_byte_array());
-    buf.extend_from_slice(&update.cosign_data());
-    buf.extend_from_slice(&member_ledger_hash);
-
-    let digest = sha256::Hash::hash(&buf);
-    let msg = Message::from_digest(digest.to_byte_array());
+    let msg = Message::from_digest(update.cosign_digest(&member_ledger_hash));
     let kp = Keypair::from_secret_key(&secp, signer_sk);
     let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
 
@@ -152,7 +139,7 @@ fn first_quorum_begin_without_cosigs_is_rejected() {
     // construct a ledger with no partner so verify_cosign_signature takes the
     // None short-circuit, and let verify_operator_signature fail — then we
     // assert the OVERALL error message pattern.
-    let err = ledger.validate_incoming_update(&update, None).unwrap_err();
+    let err = ledger.validate_incoming_update(&update).unwrap_err();
     // Either the operator-sig error fires first (zeroed sig) OR the
     // missing-cosig error. Both are valid rejections; we just want to be sure
     // a zero-cosig first QuorumBegin is *never* accepted.
@@ -266,7 +253,7 @@ fn quorum_begin_with_empty_staged_set_is_rejected_by_validator() {
     let op = quorum_begin_op(&[]);
     let update = build_unsigned_update(op_pk, &op);
 
-    let err = ledger.validate_incoming_update(&update, None).unwrap_err();
+    let err = ledger.validate_incoming_update(&update).unwrap_err();
     let s = format!("{:?}", err);
     // Either empty_quorum fires, or (more likely) an earlier signature check
     // fails first. We just want to assert acceptance is impossible.

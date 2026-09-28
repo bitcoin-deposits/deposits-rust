@@ -464,7 +464,6 @@ impl Default for EventStore {
 mod tests {
     use super::*;
     use bitcoin::secp256k1::{Secp256k1, SecretKey};
-    use sha2::{Digest, Sha256};
 
     /// Helper to create a keypair for testing.
     fn test_keypair() -> (SecretKey, PublicKey) {
@@ -472,18 +471,6 @@ mod tests {
         let sk = SecretKey::from_slice(&[1u8; 32]).unwrap();
         let pk = PublicKey::from_secret_key(&secp, &sk);
         (sk, pk)
-    }
-
-    /// Helper to compute hash the same way SignedLedgerUpdate::compute_hash does.
-    fn compute_hash(seq: u64, prev_hash: &[u8; 32], message: &[u8]) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(seq.to_le_bytes());
-        hasher.update(prev_hash);
-        hasher.update(message);
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
     }
 
     /// Build a test update at a given sequence, chaining from prev_hash.
@@ -494,23 +481,21 @@ mod tests {
         prev_hash: [u8; 32],
         message: &[u8],
     ) -> SignedLedgerUpdate {
-        let content_hash = compute_hash(seq, &prev_hash, message);
-        SignedLedgerUpdate {
+        let mut u = SignedLedgerUpdate {
             message: message.to_vec(),
             message_type: 0x0001,
             operator_id,
             ledger_id,
             sequence_number: seq,
             previous_hash: prev_hash,
-            content_hash,
+            content_hash: [0u8; 32],
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
-        }
+        };
+        u.content_hash = u.compute_hash();
+        u
     }
 
     /// Build a chain of N updates starting from seq 0.
@@ -773,7 +758,7 @@ mod tests {
         let mut update = make_update(lid, pk, 0, [0u8; 32], b"genesis");
         update.previous_hash = [0x01; 32];
         // Recompute hash with wrong prev
-        update.content_hash = compute_hash(0, &update.previous_hash, &update.message);
+        update.content_hash = update.compute_hash();
 
         let mut store = EventStore::new();
         store.insert(update.clone());

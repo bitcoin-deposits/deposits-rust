@@ -1,9 +1,10 @@
-//! Tests for the hash chain structure:
-//!   content_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
+//! Tests for the hash chain structure (DEP-02 §Hash Chain):
+//!   content_hash = tagged_hash("deposits/update/v2", cosign_data || n (2 LE)
+//!                      || for each sorted entry: member_ledger_hash || cosign_signature)
 //!   chain_hash   = SHA256(content_hash || operator_signature)
 //!   next update's previous_hash = chain_hash
 
-use deposits_protocol::types::SignedLedgerUpdate;
+use deposits_protocol::types::{CosignEntry, SignedLedgerUpdate};
 use sha2::{Digest, Sha256};
 
 fn test_pubkey() -> bitcoin::secp256k1::PublicKey {
@@ -25,14 +26,50 @@ fn make_update(seq: u64, prev_hash: [u8; 32], message: &[u8]) -> SignedLedgerUpd
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     u.content_hash = u.compute_hash();
     u
+}
+
+/// Give `u` a single cosignature entry and recompute its content_hash.
+fn cosign(u: &mut SignedLedgerUpdate, sig_byte: u8, member_hash: [u8; 32]) {
+    u.cosignatures = vec![CosignEntry {
+        cosigner_pubkey: test_pubkey(),
+        cosign_signature: [sig_byte; 64],
+        member_ledger_hash: member_hash,
+    }];
+    u.content_hash = u.compute_hash();
+}
+
+/// Independent reference for the spec formula, built byte by byte.
+fn reference_content_hash(
+    seq: u64,
+    ledger_id: [u8; 32],
+    block_height: u32,
+    block_hash: [u8; 32],
+    prev: [u8; 32],
+    message: &[u8],
+    entries: &[([u8; 32], [u8; 64])],
+) -> [u8; 32] {
+    let tag: [u8; 32] = Sha256::digest(b"deposits/update/v2").into();
+    let mut h = Sha256::new();
+    h.update(tag);
+    h.update(tag);
+    h.update(seq.to_le_bytes());
+    h.update(ledger_id);
+    h.update(block_height.to_le_bytes());
+    h.update(block_hash);
+    h.update(prev);
+    h.update((message.len() as u32).to_le_bytes());
+    h.update(message);
+    h.update((entries.len() as u16).to_le_bytes());
+    for (mlh, sig) in entries {
+        h.update(mlh);
+        h.update(sig);
+    }
+    h.finalize().into()
 }
 
 // =========================================================================
@@ -40,55 +77,47 @@ fn make_update(seq: u64, prev_hash: [u8; 32], message: &[u8]) -> SignedLedgerUpd
 // =========================================================================
 
 #[test]
-fn content_hash_without_signatures_is_content_only() {
+fn content_hash_without_cosignatures() {
     let u = make_update(0, [0u8; 32], &[1, 2, 3]);
-
-    let mut h = Sha256::new();
-    h.update(0u64.to_le_bytes());
-    h.update([0u8; 32]);
-    h.update([1u8, 2, 3]);
-    let expected: [u8; 32] = h.finalize().into();
-
+    let expected = reference_content_hash(0, [0x12; 32], 0, [0u8; 32], [0u8; 32], &[1, 2, 3], &[]);
     assert_eq!(u.content_hash, expected);
 }
 
 #[test]
-fn content_hash_with_cosign_signature() {
+fn content_hash_covers_block_header() {
+    let mut u = make_update(3, [0x33; 32], &[1, 2, 3]);
+    u.block_height = 850_000;
+    u.block_hash = [0xbb; 32];
+    u.content_hash = u.compute_hash();
+    let expected = reference_content_hash(
+        3,
+        [0x12; 32],
+        850_000,
+        [0xbb; 32],
+        [0x33; 32],
+        &[1, 2, 3],
+        &[],
+    );
+    assert_eq!(u.content_hash, expected);
+}
+
+#[test]
+fn content_hash_with_cosignature() {
     let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
     let hash_before = u.content_hash;
 
-    u.cosign_signature = [0xAA; 64];
-    u.content_hash = u.compute_hash();
-
+    cosign(&mut u, 0xCC, [0xBB; 32]);
     assert_ne!(u.content_hash, hash_before);
 
-    // Verify manually
-    let mut h = Sha256::new();
-    h.update(0u64.to_le_bytes());
-    h.update([0u8; 32]);
-    h.update([1u8, 2, 3]);
-    h.update([0xAA; 64]);
-    let expected: [u8; 32] = h.finalize().into();
-
-    assert_eq!(u.content_hash, expected);
-}
-
-#[test]
-fn content_hash_with_member_ledger_hash_and_cosign_signature() {
-    let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
-
-    u.member_ledger_hash = Some([0xBB; 32]);
-    u.cosign_signature = [0xCC; 64];
-    u.content_hash = u.compute_hash();
-
-    let mut h = Sha256::new();
-    h.update(0u64.to_le_bytes());
-    h.update([0u8; 32]);
-    h.update([1u8, 2, 3]);
-    h.update([0xBB; 32]);
-    h.update([0xCC; 64]);
-    let expected: [u8; 32] = h.finalize().into();
-
+    let expected = reference_content_hash(
+        0,
+        [0x12; 32],
+        0,
+        [0u8; 32],
+        [0u8; 32],
+        &[1, 2, 3],
+        &[([0xBB; 32], [0xCC; 64])],
+    );
     assert_eq!(u.content_hash, expected);
 }
 
@@ -139,29 +168,29 @@ fn two_update_chain_links_via_chain_hash() {
     assert_ne!(u1.previous_hash, u0.content_hash); // not content_hash!
 }
 
-#[test]
-fn three_update_chain_with_signatures() {
-    // Build a 3-update chain with distinct signatures
+fn three_cosigned_chain() -> [SignedLedgerUpdate; 3] {
     let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.cosign_signature = [0xA1; 64];
-    u0.content_hash = u0.compute_hash();
+    cosign(&mut u0, 0xA1, [0xA0; 32]);
     u0.operator_signature = [0xA2; 64];
 
     let mut u1 = make_update(1, u0.chain_hash(), &[2]);
-    u1.cosign_signature = [0xB1; 64];
-    u1.content_hash = u1.compute_hash();
+    cosign(&mut u1, 0xB1, [0xB0; 32]);
     u1.operator_signature = [0xB2; 64];
 
     let mut u2 = make_update(2, u1.chain_hash(), &[3]);
-    u2.cosign_signature = [0xC1; 64];
-    u2.content_hash = u2.compute_hash();
+    cosign(&mut u2, 0xC1, [0xC0; 32]);
     u2.operator_signature = [0xC2; 64];
+    [u0, u1, u2]
+}
+
+#[test]
+fn three_update_chain_with_signatures() {
+    let [u0, u1, u2] = three_cosigned_chain();
 
     // Verify chain linkage
     assert_eq!(u1.previous_hash, u0.chain_hash());
     assert_eq!(u2.previous_hash, u1.chain_hash());
 
-    // Verify each content_hash includes cosign_signature
     assert!(u0.verify_hash());
     assert!(u1.verify_hash());
     assert!(u2.verify_hash());
@@ -174,34 +203,30 @@ fn three_update_chain_with_signatures() {
 }
 
 #[test]
-fn chain_with_cosigned_and_unsigned_updates() {
-    // u0: unsigned (no partner sig, no member hash)
+fn chain_with_cosigned_and_uncosigned_updates() {
     let mut u0 = make_update(0, [0u8; 32], &[1]);
     u0.operator_signature = [0x01; 64];
 
-    // u1: co-signed (has member_ledger_hash + cosign_signature)
     let mut u1 = make_update(1, u0.chain_hash(), &[2]);
-    u1.member_ledger_hash = Some([0xAA; 32]);
-    u1.cosign_signature = [0xBB; 64];
-    u1.content_hash = u1.compute_hash();
+    cosign(&mut u1, 0xBB, [0xAA; 32]);
     u1.operator_signature = [0x02; 64];
 
-    // u2: unsigned again
     let mut u2 = make_update(2, u1.chain_hash(), &[3]);
     u2.operator_signature = [0x03; 64];
 
-    // Chain links correctly through both types
+    // Chain links correctly through both kinds
     assert_eq!(u1.previous_hash, u0.chain_hash());
     assert_eq!(u2.previous_hash, u1.chain_hash());
 
-    // u1's content_hash includes member_ledger_hash + cosign_signature
-    let mut h = Sha256::new();
-    h.update(1u64.to_le_bytes());
-    h.update(u0.chain_hash());
-    h.update([2u8]);
-    h.update([0xAA; 32]);
-    h.update([0xBB; 64]);
-    let expected: [u8; 32] = h.finalize().into();
+    let expected = reference_content_hash(
+        1,
+        [0x12; 32],
+        0,
+        [0u8; 32],
+        u0.chain_hash(),
+        &[2],
+        &[([0xAA; 32], [0xBB; 64])],
+    );
     assert_eq!(u1.content_hash, expected);
 
     // u1's chain_hash folds in operator sig
@@ -232,12 +257,10 @@ fn changing_operator_signature_changes_chain_hash() {
 #[test]
 fn changing_cosign_signature_changes_content_hash() {
     let mut u = make_update(0, [0u8; 32], &[1, 2, 3]);
-    u.cosign_signature = [0x11; 64];
-    u.content_hash = u.compute_hash();
+    cosign(&mut u, 0x11, [0u8; 32]);
     let h1 = u.content_hash;
 
-    u.cosign_signature = [0x22; 64];
-    u.content_hash = u.compute_hash();
+    cosign(&mut u, 0x22, [0u8; 32]);
     let h2 = u.content_hash;
 
     assert_ne!(h1, h2);
@@ -247,15 +270,13 @@ fn changing_cosign_signature_changes_content_hash() {
 fn swapping_cosigner_breaks_chain() {
     // Build u0 → u1 chain
     let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.cosign_signature = [0xAA; 64];
-    u0.content_hash = u0.compute_hash();
+    cosign(&mut u0, 0xAA, [0u8; 32]);
     u0.operator_signature = [0x01; 64];
 
     let u1 = make_update(1, u0.chain_hash(), &[2]);
 
-    // Now swap the cosigner on u0
-    u0.cosign_signature = [0xFF; 64];
-    u0.content_hash = u0.compute_hash();
+    // Now swap the cosignature on u0
+    cosign(&mut u0, 0xFF, [0u8; 32]);
     // u0.chain_hash() has changed, so u1.previous_hash no longer matches
     assert_ne!(u1.previous_hash, u0.chain_hash());
 }
@@ -281,9 +302,9 @@ fn tlv_roundtrip_derives_content_hash() {
     use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
     let mut u = make_update(5, [0xAA; 32], &[10, 20, 30]);
-    u.cosign_signature = [0xBB; 64];
-    u.member_ledger_hash = Some([0xCC; 32]);
-    u.content_hash = u.compute_hash();
+    u.block_height = 42;
+    u.block_hash = [0x44; 32];
+    cosign(&mut u, 0xBB, [0xCC; 32]);
     u.operator_signature = [0xDD; 64];
 
     let expected_hash = u.content_hash;
@@ -302,14 +323,15 @@ fn tlv_roundtrip_derives_content_hash() {
     assert_eq!(decoded.sequence_number, 5);
     assert_eq!(decoded.previous_hash, [0xAA; 32]);
     assert_eq!(decoded.message, vec![10, 20, 30]);
-    assert_eq!(decoded.cosign_signature, [0xBB; 64]);
-    assert_eq!(decoded.member_ledger_hash, Some([0xCC; 32]));
+    assert_eq!(decoded.block_height, 42);
+    assert_eq!(decoded.block_hash, [0x44; 32]);
+    assert_eq!(decoded.cosignatures, u.cosignatures);
     assert_eq!(decoded.operator_signature, [0xDD; 64]);
     assert_eq!(decoded.chain_hash(), u.chain_hash());
 }
 
 #[test]
-fn tlv_roundtrip_unsigned_update_derives_hash() {
+fn tlv_roundtrip_uncosigned_update_derives_hash() {
     use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
     let u = make_update(0, [0u8; 32], &[1, 2, 3]);
@@ -319,8 +341,7 @@ fn tlv_roundtrip_unsigned_update_derives_hash() {
     let decoded = SignedLedgerUpdate::tlv_decode(&encoded).unwrap();
 
     assert_eq!(decoded.content_hash, expected);
-    assert_eq!(decoded.cosign_signature, [0u8; 64]);
-    assert_eq!(decoded.member_ledger_hash, None);
+    assert!(decoded.cosignatures.is_empty());
 }
 
 #[test]
@@ -333,10 +354,7 @@ fn tlv_wire_does_not_contain_content_hash_bytes() {
     let encoded = u.tlv_encode();
     let stream = TlvStream::decode(&encoded).unwrap();
 
-    // content_hash should not be in the TLV stream (derived on decode)
-    // With new layout, no field maps to content_hash
-
-    // Check fields are present with new tag numbers
+    // content_hash is not in the TLV stream (derived on decode)
     assert!(
         stream.get(0).is_some(),
         "operator_id (type 0) should be present"
@@ -357,27 +375,16 @@ fn tlv_wire_does_not_contain_content_hash_bytes() {
         stream.get(20).is_some(),
         "operator_signature (type 20) should be present"
     );
+    // Zero block_height / block_hash are omitted.
+    assert!(stream.get(10).is_none());
+    assert!(stream.get(12).is_none());
 }
 
 #[test]
 fn chain_of_three_survives_tlv_roundtrip() {
     use deposits_protocol::tlv::{TlvDecode, TlvEncode};
 
-    // Build a 3-update chain
-    let mut u0 = make_update(0, [0u8; 32], &[1]);
-    u0.cosign_signature = [0xA1; 64];
-    u0.content_hash = u0.compute_hash();
-    u0.operator_signature = [0xA2; 64];
-
-    let mut u1 = make_update(1, u0.chain_hash(), &[2]);
-    u1.cosign_signature = [0xB1; 64];
-    u1.content_hash = u1.compute_hash();
-    u1.operator_signature = [0xB2; 64];
-
-    let mut u2 = make_update(2, u1.chain_hash(), &[3]);
-    u2.cosign_signature = [0xC1; 64];
-    u2.content_hash = u2.compute_hash();
-    u2.operator_signature = [0xC2; 64];
+    let [u0, u1, u2] = three_cosigned_chain();
 
     // Roundtrip each through TLV
     let d0 = SignedLedgerUpdate::tlv_decode(&u0.tlv_encode()).unwrap();

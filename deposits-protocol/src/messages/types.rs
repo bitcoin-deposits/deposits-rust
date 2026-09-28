@@ -2106,53 +2106,17 @@ impl BinaryCodec for LedgerUpdateMsg {
 }
 
 impl BinaryCodec for SignedLedgerUpdate {
+    /// Carries the canonical TLV encoding (DEP-02), so there is one wire
+    /// format for an update and it holds every cosignature.
     fn write_to<W: Write>(&self, w: &mut W) -> Result<(), CodecError> {
-        write_bytes(w, &self.message)?;
-        write_u16(w, self.message_type)?;
-        write_pubkey(w, &self.operator_id)?;
-        write_32(w, &self.ledger_id)?;
-        write_u64(w, self.sequence_number)?;
-        write_32(w, &self.previous_hash)?;
-        write_u32(w, self.block_height)?;
-        write_32(w, &self.block_hash)?;
-        write_64(w, &self.cosign_signature)?;
-        write_64(w, &self.operator_signature)?;
-        write_option(w, &self.cosigner_pubkey, |w, pk| write_pubkey(w, pk))?;
-        write_option(w, &self.member_ledger_hash, |w, h| write_32(w, h))?;
-        Ok(())
+        use crate::tlv::TlvEncode;
+        write_bytes(w, &self.tlv_encode())
     }
 
     fn read_from<R: Read>(r: &mut R) -> Result<Self, CodecError> {
-        let message = read_bytes(r)?;
-        let message_type = read_u16(r)?;
-        let operator_id = read_pubkey(r)?;
-        let ledger_id = read_32(r)?;
-        let sequence_number = read_u64(r)?;
-        let previous_hash = read_32(r)?;
-        let block_height = read_u32(r)?;
-        let block_hash = read_32(r)?;
-        let cosign_signature = read_64(r)?;
-        let operator_signature = read_64(r)?;
-        // Optional fields (backward compatible - not present in old format)
-        let cosigner_pubkey = read_option(r, read_pubkey).unwrap_or(None);
-        let member_ledger_hash = read_option(r, |r| read_32(r)).unwrap_or(None);
-        let mut update = Self {
-            message,
-            message_type,
-            operator_id,
-            ledger_id,
-            sequence_number,
-            previous_hash,
-            content_hash: [0u8; 32],
-            block_height,
-            block_hash,
-            cosign_signature,
-            operator_signature,
-            cosigner_pubkey,
-            member_ledger_hash,
-            cosignatures: Vec::new(),
-        };
-        update.content_hash = update.compute_hash();
-        Ok(update)
+        use crate::tlv::TlvDecode;
+        let bytes = read_bytes(r)?;
+        SignedLedgerUpdate::tlv_decode(&bytes)
+            .map_err(|e| CodecError::InvalidData(format!("SignedLedgerUpdate: {}", e)))
     }
 }

@@ -93,17 +93,12 @@ fn build_quorum_add_member_update(
         content_hash: [0u8; 32], // patched below
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     update.content_hash = update.compute_hash();
 
-    let signing_data = update.operator_signing_data();
-    let hash = sha256::Hash::hash(&signing_data);
-    let msg = Message::from_digest(*hash.as_byte_array());
+    let msg = Message::from_digest(update.operator_digest());
     let sig = secp.sign_schnorr_no_aux_rand(&msg, kp);
     update.operator_signature = sig.serialize();
 

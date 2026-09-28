@@ -499,16 +499,17 @@ fn compute_hash_changes_with_member_ledger_hash() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
 
     let hash_without = update.compute_hash();
 
-    update.member_ledger_hash = Some([0xAA; 32]);
+    update.cosignatures = vec![deposits_protocol::types::CosignEntry {
+        cosigner_pubkey: pk,
+        cosign_signature: [0u8; 64],
+        member_ledger_hash: [0xAA; 32],
+    }];
     let hash_with = update.compute_hash();
 
     assert_ne!(
@@ -516,53 +517,17 @@ fn compute_hash_changes_with_member_ledger_hash() {
         "member_ledger_hash should change the hash"
     );
 
-    update.member_ledger_hash = Some([0xBB; 32]);
+    update.cosignatures = vec![deposits_protocol::types::CosignEntry {
+        cosigner_pubkey: pk,
+        cosign_signature: [0u8; 64],
+        member_ledger_hash: [0xBB; 32],
+    }];
     let hash_with_different = update.compute_hash();
 
     assert_ne!(
         hash_with, hash_with_different,
         "different member_ledger_hash should produce different hash"
     );
-}
-
-#[test]
-fn compute_hash_without_member_hash_is_backward_compatible() {
-    use deposits_protocol::types::SignedLedgerUpdate;
-
-    let pk = {
-        use std::str::FromStr;
-        bitcoin::secp256k1::PublicKey::from_str(
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-        )
-        .unwrap()
-    };
-
-    let update = SignedLedgerUpdate {
-        message: vec![1, 2, 3],
-        message_type: 1,
-        operator_id: pk,
-        ledger_id: [0x12; 32],
-        sequence_number: 1,
-        previous_hash: [0u8; 32],
-        content_hash: [0u8; 32],
-        block_height: 0,
-        block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
-        operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
-        cosignatures: Vec::new(),
-    };
-
-    // Without member_ledger_hash, hash is just SHA256(seq || prev_hash || message)
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(1u64.to_le_bytes());
-    hasher.update([0u8; 32]);
-    hasher.update([1u8, 2, 3]);
-    let expected: [u8; 32] = hasher.finalize().into();
-
-    assert_eq!(update.compute_hash(), expected);
 }
 
 #[test]
@@ -587,16 +552,17 @@ fn compute_hash_includes_cosign_signature() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
 
     let hash_no_sig = update.compute_hash();
 
-    update.cosign_signature = [0xAA; 64];
+    update.cosignatures = vec![deposits_protocol::types::CosignEntry {
+        cosigner_pubkey: pk,
+        cosign_signature: [0xAA; 64],
+        member_ledger_hash: [0u8; 32],
+    }];
     let hash_with_sig = update.compute_hash();
 
     assert_ne!(
@@ -604,7 +570,11 @@ fn compute_hash_includes_cosign_signature() {
         "cosign_signature should change compute_hash"
     );
 
-    update.cosign_signature = [0xBB; 64];
+    update.cosignatures = vec![deposits_protocol::types::CosignEntry {
+        cosigner_pubkey: pk,
+        cosign_signature: [0xBB; 64],
+        member_ledger_hash: [0u8; 32],
+    }];
     let hash_different_sig = update.compute_hash();
 
     assert_ne!(
@@ -635,10 +605,7 @@ fn chain_hash_includes_operator_signature() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     update.content_hash = update.compute_hash();
@@ -766,7 +733,6 @@ mod dispatch {
         op: LedgerOperation,
         cosigs_with_member_hashes: &[[u8; 32]],
         block_height: u32,
-        member_ledger_hash: Option<[u8; 32]>,
     ) -> SignedLedgerUpdate {
         SignedLedgerUpdate {
             message: op.tlv_encode(),
@@ -778,10 +744,7 @@ mod dispatch {
             content_hash: [0u8; 32],
             block_height,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash,
             cosignatures: cosigs_with_member_hashes
                 .iter()
                 .map(|h| CosignEntry {
@@ -829,7 +792,6 @@ mod dispatch {
                 dummy_transfer_lock([0; 32]),
                 &[],
                 90,
-                None,
             ),
             update_with(
                 6,
@@ -837,7 +799,6 @@ mod dispatch {
                 dummy_transfer_lock([1; 32]),
                 &[],
                 95,
-                None,
             ),
             update_with(
                 7,
@@ -845,7 +806,6 @@ mod dispatch {
                 dummy_transfer_lock([2; 32]),
                 &[],
                 100,
-                None,
             ),
         ];
         let h_old = member_history[0].chain_hash();
@@ -875,7 +835,6 @@ mod dispatch {
             dummy_transfer_lock([0; 32]),
             &[h_old],
             110,
-            None,
         );
         stale_update.content_hash = stale_content;
         let embedding_update = update_with(
@@ -884,7 +843,6 @@ mod dispatch {
             dummy_transfer_lock(proof_hash),
             &[],
             120,
-            None,
         );
         let accused_history = vec![stale_update, embedding_update];
 
@@ -950,7 +908,6 @@ mod dispatch {
             dummy_transfer_lock(proof_hash),
             &[],
             120,
-            None,
         );
         let provider = provider_from(histories);
         let oracle = MockOracle(HashMap::new());
@@ -1012,7 +969,6 @@ mod dispatch {
             dummy_transfer_lock(proof_hash),
             &[],
             0,
-            None,
         )];
 
         let broadcast = FraudBroadcast {
@@ -1066,7 +1022,7 @@ mod dispatch {
         };
         let id = broadcast.embedding.as_ref().unwrap().ledger_id.clone();
         let v = histories.get_mut(&id).unwrap();
-        v.insert(0, update_with(30, [0xAA; 32], credit_op, &[], 0, None));
+        v.insert(0, update_with(30, [0xAA; 32], credit_op, &[], 0));
         let err = verify_fraud_broadcast(
             &broadcast,
             &provider_from(histories),
@@ -1102,7 +1058,6 @@ mod dispatch {
             dummy_transfer_lock([0; 32]),
             &[],
             0,
-            None,
         );
         member_active_update.operator_id = member_pk;
         member_active_update.block_hash = member_block;
@@ -1129,7 +1084,6 @@ mod dispatch {
             dummy_transfer_lock(proof_hash),
             &[],
             0,
-            None,
         );
 
         let mut histories = HashMap::new();
@@ -1244,7 +1198,6 @@ mod dispatch {
             dummy_transfer_lock(proof_hash),
             &[],
             0,
-            None,
         );
         proof_update.block_hash = proof_block;
 
@@ -1294,7 +1247,7 @@ mod dispatch {
         let mut histories = histories;
         let v = histories.get_mut(&id).unwrap();
         v[0] = {
-            let mut u = update_with(50, [0xAA; 32], dummy_transfer_lock(new_hash), &[], 0, None);
+            let mut u = update_with(50, [0xAA; 32], dummy_transfer_lock(new_hash), &[], 0);
             u.block_hash = [0xEE; 32];
             u
         };
@@ -1347,10 +1300,7 @@ mod stale_cosignature {
             content_hash,
             block_height,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -1371,10 +1321,7 @@ mod stale_cosignature {
             content_hash,
             block_height,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: cosigs_with_member_hashes
                 .iter()
                 .map(|h| CosignEntry {
@@ -1603,10 +1550,7 @@ mod uncredited_lightning {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -1872,10 +1816,7 @@ mod inactive_quorum_member {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash,
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -2058,10 +1999,7 @@ mod uncredited_onchain {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash,
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -2382,10 +2320,7 @@ mod embedding {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -2615,11 +2550,12 @@ fn chain_hash_is_sha256_of_content_hash_and_operator_sig() {
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0xAA; 64],
         operator_signature: [0xBB; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: Some([0xCC; 32]),
-        cosignatures: Vec::new(),
+        cosignatures: vec![deposits_protocol::types::CosignEntry {
+            cosigner_pubkey: pk,
+            cosign_signature: [0xAA; 64],
+            member_ledger_hash: [0xCC; 32],
+        }],
     };
     update.content_hash = update.compute_hash();
 
@@ -2677,10 +2613,7 @@ mod quorum_expired_verifier {
             content_hash: [0; 32],
             block_height: 0,
             block_hash: [0; 32],
-            cosign_signature: [0; 64],
             operator_signature: [0; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: vec![],
         }
     }
@@ -2845,10 +2778,7 @@ mod winner_collateral_deviation_tests {
             content_hash: [0; 32],
             block_height: 800_000,
             block_hash: [0xBB; 32],
-            cosign_signature: [0; 64],
             operator_signature: [0; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: vec![],
         };
         // The fraud verifier doesn't check this signature — it relies on

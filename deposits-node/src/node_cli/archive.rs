@@ -857,10 +857,10 @@ mod tests {
         (sk, pk)
     }
 
-    /// Operator-sign an update in place (v1 tagged digest, matching the daemon).
+    /// Operator-sign an update in place (DEP-02 v2 digest, matching the daemon).
     fn operator_sign(update: &mut SignedLedgerUpdate, sk: &SecretKey) {
         let secp = Secp256k1::new();
-        let digest = update.operator_sign_digest_v1();
+        let digest = update.operator_digest();
         let kp = Keypair::from_secret_key(&secp, sk);
         let msg = bitcoin::secp256k1::Message::from_digest(digest);
         let sig = secp.sign_schnorr_no_aux_rand(&msg, &kp);
@@ -887,10 +887,7 @@ mod tests {
             content_hash: [0u8; 32],
             block_height: 100,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         };
         u.content_hash = u.compute_hash();

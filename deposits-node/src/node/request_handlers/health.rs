@@ -291,7 +291,9 @@ impl Node {
                         .and_then(|arc| {
                             let l = arc.read().unwrap();
                             l.history.last().and_then(|u| {
-                                u.cosigner_pubkey.map(|pk| hex::encode(pk.serialize()))
+                                u.cosignatures
+                                    .first()
+                                    .map(|c| hex::encode(c.cosigner_pubkey.serialize()))
                             })
                         })
                         .unwrap_or_default()

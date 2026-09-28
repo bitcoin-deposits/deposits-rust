@@ -250,8 +250,8 @@ impl Ledger {
         if seq < expected_seq {
             // Update in place if this has better signatures
             if let Some(existing) = self.history.get_mut(seq as usize) {
-                // Preserve existing co-signer signature if new one is empty
-                if update.cosign_signature != [0u8; 64] || existing.cosign_signature == [0u8; 64] {
+                // Preserve existing cosignatures if the new copy has none
+                if !update.cosignatures.is_empty() || existing.cosignatures.is_empty() {
                     *existing = update;
                 }
             }
@@ -361,14 +361,10 @@ impl Ledger {
     /// 4. Hash chain validation
     ///
     /// Call this before accepting an update from a peer.
-    pub fn validate_incoming_update(
-        &self,
-        update: &SignedLedgerUpdate,
-        partner_pubkey: Option<&PublicKey>,
-    ) -> DepositsResult<()> {
-        // 1. Verify signatures
+    pub fn validate_incoming_update(&self, update: &SignedLedgerUpdate) -> DepositsResult<()> {
+        // 1. Verify the operator signature
         update
-            .verify_signatures(partner_pubkey)
+            .verify_operator_signature()
             .map_err(|e| DepositsError::ProtocolViolation {
                 violation_type: "invalid_signature".to_string(),
                 details: e,
@@ -996,29 +992,23 @@ impl Ledger {
         // sequence number after compaction → "Sequence gap before persist".
         let sequence = self.next_sequence();
 
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&prev_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
         // Create SignedLedgerUpdate (unsigned - caller should populate signatures)
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message_type: operation.message_type(),
             message: message_bytes,
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: self.state.operator_key,
             ledger_id: self.state.ledger_id,
             sequence_number: sequence,
             previous_hash: prev_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height,
             block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        let new_hash = signed_update.content_hash;
 
         // Apply state changes
         self.apply_state_changes(&operation)?;
@@ -1136,28 +1126,21 @@ impl Ledger {
         let prev_hash = self.state.chain_tip_hash;
         let sequence = self.next_sequence();
 
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&prev_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-        let update = SignedLedgerUpdate {
+        let mut update = SignedLedgerUpdate {
             message_type: operation.message_type(),
             message: message_bytes,
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: self.state.operator_key,
             ledger_id: self.state.ledger_id,
             sequence_number: sequence,
             previous_hash: prev_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height,
             block_hash,
         };
+        update.content_hash = update.compute_hash();
 
         Ok(StagedUpdate { operation, update })
     }
@@ -1209,40 +1192,9 @@ impl Ledger {
     /// Update the signature on the last history entry.
     ///
     /// This is used after `append_operation` to add signatures from the porcupine dance.
-    pub fn sign_last_update(
-        &mut self,
-        operator_sig: Option<[u8; 64]>,
-        cosign_sig: Option<[u8; 64]>,
-    ) {
+    pub fn sign_last_update(&mut self, operator_sig: [u8; 64]) {
         if let Some(update) = self.history.last_mut() {
-            if let Some(sig) = operator_sig {
-                update.operator_signature = sig;
-            }
-            if let Some(sig) = cosign_sig {
-                update.cosign_signature = sig;
-            }
-        }
-    }
-
-    /// Apply co-signer info and recompute content_hash.
-    ///
-    /// Sets member_ledger_hash, cosigner_pubkey, and co-signer's signature, then
-    /// recomputes content_hash to include all three. Must be called BEFORE
-    /// operator signing, since the operator signs content_hash.
-    pub fn apply_cosigner_hash(
-        &mut self,
-        member_ledger_hash: [u8; 32],
-        cosigner_pubkey: PublicKey,
-        cosign_signature: [u8; 64],
-    ) {
-        if let Some(update) = self.history.last_mut() {
-            update.member_ledger_hash = Some(member_ledger_hash);
-            update.cosigner_pubkey = Some(cosigner_pubkey);
-            update.cosign_signature = cosign_signature;
-            // Recompute content_hash: includes message + member_ledger_hash + cosign_signature
-            update.content_hash = update.compute_hash();
-            // state.hash tracks content_hash until finalize_chain_hash
-            self.state.chain_tip_hash = update.content_hash;
+            update.operator_signature = operator_sig;
         }
     }
 
@@ -1257,10 +1209,6 @@ impl Ledger {
         });
         if let Some(update) = self.history.last_mut() {
             update.cosignatures = entries;
-            // Clear deprecated single-cosig fields
-            update.cosigner_pubkey = None;
-            update.member_ledger_hash = None;
-            update.cosign_signature = [0u8; 64];
             // Recompute content_hash to include all cosig entries
             update.content_hash = update.compute_hash();
             self.state.chain_tip_hash = update.content_hash;

@@ -435,15 +435,20 @@ fn cosign_data_contains_decodable_operation() {
     let seq: u64 = 3;
     let prev_hash = [0u8; 32];
 
-    let mut cosign_data = Vec::new();
-    cosign_data.extend_from_slice(&seq.to_le_bytes());
-    cosign_data.extend_from_slice(&prev_hash);
-    cosign_data.extend_from_slice(&message_bytes);
+    let cosign_data = deposits_core::types::CosignData {
+        sequence_number: seq,
+        ledger_id: [0x12; 32],
+        block_height: 850_000,
+        block_hash: [0xbb; 32],
+        previous_hash: prev_hash,
+        message: &message_bytes,
+    }
+    .encode();
 
-    // The cosigner extracts bytes 40+ as the operation TLV
-    assert!(cosign_data.len() > 40);
-    let extracted_message = &cosign_data[40..];
-    let decoded = LedgerOperation::tlv_decode(extracted_message);
+    // The cosigner parses cosign_data and decodes the message as the operation TLV
+    let fields = deposits_core::types::CosignData::parse(&cosign_data).unwrap();
+    assert_eq!(fields.sequence_number, seq);
+    let decoded = LedgerOperation::tlv_decode(fields.message);
     assert!(
         decoded.is_ok(),
         "Should be able to decode operation from cosign_data"
@@ -477,13 +482,18 @@ fn cosign_data_invalid_operation_rejected() {
     };
 
     let message_bytes = operation.tlv_encode();
-    let mut cosign_data = Vec::new();
-    cosign_data.extend_from_slice(&0u64.to_le_bytes());
-    cosign_data.extend_from_slice(&[0u8; 32]);
-    cosign_data.extend_from_slice(&message_bytes);
+    let cosign_data = deposits_core::types::CosignData {
+        sequence_number: 0,
+        ledger_id: [0x12; 32],
+        block_height: 0,
+        block_hash: [0u8; 32],
+        previous_hash: [0u8; 32],
+        message: &message_bytes,
+    }
+    .encode();
 
-    let extracted = &cosign_data[40..];
-    let decoded = LedgerOperation::tlv_decode(extracted).unwrap();
+    let fields = deposits_core::types::CosignData::parse(&cosign_data).unwrap();
+    let decoded = LedgerOperation::tlv_decode(fields.message).unwrap();
 
     // Validate against state — should fail (deposit doesn't exist)
     let result = ledger.state.apply(&decoded);

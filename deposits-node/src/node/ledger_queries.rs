@@ -334,51 +334,34 @@ impl Node {
         // `our_latest.content_hash` — that's a state anchor, not a chain link.
         let parent_chain_hash = our_latest.chain_hash();
         let sequence = our_latest.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&parent_chain_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(parent_chain_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
-        let operator_sig_bytes = self
-            .handler
-            .signer
-            .bip340_sign(
-                &SignContext::operator_update(ledger_id_bytes, sequence),
-                msg_hash.as_ref(),
-            )
-            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
-
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: deposits_core::messages::consts::QUORUM_BEGIN,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: parent_chain_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block,
             block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                &signed_update.operator_digest(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         self.nostr
             .broadcast_ledger_update(&signed_update)
@@ -517,50 +500,33 @@ impl Node {
             // is populated before it becomes the next parent.
             let parent_chain_hash = our_latest.chain_hash();
             let sequence = our_latest.sequence_number + 1;
-            let mut hash_input = Vec::new();
-            hash_input.extend_from_slice(&sequence.to_le_bytes());
-            hash_input.extend_from_slice(&parent_chain_hash);
-            hash_input.extend_from_slice(&message_bytes);
-            let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-
-            let update_msg = format!(
-                "deposits:ledger:{}:{}:{}",
-                hex::encode(parent_chain_hash),
-                sequence,
-                hex::encode(new_hash)
-            );
-            let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-
             let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
                 .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
                 .try_into()
                 .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
-            let operator_sig_bytes = self
-                .handler
-                .signer
-                .bip340_sign(
-                    &SignContext::operator_update(ledger_id_bytes, sequence),
-                    msg_hash.as_ref(),
-                )
-                .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
-
-            let signed_update = SignedLedgerUpdate {
+            let mut signed_update = SignedLedgerUpdate {
                 message: message_bytes,
                 message_type: deposits_core::messages::consts::DEPOSIT_OPEN,
-                operator_signature: operator_sig_bytes,
-                cosigner_pubkey: None,
-                member_ledger_hash: None,
+                operator_signature: [0u8; 64],
                 cosignatures: Vec::new(),
-                cosign_signature: [0u8; 64],
                 operator_id: our_pubkey,
                 ledger_id: ledger_id_bytes,
                 sequence_number: sequence,
                 previous_hash: parent_chain_hash,
-                content_hash: new_hash,
+                content_hash: [0u8; 32],
                 block_height: current_block,
                 block_hash,
             };
+            signed_update.content_hash = signed_update.compute_hash();
+            signed_update.operator_signature = self
+                .handler
+                .signer
+                .bip340_sign(
+                    &SignContext::operator_update(ledger_id_bytes, sequence),
+                    &signed_update.operator_digest(),
+                )
+                .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
             self.nostr
                 .broadcast_ledger_update(&signed_update)

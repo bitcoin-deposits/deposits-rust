@@ -410,9 +410,9 @@ impl Node {
         let ledger_id_bytes = ledger.ledger_id();
 
         if let Some(update) = ledger.history.last_mut() {
-            // v1: tagged BIP-340 hash with length-prefixed message field.
-            // See `SignedLedgerUpdate::operator_sign_digest_v1`.
-            let digest = update.operator_sign_digest_v1();
+            // DEP-02 v2 operator digest.
+            // See `SignedLedgerUpdate::operator_digest`.
+            let digest = update.operator_digest();
             let ctx = SignContext::operator_update(ledger_id_bytes, update.sequence_number);
             update.operator_signature = self
                 .handler

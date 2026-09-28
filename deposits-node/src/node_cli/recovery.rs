@@ -1364,21 +1364,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
     let message_bytes = custody_dispute.tlv_encode();
 
     let sequence = last_valid_sequence + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&last_valid_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(last_valid_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -1388,22 +1374,26 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: last_valid_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: entropy_block_hash,
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     println!();
     println!("Publishing DisputeEnter to Nostr...");
@@ -1424,7 +1414,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         "  Sequence: {} (forked from {})",
         sequence, last_valid_sequence
     );
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     println!("  Reason: {}", violation_details);
     println!();
     println!("Next steps (dispute protocol):");
@@ -1539,21 +1529,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     let message_bytes = custody_release.tlv_encode();
 
     let sequence = our_armed.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_armed.content_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_armed.content_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -1563,22 +1539,26 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: our_armed.content_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     println!();
     println!("Publishing DisputeYield to Nostr...");
@@ -1595,7 +1575,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     println!();
     println!("DisputeYield published successfully!");
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     println!();
     println!("Your candidate branch is now closed.");
     println!("Your quorum members are released from attestation obligations.");
@@ -1800,25 +1780,11 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
     let message_bytes = custody_dispute.tlv_encode();
 
     let sequence = last_valid_sequence_u64 + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&last_valid_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
     let current_block_height = crate::chain_backend::from_env(&config.electrum_url)
         .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(last_valid_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -1828,22 +1794,26 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: last_valid_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     println!();
     println!("Publishing DisputeEnter to Nostr...");
@@ -1864,7 +1834,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         "  Sequence: {} (forked from {})",
         sequence, last_valid_sequence_u64
     );
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     println!();
     println!("Ledger is now in DISPUTED state. Quorum has been disbanded.");
     println!();
@@ -2020,21 +1990,7 @@ pub async fn recovery_rebuild_quorum_add(
     let message_bytes = operation.tlv_encode();
 
     let sequence = our_latest.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.content_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.content_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -2044,22 +2000,26 @@ pub async fn recovery_rebuild_quorum_add(
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: deposits_core::messages::consts::QUORUM_ADD_MEMBER,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: our_latest.content_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     println!("Publishing QuorumAddMember to Nostr...");
     let publishing_keys = Keys::new(
@@ -2448,21 +2408,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     let message_bytes = custody_armed.tlv_encode();
 
     let sequence = latest.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&latest.content_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(latest.content_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -2472,22 +2418,26 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: latest.content_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     println!();
     println!("Publishing DisputeArmed to Nostr...");
@@ -2507,7 +2457,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("DisputeArmed published successfully!");
     println!("  Armed block: {}", current_block_height);
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     println!();
     println!("Ledger is now in ARMED state. Quorum is locked.");
     println!();
@@ -2706,21 +2656,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         let message_bytes = operation.tlv_encode();
 
         let sequence = our_latest.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.content_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.content_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = {
             let decoded =
@@ -2730,22 +2666,26 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
                 .map_err(|_| "Ledger ID must be 32 bytes")?
         };
 
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: our_latest.content_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = *secp
+            .sign_schnorr(
+                &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+                &keypair,
+            )
+            .as_ref();
 
         let publish_transport = NostrTransportBuilder::new(secret_key)
             .relay(&relay_url)
@@ -2759,7 +2699,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         println!();
         println!("DisputeAcquire published successfully!");
         println!("  Sequence: {}", sequence);
-        println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+        println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     } else {
         println!("You did NOT win. Publishing DisputeYield...");
 
@@ -2767,21 +2707,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         let message_bytes = operation.tlv_encode();
 
         let sequence = our_latest.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&our_latest.content_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(our_latest.content_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
         let ledger_id_bytes: [u8; 32] = {
             let decoded =
@@ -2791,22 +2717,26 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
                 .map_err(|_| "Ledger ID must be 32 bytes")?
         };
 
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: our_latest.content_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash: entropy_block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = *secp
+            .sign_schnorr(
+                &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+                &keypair,
+            )
+            .as_ref();
 
         let publish_transport = NostrTransportBuilder::new(secret_key)
             .relay(&relay_url)
@@ -2820,7 +2750,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         println!();
         println!("DisputeYield published successfully!");
         println!("  Sequence: {}", sequence);
-        println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+        println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
         println!();
         println!("Your branch is now TOMBSTONED.");
     }
@@ -2993,38 +2923,28 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
         let message_bytes = operation.tlv_encode();
 
         let sequence = latest.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&latest.content_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(latest.content_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-        let signature = secp.sign_schnorr(&Message::from_digest(*msg_hash.as_ref()), &keypair);
-        let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: latest.content_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = *secp
+            .sign_schnorr(
+                &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+                &keypair,
+            )
+            .as_ref();
 
         publish_transport
             .broadcast_ledger_update(&signed_update)
@@ -5191,23 +5111,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
 
     // Build update continuing from our DisputeArmed
     let sequence = our_armed.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_armed.content_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    // Sign the update
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_armed.content_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
-    let signature = secp.sign_schnorr(&msg, &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     // Parse ledger_id into bytes
     let ledger_id_bytes: [u8; 32] = {
@@ -5218,22 +5122,26 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: our_armed.content_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: current_block_hash,
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     // Publish to Nostr
     let publish_transport = NostrTransportBuilder::new(secret_key)
@@ -5248,7 +5156,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!();
     println!("DisputeAcquire published successfully!");
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(new_hash)[..16]);
+    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
     println!("  Claim txid: {}...", &hex::encode(claim_txid_bytes)[..16]);
     println!(
         "  New reserves: {}...",
@@ -5591,22 +5499,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let message_bytes = operation.tlv_encode();
 
     let sequence = our_latest.sequence_number + 1;
-    let mut hash_input = Vec::new();
-    hash_input.extend_from_slice(&sequence.to_le_bytes());
-    hash_input.extend_from_slice(&our_latest.content_hash);
-    hash_input.extend_from_slice(&message_bytes);
-    let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
 
-    let update_msg = format!(
-        "deposits:ledger:{}:{}:{}",
-        hex::encode(our_latest.content_hash),
-        sequence,
-        hex::encode(new_hash)
-    );
-    let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-    let msg = bitcoin::secp256k1::Message::from_digest(*msg_hash.as_ref());
-    let signature = secp.sign_schnorr(&msg, &keypair);
-    let operator_sig_bytes: [u8; 64] = *signature.as_ref();
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -5616,22 +5509,26 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
             .map_err(|_| "Ledger ID must be 32 bytes")?
     };
 
-    let signed_update = SignedLedgerUpdate {
+    let mut signed_update = SignedLedgerUpdate {
         message: message_bytes,
         message_type: 0x8001,
-        operator_signature: operator_sig_bytes,
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
+        operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
-        cosign_signature: [0u8; 64],
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
         previous_hash: our_latest.content_hash,
-        content_hash: new_hash,
+        content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash,
     };
+    signed_update.content_hash = signed_update.compute_hash();
+    signed_update.operator_signature = *secp
+        .sign_schnorr(
+            &bitcoin::secp256k1::Message::from_digest(signed_update.operator_digest()),
+            &keypair,
+        )
+        .as_ref();
 
     let publish_transport = NostrTransportBuilder::new(secret_key)
         .relay(&relay_url)
@@ -5730,19 +5627,13 @@ pub async fn recovery_embed_hash(args: &[String]) -> Result<(), Box<dyn std::err
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     update.content_hash = update.compute_hash();
     let content_hash = update.content_hash;
 
-    let signing_data = update.operator_signing_data();
-    let mut hash_bytes = [0u8; 32];
-    hash_bytes.copy_from_slice(&Sha256::digest(&signing_data));
-    let msg = Message::from_digest(hash_bytes);
+    let msg = Message::from_digest(update.operator_digest());
     update.operator_signature = secp.sign_schnorr_no_aux_rand(&msg, &keypair).serialize();
 
     println!("DeliveryEmbed update:");

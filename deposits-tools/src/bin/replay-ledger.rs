@@ -551,7 +551,7 @@ fn replay_chain(
         match LedgerOperation::tlv_decode(&update.message) {
             Ok(op) => {
                 if verbose {
-                    let cosigned = if update.cosigner_pubkey.is_some() {
+                    let cosigned = if update.has_cosign_signature() {
                         " [cosigned]"
                     } else {
                         ""
@@ -1846,10 +1846,7 @@ fn dump_update_json(update: &SignedLedgerUpdate) -> String {
         "previous_hash": hex::encode(update.previous_hash),
         "content_hash": hex::encode(update.content_hash),
         "chain_hash": hex::encode(update.chain_hash()),
-        "cosign_signature": hex::encode(update.cosign_signature),
         "operator_signature": hex::encode(update.operator_signature),
-        "cosigner_pubkey": update.cosigner_pubkey.map(|pk| hex::encode(pk.serialize())),
-        "member_ledger_hash": update.member_ledger_hash.map(hex::encode),
         "cosignatures": update.cosignatures.iter().map(|e| serde_json::json!({
             "pubkey": hex::encode(e.cosigner_pubkey.serialize()),
             "signature": hex::encode(e.cosign_signature),
@@ -2064,7 +2061,7 @@ use ratatui::{
 
 /// Short label for the left panel list.
 fn update_label(update: &SignedLedgerUpdate) -> String {
-    let cosigned = if update.cosigner_pubkey.is_some() {
+    let cosigned = if update.has_cosign_signature() {
         " *"
     } else {
         ""

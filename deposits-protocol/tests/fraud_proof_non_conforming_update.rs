@@ -44,10 +44,7 @@ fn signed_update(
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     u.content_hash = if break_content_hash {
@@ -55,8 +52,7 @@ fn signed_update(
     } else {
         u.compute_hash()
     };
-    // Sign the legacy raw digest — verify_operator_signature accepts it.
-    let digest: [u8; 32] = Sha256::digest(u.operator_signing_data()).into();
+    let digest = u.operator_digest();
     u.operator_signature = secp
         .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &kp)
         .serialize();
@@ -595,10 +591,9 @@ fn lock(amount: u64, expiry: u32) -> LedgerOperation {
 
 #[test]
 fn a_rewritten_block_height_does_not_frame_an_honest_update() {
-    // block_height is in neither the content_hash nor the operator signature,
-    // so anyone relaying an honest lock can raise it past the lock's expiry
-    // and the signature still verifies. ExpiryPassed (and the other
-    // height-dependent checks) must not count as proof.
+    // Anyone relaying an honest lock can raise its block_height past the
+    // lock's expiry. block_height is signed (DEP-02 v2), so the re-dated copy
+    // no longer carries the operator's signature and is not proof.
     let prefix = ledger_c_prefix();
     let mut honest = signed_update(
         4,
@@ -610,9 +605,8 @@ fn a_rewritten_block_height_does_not_frame_an_honest_update() {
     );
     assert!(verify_non_conforming_update(&proof_for(&honest), &prefix).is_err());
     honest.block_height = 10_000;
-    honest.verify_operator_signature().unwrap();
-    let err = verify_non_conforming_update(&proof_for(&honest), &prefix).unwrap_err();
-    assert!(err.contains("applies cleanly"), "{}", err);
+    assert!(honest.verify_operator_signature().is_err());
+    assert!(verify_non_conforming_update(&proof_for(&honest), &prefix).is_err());
 
     // A rule that does not depend on heights still proves: a zero-amount lock.
     let zero = signed_update(
@@ -627,11 +621,11 @@ fn a_rewritten_block_height_does_not_frame_an_honest_update() {
 }
 
 // ---------------------------------------------------------------------------
-// Binding to the ledger. ledger_id is covered by neither the content_hash nor
-// the operator signature (DEP-02 §Signing), and one operator key runs several
-// ledgers (cl-deposits nodes open their own ledger and operate another with
-// the node key). A chain break must be bound to the named ledger by what the
-// operator signed: the previous_hash, walked back to this ledger's genesis.
+// Binding to the ledger. One operator key runs several ledgers (cl-deposits
+// nodes open their own ledger and operate another with the node key).
+// ledger_id is signed (DEP-02 v2), so a relabelled copy carries no valid
+// operator signature; the verifiers also bind a chain break to the named
+// ledger through the previous_hash, walked back to this ledger's genesis.
 // ---------------------------------------------------------------------------
 
 /// Ledger X: another ledger by the same operator key, with its own reserves.
@@ -679,15 +673,14 @@ fn ledger_x() -> Vec<SignedLedgerUpdate> {
 fn an_honest_update_of_another_ledger_relabelled_is_not_proof() {
     let y = ledger_c_prefix();
     let x = ledger_x();
-    // X's honest seq-4 credit, relabelled as ledger Y (C). Its operator
-    // signature still verifies: ledger_id isn't signed.
+    // X's honest seq-4 credit, relabelled as ledger Y (C). ledger_id is
+    // signed, so the operator's signature no longer verifies.
     let mut relabelled = x[4].clone();
     relabelled.ledger_id = ledger();
-    relabelled.verify_operator_signature().unwrap();
+    assert!(relabelled.verify_operator_signature().is_err());
     assert_ne!(relabelled.previous_hash, y[3].chain_hash());
 
-    let err = verify_non_conforming_update(&proof_for(&relabelled), &y).unwrap_err();
-    assert!(err.contains("nothing binds it to this ledger"), "{}", err);
+    assert!(verify_non_conforming_update(&proof_for(&relabelled), &y).is_err());
     // Even with X's history mixed into what the relay returns for Y (a
     // relabelled copy of all of it): X's genesis opens X, not Y.
     let mut mixed = y.clone();
@@ -734,13 +727,13 @@ fn two_ledgers_updates_at_one_sequence_are_not_equivocation() {
     use deposits_protocol::fraud::{find_equivocation, verify_equivocation};
     let y = ledger_c_prefix();
     let x = ledger_x();
-    // Seq 3 on both ledgers, same operator key; X's relabelled as Y passes
-    // every check on the two updates themselves.
+    // Seq 3 on both ledgers, same operator key. X's relabelled as Y no longer
+    // carries the operator's signature: ledger_id is signed.
     let mut relabelled = x[3].clone();
     relabelled.ledger_id = ledger();
+    assert!(relabelled.verify_operator_signature().is_err());
     let proof = equivocation(&y[3], &relabelled);
-    let err = verify_equivocation(&proof, &y).unwrap_err();
-    assert!(err.contains("nothing binds it to this ledger"), "{}", err);
+    assert!(verify_equivocation(&proof, &y).is_err());
 
     let mut mixed = y.clone();
     mixed.extend(x.iter().cloned().map(|mut u| {

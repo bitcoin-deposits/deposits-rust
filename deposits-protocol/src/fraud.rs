@@ -2341,7 +2341,10 @@ fn verify_embedding_and_causal_chain(
         })?;
         let link_ok = history.iter().any(|u| {
             u.sequence_number == link.sequence
-                && u.member_ledger_hash.map(hex::encode) == Some(link.member_ledger_hash.clone())
+                && u
+                    .cosignatures
+                    .iter()
+                    .any(|c| hex::encode(c.member_ledger_hash) == link.member_ledger_hash)
         });
         if !link_ok {
             return Err(format!(

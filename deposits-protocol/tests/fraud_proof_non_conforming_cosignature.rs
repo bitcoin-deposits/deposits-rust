@@ -52,15 +52,12 @@ fn update(seq: u64, prev: [u8; 32], op: &LedgerOperation, cosigners: &[u8]) -> S
         content_hash: [0u8; 32],
         block_height: 0,
         block_hash: [0u8; 32],
-        cosign_signature: [0u8; 64],
         operator_signature: [0u8; 64],
-        cosigner_pubkey: None,
-        member_ledger_hash: None,
         cosignatures: Vec::new(),
     };
     for &c in cosigners {
         let mlh = [c; 32];
-        let digest = u.cosign_sign_digest_v1(&mlh);
+        let digest = u.cosign_digest(&mlh);
         u.cosignatures.push(CosignEntry {
             cosigner_pubkey: pubkey(c),
             cosign_signature: secp
@@ -70,7 +67,7 @@ fn update(seq: u64, prev: [u8; 32], op: &LedgerOperation, cosigners: &[u8]) -> S
         });
     }
     u.content_hash = u.compute_hash();
-    let digest: [u8; 32] = Sha256::digest(u.operator_signing_data()).into();
+    let digest = u.operator_digest();
     u.operator_signature = secp
         .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &keypair(OP))
         .serialize();
@@ -231,7 +228,7 @@ fn a_cosigner_listed_without_their_signature_is_not_accused() {
     // re-signs: the update is the operator's claim, not the member's act.
     fault.cosignatures[0].cosign_signature = [0x42; 64];
     fault.content_hash = fault.compute_hash();
-    let digest: [u8; 32] = Sha256::digest(fault.operator_signing_data()).into();
+    let digest = fault.operator_digest();
     fault.operator_signature = Secp256k1::new()
         .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &keypair(OP))
         .serialize();
@@ -253,7 +250,11 @@ fn a_fault_that_links_to_nothing_is_not_judged() {
 fn a_rewritten_block_height_is_not_proof() {
     let history = prefix();
     let mut honest = next(&history, &withdrawal(1_000_000));
-    honest.block_height = 50_000; // past the lock's expiry; signed by no one
     honest.verify_operator_signature().unwrap();
+    // Past the lock's expiry. block_height is signed (DEP-02 v2), so the
+    // re-dated copy carries no valid operator signature or cosignature.
+    honest.block_height = 50_000;
+    assert!(honest.verify_operator_signature().is_err());
+    assert!(honest.verify_cosign_signatures(&[pubkey(MEMBER)], 1).is_err());
     assert!(verify_non_conforming_cosignature(&proof(&honest, pubkey(OP)), &history).is_err());
 }

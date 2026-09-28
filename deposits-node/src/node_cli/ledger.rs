@@ -321,7 +321,7 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let curr = &update.content_hash;
 
         // Determine signature status and signer
-        let has_partner_sig = update.cosign_signature != [0u8; 64];
+        let has_partner_sig = update.has_cosign_signature();
         let has_operator_sig = update.operator_signature != [0u8; 64];
         let sig_status = format!(
             "[{}{}]",
@@ -338,15 +338,16 @@ async fn ledger_history(args: &[String]) -> Result<(), Box<dyn std::error::Error
         };
 
         // Show cosigner pubkey (4 hex chars or dashes if no co-signature)
-        let cosigner = if let Some(ref pk) = update.cosigner_pubkey {
-            let pk_bytes = pk.serialize();
+        let cosigner = if let Some(c) = update.cosignatures.first() {
+            let pk_bytes = c.cosigner_pubkey.serialize();
             format!("{:02x}{:02x}", pk_bytes[1], pk_bytes[2])
         } else {
             "----".to_string()
         };
 
         // Show member ledger hash (4 hex chars or dashes if no co-signature)
-        let member_hash = if let Some(ref h) = update.member_ledger_hash {
+        let member_hash = if let Some(c) = update.cosignatures.first() {
+            let h = c.member_ledger_hash;
             format!("{:02x}{:02x}", h[0], h[1])
         } else {
             "----".to_string()

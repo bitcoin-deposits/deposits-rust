@@ -180,12 +180,14 @@ types:
     doc: |
       A signed ledger update, broadcast as Kind 9100 Nostr events.
 
-      Multi-cosig format (tag 22 present):
-        content_hash = SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)
-      Legacy single-cosig format (tag 22 absent):
-        content_hash = SHA256(seq || prev_hash || message [|| member_ledger_hash] [|| cosign_signature])
+      DEP-02 v2 (tagged_hash(tag, x) = SHA256(SHA256(tag) || SHA256(tag) || x)):
+        cosign_data  = seq (8 LE) || ledger_id (32) || block_height (4 LE) || block_hash (32)
+                       || previous_hash (32) || len(message) (4 LE) || message
+        content_hash = tagged_hash("deposits/update/v2", cosign_data || n (2 LE)
+                       || for each sorted entry: member_ledger_hash || cosign_signature)
       chain_hash   = SHA256(content_hash || operator_signature)
       next update's previous_hash = chain_hash
+      An absent block_height / block_hash is hashed and signed as zero.
 
       content_hash is NOT on the wire -- it is derived by the receiver.
       message_type is NOT on the wire -- it is derived from the operation discriminant.
@@ -196,20 +198,18 @@ types:
         type 4  = sequence_number    (u64)
         type 6  = previous_hash      (32-byte hash)
         type 8  = message            (variable, inner LedgerOperation TLV)
-        type 10 = block_height       (u32, optional)
-        type 12 = block_hash         (32-byte hash, optional)
-        type 14 = cosigner_pubkey    (33-byte pubkey, deprecated — legacy single-cosig)
-        type 16 = member_ledger_hash (32-byte hash, deprecated — legacy single-cosig)
-        type 18 = cosign_signature   (64-byte sig, deprecated — legacy single-cosig)
+        type 10 = block_height       (u32, omitted when 0; explicit 0 is rejected)
+        type 12 = block_hash         (32-byte hash, omitted when zero; explicit zero is rejected)
+        types 14, 16, 18             (retired single-cosig format; decoders reject them)
         type 20 = operator_signature (64-byte sig)
         type 22 = cosignatures       (variable, length-prefixed entries — majority cosig)
 
       Tag 22 contains N entries, each: u16_be(129) || pubkey(33) || sig(64) || hash(32).
       Entries sorted by pubkey. After QuorumBegin, floor(n/2)+1 entries required.
 
-      Co-signing: SHA256(tag || tag || cosign_data || member_ledger_hash)
-      where tag = SHA256("deposits/cosign") and cosign_data =
-      sequence || previous_hash || message.
+      Co-signing: tagged_hash("deposits/cosign/v2", cosign_data || member_ledger_hash)
+      Operator:   tagged_hash("deposits/operator-update/v2",
+                    cosign_data || n (2 LE) || for each sorted entry: cosign_signature)
       Each quorum member signs independently with their own member_ledger_hash.
     seq:
       - id: records
@@ -235,9 +235,9 @@ types:
             8:  ledger_operation  # message (nested)
             10: u4be              # block_height
             12: hash32            # block_hash
-            14: pubkey            # cosigner_pubkey (deprecated)
-            16: hash32            # member_ledger_hash (deprecated)
-            18: sig64             # cosign_signature (deprecated)
+            14: pubkey            # retired; decoders reject
+            16: hash32            # retired; decoders reject
+            18: sig64             # retired; decoders reject
             20: sig64             # operator_signature
             22: cosignature_list
 

@@ -1873,10 +1873,7 @@ mod equivocation_detection_tests {
             content_hash: content,
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -1988,26 +1985,21 @@ mod fork_point_collateral_tests {
         prev: [u8; 32],
     ) -> SignedLedgerUpdate {
         let message = op.tlv_encode();
-        let mut h = Vec::new();
-        h.extend_from_slice(&seq.to_le_bytes());
-        h.extend_from_slice(&prev);
-        h.extend_from_slice(&message);
-        SignedLedgerUpdate {
+        let mut u = SignedLedgerUpdate {
             message,
             message_type: 0x8001,
             operator_id: operator,
             ledger_id: [7u8; 32],
             sequence_number: seq,
             previous_hash: prev,
-            content_hash: *sha256::Hash::hash(&h).as_byte_array(),
+            content_hash: [0u8; 32],
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
             operator_signature: [seq as u8 + 1; 64],
-            cosign_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
-        }
+        };
+        u.content_hash = u.compute_hash();
+        u
     }
 
     fn credit(n: u8, amount: u64) -> LedgerOperation {

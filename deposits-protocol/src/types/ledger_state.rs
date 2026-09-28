@@ -1289,10 +1289,8 @@ impl LedgerState {
         }
 
         // 5. Operator signature. Delegated to `SignedLedgerUpdate::
-        //    verify_operator_signature()`, which encodes the canonical
-        //    digest (`SHA256(operator_signing_data())`) used by every
-        //    production signing path (`Node::sign_last_update` in
-        //    deposits-node/src/node/init.rs:406).
+        //    verify_operator_signature()`, over the DEP-02 v2 operator
+        //    digest (`SignedLedgerUpdate::operator_digest`).
         if let Err(e) = update.verify_operator_signature() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "bad_operator_signature".to_string(),

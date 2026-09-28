@@ -2312,11 +2312,12 @@ mod tests {
             content_hash: [0u8; 32], // will be computed
             block_height: 12345,
             block_hash: [0x11; 32],
-            cosign_signature: [0xFF; 64],
             operator_signature: [0xEE; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
-            cosignatures: Vec::new(),
+            cosignatures: vec![crate::types::CosignEntry {
+                cosigner_pubkey: test_pubkey(),
+                cosign_signature: [0xFF; 64],
+                member_ledger_hash: [0xDD; 32],
+            }],
         };
         update.content_hash = update.compute_hash();
 

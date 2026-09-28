@@ -2218,15 +2218,15 @@ impl DepositsHandler {
 
     /// Sign the last update in a ledger with our operator key.
     ///
-    /// Signs `update.operator_sign_digest_v1()` — tagged BIP-340 hash
+    /// Signs `update.operator_digest()` — tagged BIP-340 hash
     /// with length-prefixed `message`. See `SignedLedgerUpdate::
-    /// operator_sign_digest_v1` for the layout and the rationale
+    /// operator_digest` for the layout and the rationale
     /// (closes the `message ↔ cosignatures` boundary ambiguity and
     /// adds domain separation against cross-protocol sig replay).
     fn sign_ledger_update(&self, ledger: &mut Ledger) {
         let ledger_id = ledger.ledger_id();
         if let Some(update) = ledger.history.last_mut() {
-            let digest = update.operator_sign_digest_v1();
+            let digest = update.operator_digest();
             let ctx = SignContext::operator_update(ledger_id, update.sequence_number);
             let sig = self
                 .signer
@@ -2783,10 +2783,7 @@ mod tests {
             content_hash: [tag; 32],
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -3196,7 +3193,7 @@ mod tests {
             u.ledger_id = ledger_id;
             u.previous_hash = chain.last().map(|p| p.chain_hash()).unwrap_or([0u8; 32]);
             u.content_hash = u.compute_hash();
-            let digest: [u8; 32] = Sha256::digest(u.operator_signing_data()).into();
+            let digest = u.operator_digest();
             u.operator_signature = secp
                 .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &kp)
                 .serialize();

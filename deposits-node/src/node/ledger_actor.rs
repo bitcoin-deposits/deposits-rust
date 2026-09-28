@@ -440,19 +440,16 @@ impl LedgerActor {
                     .cmp(&b.cosigner_pubkey.serialize())
             });
             staged.update.cosignatures = sorted;
-            staged.update.cosigner_pubkey = None;
-            staged.update.member_ledger_hash = None;
-            staged.update.cosign_signature = [0u8; 64];
             staged.update.content_hash = staged.update.compute_hash();
         }
 
-        // 3. Operator-sign. Uses the v1 tagged + length-prefixed digest
-        //    (see `SignedLedgerUpdate::operator_sign_digest_v1`). Routed
+        // 3. Operator-sign. Uses the DEP-02 v2 operator digest
+        //    (see `SignedLedgerUpdate::operator_digest`). Routed
         //    through the Signer so RemoteSigner / anti-equivocation
         //    policy can intercept.
         {
             use deposits_signer_api::SignContext;
-            let digest = staged.update.operator_sign_digest_v1();
+            let digest = staged.update.operator_digest();
             let ledger_id_bytes = self.ledger.read().unwrap().ledger_id();
             let ctx = SignContext::operator_update(ledger_id_bytes, staged.update.sequence_number);
             staged.update.operator_signature = self

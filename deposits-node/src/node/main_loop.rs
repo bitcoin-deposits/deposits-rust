@@ -2761,11 +2761,8 @@ mod pagination_tests {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
         }
     }
 

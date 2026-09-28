@@ -1045,7 +1045,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
                         let curr = &update.content_hash;
 
                         // Determine signature status and signer
-                        let has_partner_sig = update.cosign_signature != [0u8; 64];
+                        let has_partner_sig = update.has_cosign_signature();
                         let has_operator_sig = update.operator_signature != [0u8; 64];
                         let sig_status = format!(
                             "[{}{}]",

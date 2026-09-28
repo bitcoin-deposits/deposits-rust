@@ -263,10 +263,7 @@ mod tests {
             content_hash: [seq as u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }

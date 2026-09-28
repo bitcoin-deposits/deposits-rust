@@ -28,7 +28,8 @@ pub struct CosignEntry {
     /// The quorum member who co-signed.
     #[serde(with = "serde_pubkey")]
     pub cosigner_pubkey: PublicKey,
-    /// Schnorr signature over SHA256(tag||tag||cosign_data||member_ledger_hash).
+    /// BIP-340 signature over
+    /// `tagged_hash("deposits/cosign/v2", cosign_data || member_ledger_hash)`.
     #[serde(with = "serde_64")]
     pub cosign_signature: [u8; 64],
     /// Hash of the cosigner's own ledger at time of signing (causal ordering).
@@ -54,31 +55,108 @@ pub struct SignedLedgerUpdate {
     /// Hash of previous ledger state (creates cryptographic chain).
     #[serde(with = "serde_32")]
     pub previous_hash: [u8; 32],
-    /// Hash of current ledger state after this update.
+    /// `current_hash` of this update (DEP-02 §Hash Chain). Derived, never on the wire.
     #[serde(with = "serde_32")]
     pub content_hash: [u8; 32],
-    /// Block height when this update was created.
+    /// Block height when this update was created (0 = absent).
     #[serde(default)]
     pub block_height: u32,
-    /// Block hash at the time this update was created.
+    /// Block hash at the time this update was created (all zero = absent).
     #[serde(default, with = "serde_32")]
     pub block_hash: [u8; 32],
-    /// Co-signer's signature over update content.
-    #[serde(with = "serde_64")]
-    pub cosign_signature: [u8; 64],
-    /// Operator's final signature covering co-signer's signature.
+    /// Operator's final signature covering the content and every co-signature.
     #[serde(with = "serde_64")]
     pub operator_signature: [u8; 64],
-    /// Public key of the quorum member who co-signed this update (if co-signed).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cosigner_pubkey: Option<PublicKey>,
-    /// Current hash of the cosigner's own ledger at time of co-signing.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub member_ledger_hash: Option<[u8; 32]>,
     /// Majority cosignatures (post-QuorumBegin). Sorted by cosigner_pubkey.
-    /// When non-empty, the deprecated single-cosig fields above are ignored.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cosignatures: Vec<CosignEntry>,
+}
+
+/// DEP-02 §Co-signing tag.
+pub const COSIGN_TAG: &[u8] = b"deposits/cosign/v2";
+/// DEP-02 §Operator tag.
+pub const OPERATOR_UPDATE_TAG: &[u8] = b"deposits/operator-update/v2";
+/// DEP-02 §Hash Chain tag for `current_hash`.
+pub const UPDATE_TAG: &[u8] = b"deposits/update/v2";
+
+/// `tagged_hash(tag, data) = SHA256(SHA256(tag) || SHA256(tag) || data)`, over the
+/// concatenation of `parts`.
+fn tagged_hash(tag: &[u8], parts: &[&[u8]]) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    let tag_hash = sha256::Hash::hash(tag);
+    let mut e = sha256::HashEngine::default();
+    e.input(tag_hash.as_byte_array());
+    e.input(tag_hash.as_byte_array());
+    for p in parts {
+        e.input(p);
+    }
+    sha256::Hash::from_engine(e).to_byte_array()
+}
+
+/// The fields of an update that everyone signs (DEP-02 §Signing):
+///
+/// ```text
+/// cosign_data = sequence_number (8 LE) || ledger_id (32) || block_height (4 LE)
+///            || block_hash (32) || previous_hash (32) || len(message) (4 LE) || message
+/// ```
+///
+/// This is the one definition of the layout. Anything that builds, parses or
+/// hashes `cosign_data` goes through here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CosignData<'a> {
+    pub sequence_number: u64,
+    pub ledger_id: [u8; 32],
+    pub block_height: u32,
+    pub block_hash: [u8; 32],
+    pub previous_hash: [u8; 32],
+    pub message: &'a [u8],
+}
+
+impl<'a> CosignData<'a> {
+    /// Length of everything before `message`.
+    pub const HEADER_LEN: usize = 8 + 32 + 4 + 32 + 32 + 4;
+
+    /// Serialize to the signed byte layout.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut data = Vec::with_capacity(Self::HEADER_LEN + self.message.len());
+        data.extend_from_slice(&self.sequence_number.to_le_bytes());
+        data.extend_from_slice(&self.ledger_id);
+        data.extend_from_slice(&self.block_height.to_le_bytes());
+        data.extend_from_slice(&self.block_hash);
+        data.extend_from_slice(&self.previous_hash);
+        data.extend_from_slice(&(self.message.len() as u32).to_le_bytes());
+        data.extend_from_slice(self.message);
+        data
+    }
+
+    /// Parse the signed byte layout. The length must be exactly
+    /// `HEADER_LEN + len(message)`: no truncation, no trailing bytes.
+    pub fn parse(data: &'a [u8]) -> Result<Self, String> {
+        if data.len() < Self::HEADER_LEN {
+            return Err(format!(
+                "cosign_data too short: {} bytes, header is {}",
+                data.len(),
+                Self::HEADER_LEN
+            ));
+        }
+        let arr32 = |off: usize| -> [u8; 32] { data[off..off + 32].try_into().unwrap() };
+        let msg_len = u32::from_le_bytes(data[108..112].try_into().unwrap()) as usize;
+        if data.len() - Self::HEADER_LEN != msg_len {
+            return Err(format!(
+                "cosign_data length mismatch: message length {} but {} bytes follow the header",
+                msg_len,
+                data.len() - Self::HEADER_LEN
+            ));
+        }
+        Ok(Self {
+            sequence_number: u64::from_le_bytes(data[0..8].try_into().unwrap()),
+            ledger_id: arr32(8),
+            block_height: u32::from_le_bytes(data[40..44].try_into().unwrap()),
+            block_hash: arr32(44),
+            previous_hash: arr32(76),
+            message: &data[Self::HEADER_LEN..],
+        })
+    }
 }
 
 impl SignedLedgerUpdate {
@@ -99,42 +177,25 @@ impl SignedLedgerUpdate {
         refs
     }
 
-    /// Compute content_hash: commits to content, causal ordering, and co-signatures.
+    /// `n (2 LE)`: the number of cosignature entries.
+    fn cosig_count_le(&self) -> [u8; 2] {
+        (self.cosignatures.len() as u16).to_le_bytes()
+    }
+
+    /// Compute `current_hash` (DEP-02 §Hash Chain):
     ///
-    /// Multi-cosig format (cosignatures non-empty):
-    ///   `SHA256(seq || prev_hash || message || for each sorted entry: member_hash || cosig)`
-    ///
-    /// Legacy single-cosig format (cosignatures empty):
-    ///   `SHA256(seq || prev_hash || message [|| member_hash] [|| cosig])`
+    /// ```text
+    /// tagged_hash("deposits/update/v2", cosign_data || n (2 LE)
+    ///     || for each entry sorted by pubkey: member_ledger_hash || cosign_signature)
+    /// ```
     pub fn compute_hash(&self) -> [u8; 32] {
-        use sha2::{Digest, Sha256};
-
-        let mut hasher = Sha256::new();
-        hasher.update(self.sequence_number.to_le_bytes());
-        hasher.update(self.previous_hash);
-        hasher.update(&self.message);
-
-        if !self.cosignatures.is_empty() {
-            // Multi-cosig: include all entries sorted by pubkey (canonical
-            // ordering — see sorted_cosignatures).
-            for entry in self.sorted_cosignatures() {
-                hasher.update(entry.member_ledger_hash);
-                hasher.update(entry.cosign_signature);
-            }
-        } else {
-            // Legacy single-cosig
-            if let Some(ref mlh) = self.member_ledger_hash {
-                hasher.update(mlh);
-            }
-            if self.cosign_signature != [0u8; 64] {
-                hasher.update(self.cosign_signature);
-            }
+        let mut data = self.cosign_data();
+        data.extend_from_slice(&self.cosig_count_le());
+        for entry in self.sorted_cosignatures() {
+            data.extend_from_slice(&entry.member_ledger_hash);
+            data.extend_from_slice(&entry.cosign_signature);
         }
-
-        let result = hasher.finalize();
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&result);
-        hash
+        tagged_hash(UPDATE_TAG, &[&data])
     }
 
     /// Compute the chain hash: the value used as previous_hash for the next update.
@@ -170,211 +231,58 @@ impl SignedLedgerUpdate {
     // Signature Methods
     // ========================================================================
 
-    /// Compute the data that the co-signer signs (update content only, no operator signature).
-    ///
-    /// Co-signer signs: sequence || prev_hash || message
-    /// Matches TLV field order: identity → chain → payload.
-    /// Does NOT include content_hash — the hash is finalized after co-signing
-    /// (it incorporates member_ledger_hash for causal ordering).
-    /// Co-signer signs ONLY the content, NOT any operator signature.
-    /// This prevents operator from tricking co-signer into endorsing invalid state.
-    pub fn cosign_data(&self) -> Vec<u8> {
-        let mut data = Vec::new();
-        data.extend_from_slice(&self.sequence_number.to_le_bytes());
-        data.extend_from_slice(&self.previous_hash);
-        data.extend_from_slice(&self.message);
-        data
+    /// The signed header and message of this update, as a [`CosignData`] view.
+    pub fn cosign_fields(&self) -> CosignData<'_> {
+        CosignData {
+            sequence_number: self.sequence_number,
+            ledger_id: self.ledger_id,
+            block_height: self.block_height,
+            block_hash: self.block_hash,
+            previous_hash: self.previous_hash,
+            message: &self.message,
+        }
     }
 
-    /// Compute the data that the operator signs (content + all co-signatures).
-    ///
-    /// Multi-cosig: cosign_data || for each sorted entry: cosign_signature
-    /// Legacy: cosign_data || cosign_signature
+    /// `cosign_data` (DEP-02 §Signing): every field except the signatures.
+    pub fn cosign_data(&self) -> Vec<u8> {
+        self.cosign_fields().encode()
+    }
+
+    /// The bytes under the operator's tag:
+    /// `cosign_data || n (2 LE) || cosign_signature for each entry sorted by pubkey`.
     pub fn operator_signing_data(&self) -> Vec<u8> {
         let mut data = self.cosign_data();
-        if !self.cosignatures.is_empty() {
-            for entry in self.sorted_cosignatures() {
-                data.extend_from_slice(&entry.cosign_signature);
-            }
-        } else {
-            data.extend_from_slice(&self.cosign_signature);
+        data.extend_from_slice(&self.cosig_count_le());
+        for entry in self.sorted_cosignatures() {
+            data.extend_from_slice(&entry.cosign_signature);
         }
         data
     }
 
-    /// The canonical digest a cosigner signs.
-    ///
-    /// Tagged BIP-340 hash with length-prefixed `message` field. Symmetric
-    /// with `operator_sign_digest_v1`: closes the `message ↔
-    /// member_ledger_hash` boundary ambiguity (without a length prefix
-    /// a writer could slide tail bytes of `message` into
-    /// `member_ledger_hash`) and adds tag-based domain separation.
-    ///
-    /// Layout:
-    /// ```text
-    /// SHA256(SHA256(TAG) || SHA256(TAG)
-    ///   || seq_le8 || previous_hash[32]
-    ///   || message_len_le4 || message
-    ///   || member_ledger_hash[32])
-    /// ```
-    /// where TAG = b"deposits/cosign/v1".
-    pub fn cosign_sign_digest_v1(&self, member_ledger_hash: &[u8; 32]) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
-        const TAG: &[u8] = b"deposits/cosign/v1";
-        let tag_hash = sha256::Hash::hash(TAG);
-        let mut e = sha256::HashEngine::default();
-        e.input(tag_hash.as_byte_array());
-        e.input(tag_hash.as_byte_array());
-        e.input(&self.sequence_number.to_le_bytes());
-        e.input(&self.previous_hash);
-        let msg_len: u32 = self.message.len() as u32;
-        e.input(&msg_len.to_le_bytes());
-        e.input(&self.message);
-        e.input(member_ledger_hash);
-        sha256::Hash::from_engine(e).to_byte_array()
+    /// The digest a cosigner signs, given raw `cosign_data` bytes:
+    /// `tagged_hash("deposits/cosign/v2", cosign_data || member_ledger_hash)`.
+    pub fn cosign_digest_for_data(cosign_data: &[u8], member_ledger_hash: &[u8; 32]) -> [u8; 32] {
+        tagged_hash(COSIGN_TAG, &[cosign_data, member_ledger_hash])
     }
 
-    /// Pre-v1 tagged cosig digest (no length prefix on `message`).
-    /// Kept only so `verify_cosign_signature{,s}` can fall back to it
-    /// for legacy data on existing relays. Deprecated.
-    fn cosign_sign_digest_legacy(&self, member_ledger_hash: &[u8; 32]) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash};
-        let tag_hash = sha256::Hash::hash(b"deposits/cosign");
-        let mut tagged_input = Vec::new();
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(tag_hash.as_byte_array());
-        tagged_input.extend_from_slice(&self.cosign_data());
-        tagged_input.extend_from_slice(member_ledger_hash);
-        sha256::Hash::hash(&tagged_input).to_byte_array()
+    /// The digest a cosigner signs for this update.
+    pub fn cosign_digest(&self, member_ledger_hash: &[u8; 32]) -> [u8; 32] {
+        Self::cosign_digest_for_data(&self.cosign_data(), member_ledger_hash)
     }
 
-    /// Verify the co-signer's signature over the update content.
-    ///
-    /// Tries the v1 tagged + length-prefixed digest first, then the
-    /// legacy non-length-prefixed digest so existing on-relay data
-    /// continues to validate during the migration.
-    ///
-    /// The co-signer pubkey must be provided by the caller (from the Ledger).
-    /// For BDK ledgers without a co-signer, pass None and this returns Ok.
-    pub fn verify_cosign_signature(
-        &self,
-        partner_pubkey: Option<&PublicKey>,
-    ) -> Result<(), String> {
-        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
-
-        let partner_pubkey = match partner_pubkey {
-            Some(pk) => pk,
-            None => return Ok(()),
-        };
-        if self.cosign_signature == [0u8; 64] {
-            return Ok(());
-        }
-
-        let secp = Secp256k1::verification_only();
-        let member_hash = self.member_ledger_hash.unwrap_or([0u8; 32]);
-        let sig = Signature::from_slice(&self.cosign_signature)
-            .map_err(|e| format!("Invalid co-signer signature format: {}", e))?;
-        let (xonly, _parity) = partner_pubkey.x_only_public_key();
-
-        let v1 = self.cosign_sign_digest_v1(&member_hash);
-        if secp
-            .verify_schnorr(&sig, &Message::from_digest(v1), &xonly)
-            .is_ok()
-        {
-            return Ok(());
-        }
-
-        let legacy = self.cosign_sign_digest_legacy(&member_hash);
-        secp.verify_schnorr(&sig, &Message::from_digest(legacy), &xonly)
-            .map_err(|e| format!("Co-signer signature verification failed: {}", e))
+    /// The digest the operator signs:
+    /// `tagged_hash("deposits/operator-update/v2", operator_signing_data())`.
+    pub fn operator_digest(&self) -> [u8; 32] {
+        tagged_hash(OPERATOR_UPDATE_TAG, &[&self.operator_signing_data()])
     }
 
-    /// The canonical digest the operator signs.
-    ///
-    /// Tagged BIP-340 hash with length-prefixed `message` field, so a
-    /// writer can't slide bytes across the `message ↔ cosignatures`
-    /// boundary to forge a colliding tuple. The tag versions the
-    /// scheme: bumping `v1 → v2` means the verifier should also try
-    /// the older tag for backward compat (see `verify_operator_signature`).
-    ///
-    /// Layout:
-    /// ```text
-    /// SHA256(SHA256(TAG) || SHA256(TAG)
-    ///   || seq_le8 || previous_hash[32]
-    ///   || message_len_le4 || message
-    ///   || cosig_count_le2 || cosig_sigs[64]…)
-    /// ```
-    /// where TAG = b"deposits/operator-update/v1".
-    pub fn operator_sign_digest_v1(&self) -> [u8; 32] {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
-        const TAG: &[u8] = b"deposits/operator-update/v1";
-        let tag_hash = sha256::Hash::hash(TAG);
-        let mut e = sha256::HashEngine::default();
-        e.input(tag_hash.as_byte_array());
-        e.input(tag_hash.as_byte_array());
-        e.input(&self.sequence_number.to_le_bytes());
-        e.input(&self.previous_hash);
-        let msg_len: u32 = self.message.len() as u32;
-        e.input(&msg_len.to_le_bytes());
-        e.input(&self.message);
-        let cosigs = self.sorted_cosignatures();
-        let cosig_count: u16 = cosigs.len() as u16;
-        e.input(&cosig_count.to_le_bytes());
-        for c in cosigs {
-            e.input(&c.cosign_signature);
-        }
-        sha256::Hash::from_engine(e).to_byte_array()
-    }
-
-    /// Verify the operator's signature.
-    ///
-    /// Tries the v1 tagged + length-prefixed digest first (the canonical
-    /// scheme going forward). Falls back to two pre-v1 digests so existing
-    /// on-relay data still verifies:
-    ///   - `SHA256(operator_signing_data())` — raw, no tag, no length
-    ///     prefix. Used by `Node::sign_last_update` for every non-genesis
-    ///     update before the tagged-digest migration.
-    ///   - `SHA256(seq || previous_hash || content_hash || message)` — the
-    ///     even older `Handler::sign_ledger_update` digest used for seq-0
-    ///     LedgerOpens before they were aligned with the rest of the
-    ///     codebase.
-    ///
-    /// Both legacy digests are deprecated and slated for removal once
-    /// known live data has been re-signed under v1.
+    /// Verify the operator's signature over [`Self::operator_digest`].
     pub fn verify_operator_signature(&self) -> Result<(), String> {
-        use bitcoin::hashes::{sha256, Hash};
-
-        // v1: tagged + length-prefixed (canonical going forward).
-        let v1 = self.operator_sign_digest_v1();
-        if let Ok(()) = self.verify_operator_signature_against(&v1) {
-            return Ok(());
-        }
-
-        // Legacy A: raw SHA256(operator_signing_data()) — non-genesis
-        // updates signed before the tagged-digest migration.
-        let legacy_a = sha256::Hash::hash(&self.operator_signing_data()).to_byte_array();
-        if let Ok(()) = self.verify_operator_signature_against(&legacy_a) {
-            return Ok(());
-        }
-
-        // Legacy B: handler.rs's pre-c57d7e0d format for seq-0 LedgerOpen.
-        let legacy_b = {
-            let mut buf = Vec::new();
-            buf.extend_from_slice(&self.sequence_number.to_le_bytes());
-            buf.extend_from_slice(&self.previous_hash);
-            buf.extend_from_slice(&self.content_hash);
-            buf.extend_from_slice(&self.message);
-            sha256::Hash::hash(&buf).to_byte_array()
-        };
-        self.verify_operator_signature_against(&legacy_b)
-    }
-
-    fn verify_operator_signature_against(&self, digest: &[u8; 32]) -> Result<(), String> {
         use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
         let secp = Secp256k1::verification_only();
         let sig = Signature::from_slice(&self.operator_signature)
             .map_err(|e| format!("Invalid operator signature format: {}", e))?;
-        let msg = Message::from_digest(*digest);
+        let msg = Message::from_digest(self.operator_digest());
         let (xonly, _parity) = self.operator_id.x_only_public_key();
         secp.verify_schnorr(&sig, &msg, &xonly)
             .map_err(|e| format!("Operator signature verification failed: {}", e))
@@ -389,7 +297,6 @@ impl SignedLedgerUpdate {
         quorum_members: &[PublicKey],
         threshold: usize,
     ) -> Result<(), String> {
-        use bitcoin::hashes::{sha256, Hash};
         use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
 
         if self.cosignatures.is_empty() {
@@ -404,6 +311,7 @@ impl SignedLedgerUpdate {
         }
 
         let secp = Secp256k1::verification_only();
+        let cosign_data = self.cosign_data();
 
         let mut seen = std::collections::HashSet::new();
         for entry in &self.cosignatures {
@@ -432,18 +340,8 @@ impl SignedLedgerUpdate {
                 )
             })?;
             let (xonly, _) = entry.cosigner_pubkey.x_only_public_key();
-
-            // Try v1 first (canonical going forward), legacy fallback for
-            // on-relay data signed before the migration.
-            let v1 = self.cosign_sign_digest_v1(&entry.member_ledger_hash);
-            if secp
-                .verify_schnorr(&sig, &Message::from_digest(v1), &xonly)
-                .is_ok()
-            {
-                continue;
-            }
-            let legacy = self.cosign_sign_digest_legacy(&entry.member_ledger_hash);
-            secp.verify_schnorr(&sig, &Message::from_digest(legacy), &xonly)
+            let digest = Self::cosign_digest_for_data(&cosign_data, &entry.member_ledger_hash);
+            secp.verify_schnorr(&sig, &Message::from_digest(digest), &xonly)
                 .map_err(|e| {
                     format!(
                         "Cosig verification failed for {}: {}",
@@ -456,25 +354,14 @@ impl SignedLedgerUpdate {
         Ok(())
     }
 
-    /// Verify both signatures on this update.
-    ///
-    /// For multi-cosig updates, pass quorum_members and threshold.
-    /// For legacy single-cosig, pass partner_pubkey.
-    /// For BDK ledgers without co-signers, pass None/empty.
-    pub fn verify_signatures(&self, partner_pubkey: Option<&PublicKey>) -> Result<(), String> {
-        self.verify_cosign_signature(partner_pubkey)?;
-        self.verify_operator_signature()
-    }
-
-    /// Check if this update has valid (non-zero) signatures.
+    /// Check if this update has cosignatures and an operator signature.
     pub fn is_fully_signed(&self) -> bool {
-        let has_cosig = !self.cosignatures.is_empty() || self.cosign_signature != [0u8; 64];
-        has_cosig && self.operator_signature != [0u8; 64]
+        self.has_cosign_signature() && self.has_operator_signature()
     }
 
     /// Check if co-signer(s) have signed.
     pub fn has_cosign_signature(&self) -> bool {
-        !self.cosignatures.is_empty() || self.cosign_signature != [0u8; 64]
+        !self.cosignatures.is_empty()
     }
 
     /// Check if operator has signed (non-zero signature).
@@ -1171,18 +1058,17 @@ impl TlvDecode for ReservesOutput {
 
 // Field type constants for SignedLedgerUpdate
 //
-// Layout: identity → chain → payload → context → cosign → signatures
+// Layout: identity → chain → payload → context → signatures
 //   tag=0  operator_id        (33B)
 //   tag=2  ledger_id          (32B)
-//   tag=4  sequence_number    (varint)
+//   tag=4  sequence_number    (8B BE)
 //   tag=6  previous_hash      (32B)
-//   tag=8  message            (variable)       ← signed by both parties
-//   tag=10 block_height       (4B, optional)
-//   tag=12 block_hash         (32B, optional)
-//   tag=14 cosigner_pubkey    (33B, optional)
-//   tag=16 member_ledger_hash (32B, optional)
-//   tag=18 cosign_signature   (64B)
+//   tag=8  message            (variable)
+//   tag=10 block_height       (4B, omitted when 0)
+//   tag=12 block_hash         (32B, omitted when all zero)
+//   tag=14/16/18              retired single-cosig format; rejected on decode
 //   tag=20 operator_signature (64B)
+//   tag=22 cosignatures       (length-prefixed 129B entries)
 mod signed_update_fields {
     pub const OPERATOR_ID: u64 = 0;
     pub const LEDGER_ID: u64 = 2;
@@ -1191,9 +1077,8 @@ mod signed_update_fields {
     pub const MESSAGE: u64 = 8;
     pub const BLOCK_HEIGHT: u64 = 10;
     pub const BLOCK_HASH: u64 = 12;
-    pub const COSIGNER_PUBKEY: u64 = 14;
-    pub const MEMBER_LEDGER_HASH: u64 = 16;
-    pub const COSIGN_SIGNATURE: u64 = 18;
+    /// Retired: cosigner_pubkey, member_ledger_hash, cosign_signature.
+    pub const RETIRED_SINGLE_COSIG: [u64; 3] = [14, 16, 18];
     pub const OPERATOR_SIGNATURE: u64 = 20;
     pub const COSIGNATURES: u64 = 22;
 }
@@ -1206,15 +1091,20 @@ impl TlvEncode for SignedLedgerUpdate {
             .u64_field(signed_update_fields::SEQUENCE_NUMBER, self.sequence_number)
             .bytes_field(signed_update_fields::PREVIOUS_HASH, &self.previous_hash)
             .bytes_field(signed_update_fields::MESSAGE, &self.message);
+        // A zero block_height / block_hash is the absent value: omit it, so every
+        // update has exactly one encoding (the decoder rejects an explicit zero).
         if self.block_height != 0 {
             builder = builder.u32_field(signed_update_fields::BLOCK_HEIGHT, self.block_height);
         }
         if self.block_hash != [0u8; 32] {
             builder = builder.bytes_field(signed_update_fields::BLOCK_HASH, &self.block_hash);
         }
+        builder = builder.bytes_field(
+            signed_update_fields::OPERATOR_SIGNATURE,
+            &self.operator_signature,
+        );
         if !self.cosignatures.is_empty() {
-            // Multi-cosig: encode as tag 22 (length-prefixed entries),
-            // sorted by pubkey so the wire bytes are canonical.
+            // Length-prefixed entries, sorted by pubkey so the wire bytes are canonical.
             let mut cosig_bytes = Vec::new();
             for entry in self.sorted_cosignatures() {
                 let entry_len: u16 = 129; // 33 + 64 + 32
@@ -1224,41 +1114,26 @@ impl TlvEncode for SignedLedgerUpdate {
                 cosig_bytes.extend_from_slice(&entry.member_ledger_hash);
             }
             builder = builder.bytes_field(signed_update_fields::COSIGNATURES, &cosig_bytes);
-        } else {
-            // Legacy single-cosig: encode tags 14/16/18
-            if let Some(ref pk) = self.cosigner_pubkey {
-                builder = builder.pubkey_field(signed_update_fields::COSIGNER_PUBKEY, pk);
-            }
-            if let Some(ref hash) = self.member_ledger_hash {
-                builder = builder.bytes_field(signed_update_fields::MEMBER_LEDGER_HASH, hash);
-            }
-            if self.cosign_signature != [0u8; 64] {
-                builder = builder.bytes_field(
-                    signed_update_fields::COSIGN_SIGNATURE,
-                    &self.cosign_signature,
-                );
-            }
         }
-        // Note: TLV is sorted by tag number, so operator_signature (tag 20) appears
-        // before cosignatures (tag 22) on wire. This is cosmetic — the operator signs
-        // over operator_signing_data() which includes cosignatures in the hash input,
-        // and content_hash also incorporates all cosignatures. The tag ordering doesn't
-        // affect signature validity.
-        builder = builder.bytes_field(
-            signed_update_fields::OPERATOR_SIGNATURE,
-            &self.operator_signature,
-        );
         builder.build()
     }
 }
 
 impl TlvDecode for SignedLedgerUpdate {
     fn tlv_decode(data: &[u8]) -> TlvResult<Self> {
+        use crate::tlv::TlvError;
         let reader = TlvReader::new(data)?;
+        for tag in signed_update_fields::RETIRED_SINGLE_COSIG {
+            if reader.read_raw_opt(tag).is_some() {
+                return Err(TlvError::InvalidFieldValue {
+                    field_type: tag,
+                    reason: "retired single-cosignature field".to_string(),
+                });
+            }
+        }
         let message = reader.read_raw(signed_update_fields::MESSAGE)?.to_vec();
         // Derive message_type from the operation discriminant in message bytes
         let message_type = crate::messages::LedgerOperation::message_type_from_bytes(&message);
-        // Try multi-cosig tag 22 first, fall back to legacy tags 14/16/18
         let cosignatures = if let Ok(raw) = reader.read_raw(signed_update_fields::COSIGNATURES) {
             let mut entries = Vec::new();
             let mut off = 0;
@@ -1269,7 +1144,7 @@ impl TlvDecode for SignedLedgerUpdate {
                     break;
                 }
                 let pk = PublicKey::from_slice(&raw[off..off + 33]).map_err(|e| {
-                    crate::tlv::TlvError::InvalidFieldValue {
+                    TlvError::InvalidFieldValue {
                         field_type: signed_update_fields::COSIGNATURES,
                         reason: format!("cosig pubkey: {}", e),
                     }
@@ -1299,6 +1174,27 @@ impl TlvDecode for SignedLedgerUpdate {
             Vec::new()
         };
 
+        let block_height = match reader.read_u32_opt(signed_update_fields::BLOCK_HEIGHT)? {
+            Some(0) => {
+                return Err(TlvError::InvalidFieldValue {
+                    field_type: signed_update_fields::BLOCK_HEIGHT,
+                    reason: "explicit zero block_height (omit it instead)".to_string(),
+                })
+            }
+            Some(h) => h,
+            None => 0,
+        };
+        let block_hash = match reader.read_bytes_opt::<32>(signed_update_fields::BLOCK_HASH)? {
+            Some(h) if h == [0u8; 32] => {
+                return Err(TlvError::InvalidFieldValue {
+                    field_type: signed_update_fields::BLOCK_HASH,
+                    reason: "explicit all-zero block_hash (omit it instead)".to_string(),
+                })
+            }
+            Some(h) => h,
+            None => [0u8; 32],
+        };
+
         let mut update = Self {
             message,
             message_type,
@@ -1307,18 +1203,9 @@ impl TlvDecode for SignedLedgerUpdate {
             sequence_number: reader.read_u64(signed_update_fields::SEQUENCE_NUMBER)?,
             previous_hash: reader.read_bytes(signed_update_fields::PREVIOUS_HASH)?,
             content_hash: [0u8; 32],
-            block_height: reader
-                .read_u32_opt(signed_update_fields::BLOCK_HEIGHT)?
-                .unwrap_or(0),
-            block_hash: reader
-                .read_bytes_opt(signed_update_fields::BLOCK_HASH)?
-                .unwrap_or([0u8; 32]),
-            cosign_signature: reader
-                .read_bytes_opt(signed_update_fields::COSIGN_SIGNATURE)?
-                .unwrap_or([0u8; 64]),
+            block_height,
+            block_hash,
             operator_signature: reader.read_bytes(signed_update_fields::OPERATOR_SIGNATURE)?,
-            cosigner_pubkey: reader.read_pubkey_opt(signed_update_fields::COSIGNER_PUBKEY)?,
-            member_ledger_hash: reader.read_bytes_opt(signed_update_fields::MEMBER_LEDGER_HASH)?,
             cosignatures,
         };
         // Derive content_hash from content (not stored on wire)
@@ -1405,10 +1292,7 @@ mod tests {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         };
 
@@ -1429,29 +1313,29 @@ mod tests {
             content_hash: [0u8; 32],
             block_height: 0,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         };
 
         // Test signing data generation
         let cosign_data = update.cosign_data();
-        assert!(!cosign_data.is_empty());
+        assert_eq!(cosign_data.len(), CosignData::HEADER_LEN + 3);
+        assert_eq!(CosignData::parse(&cosign_data).unwrap(), update.cosign_fields());
 
-        let operator_data = update.operator_signing_data();
-        // Operator data includes cosign_signature
-        assert!(operator_data.len() > cosign_data.len());
-        assert_eq!(operator_data.len(), cosign_data.len() + 64);
+        // Operator data appends n (2 LE) and one signature per entry.
+        assert_eq!(update.operator_signing_data().len(), cosign_data.len() + 2);
 
         // Test signature status checks
         assert!(!update.is_fully_signed());
         assert!(!update.has_cosign_signature());
         assert!(!update.has_operator_signature());
 
-        // Set non-zero signatures and check
-        update.cosign_signature = [0xaa; 64];
+        update.cosignatures.push(CosignEntry {
+            cosigner_pubkey: pk,
+            cosign_signature: [0xaa; 64],
+            member_ledger_hash: [0u8; 32],
+        });
+        assert_eq!(update.operator_signing_data().len(), cosign_data.len() + 2 + 64);
         assert!(update.has_cosign_signature());
         assert!(!update.is_fully_signed());
 

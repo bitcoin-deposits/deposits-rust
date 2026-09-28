@@ -302,10 +302,7 @@ mod recovery_voter_derivation_tests {
             content_hash: [0u8; 32],
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
-            cosign_signature: [0u8; 64],
             operator_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
     }
@@ -1731,51 +1728,33 @@ impl Node {
         // cosigners could never converge onto the resolved chain.
         let parent_chain_hash = our_armed.chain_hash();
         let sequence = our_armed.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&parent_chain_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-
-        // Sign the update
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(parent_chain_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
-        let operator_sig_bytes = self
-            .handler
-            .signer
-            .bip340_sign(
-                &SignContext::operator_update(ledger_id_bytes, sequence),
-                msg_hash.as_ref(),
-            )
-            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
-
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: parent_chain_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block,
             block_hash: current_block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                &signed_update.operator_digest(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         // Broadcast to Nostr
         self.nostr
@@ -1907,51 +1886,33 @@ impl Node {
         // ONE convention and `validate_hash_chain` stays strict.
         let parent_chain_hash = our_armed.chain_hash();
         let sequence = our_armed.sequence_number + 1;
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&sequence.to_le_bytes());
-        hash_input.extend_from_slice(&parent_chain_hash);
-        hash_input.extend_from_slice(&message_bytes);
-        let new_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-
-        // Sign the update
-        let update_msg = format!(
-            "deposits:ledger:{}:{}:{}",
-            hex::encode(parent_chain_hash),
-            sequence,
-            hex::encode(new_hash)
-        );
-        let msg_hash = sha256::Hash::hash(update_msg.as_bytes());
-
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
-        let operator_sig_bytes = self
-            .handler
-            .signer
-            .bip340_sign(
-                &SignContext::operator_update(ledger_id_bytes, sequence),
-                msg_hash.as_ref(),
-            )
-            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
-
-        let signed_update = SignedLedgerUpdate {
+        let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
-            operator_signature: operator_sig_bytes,
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
+            operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
-            cosign_signature: [0u8; 64],
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
             previous_hash: parent_chain_hash,
-            content_hash: new_hash,
+            content_hash: [0u8; 32],
             block_height: current_block,
             block_hash: current_block_hash,
         };
+        signed_update.content_hash = signed_update.compute_hash();
+        signed_update.operator_signature = self
+            .handler
+            .signer
+            .bip340_sign(
+                &SignContext::operator_update(ledger_id_bytes, sequence),
+                &signed_update.operator_digest(),
+            )
+            .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
         // Broadcast to Nostr
         self.nostr
@@ -3590,9 +3551,8 @@ mod recovery_chaining_tests {
     }
 
     /// Build a signed update chaining on `prev` (already the parent's
-    /// chain_hash, or [0;32] for genesis). `content_hash` is computed the
-    /// same way the recovery builders and `append_operation_with_block` do:
-    /// SHA256(seq_le || prev || message). A non-zero operator_signature is
+    /// chain_hash, or [0;32] for genesis). `content_hash` is
+    /// `SignedLedgerUpdate::compute_hash`. A non-zero operator_signature is
     /// stamped so `chain_hash()` (which folds it in) is meaningful.
     fn signed(
         seq: u64,
@@ -3601,29 +3561,23 @@ mod recovery_chaining_tests {
         prev: [u8; 32],
     ) -> SignedLedgerUpdate {
         let message = op.tlv_encode();
-        let mut hash_input = Vec::new();
-        hash_input.extend_from_slice(&seq.to_le_bytes());
-        hash_input.extend_from_slice(&prev);
-        hash_input.extend_from_slice(&message);
-        let content_hash = *sha256::Hash::hash(&hash_input).as_byte_array();
-        SignedLedgerUpdate {
+        let mut u = SignedLedgerUpdate {
             message,
             message_type: 0x8001,
             operator_id: operator,
             ledger_id: [7u8; 32],
             sequence_number: seq,
             previous_hash: prev,
-            content_hash,
+            content_hash: [0u8; 32],
             block_height: 100 + seq as u32,
             block_hash: [0u8; 32],
             // Distinct non-zero sig per seq so chain_hash != content_hash and
             // each parent's chain_hash is unique.
             operator_signature: [seq as u8 + 1; 64],
-            cosign_signature: [0u8; 64],
-            cosigner_pubkey: None,
-            member_ledger_hash: None,
             cosignatures: Vec::new(),
-        }
+        };
+        u.content_hash = u.compute_hash();
+        u
     }
 
     fn ledger_open(operator: PublicKey) -> LedgerOperation {
