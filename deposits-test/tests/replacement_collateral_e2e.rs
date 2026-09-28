@@ -191,12 +191,12 @@ fn replacement_collateral_round_trips_through_dispute_pipeline() {
     );
     let broadcast = FraudBroadcast {
         proof,
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: accused_ledger.clone(),
             sequence: embed_update.sequence_number,
             update_hash: hex::encode(embed_update.content_hash),
             field: "delivery_request_hash".into(),
-        },
+        }),
         causal_chain: Vec::<CausalLink>::new(),
     };
     publish_fraud_broadcast(&node, accused_op_idx, &broadcast);

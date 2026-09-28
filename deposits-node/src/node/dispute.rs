@@ -1977,9 +1977,10 @@ impl Node {
         // verify each before trusting it, or a bogus notice could drive an
         // unjustified confiscation (the cosign tx-shape verifier confirms the tx
         // *matches* the proof_type, not that the *fault is real*). Return the
-        // most-recent broadcast that actually verifies — gap-fill + structural +
-        // embedding + causal chain + per-type evidence + on-chain steps, the
-        // same checks the inbound receive path runs.
+        // most-recent broadcast that actually verifies — gap-fill + per-type
+        // evidence + on-chain steps, plus structural + embedding + causal
+        // chain for embedding-required types: the same checks the inbound
+        // receive path runs.
         let mut candidates: Vec<(u64, FraudBroadcast)> = events
             .iter()
             .filter_map(|e| {

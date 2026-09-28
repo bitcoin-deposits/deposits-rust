@@ -1189,8 +1189,9 @@ impl Node {
     /// confiscation decision) is a SIGNAL to verify, never authoritative on its
     /// own — anyone can publish a well-formed-looking `FraudBroadcast` carrying
     /// any `proof_type`. This gap-fills the referenced ledgers from the relay,
-    /// then runs the protocol-layer `verify_fraud_broadcast` (structural +
-    /// embedding + causal chain + per-type evidence) plus the
+    /// then runs the protocol-layer `verify_fraud_broadcast` (per-type
+    /// evidence, plus structural + embedding + causal chain for
+    /// embedding-required types) plus the
     /// `WinnerCollateralDeviation` on-chain step. `Ok(())` means the fault is
     /// real. Shared by the inbound receive path (`handle_fraud_proof`) and the
     /// confiscation proof-type resolver so both ground on identical checks.
@@ -1200,22 +1201,41 @@ impl Node {
     ) -> Result<(), String> {
         // 0. Gap-fill any referenced ledgers we don't already have.
         //    `verify_fraud_broadcast` queries the LedgerProvider for the
-        //    embedding ledger AND every causal-chain link's ledger; missing →
-        //    reject. Cosigners only hold replicas of ledgers they joined, so
-        //    pre-fetch from the durable relay before verifying.
+        //    accused ledger, the embedding ledger AND every causal-chain
+        //    link's ledger (the latter two only for embedding-required
+        //    types); missing → reject. Cosigners only hold replicas of
+        //    ledgers they joined, so pre-fetch from the durable relay before
+        //    verifying. A self-evident proof may carry no embedding, so the
+        //    accused ledger is named explicitly.
         let mut needed: std::collections::HashSet<String> =
-            std::iter::once(broadcast.embedding.ledger_id.clone()).collect();
-        for link in &broadcast.causal_chain {
-            needed.insert(link.ledger_id.clone());
+            std::iter::once(broadcast.proof.ledger_id.clone()).collect();
+        if broadcast.proof.proof_type.requires_embedding() {
+            if let Some(embedding) = &broadcast.embedding {
+                needed.insert(embedding.ledger_id.clone());
+            }
+            for link in &broadcast.causal_chain {
+                needed.insert(link.ledger_id.clone());
+            }
         }
-        // NonConformingCosignature names a separate fault ledger inside the
-        // evidence; its verifier needs that ledger's history to replay state.
-        if let deposits_core::fraud::FraudEvidence::NonConformingCosignature {
-            fault_ledger_id,
-            ..
-        } = &broadcast.proof.evidence
-        {
-            needed.insert(fault_ledger_id.clone());
+        // Evidence can name further ledgers whose history its verifier
+        // replays: NonConformingCosignature's fault ledger, and the member
+        // ledger of StaleCosign / DisputeDereliction.
+        match &broadcast.proof.evidence {
+            deposits_core::fraud::FraudEvidence::NonConformingCosignature {
+                fault_ledger_id,
+                ..
+            } => {
+                needed.insert(fault_ledger_id.clone());
+            }
+            deposits_core::fraud::FraudEvidence::StaleCosign {
+                member_ledger_id, ..
+            }
+            | deposits_core::fraud::FraudEvidence::DisputeDereliction {
+                member_ledger_id, ..
+            } => {
+                needed.insert(member_ledger_id.clone());
+            }
+            _ => {}
         }
         for lid in &needed {
             let have = {
@@ -1263,12 +1283,10 @@ impl Node {
         }
 
         // Synchronous structural + embedding + causal + per-type evidence
-        // check. provider/oracle are created and used entirely within this
-        // sync call (no await), so no non-Send guard is held across an await —
-        // keeps this helper usable from spawned (Send) tasks like the
-        // confiscation driver. The WinnerCollateralDeviation on-chain step
-        // (which holds `&dyn BlockOracle` across an await, and isn't part of
-        // confiscation resolution anyway) stays in the inbound receive path.
+        // check. provider/oracle are created and used entirely within these
+        // sync calls (no await follows), so no non-Send guard is held across
+        // an await — keeps this helper usable from spawned (Send) tasks like
+        // the confiscation driver.
         let provider = DaemonLedgers {
             handler: &self.handler,
         };
@@ -1276,13 +1294,26 @@ impl Node {
             wallet: &self.wallet,
         };
         deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle)?;
+
+        // WinnerCollateralDeviation's evidence is the on-chain claim TX,
+        // which the pure verifier can't fetch. The type is self-evident, so
+        // no embedding check stands in for it: both the receive path and the
+        // confiscation resolver must run this step.
+        if matches!(
+            broadcast.proof.proof_type,
+            deposits_core::fraud::FraudProofType::WinnerCollateralDeviation
+        ) {
+            self.verify_winner_collateral_deviation_onchain(broadcast, &oracle)
+                .map_err(|e| format!("WinnerCollateralDeviation: {}", e))?;
+        }
         Ok(())
     }
 
     /// Handle an incoming fraud proof broadcast.
     ///
-    /// Verifies the proof hash against the embedding, then checks if we're
-    /// a quorum member. If so, initiates a custody dispute.
+    /// Verifies the proof (its evidence, plus the embedding and causal chain
+    /// for embedding-required types), then checks if we're a quorum member.
+    /// If so, initiates a custody dispute.
     #[tracing::instrument(name = "handle_fraud_proof", skip(self, fp), fields(ledger = &fp.broadcast.proof.ledger_id[..16.min(fp.broadcast.proof.ledger_id.len())]))]
     pub(crate) async fn handle_fraud_proof(&self, fp: crate::nostr::FraudProofEvent) {
         let broadcast = &fp.broadcast;
@@ -1304,45 +1335,24 @@ impl Node {
             return;
         }
 
-        // WinnerCollateralDeviation needs an on-chain step the pure verifier
-        // can't run (fetch the claim TX + lottery output value). Receive-path
-        // only — it holds `&dyn BlockOracle` across an await and isn't part of
-        // confiscation resolution, so it's kept out of the shared Send helper.
-        if matches!(
-            broadcast.proof.proof_type,
-            deposits_core::fraud::FraudProofType::WinnerCollateralDeviation
-        ) {
-            struct WalletOracle<'a> {
-                wallet: &'a crate::wallet::Wallet,
-            }
-            impl<'a> deposits_core::fraud::BlockOracle for WalletOracle<'a> {
-                fn confirms(&self, hash: &[u8; 32]) -> Option<u32> {
-                    self.wallet.confirms_block(hash)
-                }
-            }
-            let oracle = WalletOracle {
-                wallet: &self.wallet,
-            };
-            if let Err(e) = self
-                .verify_winner_collateral_deviation_onchain(broadcast, &oracle)
-                .await
-            {
+        match &broadcast.embedding {
+            Some(embedding) if broadcast.proof.proof_type.requires_embedding() => {
                 tracing::warn!(
-                    "WinnerCollateralDeviation rejected ({}...): {}",
+                    "Fraud proof VERIFIED: {} at seq {} on {}, evidence type {:?}",
                     &proof_hash_hex[..16],
-                    e
+                    embedding.sequence,
+                    &embedding.ledger_id[..16.min(embedding.ledger_id.len())],
+                    broadcast.proof.proof_type,
                 );
-                return;
+            }
+            _ => {
+                tracing::warn!(
+                    "Fraud proof VERIFIED: {} (self-evident, no embedding), evidence type {:?}",
+                    &proof_hash_hex[..16],
+                    broadcast.proof.proof_type,
+                );
             }
         }
-
-        tracing::warn!(
-            "Fraud proof VERIFIED: {} at seq {} on {}, evidence type {:?}",
-            &proof_hash_hex[..16],
-            broadcast.embedding.sequence,
-            &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())],
-            broadcast.proof.proof_type,
-        );
 
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
@@ -1476,7 +1486,7 @@ impl Node {
     /// the disputant's declared replacement collateral. Any other outcome
     /// (no deviation, missing tx, etc.) becomes `Err(reason)` so the
     /// caller can reject the fraud proof.
-    async fn verify_winner_collateral_deviation_onchain(
+    fn verify_winner_collateral_deviation_onchain(
         &self,
         broadcast: &deposits_core::fraud::FraudBroadcast,
         oracle: &dyn deposits_core::fraud::BlockOracle,

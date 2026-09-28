@@ -198,3 +198,136 @@ fn seq_zero_with_nonzero_prev_is_non_conforming() {
         "a seq-0 update not linking to the zero hash must verify as fraud"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Broadcast-level: NonConformingUpdate is self-evident (DEP-06), so the
+// broadcast verifies on its evidence alone, with no embedding or causal
+// chain. The evidence check is never skipped.
+// ---------------------------------------------------------------------------
+
+use deposits_protocol::fraud::{verify_fraud_broadcast, FraudBroadcast, ProofEmbedding};
+
+fn accused_history(id: &str) -> Option<Vec<SignedLedgerUpdate>> {
+    (id == hex::encode(LEDGER)).then(canonical_chain)
+}
+
+fn no_blocks(_: &[u8; 32]) -> Option<u32> {
+    None
+}
+
+/// cl-deposits' transitional placeholder embedding (fraud.lisp
+/// `broadcast->json`): the accused ledger, seq 0, empty hash, "inline".
+fn cl_placeholder(ledger_id: &str) -> ProofEmbedding {
+    ProofEmbedding {
+        ledger_id: ledger_id.to_string(),
+        sequence: 0,
+        update_hash: String::new(),
+        field: "inline".into(),
+    }
+}
+
+#[test]
+fn ncu_broadcast_without_embedding_verifies() {
+    let bad = signed_update(2, LEDGER, [0xFF; 32], OP, b"orphan", false);
+    let b = FraudBroadcast {
+        proof: proof_for(&bad),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    b.verify_chain_structure().unwrap();
+    verify_fraud_broadcast(&b, &accused_history, &no_blocks).unwrap();
+}
+
+#[test]
+fn ncu_broadcast_with_cl_placeholder_verifies() {
+    let bad = signed_update(2, LEDGER, [0xFF; 32], OP, b"orphan", false);
+    let proof = proof_for(&bad);
+    let b = FraudBroadcast {
+        embedding: Some(cl_placeholder(&proof.ledger_id)),
+        proof,
+        causal_chain: vec![],
+    };
+    verify_fraud_broadcast(&b, &accused_history, &no_blocks).unwrap();
+}
+
+#[test]
+fn ncu_broadcast_with_bogus_evidence_still_rejected() {
+    // A conforming update dressed up as fraud: no embedding needed, but the
+    // evidence check still runs and refuses it.
+    let honest = canonical_chain()[2].clone();
+    let b = FraudBroadcast {
+        proof: proof_for(&honest),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    let err = verify_fraud_broadcast(&b, &accused_history, &no_blocks).unwrap_err();
+    assert!(err.contains("conforming"), "wrong error: {}", err);
+
+    // A non-conforming update not signed by the accused: impersonation.
+    let bad = signed_update(2, LEDGER, [0xFF; 32], OP, b"orphan", false);
+    let mut proof = proof_for(&bad);
+    proof.accused = hex::encode(
+        Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[9; 32]).unwrap())
+            .public_key()
+            .serialize(),
+    );
+    let b = FraudBroadcast {
+        embedding: Some(cl_placeholder(&proof.ledger_id)),
+        proof,
+        causal_chain: vec![],
+    };
+    assert!(verify_fraud_broadcast(&b, &accused_history, &no_blocks).is_err());
+
+    // The accused ledger unavailable: fail closed, not skip.
+    let bad = signed_update(2, LEDGER, [0xFF; 32], OP, b"orphan", false);
+    let b = FraudBroadcast {
+        proof: proof_for(&bad),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    let nothing = |_: &str| -> Option<Vec<SignedLedgerUpdate>> { None };
+    assert!(verify_fraud_broadcast(&b, &nothing, &no_blocks).is_err());
+}
+
+/// cl's JSON, as `broadcast->json` / `proof->json` emit it today (with the
+/// placeholder), and the embedding-less shapes it can move to.
+#[test]
+fn cl_shaped_json_round_trip() {
+    let bad = signed_update(2, LEDGER, [0xFF; 32], OP, b"orphan", false);
+    let accused = hex::encode(bad.operator_id.serialize());
+    let ledger = hex::encode(LEDGER);
+    let fault_hex = hex::encode(bad.tlv_encode());
+    let proof_json = format!(
+        r#"{{"proof_type":"NonConformingUpdate","accused":"{accused}","ledger_id":"{ledger}","evidence":{{"NonConformingUpdate":{{"fault_sequence":2,"fault_update_hex":"{fault_hex}"}}}}}}"#
+    );
+    let with_placeholder = format!(
+        r#"{{"proof":{proof_json},"embedding":{{"ledger_id":"{ledger}","sequence":0,"update_hash":"","field":"inline"}},"causal_chain":[]}}"#
+    );
+    let key_absent = format!(r#"{{"proof":{proof_json},"causal_chain":[]}}"#);
+    let null_embedding = format!(r#"{{"proof":{proof_json},"embedding":null,"causal_chain":[]}}"#);
+    let bare = format!(r#"{{"proof":{proof_json}}}"#);
+
+    let expected_hash = proof_for(&bad).proof_hash();
+    for (name, json) in [
+        ("placeholder", &with_placeholder),
+        ("key absent", &key_absent),
+        ("null", &null_embedding),
+        ("no causal_chain", &bare),
+    ] {
+        let b: FraudBroadcast =
+            serde_json::from_str(json).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
+        assert_eq!(b.proof.proof_hash(), expected_hash, "{name}: proof hash");
+        verify_fraud_broadcast(&b, &accused_history, &no_blocks)
+            .unwrap_or_else(|e| panic!("{name}: verify: {e}"));
+        // Round trip through the reference's serializer.
+        let again: FraudBroadcast = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(again.proof.proof_hash(), expected_hash, "{name}: round trip");
+        assert_eq!(again.embedding.is_some(), b.embedding.is_some(), "{name}: embedding");
+    }
+
+    // The reference omits the key (not `null`) when it has no embedding.
+    let b: FraudBroadcast = serde_json::from_str(&key_absent).unwrap();
+    let out: serde_json::Value = serde_json::to_value(&b).unwrap();
+    assert!(out.get("embedding").is_none(), "embedding key must be omitted: {out}");
+    assert_eq!(out["causal_chain"], serde_json::json!([]));
+}

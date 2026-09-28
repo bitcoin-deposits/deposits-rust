@@ -189,12 +189,12 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     // ── 6. Publish kind:9101 — anyone can publish. Use op1. ──
     let broadcast = FraudBroadcast {
         proof,
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: accused_ledger.clone(),
             sequence: embed_seq,
             update_hash: hex::encode(embed_content),
             field: "delivery_request_hash".into(),
-        },
+        }),
         causal_chain: Vec::<CausalLink>::new(),
     };
     eprintln!("[publish]  kind:9101 from op{}", accused_op_idx);

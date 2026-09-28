@@ -211,12 +211,12 @@ fn fraud_proof_stale_cosig_triggers_confiscation() {
     // ── 7. Build the FraudBroadcast and publish kind:9101 ──
     let broadcast = FraudBroadcast {
         proof,
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: accused_ledger.clone(),
             sequence: embed_seq,
             update_hash: hex::encode(embed_content),
             field: "delivery_request_hash".into(),
-        },
+        }),
         causal_chain: Vec::<CausalLink>::new(), // same-ledger
     };
     eprintln!("[publish] kind:9101 from op0");

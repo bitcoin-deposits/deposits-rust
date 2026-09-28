@@ -199,12 +199,12 @@ fn fraud_proof_equivocation_drives_confiscation() {
         embed_proof_hash(&node, accused_op_idx, peer_op, &accused_ledger, proof_hash);
     let broadcast = FraudBroadcast {
         proof,
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: accused_ledger.clone(),
             sequence: embed_update.sequence_number,
             update_hash: hex::encode(embed_update.content_hash),
             field: "delivery_request_hash".into(),
-        },
+        }),
         causal_chain: Vec::<CausalLink>::new(),
     };
     eprintln!("[publish] kind:9101 Equivocation from op{}", accused_op_idx);

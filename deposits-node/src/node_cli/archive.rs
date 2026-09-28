@@ -342,8 +342,9 @@ impl BlockOracle for NoChainOracle {
 
 /// Verify a fraud broadcast against the archive's validated chains using the
 /// SAME `verify_fraud_broadcast` the daemon runs. Returns `Ok(())` only if the
-/// proof is structurally sound, embedded in a validated ledger, its causal
-/// chain present, and its per-type evidence checks out.
+/// per-type evidence checks out and, for embedding-required types, the proof
+/// is structurally sound, embedded in a validated ledger and its causal chain
+/// present.
 pub fn verify_archived_fraud(
     broadcast: &FraudBroadcast,
     chains: &HashMap<String, Vec<SignedLedgerUpdate>>,

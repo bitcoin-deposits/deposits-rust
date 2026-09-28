@@ -17,6 +17,11 @@
 //!
 //! Verification: hash the proof, walk the causal chain from the embedding
 //! to the operator's ledger, confirm each link is a signed update.
+//!
+//! Embedding and causal chain apply only to off-ledger / timing-dependent
+//! proof types. A proof that is itself cryptographic evidence of
+//! non-conformity is self-evident and verifies on its evidence alone; see
+//! [`FraudProofType::requires_embedding`].
 
 use bitcoin::hashes::{sha256, Hash};
 use serde::{Deserialize, Serialize};
@@ -120,6 +125,59 @@ impl FraudProofType {
     ///   operator's *other* quorums; respectful do not).
     pub fn is_respectful(&self) -> bool {
         matches!(self, Self::QuorumExpired)
+    }
+
+    /// Whether a broadcast of this proof type must carry an embedding and
+    /// causal chain (DEP-06), or is *self-evident*.
+    ///
+    /// The rule: embedding exists for censorship and off-ledger fraud, where
+    /// there is no signed, on-ledger evidence of non-conformity and the
+    /// causal ordering of the evidence is what proves the fault. **A fraud
+    /// proof that is itself cryptographic evidence of non-conformity needs
+    /// no embedding and no causal chain**: its verdict does not depend on
+    /// when the proof became known, so ordering adds nothing. It is also
+    /// often unsatisfiable: a quorum member reporting its own operator after
+    /// the fraud cannot get a causal link (the accused chain now holds the
+    /// invalid update, and honest members never cosign past it), and a
+    /// direct embedding needs the fraudster to sign the reporter's hash.
+    ///
+    /// Self-evident (embedding optional, ignored when present):
+    /// - `NonConformingUpdate`: the operator's own signed update.
+    /// - `Equivocation`: two operator-signed updates at one sequence.
+    /// - `NonConformingCosignature`: the accused's cosignature on a
+    ///   non-conforming update.
+    /// - `StaleCosignature`: two signed hashes from the member's own chain.
+    /// - `QuorumExpired`: a block anchor past the ledger's signed expiry.
+    /// - `WinnerCollateralDeviation`: the claim TX against the winner's
+    ///   signed `DisputeArmed`.
+    ///
+    /// Embedding required (off-ledger or timing-dependent):
+    /// - `UncreditedOnchainPayment`, `UncreditedLightningPayment`: the
+    ///   payment is off-ledger; the proof must be shown to precede the
+    ///   operator's (non-)response.
+    /// - `DisputeDereliction` (inactive quorum member): the fault is a
+    ///   response window measured from when the member saw the proof.
+    ///
+    /// The match is exhaustive on purpose: a new proof type must be
+    /// classified here.
+    pub fn requires_embedding(&self) -> bool {
+        match self {
+            Self::UncreditedOnchainPayment
+            | Self::UncreditedLightningPayment
+            | Self::DisputeDereliction => true,
+            Self::NonConformingUpdate
+            | Self::Equivocation
+            | Self::NonConformingCosignature
+            | Self::StaleCosignature
+            | Self::QuorumExpired
+            | Self::WinnerCollateralDeviation => false,
+        }
+    }
+
+    /// The complement of [`Self::requires_embedding`]: the proof is its own
+    /// evidence and verifies without an embedding or causal chain.
+    pub fn is_self_evident(&self) -> bool {
+        !self.requires_embedding()
     }
 }
 
@@ -1650,14 +1708,20 @@ pub fn verify_uncredited_onchain(
 pub struct FraudBroadcast {
     /// The fraud proof (hashable evidence).
     pub proof: FraudProof,
-    /// Where the proof hash was embedded.
-    pub embedding: ProofEmbedding,
+    /// Where the proof hash was embedded. Required for proof types that
+    /// [`FraudProofType::requires_embedding`]; optional, and ignored by
+    /// verification, for self-evident types. Absent (or `null`) on the
+    /// wire when `None`; the reference omits the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ProofEmbedding>,
     /// Causal chain from the embedding to the accused operator's ledger.
     /// Each link is a co-signed update that entangles one ledger into another.
     /// Empty if embedded directly on the operator's ledger.
     /// One entry if embedded on a quorum member's ledger (the co-signature
     /// on the operator's ledger that includes the member's hash).
     /// Multiple entries for longer paths through the web.
+    /// Defaults to empty when absent (self-evident proofs have none).
+    #[serde(default)]
     pub causal_chain: Vec<CausalLink>,
 }
 
@@ -1745,37 +1809,58 @@ where
 ///      member_ledger_hash) on each link's ledger.
 ///   4. Per-type evidence verification (the actual fraud claim).
 ///
-/// Returns `Ok(())` if every layer passes — the broadcast represents
-/// real, anchored, attributable fraud. Returns the first failure
+/// Steps 1-3 run only for proof types that
+/// [`FraudProofType::requires_embedding`]. A self-evident proof is its own
+/// cryptographic evidence of non-conformity, so its embedding (absent, a
+/// placeholder, or real) and causal chain are ignored; step 4 always runs.
+///
+/// Returns `Ok(())` if every applicable layer passes — the broadcast
+/// represents real, attributable fraud. Returns the first failure
 /// otherwise.
 pub fn verify_fraud_broadcast(
     broadcast: &FraudBroadcast,
     ledgers: &dyn LedgerProvider,
     block_oracle: &dyn BlockOracle,
 ) -> Result<(), String> {
-    // (1) structural
+    if broadcast.proof.proof_type.requires_embedding() {
+        verify_embedding_and_causal_chain(broadcast, ledgers)?;
+    }
+    verify_fraud_evidence(&broadcast.proof, ledgers, block_oracle)
+}
+
+/// Steps 1-3 of [`verify_fraud_broadcast`]: the broadcast's embedding is
+/// present, sits at the claimed sequence of the claimed ledger, and every
+/// causal link is present on its ledger.
+fn verify_embedding_and_causal_chain(
+    broadcast: &FraudBroadcast,
+    ledgers: &dyn LedgerProvider,
+) -> Result<(), String> {
+    // (1) structural (also rejects a missing embedding)
     broadcast.verify_chain_structure()?;
+    let embedding = broadcast.embedding.as_ref().ok_or_else(|| {
+        format!(
+            "{:?} requires an embedding (DEP-06)",
+            broadcast.proof.proof_type
+        )
+    })?;
 
     let proof_hash = broadcast.proof.proof_hash();
 
     // (2) embedding in claimed ledger
     let embed_history = ledgers
-        .ledger_history(&broadcast.embedding.ledger_id)
+        .ledger_history(&embedding.ledger_id)
         .ok_or_else(|| {
             format!(
                 "embedding ledger {} not available to verifier",
-                &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())]
+                &embedding.ledger_id[..16.min(embedding.ledger_id.len())]
             )
         })?;
-    if !broadcast
-        .embedding
-        .verify_in_history(&embed_history, &proof_hash)
-    {
+    if !embedding.verify_in_history(&embed_history, &proof_hash) {
         return Err(format!(
             "proof_hash {} not embedded at seq {} on ledger {}",
             hex::encode(&proof_hash[..8]),
-            broadcast.embedding.sequence,
-            &broadcast.embedding.ledger_id[..16.min(broadcast.embedding.ledger_id.len())]
+            embedding.sequence,
+            &embedding.ledger_id[..16.min(embedding.ledger_id.len())]
         ));
     }
 
@@ -1799,9 +1884,16 @@ pub fn verify_fraud_broadcast(
             ));
         }
     }
+    Ok(())
+}
 
-    // (4) per-type evidence verification.
-    let proof = &broadcast.proof;
+/// Step 4 of [`verify_fraud_broadcast`]: the per-type evidence check, which
+/// runs for every proof type, self-evident or not.
+pub fn verify_fraud_evidence(
+    proof: &FraudProof,
+    ledgers: &dyn LedgerProvider,
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
     match proof.proof_type {
         FraudProofType::StaleCosignature => {
             let FraudEvidence::StaleCosign {
@@ -1886,7 +1978,9 @@ pub fn verify_fraud_broadcast(
             // available at this layer). The daemon-side wrapper fetches
             // the TX via Esplora and calls `verify_winner_collateral_deviation`
             // directly. Top-level broadcast verification accepts at this
-            // layer; daemon enforcement is upstream.
+            // layer, so every caller that acts on a WinnerCollateralDeviation
+            // broadcast must run that on-chain step too: the type is
+            // self-evident, so no embedding check stands in for it.
         }
         FraudProofType::Equivocation => {
             // Self-contained — both updates are inline in the evidence,
@@ -1928,13 +2022,23 @@ impl FraudBroadcast {
     /// Checks that each link's `member_ledger_hash` could follow from the
     /// previous link (or embedding). Does NOT verify signatures — that
     /// requires fetching the actual updates from relays.
+    ///
+    /// A self-evident proof type ([`FraudProofType::is_self_evident`]) needs
+    /// no embedding or chain, so it passes whatever they hold. An
+    /// embedding-required type without an embedding fails.
     pub fn verify_chain_structure(&self) -> Result<(), String> {
-        // The proof hash must match
-        let expected_hash = self.proof.proof_hash();
-        let _expected_hex = hex::encode(expected_hash);
+        if self.proof.proof_type.is_self_evident() {
+            return Ok(());
+        }
+        let Some(embedding) = self.embedding.as_ref() else {
+            return Err(format!(
+                "{:?} requires an embedding (DEP-06)",
+                self.proof.proof_type
+            ));
+        };
 
         // If direct embedding on the accused ledger, chain should be empty
-        if self.embedding.ledger_id == self.proof.ledger_id {
+        if embedding.ledger_id == self.proof.ledger_id {
             if !self.causal_chain.is_empty() {
                 return Err("Direct embedding should have empty causal chain".to_string());
             }
@@ -1948,10 +2052,10 @@ impl FraudBroadcast {
 
         // First link must reference the embedding ledger
         let first = &self.causal_chain[0];
-        if first.source_ledger_id != self.embedding.ledger_id {
+        if first.source_ledger_id != embedding.ledger_id {
             return Err(format!(
                 "First causal link source {} doesn't match embedding ledger {}",
-                first.source_ledger_id, self.embedding.ledger_id
+                first.source_ledger_id, embedding.ledger_id
             ));
         }
 
@@ -2178,12 +2282,12 @@ mod tests {
     fn direct_embedding_empty_chain_valid() {
         let proof = make_proof();
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: proof.ledger_id.clone(), // same as accused
                 sequence: 50,
                 update_hash: "ff".repeat(32),
                 field: "transfer_nonce".to_string(),
-            },
+            }),
             causal_chain: vec![],
             proof,
         };
@@ -2195,12 +2299,12 @@ mod tests {
         let proof = make_proof();
         let member_ledger = "11".repeat(32);
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: member_ledger.clone(), // embedded on member's ledger
                 sequence: 10,
                 update_hash: "22".repeat(32),
                 field: "transfer_nonce".to_string(),
-            },
+            }),
             causal_chain: vec![CausalLink {
                 ledger_id: proof.ledger_id.clone(), // operator's ledger
                 sequence: 55,
@@ -2217,12 +2321,12 @@ mod tests {
     fn indirect_embedding_missing_chain_rejected() {
         let proof = make_proof();
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: "11".repeat(32), // different from accused
                 sequence: 10,
                 update_hash: "22".repeat(32),
                 field: "transfer_nonce".to_string(),
-            },
+            }),
             causal_chain: vec![],
             proof,
         };
@@ -2233,12 +2337,12 @@ mod tests {
     fn chain_not_reaching_accused_rejected() {
         let proof = make_proof();
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: "11".repeat(32),
                 sequence: 10,
                 update_hash: "22".repeat(32),
                 field: "transfer_nonce".to_string(),
-            },
+            }),
             causal_chain: vec![CausalLink {
                 ledger_id: "99".repeat(32), // wrong — doesn't reach accused
                 sequence: 55,
@@ -2257,12 +2361,12 @@ mod tests {
         let ledger_a = "11".repeat(32);
         let ledger_b = "22".repeat(32);
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: ledger_a.clone(),
                 sequence: 10,
                 update_hash: "ff".repeat(32),
                 field: "transfer_nonce".to_string(),
-            },
+            }),
             causal_chain: vec![
                 // ledger_b co-signed update includes ledger_a's hash
                 CausalLink {

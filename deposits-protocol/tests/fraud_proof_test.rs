@@ -232,16 +232,70 @@ fn discriminants_are_unique() {
 // Causal chain verification
 // =========================================================================
 
+// =========================================================================
+// Embedding classification (DEP-06: self-evident proofs need no embedding)
+// =========================================================================
+
+#[test]
+fn embedding_classification() {
+    for t in [
+        FraudProofType::UncreditedOnchainPayment,
+        FraudProofType::UncreditedLightningPayment,
+        FraudProofType::DisputeDereliction,
+    ] {
+        assert!(t.requires_embedding(), "{:?} must require an embedding", t);
+    }
+    for t in [
+        FraudProofType::NonConformingUpdate,
+        FraudProofType::Equivocation,
+        FraudProofType::NonConformingCosignature,
+        FraudProofType::StaleCosignature,
+        FraudProofType::QuorumExpired,
+        FraudProofType::WinnerCollateralDeviation,
+    ] {
+        assert!(t.is_self_evident(), "{:?} must be self-evident", t);
+    }
+}
+
+#[test]
+fn uncredited_payment_without_embedding_rejected() {
+    let empty = |_: &str| -> Option<Vec<deposits_protocol::types::SignedLedgerUpdate>> {
+        Some(vec![])
+    };
+    let oracle = |_: &[u8; 32]| -> Option<u32> { None };
+    for proof in [make_onchain_proof(), make_lightning_proof(), make_inactive_proof()] {
+        let b = FraudBroadcast {
+            proof,
+            embedding: None,
+            causal_chain: vec![],
+        };
+        let err = b.verify_chain_structure().unwrap_err();
+        assert!(err.contains("requires an embedding"), "wrong error: {}", err);
+        let err = verify_fraud_broadcast(&b, &empty, &oracle).unwrap_err();
+        assert!(err.contains("requires an embedding"), "wrong error: {}", err);
+    }
+}
+
+#[test]
+fn uncredited_payment_embedding_required_on_the_wire() {
+    // An embedding-required broadcast without the key still parses (the
+    // field is optional on the wire) but fails verification.
+    let json = serde_json::json!({ "proof": make_onchain_proof() }).to_string();
+    let b: FraudBroadcast = serde_json::from_str(&json).unwrap();
+    assert!(b.embedding.is_none());
+    assert!(b.verify_chain_structure().is_err());
+}
+
 #[test]
 fn direct_embedding_valid() {
     let proof = make_onchain_proof();
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
             sequence: 50,
             update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![],
         proof,
     };
@@ -252,12 +306,12 @@ fn direct_embedding_valid() {
 fn direct_embedding_with_chain_rejected() {
     let proof = make_onchain_proof();
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
             sequence: 50,
             update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
             sequence: 55,
@@ -274,12 +328,12 @@ fn direct_embedding_with_chain_rejected() {
 fn indirect_missing_chain_rejected() {
     let proof = make_onchain_proof();
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32), // different from accused
             sequence: 10,
             update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![],
         proof,
     };
@@ -291,12 +345,12 @@ fn one_hop_valid() {
     let proof = make_onchain_proof();
     let member = "11".repeat(32);
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: member.clone(),
             sequence: 10,
             update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
             sequence: 55,
@@ -313,12 +367,12 @@ fn one_hop_valid() {
 fn one_hop_wrong_source_rejected() {
     let proof = make_onchain_proof();
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32),
             sequence: 10,
             update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![CausalLink {
             ledger_id: proof.ledger_id.clone(),
             sequence: 55,
@@ -337,12 +391,12 @@ fn two_hop_valid() {
     let a = "11".repeat(32);
     let b_ledger = "22".repeat(32);
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: a.clone(),
             sequence: 10,
             update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![
             CausalLink {
                 ledger_id: b_ledger.clone(),
@@ -370,12 +424,12 @@ fn two_hop_broken_middle_rejected() {
     let a = "11".repeat(32);
     let b_ledger = "22".repeat(32);
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: a.clone(),
             sequence: 10,
             update_hash: "ff".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![
             CausalLink {
                 ledger_id: b_ledger.clone(),
@@ -401,12 +455,12 @@ fn two_hop_broken_middle_rejected() {
 fn chain_not_reaching_accused_rejected() {
     let proof = make_onchain_proof();
     let b = FraudBroadcast {
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32),
             sequence: 10,
             update_hash: "22".repeat(32),
             field: "transfer_nonce".to_string(),
-        },
+        }),
         causal_chain: vec![CausalLink {
             ledger_id: "99".repeat(32), // wrong destination
             sequence: 55,
@@ -835,12 +889,12 @@ mod dispatch {
         let accused_history = vec![stale_update, embedding_update];
 
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: hex::encode(accused_ledger),
                 sequence: 50,
                 update_hash: hex::encode([0u8; 32]),
                 field: "transfer_nonce".into(),
-            },
+            }),
             causal_chain: vec![],
             proof: proof_template,
         };
@@ -860,13 +914,17 @@ mod dispatch {
     }
 
     #[test]
-    fn dispatch_rejects_stale_cosig_with_missing_embedding() {
+    fn dispatch_ignores_stale_cosig_embedding() {
+        // StaleCosignature is self-evident (two signed hashes from the
+        // member's own chain): a wrong or absent embedding does not matter,
+        // the evidence alone decides.
         let (mut broadcast, histories) = stale_cosig_scenario();
-        broadcast.embedding.sequence = 999; // no update at this seq
-        let provider = provider_from(histories);
+        broadcast.embedding.as_mut().unwrap().sequence = 999; // no update at this seq
+        let provider = provider_from(histories.clone());
         let oracle = MockOracle(HashMap::new());
-        let err = verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap_err();
-        assert!(err.contains("not embedded"), "wrong error: {}", err);
+        verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap();
+        broadcast.embedding = None;
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &oracle).unwrap();
     }
 
     #[test]
@@ -884,7 +942,7 @@ mod dispatch {
         // proof_hash changes when evidence changes — re-embed.
         let proof_hash = broadcast.proof.proof_hash();
         let mut histories = histories;
-        let accused_id = broadcast.embedding.ledger_id.clone();
+        let accused_id = broadcast.embedding.as_ref().unwrap().ledger_id.clone();
         let accused_history = histories.get_mut(&accused_id).unwrap();
         accused_history[1] = update_with(
             50,
@@ -958,12 +1016,12 @@ mod dispatch {
         )];
 
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: ledger_id_hex.clone(),
                 sequence: 50,
                 update_hash: hex::encode([0u8; 32]),
                 field: "transfer_nonce".into(),
-            },
+            }),
             causal_chain: vec![],
             proof: proof_template,
         };
@@ -1006,7 +1064,7 @@ mod dispatch {
             wallet_authorization: None,
             commitment: None,
         };
-        let id = broadcast.embedding.ledger_id.clone();
+        let id = broadcast.embedding.as_ref().unwrap().ledger_id.clone();
         let v = histories.get_mut(&id).unwrap();
         v.insert(0, update_with(30, [0xAA; 32], credit_op, &[], 0, None));
         let err = verify_fraud_broadcast(
@@ -1079,12 +1137,12 @@ mod dispatch {
         histories.insert(hex::encode(member_ledger), vec![member_active_update]);
 
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: hex::encode(accused_ledger),
                 sequence: 50,
                 update_hash: hex::encode([0u8; 32]),
                 field: "transfer_nonce".into(),
-            },
+            }),
             causal_chain: vec![],
             proof: proof_template,
         };
@@ -1194,12 +1252,12 @@ mod dispatch {
         histories.insert(ledger_id_hex.clone(), vec![proof_update]);
 
         let broadcast = FraudBroadcast {
-            embedding: ProofEmbedding {
+            embedding: Some(ProofEmbedding {
                 ledger_id: ledger_id_hex,
                 sequence: 50,
                 update_hash: hex::encode([0u8; 32]),
                 field: "transfer_nonce".into(),
-            },
+            }),
             causal_chain: vec![],
             proof: proof_template,
         };
@@ -1232,7 +1290,7 @@ mod dispatch {
         }
         // Re-anchor embedding since proof_hash changed.
         let new_hash = broadcast.proof.proof_hash();
-        let id = broadcast.embedding.ledger_id.clone();
+        let id = broadcast.embedding.as_ref().unwrap().ledger_id.clone();
         let mut histories = histories;
         let v = histories.get_mut(&id).unwrap();
         v[0] = {

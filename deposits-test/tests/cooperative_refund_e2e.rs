@@ -281,12 +281,12 @@ fn cooperative_refund_drains_and_anchors_lottery() {
         embed_proof_hash(&node, ACCUSED_OP, peer_op_idx, &accused_ledger, proof_hash);
     let broadcast = FraudBroadcast {
         proof,
-        embedding: ProofEmbedding {
+        embedding: Some(ProofEmbedding {
             ledger_id: accused_ledger.clone(),
             sequence: embed_update.sequence_number,
             update_hash: hex::encode(embed_update.content_hash),
             field: "delivery_request_hash".into(),
-        },
+        }),
         causal_chain: Vec::<CausalLink>::new(),
     };
     eprintln!("[publish] kind:9101 QuorumExpired from op{}", ACCUSED_OP);
