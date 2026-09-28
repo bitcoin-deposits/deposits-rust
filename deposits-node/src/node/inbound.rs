@@ -649,6 +649,9 @@ impl Node {
                         .rev()
                         .find(|u| updates_equivocate(u, &inbound.update))
                         .cloned()
+                        .filter(|_| {
+                            inbound_binds_to_ledger(&inbound.update, &l.state.ledger_id, &l.history)
+                        })
                 } else {
                     None
                 }
@@ -1778,6 +1781,28 @@ pub(crate) fn fork_state_at(
     Some(state)
 }
 
+/// Whether `update` belongs to ledger `ledger_id`, whose `history` we hold,
+/// by what its operator signed: a genesis opening that ledger, or an
+/// update whose `previous_hash` is one of our updates' `chain_hash`. Its
+/// `ledger_id` field says nothing: no signature covers it, and one operator
+/// key runs several ledgers (a cl node signs its own ledger and the one it
+/// operates with its node key), so anyone can republish an honest update of
+/// the operator's other ledger tagged as this one, at a sequence we hold.
+/// Without this, that looked like double-signing and armed a dispute.
+pub(crate) fn inbound_binds_to_ledger(
+    update: &deposits_core::types::SignedLedgerUpdate,
+    ledger_id: &[u8; 32],
+    history: &[deposits_core::types::SignedLedgerUpdate],
+) -> bool {
+    if update.sequence_number == 0 {
+        return deposits_core::fraud::update_opens_ledger(update, ledger_id);
+    }
+    history
+        .iter()
+        .rev()
+        .any(|h| h.chain_hash() == update.previous_hash)
+}
+
 /// Two updates double-sign the same slot: same ledger + sequence + operator,
 /// but different `content_hash`. That's provable equivocation (each bears the
 /// operator's signature). Pure so it's unit-testable; `verify_equivocation`
@@ -1821,6 +1846,35 @@ mod equivocation_detection_tests {
             member_ledger_hash: None,
             cosignatures: Vec::new(),
         }
+    }
+
+    /// A relay can republish an honest update of the operator's other ledger
+    /// tagged as this one: same operator, same sequence, different content.
+    /// It follows nothing we hold, so it is not treated as double-signing;
+    /// a sibling of our update, following our predecessor, is.
+    #[test]
+    fn only_an_update_following_our_chain_binds_to_the_ledger() {
+        use super::inbound_binds_to_ledger;
+        let (l, op) = ([1u8; 32], pk(0x11));
+        let mut ours = vec![upd(l, 0, op, [0x10; 32])];
+        for seq in 1..4u64 {
+            let mut u = upd(l, seq, op, [0x10 + seq as u8; 32]);
+            u.previous_hash = ours.last().unwrap().chain_hash();
+            ours.push(u);
+        }
+        // Our seq 3's sibling, off our seq 2: binds, and equivocates.
+        let mut sibling = upd(l, 3, op, [0xCC; 32]);
+        sibling.previous_hash = ours[2].chain_hash();
+        assert!(inbound_binds_to_ledger(&sibling, &l, &ours));
+        assert!(updates_equivocate(&ours[3], &sibling));
+        // The other ledger's seq 3, relabelled: equivocates on its face, but
+        // follows an update we don't have.
+        let mut relabelled = upd(l, 3, op, [0xDD; 32]);
+        relabelled.previous_hash = [0x77; 32];
+        assert!(updates_equivocate(&ours[3], &relabelled));
+        assert!(!inbound_binds_to_ledger(&relabelled, &l, &ours));
+        // A seq-0 update binds only if it opens this ledger.
+        assert!(!inbound_binds_to_ledger(&upd(l, 0, op, [0xEE; 32]), &l, &ours));
     }
 
     #[test]

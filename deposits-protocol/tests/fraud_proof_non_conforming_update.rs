@@ -715,3 +715,62 @@ fn an_update_following_nothing_in_the_history_is_not_proof() {
     let err = verify_non_conforming_update(&proof_for(&orphan), &prefix).unwrap_err();
     assert!(err.contains("nothing binds it to this ledger"), "{}", err);
 }
+
+fn equivocation(a: &SignedLedgerUpdate, b: &SignedLedgerUpdate) -> FraudProof {
+    FraudProof {
+        proof_type: FraudProofType::Equivocation,
+        accused: hex::encode(a.operator_id.serialize()),
+        ledger_id: hex::encode(a.ledger_id),
+        evidence: FraudEvidence::Equivocation {
+            sequence: a.sequence_number,
+            update_a_hex: hex::encode(a.tlv_encode()),
+            update_b_hex: hex::encode(b.tlv_encode()),
+        },
+    }
+}
+
+#[test]
+fn two_ledgers_updates_at_one_sequence_are_not_equivocation() {
+    use deposits_protocol::fraud::{find_equivocation, verify_equivocation};
+    let y = ledger_c_prefix();
+    let x = ledger_x();
+    // Seq 3 on both ledgers, same operator key; X's relabelled as Y passes
+    // every check on the two updates themselves.
+    let mut relabelled = x[3].clone();
+    relabelled.ledger_id = ledger();
+    let proof = equivocation(&y[3], &relabelled);
+    let err = verify_equivocation(&proof, &y).unwrap_err();
+    assert!(err.contains("nothing binds it to this ledger"), "{}", err);
+
+    let mut mixed = y.clone();
+    mixed.extend(x.iter().cloned().map(|mut u| {
+        u.ledger_id = ledger();
+        u
+    }));
+    assert!(verify_equivocation(&proof, &mixed).is_err());
+    assert_eq!(find_equivocation(&mixed, &pubkey(OP)), None);
+}
+
+#[test]
+fn a_genuine_equivocation_still_verifies() {
+    use deposits_protocol::fraud::{find_equivocation, verify_equivocation};
+    let y = ledger_c_prefix();
+    let a = signed_update(4, ledger(), y[3].chain_hash(), OP, &credit(3, 1).tlv_encode(), false);
+    let b = signed_update(4, ledger(), y[3].chain_hash(), OP, &credit(4, 2).tlv_encode(), false);
+    verify_equivocation(&equivocation(&a, &b), &y).unwrap();
+    let mut history = y.clone();
+    history.extend([a.clone(), b.clone()]);
+    assert_eq!(find_equivocation(&history, &pubkey(OP)), Some(4));
+
+    // As a broadcast, with the accused ledger's history.
+    let provider = move |id: &str| (id == hex::encode(ledger())).then(|| history.clone());
+    let bc = FraudBroadcast {
+        proof: equivocation(&a, &b),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    verify_fraud_broadcast(&bc, &provider, &no_blocks).unwrap();
+    // Without the history, nothing binds the pair: fail closed.
+    let nothing = |_: &str| -> Option<Vec<SignedLedgerUpdate>> { None };
+    assert!(verify_fraud_broadcast(&bc, &nothing, &no_blocks).is_err());
+}

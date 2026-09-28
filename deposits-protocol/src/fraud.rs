@@ -941,7 +941,10 @@ pub fn verify_quorum_expired(
 ///   7. The proof's outer `accused` field matches both updates'
 ///      `operator_id` (no impersonation: the operator named on the
 ///      proof must be the one whose signature appears on both).
-pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
+pub fn verify_equivocation(
+    proof: &FraudProof,
+    history: &[crate::types::SignedLedgerUpdate],
+) -> Result<(), String> {
     use crate::tlv::TlvDecode;
 
     let FraudEvidence::Equivocation {
@@ -1034,6 +1037,25 @@ pub fn verify_equivocation(proof: &FraudProof) -> Result<(), String> {
             &proof.accused[..16.min(proof.accused.len())],
             hex::encode(&update_a.operator_id.serialize()[..8])
         ));
+    }
+
+    // (8) Both are on this ledger by what the operator signed. The
+    //     `ledger_id` field is signed by no one and one key runs several
+    //     ledgers, so two honest updates at the same sequence on the
+    //     operator's ledgers X and Y, one relabelled, pass (1)-(7). Each
+    //     must be a genesis opening this ledger or follow an update whose
+    //     chain reaches that genesis in the ledger's history.
+    let index = OperatorIndex::new(history, &update_a.operator_id, u64::MAX);
+    let bound = index.bound_hashes(&update_a.ledger_id);
+    for (name, u) in [("update_a", &update_a), ("update_b", &update_b)] {
+        if !update_binds_to_ledger(u, &update_a.ledger_id, &bound) {
+            return Err(format!(
+                "{} does not follow an update of this ledger in its history — \
+                 nothing binds it to this ledger (ledger_id is not signed, \
+                 DEP-02), so it may be another ledger's update. Fail closed",
+                name
+            ));
+        }
     }
 
     Ok(())
@@ -1342,16 +1364,7 @@ pub fn verify_non_conforming_update(
     // (6a) seq 0: it must open this ledger; then linking to anything but the
     //      zero hash is non-conforming.
     if fault.sequence_number == 0 {
-        use crate::messages::LedgerOperation;
-        use crate::tlv::TlvDecode;
-        let opens_this_ledger = matches!(
-            LedgerOperation::tlv_decode(&fault.message),
-            Ok(LedgerOperation::LedgerOpen { operator_id, ref reserves_id, genesis_block, .. })
-                if operator_id == fault.operator_id
-                    && crate::types::LedgerState::compute_ledger_id(
-                        &operator_id, reserves_id, genesis_block,
-                    ) == fault.ledger_id
-        );
+        let opens_this_ledger = update_opens_ledger(&fault, &fault.ledger_id);
         if !opens_this_ledger {
             return Err("fault update at seq 0 is not a LedgerOpen of this ledger by \
                         the accused — not bound to it, fail closed"
@@ -1471,22 +1484,70 @@ impl<'a> OperatorIndex<'a> {
             }
         }
         chain.reverse();
-        let genesis = chain[0];
-        let opens_ledger = genesis.previous_hash == [0u8; 32]
-            && matches!(
-                LedgerOperation::tlv_decode(&genesis.message),
-                Ok(LedgerOperation::LedgerOpen { operator_id, ref reserves_id, genesis_block, .. })
-                    if operator_id == genesis.operator_id
-                        && crate::types::LedgerState::compute_ledger_id(
-                            &operator_id, reserves_id, genesis_block,
-                        ) == *ledger_id
-            );
+        let opens_ledger = update_opens_ledger(chain[0], ledger_id);
         if !opens_ledger {
             return Err("the chain's seq 0 is not this ledger's LedgerOpen by the \
                         accused — inconclusive, fail closed"
                 .into());
         }
         Ok(chain)
+    }
+}
+
+impl<'a> OperatorIndex<'a> {
+    /// The `chain_hash`es of the updates whose chain walks back to a genesis
+    /// that opens `ledger_id`: one forward pass by sequence. An update
+    /// belongs to the ledger when it is such a genesis or its
+    /// `previous_hash` is in this set (see [`update_binds_to_ledger`]).
+    fn bound_hashes(&self, ledger_id: &[u8; 32]) -> std::collections::HashSet<[u8; 32]> {
+        let mut bound = std::collections::HashSet::new();
+        let max = self.by_seq.keys().copied().max().unwrap_or(0);
+        for seq in 0..=max {
+            for u in self.at_seq(seq) {
+                let binds = if seq == 0 {
+                    u.previous_hash == [0u8; 32] && update_opens_ledger(u, ledger_id)
+                } else {
+                    bound.contains(&u.previous_hash)
+                };
+                if binds {
+                    bound.insert(u.chain_hash());
+                }
+            }
+        }
+        bound
+    }
+}
+
+/// Whether `update` is a seq-0 `LedgerOpen`, by its own operator, whose
+/// operation derives `ledger_id`. The operator signs the operation, so this
+/// binds a genesis to its ledger; the `ledger_id` field does not (it is
+/// covered by neither the content_hash nor the operator signature).
+pub fn update_opens_ledger(update: &crate::types::SignedLedgerUpdate, ledger_id: &[u8; 32]) -> bool {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    update.sequence_number == 0
+        && matches!(
+            LedgerOperation::tlv_decode(&update.message),
+            Ok(LedgerOperation::LedgerOpen { operator_id, ref reserves_id, genesis_block, .. })
+                if operator_id == update.operator_id
+                    && crate::types::LedgerState::compute_ledger_id(
+                        &operator_id, reserves_id, genesis_block,
+                    ) == *ledger_id
+        )
+}
+
+/// Whether `update` belongs to `ledger_id` by what its operator signed: a
+/// genesis that opens it, or an update whose `previous_hash` is in
+/// `bound` (from `OperatorIndex::bound_hashes`).
+fn update_binds_to_ledger(
+    update: &crate::types::SignedLedgerUpdate,
+    ledger_id: &[u8; 32],
+    bound: &std::collections::HashSet<[u8; 32]>,
+) -> bool {
+    if update.sequence_number == 0 {
+        update_opens_ledger(update, ledger_id)
+    } else {
+        bound.contains(&update.previous_hash)
     }
 }
 
@@ -1699,6 +1760,53 @@ fn first_rule_break<'a>(
             .collect();
         if !proving.is_empty() && confirm(u) {
             return Some((u, format!("conformance violations: {:?}", proving)));
+        }
+    }
+    None
+}
+
+/// Find a sequence at which `operator` signed two different updates of the
+/// ledger `history` belongs to (the one its genesis opens), both bound to it
+/// by what they sign: an `Equivocation` proof's grounds. One index and one
+/// forward pass; a candidate pair is confirmed with [`verify_equivocation`].
+pub fn find_equivocation(
+    history: &[crate::types::SignedLedgerUpdate],
+    operator: &bitcoin::secp256k1::PublicKey,
+) -> Option<u64> {
+    use crate::tlv::TlvEncode;
+
+    let index = OperatorIndex::new(history, operator, u64::MAX);
+    let genesis = index
+        .at_seq(0)
+        .find(|g| update_opens_ledger(g, &g.ledger_id))?;
+    let ledger_id = genesis.ledger_id;
+    let bound = index.bound_hashes(&ledger_id);
+    let mut seqs: Vec<u64> = index.by_seq.keys().copied().collect();
+    seqs.sort_unstable();
+    for seq in seqs {
+        let mut distinct: Vec<&crate::types::SignedLedgerUpdate> = Vec::new();
+        for u in index.at_seq(seq) {
+            if update_binds_to_ledger(u, &ledger_id, &bound)
+                && !distinct.iter().any(|d| d.content_hash == u.content_hash)
+                && u.verify_operator_signature().is_ok()
+            {
+                distinct.push(u);
+            }
+        }
+        if let [a, b, ..] = distinct[..] {
+            let proof = FraudProof {
+                proof_type: FraudProofType::Equivocation,
+                accused: hex::encode(operator.serialize()),
+                ledger_id: hex::encode(ledger_id),
+                evidence: FraudEvidence::Equivocation {
+                    sequence: seq,
+                    update_a_hex: hex::encode(a.tlv_encode()),
+                    update_b_hex: hex::encode(b.tlv_encode()),
+                },
+            };
+            if verify_equivocation(&proof, history).is_ok() {
+                return Some(seq);
+            }
         }
     }
     None
@@ -2341,9 +2449,15 @@ pub fn verify_fraud_evidence(
             // self-evident, so no embedding check stands in for it.
         }
         FraudProofType::Equivocation => {
-            // Self-contained — both updates are inline in the evidence,
-            // no relay/oracle/cosigner-ledger lookup needed.
-            verify_equivocation(proof)?;
+            // Both updates are inline; the accused ledger's history binds
+            // them to it (ledger_id is not signed).
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_equivocation(proof, &accused_history)?;
         }
         FraudProofType::NonConformingCosignature => {
             let FraudEvidence::NonConformingCosignature {

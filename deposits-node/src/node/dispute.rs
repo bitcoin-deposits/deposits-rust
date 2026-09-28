@@ -2134,7 +2134,8 @@ impl Node {
     /// operator broadcast both as kind:9100). We fetch the ledger's full
     /// history and look for the original operator double-signing — two updates
     /// at the same `sequence_number` with different `content_hash`, both
-    /// bearing a valid operator signature. One such pair is unrecoverable proof
+    /// bearing a valid operator signature and both following an update of this
+    /// ledger (or opening it). One such pair is unrecoverable proof
     /// of misbehavior, so any cosigner can independently confirm a confiscation
     /// is grounded without trusting a third party.
     pub(crate) async fn fetch_equivocation_inline_evidence(
@@ -2143,7 +2144,6 @@ impl Node {
     ) -> Option<deposits_core::fraud::FraudProofType> {
         use deposits_core::fraud::FraudProofType;
         use deposits_core::SignedLedgerUpdate;
-        use std::collections::HashMap;
 
         let updates: Vec<SignedLedgerUpdate> =
             self.fetch_all_ledger_updates_paginated(ledger_id).await;
@@ -2158,28 +2158,17 @@ impl Node {
             .find(|u| u.sequence_number == 0)
             .map(|u| u.operator_id)?;
 
-        // Group the original operator's updates by sequence; any sequence with
-        // ≥2 distinct, signature-valid content_hashes is an equivocation.
-        let mut by_seq: HashMap<u64, Vec<&SignedLedgerUpdate>> = HashMap::new();
-        for u in &updates {
-            if u.operator_id == original_operator {
-                by_seq.entry(u.sequence_number).or_default().push(u);
-            }
-        }
-        for group in by_seq.values() {
-            for i in 0..group.len() {
-                for j in (i + 1)..group.len() {
-                    let (a, b) = (group[i], group[j]);
-                    if a.content_hash != b.content_hash
-                        && a.verify_operator_signature().is_ok()
-                        && b.verify_operator_signature().is_ok()
-                    {
-                        return Some(FraudProofType::Equivocation);
-                    }
-                }
-            }
-        }
-        None
+        // Two different signed updates at one sequence, both bound to this
+        // ledger by the hash chain (ledger_id is signed by no one and the
+        // operator's key may run other ledgers, so a relabelled update of
+        // another ledger must not count). Confirmed by verify_equivocation.
+        let seq = deposits_core::fraud::find_equivocation(&updates, &original_operator)?;
+        tracing::info!(
+            "Ledger {}: Equivocation by the original operator at seq {}",
+            &ledger_id[..16.min(ledger_id.len())],
+            seq
+        );
+        Some(FraudProofType::Equivocation)
     }
 
     /// Self-verifying inline evidence for a NonConformingCosignature confiscation
