@@ -285,7 +285,8 @@ impl LedgerActor {
                 // The replica still applies it (and so follows the chain past
                 // it); record where it went wrong so a dispute forks before
                 // it, not at our tip. Only violations the signed evidence
-                // proves: not the ones that turn on the unsigned block_height.
+                // proves (under v2 signing, all of them; see
+                // `proves_non_conformance`).
                 if violations
                     .iter()
                     .any(deposits_core::fraud::proves_non_conformance)

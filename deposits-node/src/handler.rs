@@ -1720,8 +1720,14 @@ impl DepositsHandler {
                 let s = arc.and_then(|arc| {
                     let l = arc.read().unwrap();
                     let operator = l.history.first().filter(|g| g.sequence_number == 0)?.operator_id;
-                    deposits_core::fraud::find_non_conforming_update(&l.history, &operator)
-                        .map(|(seq, _)| seq)
+                    // The dep-16 descriptor verifier, as the replica's
+                    // apply_and_check uses: a forged witness is a fault.
+                    deposits_core::fraud::find_non_conforming_update(
+                        &l.history,
+                        &operator,
+                        &deposits_core::dep16::Dep16Authorizer::new(),
+                    )
+                    .map(|(seq, _)| seq)
                 });
                 self.scanned_non_conforming
                     .lock()
@@ -3169,7 +3175,9 @@ mod tests {
             },
             LedgerOperation::DepositOpen {
                 deposit_id: [0xAB; 16],
-                descriptor: "wpkh(deadbeef)".to_string(),
+                // A descriptor that parses: the scan judges with the dep-16
+                // verifier, which reports an unparseable one (as it should).
+                descriptor: format!("wsh(prove(pk({})))", bitcoin::PublicKey::new(member)),
                 fees: None,
                 transfer_fees: None,
                 payment_hash: None,

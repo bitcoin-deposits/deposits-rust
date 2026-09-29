@@ -1092,13 +1092,14 @@ pub fn verify_equivocation(
 ///      non-conformance on the signed evidence; a fault that applies
 ///      cleanly is refused.
 ///
-/// As for `NonConformingUpdate`: conformance runs with `AllowAll` (an
-/// authorizer that denies would report every honest withdrawal, which is how
-/// this verifier used to accuse honest operators), and violations that turn
-/// on the unsigned `block_height` do not count (`proves_non_conformance`).
+/// As for `NonConformingUpdate`: conformance runs with the caller's
+/// `authorizer` (a node passes the dep-16 descriptor verifier; never `DenyAll`,
+/// which reports every honest withdrawal and is how this verifier used to
+/// accuse honest operators).
 pub fn verify_non_conforming_cosignature(
     proof: &FraudProof,
     fault_history: &[crate::types::SignedLedgerUpdate],
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
@@ -1222,7 +1223,7 @@ pub fn verify_non_conforming_cosignature(
 
     // (5) Replay and judge.
     let state = replay_canonical(&prefix)?;
-    match fault_rejection(&state, &fault_update)? {
+    match fault_rejection(&state, &fault_update, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
             "fault update at seq {} applies cleanly with no conformance violation \
@@ -1265,14 +1266,15 @@ pub fn verify_non_conforming_cosignature(
 /// walk and replay are each linear: about 160 ms for a 100,000-update ledger
 /// in a release build, where checking every update's signature took 8.7 s.
 ///
-/// Two limits on what counts, both failing closed:
-/// - conformance runs with [`crate::types::AllowAll`]: this crate has no
-///   descriptor evaluator, and `DenyAll` would report every honest
-///   withdrawal as an `InvalidWitness`. A fault whose only defect is its
-///   witness is not proved here;
-/// - an update's `block_height` is signed by no one, so violations that turn
-///   on heights (expiry, nonce window, fee cadence) are not proof; see
-///   `proves_non_conformance`.
+/// Conformance runs with `authorizer`, which checks each signature-bearing
+/// operation's witness against its deposit's descriptor. This crate has no
+/// descriptor evaluator: a node passes deposits-core's `Dep16Authorizer`, so
+/// a forged or missing depositor witness (`InvalidWitness`) is proof while an
+/// honest, correctly witnessed spend is not. Only callers with no evaluator
+/// (this crate's own tests) pass `AllowAll`, under which a fault whose only
+/// defect is its witness is not proved. Never `DenyAll`: it reports every
+/// honest withdrawal. Height-dependent violations count: the v2 signing
+/// covers the heights they are judged at (`proves_non_conformance`).
 ///
 /// Also `Err`: the fault not signed by the accused, a missing link back to
 /// this ledger's genesis, a prefix that does not
@@ -1284,6 +1286,7 @@ pub fn verify_non_conforming_cosignature(
 pub fn verify_non_conforming_update(
     proof: &FraudProof,
     history: &[crate::types::SignedLedgerUpdate],
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     use crate::tlv::TlvDecode;
 
@@ -1407,7 +1410,7 @@ pub fn verify_non_conforming_update(
     // (9) It chains, so it must break a rule. Replay the prefix it follows
     //     from genesis and apply the fault to that state.
     let state = replay_canonical(&prefix)?;
-    match fault_rejection(&state, &fault)? {
+    match fault_rejection(&state, &fault, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
             "fault update at seq {} chains onto its predecessor and applies \
@@ -1585,32 +1588,58 @@ fn replay_canonical(
 }
 
 /// Whether a conformance violation proves non-conformance on the signed
-/// evidence alone. Not the ones that turn on block heights: an update's
-/// `block_height` is covered by neither its `content_hash` nor its operator
-/// signature, so anyone relaying a copy can change it, and with it the
-/// expiry check (`ExpiryPassed`), the nonce window (`NonceReplay`) and the fee
-/// cadence, which starts from the DepositOpen's height (`FeeWindowNotElapsed`,
-/// `FeeExceedsAssessment`). Counting those would let a relay frame an honest
-/// operator by rewriting a height.
+/// evidence alone. Under the v2 signing (DEP-02 §Signing) every one does, the
+/// height-dependent ones included:
+///
+/// - `ExpiryPassed` and `NonceReplay` are judged at the fault's own
+///   `block_height`, which is in its `cosign_data`, so in its `content_hash`
+///   and under its operator signature; the nonces already seen come from the
+///   operations of the prefix, which the fault's `previous_hash` fixes.
+/// - `FeeWindowNotElapsed` and `FeeExceedsAssessment` are judged at the
+///   FeeCollect's own `block_height` field (in the signed operation) against
+///   the deposit's last assessment: a previous FeeCollect's operation, or the
+///   DepositOpen update's `block_height`, which its `content_hash` covers and
+///   the hash chain from the fault fixes.
+///
+/// Under v1 no signature covered an update's `block_height`, so a relay could
+/// rewrite one and frame an honest operator; these four were excluded then.
+/// Now a rewritten height breaks the signature. An honest operator judges an
+/// operation at the very height it stamps on the update (`stage_operation`
+/// runs `check_speculative` at it), so it never signs one of these.
+///
+/// The match is exhaustive so that a new violation is classified on purpose.
 pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
     use crate::types::ConformanceViolation as V;
-    !matches!(
-        v,
-        V::ExpiryPassed { .. }
-            | V::NonceReplay { .. }
-            | V::FeeWindowNotElapsed { .. }
-            | V::FeeExceedsAssessment { .. }
-    )
+    match v {
+        V::InsufficientReserves { .. }
+        | V::InvalidWitness { .. }
+        | V::ZeroAmount { .. }
+        | V::EmptyDestination
+        | V::UnparseableDescriptor { .. }
+        | V::ExceedsCollateral { .. }
+        | V::FeeWindowNotElapsed { .. }
+        | V::FeeExceedsAssessment { .. }
+        | V::UnknownRuleset { .. }
+        | V::BalanceCommitmentMismatch { .. }
+        | V::MissingBalanceCommitment { .. }
+        | V::RulesetFamilyMismatch { .. }
+        | V::DescriptorTooLarge { .. }
+        | V::NonceReplay { .. }
+        | V::ExpiryPassed { .. }
+        | V::ProtocolRule { .. }
+        | V::StateMachineRejected { .. } => true,
+    }
 }
 
 /// Why `fault` may not follow `state`: `Some(reason)` when the state machine
 /// refuses its operation or conformance reports a violation that
 /// [`proves_non_conformance`], `None` when it applies cleanly. `Err` when its
 /// operation does not decode (not judged: fail closed). Conformance runs with
-/// `AllowAll` (see [`verify_non_conforming_update`]).
+/// `authorizer` (see [`verify_non_conforming_update`]).
 fn fault_rejection(
     state: &crate::types::LedgerState,
     fault: &crate::types::SignedLedgerUpdate,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<Option<String>, String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
@@ -1622,7 +1651,7 @@ fn fault_rejection(
         )
     })?;
     Ok(
-        match state.apply_with_verifier(&op, &crate::types::AllowAll, fault.block_height) {
+        match state.apply_with_verifier(&op, authorizer, fault.block_height) {
             Err(e) => Some(format!("state machine refuses it: {}", e)),
             Ok((_, violations)) => {
                 let proving: Vec<_> = violations
@@ -1654,6 +1683,7 @@ fn fault_rejection(
 pub fn find_non_conforming_update(
     history: &[crate::types::SignedLedgerUpdate],
     operator: &bitcoin::secp256k1::PublicKey,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Option<(u64, String)> {
     use crate::tlv::TlvEncode;
 
@@ -1667,7 +1697,7 @@ pub fn find_non_conforming_update(
                 fault_update_hex: hex::encode(u.tlv_encode()),
             },
         };
-        verify_non_conforming_update(&proof, history).is_ok()
+        verify_non_conforming_update(&proof, history, authorizer).is_ok()
     };
 
     let index = OperatorIndex::new(history, operator, u64::MAX);
@@ -1699,7 +1729,7 @@ pub fn find_non_conforming_update(
     }
 
     // Rule breaks along the operator's chain.
-    first_rule_break(&index, &ledger_id, |_| true, |u| confirm(u))
+    first_rule_break(&index, &ledger_id, authorizer, |_| true, |u| confirm(u))
         .map(|(u, reason)| (u.sequence_number, reason))
 }
 
@@ -1715,6 +1745,7 @@ pub fn find_non_conforming_update(
 fn first_rule_break<'a>(
     index: &OperatorIndex<'a>,
     ledger_id: &[u8; 32],
+    authorizer: &impl crate::types::Authorizer,
     eligible: impl Fn(&crate::types::SignedLedgerUpdate) -> bool,
     confirm: impl Fn(&crate::types::SignedLedgerUpdate) -> bool,
 ) -> Option<(&'a crate::types::SignedLedgerUpdate, String)> {
@@ -1733,7 +1764,7 @@ fn first_rule_break<'a>(
             s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash()
         }) {
             if eligible(s) && signed(&s) {
-                if let Ok(Some(reason)) = fault_rejection(&state, s) {
+                if let Ok(Some(reason)) = fault_rejection(&state, s, authorizer) {
                     if confirm(s) {
                         return Some((s, reason));
                     }
@@ -1754,7 +1785,7 @@ fn first_rule_break<'a>(
             continue;
         }
         let proving: Vec<_> = state
-            .check_conformance(&op, None, &crate::types::AllowAll, u.block_height)
+            .check_conformance(&op, None, authorizer, u.block_height)
             .into_iter()
             .filter(proves_non_conformance)
             .collect();
@@ -1821,6 +1852,7 @@ pub fn find_equivocation(
 pub fn find_non_conforming_cosignature(
     history: &[crate::types::SignedLedgerUpdate],
     operator: &bitcoin::secp256k1::PublicKey,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Option<(u64, u64, String)> {
     use crate::messages::LedgerOperation;
     use crate::tlv::{TlvDecode, TlvEncode};
@@ -1860,10 +1892,11 @@ pub fn find_non_conforming_cosignature(
     let (u, reason) = first_rule_break(
         &index,
         &ledger_id,
+        authorizer,
         |u| !u.cosignatures.is_empty() && governing(u.sequence_number).is_some(),
         |u| {
             governing(u.sequence_number).is_some_and(|qb| {
-                verify_non_conforming_cosignature(&proof_for(u, qb), history).is_ok()
+                verify_non_conforming_cosignature(&proof_for(u, qb), history, authorizer).is_ok()
             })
         },
     )?;
@@ -2288,11 +2321,12 @@ pub fn verify_fraud_broadcast(
     broadcast: &FraudBroadcast,
     ledgers: &dyn LedgerProvider,
     block_oracle: &dyn BlockOracle,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     if broadcast.proof.proof_type.requires_embedding() {
         verify_embedding_and_causal_chain(broadcast, ledgers)?;
     }
-    verify_fraud_evidence(&broadcast.proof, ledgers, block_oracle)
+    verify_fraud_evidence(&broadcast.proof, ledgers, block_oracle, authorizer)
 }
 
 /// Steps 1-3 of [`verify_fraud_broadcast`]: the broadcast's embedding is
@@ -2363,6 +2397,7 @@ pub fn verify_fraud_evidence(
     proof: &FraudProof,
     ledgers: &dyn LedgerProvider,
     block_oracle: &dyn BlockOracle,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     match proof.proof_type {
         FraudProofType::StaleCosignature => {
@@ -2431,7 +2466,7 @@ pub fn verify_fraud_evidence(
                     &proof.ledger_id[..16.min(proof.ledger_id.len())]
                 )
             })?;
-            verify_non_conforming_update(proof, &accused_history)?;
+            verify_non_conforming_update(proof, &accused_history, authorizer)?;
         }
         FraudProofType::QuorumExpired => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
@@ -2475,13 +2510,12 @@ pub fn verify_fraud_evidence(
                     &fault_ledger_id[..16.min(fault_ledger_id.len())]
                 )
             })?;
-            // Conformance runs with AllowAll and ignores height-dependent
-            // violations (see verify_non_conforming_cosignature). This used
-            // to pass DenyAll on the argument that an honest update fires no
-            // violation whatever the authorizer; it does: DenyAll refuses
-            // every withdrawal's witness, so any honest cosigned withdrawal
+            // Conformance runs with the caller's `authorizer`: a node passes
+            // the dep-16 descriptor verifier, so a forged witness is proof
+            // and an honest one is not. Never `DenyAll`: it refuses every
+            // withdrawal's witness, so any honest cosigned withdrawal
             // "proved" fraud.
-            verify_non_conforming_cosignature(proof, &fault_history)?;
+            verify_non_conforming_cosignature(proof, &fault_history, authorizer)?;
         }
     }
 

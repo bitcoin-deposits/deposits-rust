@@ -2184,6 +2184,7 @@ impl Node {
         let (seq, governing_qb, reason) = deposits_core::fraud::find_non_conforming_cosignature(
             &updates,
             &original_operator,
+            &deposits_core::dep16::Dep16Authorizer::new(),
         )?;
         tracing::info!(
             "Ledger {}: NonConformingCosignature at seq {} (governing QuorumBegin {}): {}",
@@ -2232,8 +2233,11 @@ impl Node {
         // replay), not a full verification per update: with the state-replay
         // verdict that would replay the whole history once per update. The
         // candidate it returns has passed verify_non_conforming_update.
-        let (seq, reason) =
-            deposits_core::fraud::find_non_conforming_update(&updates, &original_operator)?;
+        let (seq, reason) = deposits_core::fraud::find_non_conforming_update(
+            &updates,
+            &original_operator,
+            &deposits_core::dep16::Dep16Authorizer::new(),
+        )?;
         tracing::info!(
             "Ledger {}: NonConformingUpdate by the original operator at seq {}: {}",
             &ledger_id[..16.min(ledger_id.len())],

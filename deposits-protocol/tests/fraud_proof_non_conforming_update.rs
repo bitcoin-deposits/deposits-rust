@@ -16,7 +16,11 @@ use deposits_protocol::fraud::{
 };
 use deposits_protocol::messages::{LedgerOperation, QuorumMemberRef};
 use deposits_protocol::tlv::TlvEncode;
-use deposits_protocol::types::SignedLedgerUpdate;
+// This crate has no descriptor evaluator, so these verifier calls pass
+// `AllowAll`: witnesses are not judged here. Nodes pass deposits-core's
+// `Dep16Authorizer`; the witness cases are tested in
+// deposits-core/tests/fraud_proof_witness.rs.
+use deposits_protocol::types::{AllowAll, SignedLedgerUpdate};
 use sha2::{Digest, Sha256};
 
 /// Build an operator-signed update at `seq` with `previous_hash = prev`,
@@ -105,7 +109,7 @@ fn broken_previous_hash_is_non_conforming() {
     let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
     let proof = proof_for(&bad);
     assert!(
-        verify_non_conforming_update(&proof, &history).is_ok(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_ok(),
         "an operator-signed update with a wrong previous_hash must verify as fraud"
     );
 }
@@ -127,7 +131,7 @@ fn conforming_update_is_rejected() {
     // same verdict on real operations.)
     let proof = proof_for(&history[2]);
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "a conforming update must NOT be judged fraudulent (fail closed)"
     );
 }
@@ -141,7 +145,7 @@ fn same_seq_fork_with_valid_prev_is_not_this_fault() {
     let fork = signed_update(2, ledger(), history[1].chain_hash(), OP, b"different", false);
     let proof = proof_for(&fork);
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "a valid-prev same-seq fork is Equivocation's domain, not NonConformingUpdate"
     );
 }
@@ -153,7 +157,7 @@ fn tampered_operator_signature_is_rejected() {
     bad.operator_signature = [0x00; 64]; // invalidate
     let proof = proof_for(&bad);
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "an update whose operator_signature doesn't verify must be rejected"
     );
 }
@@ -171,7 +175,7 @@ fn accused_mismatch_is_rejected() {
     };
     proof.accused = hex::encode(other.serialize());
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "accused must be the operator that signed the fault update"
     );
 }
@@ -185,7 +189,7 @@ fn sequence_redundancy_mismatch_is_rejected() {
         *fault_sequence = 5; // lie about the sequence
     }
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "evidence.fault_sequence must match the inline update's sequence_number"
     );
 }
@@ -199,7 +203,7 @@ fn missing_predecessor_is_inconclusive() {
     let bad = signed_update(2, ledger(), full[1].chain_hash(), OP, b"orphan", false);
     let proof = proof_for(&bad);
     assert!(
-        verify_non_conforming_update(&proof, &history).is_err(),
+        verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
         "absent a reconstructable canonical predecessor, the verifier must fail closed"
     );
 }
@@ -210,12 +214,12 @@ fn seq_zero_with_nonzero_prev_is_non_conforming() {
     let bad = signed_update(0, ledger(), [0x11; 32], OP, &genesis_op().tlv_encode(), false);
     let proof = proof_for(&bad);
     assert!(
-        verify_non_conforming_update(&proof, &[]).is_ok(),
+        verify_non_conforming_update(&proof, &[], &AllowAll).is_ok(),
         "a seq-0 update not linking to the zero hash must verify as fraud"
     );
     // A seq-0 update that doesn't open this ledger isn't bound to it.
     let other = signed_update(0, ledger(), [0x11; 32], OP, b"bad-genesis", false);
-    assert!(verify_non_conforming_update(&proof_for(&other), &[]).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&other), &[], &AllowAll).is_err());
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +258,7 @@ fn ncu_broadcast_without_embedding_verifies() {
         causal_chain: vec![],
     };
     b.verify_chain_structure().unwrap();
-    verify_fraud_broadcast(&b, &accused_history, &no_blocks).unwrap();
+    verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll).unwrap();
 }
 
 #[test]
@@ -266,7 +270,7 @@ fn ncu_broadcast_with_cl_placeholder_verifies() {
         proof,
         causal_chain: vec![],
     };
-    verify_fraud_broadcast(&b, &accused_history, &no_blocks).unwrap();
+    verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll).unwrap();
 }
 
 #[test]
@@ -282,7 +286,7 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
         causal_chain: vec![],
     };
     let ledger_c = |id: &str| (id == hex::encode(ledger())).then(ledger_c_prefix);
-    let err = verify_fraud_broadcast(&b, &ledger_c, &no_blocks).unwrap_err();
+    let err = verify_fraud_broadcast(&b, &ledger_c, &no_blocks, &AllowAll).unwrap_err();
     assert!(err.contains("conforming"), "wrong error: {}", err);
 
     // A non-conforming update not signed by the accused: impersonation.
@@ -298,7 +302,7 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
         proof,
         causal_chain: vec![],
     };
-    assert!(verify_fraud_broadcast(&b, &accused_history, &no_blocks).is_err());
+    assert!(verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll).is_err());
 
     // The accused ledger unavailable: fail closed, not skip.
     let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
@@ -308,7 +312,7 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
         causal_chain: vec![],
     };
     let nothing = |_: &str| -> Option<Vec<SignedLedgerUpdate>> { None };
-    assert!(verify_fraud_broadcast(&b, &nothing, &no_blocks).is_err());
+    assert!(verify_fraud_broadcast(&b, &nothing, &no_blocks, &AllowAll).is_err());
 }
 
 /// cl's JSON, as `broadcast->json` / `proof->json` emit it today (with the
@@ -339,7 +343,7 @@ fn cl_shaped_json_round_trip() {
         let b: FraudBroadcast =
             serde_json::from_str(json).unwrap_or_else(|e| panic!("{name}: parse: {e}"));
         assert_eq!(b.proof.proof_hash(), expected_hash, "{name}: proof hash");
-        verify_fraud_broadcast(&b, &accused_history, &no_blocks)
+        verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll)
             .unwrap_or_else(|e| panic!("{name}: verify: {e}"));
         // Round trip through the reference's serializer.
         let again: FraudBroadcast = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
@@ -449,7 +453,7 @@ fn chained_credit_over_reserves_verifies() {
     let mut with_fault = prefix.clone();
     with_fault.push(fraud.clone());
     for history in [&prefix, &with_fault] {
-        verify_non_conforming_update(&proof_for(&fraud), history)
+        verify_non_conforming_update(&proof_for(&fraud), history, &AllowAll)
             .expect("a chained credit past reserves and collateral is non-conforming");
     }
 }
@@ -466,14 +470,14 @@ fn chained_credit_over_reserves_verifies_as_a_broadcast() {
         embedding: None,
         causal_chain: vec![],
     };
-    verify_fraud_broadcast(&b, &provider, &no_blocks).unwrap();
+    verify_fraud_broadcast(&b, &provider, &no_blocks, &AllowAll).unwrap();
 }
 
 #[test]
 fn chained_conforming_update_is_rejected() {
     let prefix = ledger_c_prefix();
     // The honest 480,000,000 credit: chains, applies, no violation.
-    let err = verify_non_conforming_update(&proof_for(&prefix[3]), &prefix).unwrap_err();
+    let err = verify_non_conforming_update(&proof_for(&prefix[3]), &prefix, &AllowAll).unwrap_err();
     assert!(err.contains("applies cleanly"), "{}", err);
     // And a second honest credit that stays under reserves and collateral.
     let ok_credit = signed_update(
@@ -484,7 +488,7 @@ fn chained_conforming_update_is_rejected() {
         &credit(3, 1_000_000_000).tlv_encode(),
         false,
     );
-    let err = verify_non_conforming_update(&proof_for(&ok_credit), &prefix).unwrap_err();
+    let err = verify_non_conforming_update(&proof_for(&ok_credit), &prefix, &AllowAll).unwrap_err();
     assert!(err.contains("applies cleanly"), "{}", err);
 }
 
@@ -495,11 +499,11 @@ fn chained_fault_signed_by_someone_else_is_rejected() {
     let foreign = ledger_c_fraud(&prefix, 9);
     let mut proof = proof_for(&foreign);
     proof.accused = hex::encode(pubkey(OP).serialize());
-    assert!(verify_non_conforming_update(&proof, &prefix).is_err());
+    assert!(verify_non_conforming_update(&proof, &prefix, &AllowAll).is_err());
     // Claims the operator's key, but the signature is another key's.
     let mut forged = ledger_c_fraud(&prefix, OP);
     forged.operator_signature = foreign.operator_signature;
-    assert!(verify_non_conforming_update(&proof_for(&forged), &prefix).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&forged), &prefix, &AllowAll).is_err());
 }
 
 #[test]
@@ -514,7 +518,7 @@ fn chain_break_on_a_real_ledger_still_verifies() {
         &credit(3, 1_000_000_000).tlv_encode(),
         false,
     );
-    verify_non_conforming_update(&proof_for(&orphan), &prefix).unwrap();
+    verify_non_conforming_update(&proof_for(&orphan), &prefix, &AllowAll).unwrap();
 }
 
 #[test]
@@ -542,17 +546,17 @@ fn a_forged_predecessor_does_not_frame_an_honest_update() {
         prefix[3].clone(),
         honest4.clone(),
     ];
-    assert!(verify_non_conforming_update(&proof_for(&honest4), &history).is_err());
-    assert_eq!(find_non_conforming_update(&history, &pubkey(OP)), None);
+    assert!(verify_non_conforming_update(&proof_for(&honest4), &history, &AllowAll).is_err());
+    assert_eq!(find_non_conforming_update(&history, &pubkey(OP), &AllowAll), None);
 }
 
 #[test]
 fn find_locates_the_chained_fault_once() {
     let prefix = ledger_c_prefix();
-    assert_eq!(find_non_conforming_update(&prefix, &pubkey(OP)), None);
+    assert_eq!(find_non_conforming_update(&prefix, &pubkey(OP), &AllowAll), None);
     let mut history = prefix.clone();
     history.push(ledger_c_fraud(&prefix, OP));
-    let (seq, reason) = find_non_conforming_update(&history, &pubkey(OP)).unwrap();
+    let (seq, reason) = find_non_conforming_update(&history, &pubkey(OP), &AllowAll).unwrap();
     assert_eq!(seq, 4);
     assert!(reason.contains("InsufficientReserves"), "{}", reason);
 }
@@ -570,7 +574,7 @@ fn find_locates_a_chain_break() {
         false,
     ));
     assert_eq!(
-        find_non_conforming_update(&history, &pubkey(OP)).map(|f| f.0),
+        find_non_conforming_update(&history, &pubkey(OP), &AllowAll).map(|f| f.0),
         Some(4)
     );
 }
@@ -603,10 +607,10 @@ fn a_rewritten_block_height_does_not_frame_an_honest_update() {
         &lock(1_000, 500).tlv_encode(),
         false,
     );
-    assert!(verify_non_conforming_update(&proof_for(&honest), &prefix).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&honest), &prefix, &AllowAll).is_err());
     honest.block_height = 10_000;
     assert!(honest.verify_operator_signature().is_err());
-    assert!(verify_non_conforming_update(&proof_for(&honest), &prefix).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&honest), &prefix, &AllowAll).is_err());
 
     // A rule that does not depend on heights still proves: a zero-amount lock.
     let zero = signed_update(
@@ -617,7 +621,7 @@ fn a_rewritten_block_height_does_not_frame_an_honest_update() {
         &lock(0, 500).tlv_encode(),
         false,
     );
-    verify_non_conforming_update(&proof_for(&zero), &prefix).unwrap();
+    verify_non_conforming_update(&proof_for(&zero), &prefix, &AllowAll).unwrap();
 }
 
 // ---------------------------------------------------------------------------
@@ -680,7 +684,7 @@ fn an_honest_update_of_another_ledger_relabelled_is_not_proof() {
     assert!(relabelled.verify_operator_signature().is_err());
     assert_ne!(relabelled.previous_hash, y[3].chain_hash());
 
-    assert!(verify_non_conforming_update(&proof_for(&relabelled), &y).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&relabelled), &y, &AllowAll).is_err());
     // Even with X's history mixed into what the relay returns for Y (a
     // relabelled copy of all of it): X's genesis opens X, not Y.
     let mut mixed = y.clone();
@@ -688,10 +692,10 @@ fn an_honest_update_of_another_ledger_relabelled_is_not_proof() {
         u.ledger_id = ledger();
         u
     }));
-    assert!(verify_non_conforming_update(&proof_for(&relabelled), &mixed).is_err());
-    assert_eq!(find_non_conforming_update(&mixed, &pubkey(OP)), None);
+    assert!(verify_non_conforming_update(&proof_for(&relabelled), &mixed, &AllowAll).is_err());
+    assert_eq!(find_non_conforming_update(&mixed, &pubkey(OP), &AllowAll), None);
     // And on X, where it belongs, it is an honest update.
-    assert!(verify_non_conforming_update(&proof_for(&x[4]), &x).is_err());
+    assert!(verify_non_conforming_update(&proof_for(&x[4]), &x, &AllowAll).is_err());
 }
 
 #[test]
@@ -705,7 +709,7 @@ fn an_update_following_nothing_in_the_history_is_not_proof() {
         &credit(3, 1).tlv_encode(),
         false,
     );
-    let err = verify_non_conforming_update(&proof_for(&orphan), &prefix).unwrap_err();
+    let err = verify_non_conforming_update(&proof_for(&orphan), &prefix, &AllowAll).unwrap_err();
     assert!(err.contains("nothing binds it to this ledger"), "{}", err);
 }
 
@@ -762,8 +766,9 @@ fn a_genuine_equivocation_still_verifies() {
         embedding: None,
         causal_chain: vec![],
     };
-    verify_fraud_broadcast(&bc, &provider, &no_blocks).unwrap();
+    verify_fraud_broadcast(&bc, &provider, &no_blocks, &AllowAll).unwrap();
     // Without the history, nothing binds the pair: fail closed.
     let nothing = |_: &str| -> Option<Vec<SignedLedgerUpdate>> { None };
-    assert!(verify_fraud_broadcast(&bc, &nothing, &no_blocks).is_err());
+    assert!(verify_fraud_broadcast(&bc, &nothing, &no_blocks, &AllowAll).is_err());
 }
+

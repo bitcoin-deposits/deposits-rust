@@ -351,7 +351,10 @@ pub fn verify_archived_fraud(
 ) -> Result<(), String> {
     let provider = ArchiveLedgers { chains };
     let oracle = NoChainOracle;
-    deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle)
+    // Witnesses are judged with the dep-16 descriptor verifier, as the
+    // daemon does.
+    let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+    deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle, &authorizer)
 }
 
 // ============================================================================

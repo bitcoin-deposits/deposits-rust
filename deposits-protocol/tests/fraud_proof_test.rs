@@ -1,6 +1,11 @@
 //! Tests for fraud proof hashing, causal chains, and evidence types.
 
+// This crate has no descriptor evaluator, so these verifier calls pass
+// `AllowAll`: witnesses are not judged here. Nodes pass deposits-core's
+// `Dep16Authorizer`; the witness cases are tested in
+// deposits-core/tests/fraud_proof_witness.rs.
 use deposits_protocol::fraud::*;
+use deposits_protocol::types::AllowAll;
 
 fn make_accused() -> String {
     "02".to_string() + &"ab".repeat(32)
@@ -271,7 +276,7 @@ fn uncredited_payment_without_embedding_rejected() {
         };
         let err = b.verify_chain_structure().unwrap_err();
         assert!(err.contains("requires an embedding"), "wrong error: {}", err);
-        let err = verify_fraud_broadcast(&b, &empty, &oracle).unwrap_err();
+        let err = verify_fraud_broadcast(&b, &empty, &oracle, &AllowAll).unwrap_err();
         assert!(err.contains("requires an embedding"), "wrong error: {}", err);
     }
 }
@@ -647,6 +652,7 @@ fn chain_hash_includes_operator_signature() {
 
 mod dispatch {
     use deposits_protocol::fraud::*;
+    use deposits_protocol::types::AllowAll;
     use deposits_protocol::messages::LedgerOperation;
     use deposits_protocol::tlv::TlvEncode;
     use deposits_protocol::types::{CosignEntry, SignedLedgerUpdate};
@@ -868,7 +874,7 @@ mod dispatch {
         let (broadcast, histories) = stale_cosig_scenario();
         let provider = provider_from(histories);
         let oracle = MockOracle(HashMap::new());
-        verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap();
+        verify_fraud_broadcast(&broadcast, &provider, &oracle, &AllowAll).unwrap();
     }
 
     #[test]
@@ -880,9 +886,9 @@ mod dispatch {
         broadcast.embedding.as_mut().unwrap().sequence = 999; // no update at this seq
         let provider = provider_from(histories.clone());
         let oracle = MockOracle(HashMap::new());
-        verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap();
+        verify_fraud_broadcast(&broadcast, &provider, &oracle, &AllowAll).unwrap();
         broadcast.embedding = None;
-        verify_fraud_broadcast(&broadcast, &provider_from(histories), &oracle).unwrap();
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &oracle, &AllowAll).unwrap();
     }
 
     #[test]
@@ -911,7 +917,7 @@ mod dispatch {
         );
         let provider = provider_from(histories);
         let oracle = MockOracle(HashMap::new());
-        let err = verify_fraud_broadcast(&broadcast, &provider, &oracle).unwrap_err();
+        let err = verify_fraud_broadcast(&broadcast, &provider, &oracle, &AllowAll).unwrap_err();
         assert!(
             err.contains("did not advance past")
                 || err.contains("doesn't appear in member history"),
@@ -994,6 +1000,7 @@ mod dispatch {
             &broadcast,
             &provider_from(histories),
             &MockOracle(HashMap::new()),
+            &AllowAll,
         )
         .unwrap();
     }
@@ -1027,6 +1034,7 @@ mod dispatch {
             &broadcast,
             &provider_from(histories),
             &MockOracle(HashMap::new()),
+            &AllowAll,
         )
         .unwrap_err();
         assert!(err.contains("InvoiceCredit found"), "wrong error: {}", err);
@@ -1106,14 +1114,14 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_inactive_quorum_member() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(200, 144);
-        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks)).unwrap();
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll).unwrap();
     }
 
     #[test]
     fn dispatch_rejects_inactive_quorum_within_window() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(100, 144);
         let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
                 .unwrap_err();
         assert!(err.contains("only 100 blocks past"), "wrong error: {}", err);
     }
@@ -1126,6 +1134,7 @@ mod dispatch {
             &broadcast,
             &provider_from(histories),
             &MockOracle(HashMap::new()),
+            &AllowAll,
         )
         .unwrap_err();
         assert!(
@@ -1220,14 +1229,14 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_uncredited_onchain() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
-        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks)).unwrap();
+        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll).unwrap();
     }
 
     #[test]
     fn dispatch_rejects_uncredited_onchain_with_insufficient_confs() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(3, 6);
         let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
                 .unwrap_err();
         assert!(err.contains("only 3 blocks past"), "wrong error: {}", err);
     }
@@ -1252,7 +1261,7 @@ mod dispatch {
             u
         };
         let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks))
+            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
                 .unwrap_err();
         assert!(
             err.contains("offer cosignature failed BIP-340"),

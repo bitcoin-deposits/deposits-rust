@@ -1296,7 +1296,11 @@ impl Node {
         let oracle = WalletOracle {
             wallet: &self.wallet,
         };
-        deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle)?;
+        // Witnesses are judged with the dep-16 descriptor verifier, the one
+        // the replica's apply_and_check uses: a proof of a forged spend
+        // verifies here whether or not we watched the update land.
+        let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+        deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle, &authorizer)?;
 
         // WinnerCollateralDeviation's evidence is the on-chain claim TX,
         // which the pure verifier can't fetch. The type is self-evident, so
