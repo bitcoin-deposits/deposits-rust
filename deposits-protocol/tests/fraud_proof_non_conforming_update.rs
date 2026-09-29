@@ -772,3 +772,108 @@ fn a_genuine_equivocation_still_verifies() {
     assert!(verify_fraud_broadcast(&bc, &nothing, &no_blocks, &AllowAll).is_err());
 }
 
+// ---------------------------------------------------------------------------
+// Only the ledger's operator at the fault's sequence can be accused.
+// ---------------------------------------------------------------------------
+
+const MEMBER: u8 = 2; // ledger C's quorum member
+
+/// A quorum member signs two different updates at the next sequence, chained
+/// onto the operator's tip, and accuses itself. Neither is the ledger's
+/// update: the operator at seq 4 is `OP`. Refused explicitly, not only
+/// because an index happens to hold just the accused's own updates.
+#[test]
+fn a_member_accusing_itself_is_refused() {
+    use deposits_protocol::fraud::verify_equivocation;
+    let y = ledger_c_prefix();
+    let a = signed_update(4, ledger(), y[3].chain_hash(), MEMBER, &credit(3, 1).tlv_encode(), false);
+    let b = signed_update(4, ledger(), y[3].chain_hash(), MEMBER, &credit(4, 2).tlv_encode(), false);
+    let mut history = y.clone();
+    history.extend([a.clone(), b.clone()]);
+    for h in [&y, &history] {
+        let err = verify_equivocation(&equivocation(&a, &b), h).unwrap_err();
+        assert!(
+            err.contains("the accused does not operate the ledger at that sequence"),
+            "wrong error: {}",
+            err
+        );
+    }
+
+    // The same as a NonConformingUpdate: a credit past reserves, by the member.
+    let fraud = ledger_c_fraud(&y, MEMBER);
+    let err = verify_non_conforming_update(&proof_for(&fraud), &y, &AllowAll).unwrap_err();
+    assert!(
+        err.contains("the accused does not operate the ledger at that sequence"),
+        "wrong error: {}",
+        err
+    );
+    // The operator's own is proof.
+    verify_non_conforming_update(&proof_for(&ledger_c_fraud(&y, OP)), &y, &AllowAll).unwrap();
+}
+
+const SUCCESSOR: u8 = 9;
+
+/// Ledger C taken over: DisputeEnter, DisputeArmed and DisputeAcquire (seq 4
+/// to 6) move custody to `SUCCESSOR`, which signs from there.
+fn taken_over() -> Vec<SignedLedgerUpdate> {
+    let mut chain = ledger_c_prefix();
+    let ops = [
+        LedgerOperation::DisputeEnter {
+            last_valid_sequence: 3,
+            reason: "fraud_proof".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
+        },
+        LedgerOperation::DisputeArmed {
+            armed_block: 100,
+            commitment_hash: [0; 20],
+            target_reserves: "bcrt1qnew".into(),
+            replacement_collateral: None,
+        },
+        LedgerOperation::DisputeAcquire {
+            new_custodian: pubkey(SUCCESSOR),
+            claim_txid: [9; 32],
+            new_reserves_address: "bcrt1qnew".into(),
+        },
+    ];
+    for op in ops {
+        let prev = chain.last().unwrap().chain_hash();
+        let seq = chain.len() as u64;
+        chain.push(signed_update(seq, ledger(), prev, SUCCESSOR, &op.tlv_encode(), false));
+    }
+    chain
+}
+
+/// After a DisputeAcquire the operator is the new custodian, by the replayed
+/// prefix: its faults are proof (they could not be proved before: the index
+/// held only its updates, which do not reach the genesis), and the former
+/// operator's updates onto the successor's chain are not its fault.
+#[test]
+fn custody_follows_dispute_acquire() {
+    use deposits_protocol::fraud::verify_equivocation;
+    let chain = taken_over();
+    let tip = chain[6].chain_hash();
+    let over_reserves = credit(2, FRAUD).tlv_encode();
+
+    let by_successor = signed_update(7, ledger(), tip, SUCCESSOR, &over_reserves, false);
+    verify_non_conforming_update(&proof_for(&by_successor), &chain, &AllowAll)
+        .expect("the new custodian's fault is proof");
+
+    let by_former = signed_update(7, ledger(), tip, OP, &over_reserves, false);
+    let err = verify_non_conforming_update(&proof_for(&by_former), &chain, &AllowAll).unwrap_err();
+    assert!(err.contains("does not operate the ledger"), "wrong error: {}", err);
+
+    let a = signed_update(7, ledger(), tip, OP, &credit(3, 1).tlv_encode(), false);
+    let b = signed_update(7, ledger(), tip, OP, &credit(4, 2).tlv_encode(), false);
+    let err = verify_equivocation(&equivocation(&a, &b), &chain).unwrap_err();
+    assert!(err.contains("does not operate the ledger"), "wrong error: {}", err);
+    let a = signed_update(7, ledger(), tip, SUCCESSOR, &credit(3, 1).tlv_encode(), false);
+    let b = signed_update(7, ledger(), tip, SUCCESSOR, &credit(4, 2).tlv_encode(), false);
+    verify_equivocation(&equivocation(&a, &b), &chain).unwrap();
+
+    // The former operator's fault from before the takeover still verifies:
+    // it did operate the ledger at seq 4. Whether to act on it is the node's
+    // call (a proof against a former operator disputes nothing).
+    verify_non_conforming_update(&proof_for(&ledger_c_fraud(&chain, OP)), &chain, &AllowAll)
+        .unwrap();
+}

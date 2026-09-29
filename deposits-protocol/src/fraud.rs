@@ -941,6 +941,11 @@ pub fn verify_quorum_expired(
 ///   7. The proof's outer `accused` field matches both updates'
 ///      `operator_id` (no impersonation: the operator named on the
 ///      proof must be the one whose signature appears on both).
+///   8. Both are bound to this ledger by the hash chain in `history`.
+///   9. The accused operates the ledger at that sequence: the
+///      `parent_pubkey` of the prefix each update follows, replayed from
+///      genesis (so custody moves at a `DisputeAcquire`). Otherwise "the
+///      accused does not operate the ledger at that sequence".
 pub fn verify_equivocation(
     proof: &FraudProof,
     history: &[crate::types::SignedLedgerUpdate],
@@ -1045,7 +1050,7 @@ pub fn verify_equivocation(
     //     operator's ledgers X and Y, one relabelled, pass (1)-(7). Each
     //     must be a genesis opening this ledger or follow an update whose
     //     chain reaches that genesis in the ledger's history.
-    let index = OperatorIndex::new(history, &update_a.operator_id, u64::MAX);
+    let index = OperatorIndex::all(history, u64::MAX);
     let bound = index.bound_hashes(&update_a.ledger_id);
     for (name, u) in [("update_a", &update_a), ("update_b", &update_b)] {
         if !update_binds_to_ledger(u, &update_a.ledger_id, &bound) {
@@ -1055,6 +1060,28 @@ pub fn verify_equivocation(
                  DEP-02), so it may be another ledger's update. Fail closed",
                 name
             ));
+        }
+    }
+
+    // (9) The accused operates the ledger at that sequence, by the prefix
+    //     each update follows replayed from genesis (which follows any
+    //     DisputeAcquire). A seq-0 update bound at (8) is the accused's own
+    //     LedgerOpen. Without this, only the index's operator filter kept a
+    //     quorum member from signing two updates onto the operator's tip and
+    //     accusing itself.
+    if *sequence > 0 {
+        let mut judged: Vec<[u8; 32]> = Vec::new();
+        for u in [&update_a, &update_b] {
+            if judged.contains(&u.previous_hash) {
+                continue;
+            }
+            judged.push(u.previous_hash);
+            let anchor = index.by_hash.get(&u.previous_hash).copied().ok_or_else(|| {
+                "an update's predecessor is not in the history — fail closed".to_string()
+            })?;
+            let prefix = index.chain_to_genesis(anchor, &update_a.ledger_id)?;
+            let state = replay_canonical(&prefix)?;
+            check_accused_operates(&state, u, &update_a.operator_id)?;
         }
     }
 
@@ -1095,7 +1122,8 @@ pub fn verify_equivocation(
 /// As for `NonConformingUpdate`: conformance runs with the caller's
 /// `authorizer` (a node passes the dep-16 descriptor verifier; never `DenyAll`,
 /// which reports every honest withdrawal and is how this verifier used to
-/// accuse honest operators).
+/// accuse honest operators), and the fault's signer must operate the ledger
+/// at that sequence by the replayed prefix.
 pub fn verify_non_conforming_cosignature(
     proof: &FraudProof,
     fault_history: &[crate::types::SignedLedgerUpdate],
@@ -1192,7 +1220,7 @@ pub fn verify_non_conforming_cosignature(
     }
 
     // (3) The prefix the fault's signatures fix.
-    let index = OperatorIndex::new(fault_history, &fault_update.operator_id, *fault_sequence);
+    let index = OperatorIndex::all(fault_history, *fault_sequence);
     let linked = index
         .at_seq(fault_sequence - 1)
         .find(|p| p.chain_hash() == fault_update.previous_hash)
@@ -1221,8 +1249,17 @@ pub fn verify_non_conforming_cosignature(
         ));
     }
 
-    // (5) Replay and judge.
+    // (5) Replay and judge. The fault's signer must be the ledger's operator
+    //     at that sequence: an update anyone else signed is not the ledger's.
     let state = replay_canonical(&prefix)?;
+    if state.parent_pubkey != fault_update.operator_id {
+        return Err(format!(
+            "the fault update's signer does not operate the ledger at seq {}: \
+             its operator there is {} — not this ledger's update, fail closed",
+            fault_sequence,
+            hex::encode(&state.parent_pubkey.serialize()[..8]),
+        ));
+    }
     match fault_rejection(&state, &fault_update, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
@@ -1275,6 +1312,12 @@ pub fn verify_non_conforming_cosignature(
 /// defect is its witness is not proved. Never `DenyAll`: it reports every
 /// honest withdrawal. Height-dependent violations count: the v2 signing
 /// covers the heights they are judged at (`proves_non_conformance`).
+///
+/// The accused must operate the ledger at the fault's sequence: the
+/// `parent_pubkey` of the prefix the fault follows, replayed from genesis, so
+/// custody moves at a `DisputeAcquire`. The prefix may hold updates by
+/// several signers for that reason. Anything else is refused ("the accused
+/// does not operate the ledger at that sequence").
 ///
 /// Also `Err`: the fault not signed by the accused, a missing link back to
 /// this ledger's genesis, a prefix that does not
@@ -1388,7 +1431,9 @@ pub fn verify_non_conforming_update(
     //     the hash chain, so no other signature needs checking. Walking it
     //     back to a genesis that opens this ledger is what binds the fault to
     //     the ledger.
-    let index = OperatorIndex::new(history, &fault.operator_id, u64::MAX);
+    //     The index holds every signer's updates: after a DisputeAcquire the
+    //     chain the fault follows has more than one.
+    let index = OperatorIndex::all(history, u64::MAX);
     let Some(&anchor) = index.by_hash.get(&fault.previous_hash) else {
         return Err(format!(
             "fault update at seq {} follows an update that is not in this \
@@ -1399,6 +1444,11 @@ pub fn verify_non_conforming_update(
         ));
     };
     let prefix = index.chain_to_genesis(anchor, &fault.ledger_id)?;
+    let state = replay_canonical(&prefix)?;
+
+    // (7b) The accused operates the ledger at the fault's sequence, by the
+    //      prefix it follows. Only the operator's updates can be its fault.
+    check_accused_operates(&state, &fault, &fault.operator_id)?;
 
     // (8) Structural verdict: it follows an update of this ledger, but not
     //     the one at the previous sequence (a rewind or a skip). An honest
@@ -1407,9 +1457,8 @@ pub fn verify_non_conforming_update(
         return Ok(());
     }
 
-    // (9) It chains, so it must break a rule. Replay the prefix it follows
-    //     from genesis and apply the fault to that state.
-    let state = replay_canonical(&prefix)?;
+    // (9) It chains, so it must break a rule: apply the fault to the state
+    //     the prefix it follows replays to.
     match fault_rejection(&state, &fault, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
@@ -1443,11 +1492,28 @@ impl<'a> OperatorIndex<'a> {
         operator: &bitcoin::secp256k1::PublicKey,
         below_seq: u64,
     ) -> Self {
+        Self::build(history, Some(operator), below_seq)
+    }
+
+    /// Every update in `history` below `below_seq` with a correct
+    /// `content_hash`, whoever signed it. A ledger's chain changes signer at
+    /// a `DisputeAcquire`, so a fault's prefix may hold updates by more than
+    /// one operator; who operates the ledger at a sequence is read off the
+    /// replayed prefix (`parent_pubkey`), never off this index.
+    fn all(history: &'a [crate::types::SignedLedgerUpdate], below_seq: u64) -> Self {
+        Self::build(history, None, below_seq)
+    }
+
+    fn build(
+        history: &'a [crate::types::SignedLedgerUpdate],
+        operator: Option<&bitcoin::secp256k1::PublicKey>,
+        below_seq: u64,
+    ) -> Self {
         let mut by_hash = std::collections::HashMap::new();
         let mut by_seq: std::collections::HashMap<u64, Vec<_>> = std::collections::HashMap::new();
         for u in history {
             if u.sequence_number < below_seq
-                && u.operator_id == *operator
+                && operator.map_or(true, |o| u.operator_id == *o)
                 && u.content_hash == u.compute_hash()
             {
                 by_hash.entry(u.chain_hash()).or_insert(u);
@@ -1489,8 +1555,8 @@ impl<'a> OperatorIndex<'a> {
         chain.reverse();
         let opens_ledger = update_opens_ledger(chain[0], ledger_id);
         if !opens_ledger {
-            return Err("the chain's seq 0 is not this ledger's LedgerOpen by the \
-                        accused — inconclusive, fail closed"
+            return Err("the chain's seq 0 is not this ledger's LedgerOpen by its \
+                        operator — inconclusive, fail closed"
                 .into());
         }
         Ok(chain)
@@ -1585,6 +1651,30 @@ fn replay_canonical(
         })?;
     }
     Ok(state)
+}
+
+/// Refuse unless `accused` operates the ledger at `fault`'s sequence: the
+/// `parent_pubkey` of `state`, the prefix `fault` follows replayed from
+/// genesis (so it follows every `DisputeAcquire` on it). Only the operator
+/// signs a ledger's updates, so an update anyone else signed at that
+/// sequence is not the operator's fault, whatever it holds: a quorum member
+/// can sign two updates chained onto the operator's tip and accuse itself,
+/// and that must not freeze the honest ledger.
+fn check_accused_operates(
+    state: &crate::types::LedgerState,
+    fault: &crate::types::SignedLedgerUpdate,
+    accused: &bitcoin::secp256k1::PublicKey,
+) -> Result<(), String> {
+    if state.parent_pubkey != *accused {
+        return Err(format!(
+            "the accused does not operate the ledger at that sequence: at seq {} \
+             the ledger's operator is {}, not the accused {}",
+            fault.sequence_number,
+            hex::encode(&state.parent_pubkey.serialize()[..8]),
+            hex::encode(&accused.serialize()[..8]),
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a conformance violation proves non-conformance on the signed
