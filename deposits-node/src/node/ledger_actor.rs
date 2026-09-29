@@ -205,13 +205,25 @@ impl LedgerActor {
             .find(|u| u.sequence_number == update.sequence_number)
         {
             if existing.content_hash != update.content_hash {
-                tracing::warn!(
-                    "LedgerActor[{}…] equivocation at seq {}: existing content {} vs new {}",
-                    &self.ledger_id[..16.min(self.ledger_id.len())],
-                    update.sequence_number,
-                    hex::encode(&existing.content_hash[..8]),
-                    hex::encode(&update.content_hash[..8])
-                );
+                // Only an update the operator actually signed is evidence of
+                // equivocation. Anyone can publish bytes under this ledger's tag
+                // (a relabelled or altered copy fails the v2 signature), and
+                // calling those "equivocation" sent us chasing a non-event.
+                if update.verify_operator_signature().is_ok() {
+                    tracing::warn!(
+                        "LedgerActor[{}…] equivocation at seq {}: existing content {} vs new {}",
+                        &self.ledger_id[..16.min(self.ledger_id.len())],
+                        update.sequence_number,
+                        hex::encode(&existing.content_hash[..8]),
+                        hex::encode(&update.content_hash[..8])
+                    );
+                } else {
+                    tracing::debug!(
+                        "LedgerActor[{}…] dropping an update at seq {} whose operator signature does not verify",
+                        &self.ledger_id[..16.min(self.ledger_id.len())],
+                        update.sequence_number
+                    );
+                }
             }
             return;
         }

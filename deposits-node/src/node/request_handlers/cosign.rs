@@ -372,6 +372,12 @@ impl Node {
         // the old gate only rejected "ahead of me" and happily re-signed anything
         // at-or-below our tip. Cosigners are kept current by the freshness barrier,
         // so checking the request against our own committed history is sufficient.
+        // Set when the request is for the exact update we already committed at
+        // that sequence (an idempotent re-sign, e.g. a request that queued behind
+        // a stall until the update had landed). It was validated when we applied
+        // it; validating it again against the state it produced double-counts it
+        // (a TransferLock reads as locking twice), so that step is skipped below.
+        let mut already_committed = false;
         if let Some(ref arc) = operator_ledger_arc {
             let ledger = arc.read().unwrap();
             let expected_seq = ledger.next_sequence();
@@ -392,6 +398,7 @@ impl Node {
             } else {
                 None
             };
+            already_committed = resign_matches == Some(true);
             let lid = &request.ledger_id[..16.min(request.ledger_id.len())];
             match cosign_seq_gate(sequence_number, expected_seq, resign_matches) {
                 CosignSeqGate::Allow => {}
@@ -597,8 +604,10 @@ impl Node {
 
             match LedgerOperation::tlv_decode(fields.message) {
                 Ok(operation) => {
-                    // Validate against local ledger state
-                    if let Some(ref arc) = operator_ledger_arc {
+                    // Validate against local ledger state — unless it is already
+                    // part of that state (see `already_committed`).
+                    let validate_against = if already_committed { None } else { operator_ledger_arc.as_ref() };
+                    if let Some(arc) = validate_against {
                         let ledger = arc.read().unwrap();
                         // Cosigner-edge policy + expiry check. Refuses to
                         // sign anything past `quorum_expiry`, including a
