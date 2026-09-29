@@ -1361,6 +1361,33 @@ impl Node {
             }
         }
 
+        // A verified proof disputes the ledger only while the accused still
+        // operates it. After a confiscation and DisputeAcquire the ledger
+        // continues under the new custodian (`parent_pubkey`); anyone can
+        // re-broadcast the old, already-punished proof, and it still
+        // verifies (the accused did operate the ledger at the fault's
+        // sequence), but acting on it would freeze the honest successor.
+        // Verification is unchanged: this only decides whether to act.
+        let current_operator = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|arc| arc.read().unwrap().state.parent_pubkey)
+        };
+        if !fraud_proof_accuses_current_operator(&broadcast.proof.accused, current_operator.as_ref())
+        {
+            tracing::info!(
+                "Not disputing {}: proof against a former operator; custody already moved \
+                 (accused {}, current operator {})",
+                &ledger_id[..16.min(ledger_id.len())],
+                &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())],
+                current_operator
+                    .map(|k| hex::encode(&k.serialize()[..8]))
+                    .unwrap_or_else(|| "unknown: ledger not held".into()),
+            );
+            return;
+        }
+
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
             tracing::info!(
@@ -1783,6 +1810,21 @@ pub(crate) fn fraud_proof_last_valid_seq(
     }
 }
 
+/// Whether a verified fraud proof accuses the ledger's current operator
+/// (`parent_pubkey` of our replica), the only case in which it may dispute
+/// the ledger. A proof against a former operator, whose custody has already
+/// moved at a DisputeAcquire, is stale: acting on it would dispute the new
+/// custodian for its predecessor's fault. An unknown operator (ledger not
+/// held) or an unparseable `accused` is not acted on either.
+pub(crate) fn fraud_proof_accuses_current_operator(
+    accused_hex: &str,
+    current_operator: Option<&bitcoin::secp256k1::PublicKey>,
+) -> bool {
+    current_operator.is_some_and(|op| {
+        hex::decode(accused_hex).is_ok_and(|a| a[..] == op.serialize()[..])
+    })
+}
+
 /// Whether `update` belongs to ledger `ledger_id`, whose `history` we hold,
 /// by what its operator signed: a genesis opening that ledger, or an
 /// update whose `previous_hash` is one of our updates' `chain_hash`. Its
@@ -1822,8 +1864,30 @@ pub(crate) fn updates_equivocate(
 
 #[cfg(test)]
 mod fraud_proof_base_tests {
-    use super::fraud_proof_last_valid_seq;
+    use super::{fraud_proof_accuses_current_operator, fraud_proof_last_valid_seq};
     use deposits_core::fraud::FraudEvidence;
+
+    fn key(b: u8) -> bitcoin::secp256k1::PublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[b; 32]).unwrap();
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    /// Ledger A was taken over: cld1's forged update at seq 6969 was
+    /// disputed and confiscated, and cld3 acquired custody. The old proof
+    /// against cld1 still verifies when re-broadcast, but it must not
+    /// dispute A again under cld3. A proof against cld3 still does.
+    #[test]
+    fn a_proof_against_a_former_operator_does_not_dispute_the_successor() {
+        let (cld1, cld3) = (key(1), key(3));
+        let accuses = |k: bitcoin::secp256k1::PublicKey| hex::encode(k.serialize());
+        assert!(!fraud_proof_accuses_current_operator(&accuses(cld1), Some(&cld3)));
+        assert!(fraud_proof_accuses_current_operator(&accuses(cld3), Some(&cld3)));
+        assert!(fraud_proof_accuses_current_operator(&accuses(cld1), Some(&cld1)));
+        // Nothing to judge against, or garbage: not acted on.
+        assert!(!fraud_proof_accuses_current_operator(&accuses(cld1), None));
+        assert!(!fraud_proof_accuses_current_operator("zz", Some(&cld1)));
+    }
 
     const C: &str = "ab";
 
