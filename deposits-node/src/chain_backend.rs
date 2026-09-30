@@ -164,3 +164,216 @@ pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
         ),
     }
 }
+
+// -- "Scan already in progress" --------------------------------------------
+//
+// bitcoind runs one `scantxoutset` at a time per node and fails a second
+// concurrent call at once with RPC error -8 "Scan already in progress". The
+// devnet shares one bitcoind among every node, so reference members arming
+// on the same equivocation all scan for their replacement collateral within
+// the same second: before this retry the losers armed with no collateral,
+// which strict cosigners refuse (DEP-03 §"Replacement collateral
+// declaration"), stalling the confiscation. Other backends never produce
+// this error, so the retry is a no-op for them.
+
+/// Retry schedule for a UTXO scan that bitcoind refused because another scan
+/// was running.
+#[derive(Clone, Debug)]
+pub struct ScanRetry {
+    /// Total attempts, the first included.
+    pub attempts: u32,
+    /// Each wait is uniform in `[min_wait, max_wait]`; the jitter keeps
+    /// members that collided once from colliding again in lockstep.
+    pub min_wait: std::time::Duration,
+    pub max_wait: std::time::Duration,
+}
+
+impl Default for ScanRetry {
+    /// 12 attempts, 1-5 s apart: at most 55 s (about 33 s expected) before
+    /// giving up. A regtest/signet scan takes milliseconds and a mainnet one
+    /// seconds, so a dozen other scans can finish in that time.
+    fn default() -> Self {
+        Self {
+            attempts: 12,
+            min_wait: std::time::Duration::from_secs(1),
+            max_wait: std::time::Duration::from_secs(5),
+        }
+    }
+}
+
+impl ScanRetry {
+    /// A short schedule for lookups on a path that must not stall: the
+    /// inbound handlers (5 s timeouts), the periodic tasks (10 s) and the
+    /// blocking `Wallet::find_utxo_for_script`. 4 attempts, 0.25-1 s apart,
+    /// at most 3 s. The dispute arm falls back to the background re-arm
+    /// pass, which uses the full [`ScanRetry::default`].
+    pub fn quick() -> Self {
+        Self {
+            attempts: 4,
+            min_wait: std::time::Duration::from_millis(250),
+            max_wait: std::time::Duration::from_millis(1000),
+        }
+    }
+
+    /// No waiting between attempts (tests).
+    pub fn immediate(attempts: u32) -> Self {
+        Self {
+            attempts,
+            min_wait: std::time::Duration::ZERO,
+            max_wait: std::time::Duration::ZERO,
+        }
+    }
+
+    fn jittered_wait(&self) -> std::time::Duration {
+        use rand::Rng;
+        if self.max_wait <= self.min_wait {
+            return self.min_wait;
+        }
+        let lo = self.min_wait.as_millis() as u64;
+        let hi = self.max_wait.as_millis() as u64;
+        std::time::Duration::from_millis(rand::thread_rng().gen_range(lo..=hi))
+    }
+}
+
+/// Whether `e` is bitcoind refusing a `scantxoutset` because another is
+/// running (RPC error -8, "Scan already in progress, use action \"abort\"
+/// or \"status\"").
+pub fn is_scan_in_progress(e: &Error) -> bool {
+    e.to_string().contains("Scan already in progress")
+}
+
+/// [`ChainBackend::find_unspent_output_at`], retried per `retry` while the
+/// backend reports a scan already in progress. Any other error, and the
+/// last "in progress" error once the attempts run out, is returned. The
+/// waits are async so a daemon task does not hold a worker thread.
+pub async fn find_unspent_output_retrying(
+    backend: &dyn ChainBackend,
+    script: &Script,
+    retry: &ScanRetry,
+) -> Result<Option<UnspentOutput>, Error> {
+    let mut attempt = 1;
+    loop {
+        match backend.find_unspent_output_at(script) {
+            Err(e) if is_scan_in_progress(&e) && attempt < retry.attempts => {
+                let wait = retry.jittered_wait();
+                tracing::info!(
+                    "UTXO scan: another scan is in progress (attempt {}/{}); retrying in {:?}",
+                    attempt,
+                    retry.attempts,
+                    wait
+                );
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Blocking form of [`find_unspent_output_retrying`] for the synchronous
+/// callers (`Wallet::find_utxo_for_script`, the CLI). On a multi-threaded
+/// tokio runtime the wait goes through `block_in_place`, so the runtime
+/// moves its other tasks off this worker meanwhile.
+pub fn find_unspent_output_retrying_blocking(
+    backend: &dyn ChainBackend,
+    script: &Script,
+    retry: &ScanRetry,
+) -> Result<Option<UnspentOutput>, Error> {
+    let mut attempt = 1;
+    loop {
+        match backend.find_unspent_output_at(script) {
+            Err(e) if is_scan_in_progress(&e) && attempt < retry.attempts => {
+                let wait = retry.jittered_wait();
+                tracing::info!(
+                    "UTXO scan: another scan is in progress (attempt {}/{}); retrying in {:?}",
+                    attempt,
+                    retry.attempts,
+                    wait
+                );
+                sleep_blocking(wait);
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+fn sleep_blocking(d: std::time::Duration) {
+    use tokio::runtime::{Handle, RuntimeFlavor};
+    match Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| std::thread::sleep(d))
+        }
+        _ => std::thread::sleep(d),
+    }
+}
+
+/// A scripted [`ChainBackend`] for tests: `find_unspent_output_at` returns
+/// the queued results in order (then `Ok(None)`); everything else is empty.
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::sync::Mutex;
+
+    pub(crate) struct ScriptedScans {
+        pub scans: Mutex<std::collections::VecDeque<Result<Option<UnspentOutput>, Error>>>,
+        pub calls: std::sync::atomic::AtomicU32,
+    }
+
+    impl ScriptedScans {
+        pub(crate) fn new(results: Vec<Result<Option<UnspentOutput>, Error>>) -> Self {
+            Self {
+                scans: Mutex::new(results.into()),
+                calls: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        pub(crate) fn scan_in_progress() -> Error {
+            Error::Wallet(
+                "bitcoind scantxoutset error -8: Scan already in progress, use action \
+                 \"abort\" or \"status\""
+                    .to_string(),
+            )
+        }
+
+        pub(crate) fn calls(&self) -> u32 {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ChainBackend for ScriptedScans {
+        fn get_tip_height(&self) -> Result<u32, Error> {
+            Ok(0)
+        }
+        fn get_block_hash(&self, _: u32) -> Result<BlockHash, Error> {
+            Err(Error::Wallet("fake".into()))
+        }
+        fn get_block_height_if_in_best_chain(&self, _: &BlockHash) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn get_tx(&self, _: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+        fn get_tx_block_height(&self, _: &Txid) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn is_output_unspent(&self, _: &Txid, _: u32) -> Result<Option<bool>, Error> {
+            Ok(None)
+        }
+        fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.scans.lock().unwrap().pop_front().unwrap_or(Ok(None))
+        }
+        fn find_spending_tx(
+            &self,
+            _: &OutPoint,
+            _: &Script,
+            _: u32,
+        ) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+        fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+            Err(Error::Wallet("fake".into()))
+        }
+    }
+}

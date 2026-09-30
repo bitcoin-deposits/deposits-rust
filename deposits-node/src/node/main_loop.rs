@@ -1762,6 +1762,30 @@ impl Node {
                             "auto_dispute_expired_quorums",
                             node.auto_dispute_expired_quorums()
                         );
+                        // Untimed: its collateral scans retry for up to a
+                        // minute. One pass at a time.
+                        {
+                            static REARM_RUNNING: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !REARM_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+                                let node = Arc::clone(&node);
+                                tokio::spawn(async move {
+                                    // Cleared on drop, so a panicking pass
+                                    // does not stop the next one.
+                                    struct Done;
+                                    impl Drop for Done {
+                                        fn drop(&mut self) {
+                                            REARM_RUNNING.store(
+                                                false,
+                                                std::sync::atomic::Ordering::Release,
+                                            );
+                                        }
+                                    }
+                                    let _done = Done;
+                                    node.auto_rearm_disputes().await;
+                                });
+                            }
+                        }
                         timed_periodic!(
                             "auto_lottery_claim_or_yield",
                             node.auto_lottery_claim_or_yield()

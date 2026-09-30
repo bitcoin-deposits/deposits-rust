@@ -641,15 +641,107 @@ impl Node {
         }
     }
 
+    /// Periodic: finish arming our dispute forks that are not armed with
+    /// replacement collateral — Disputed with no `DisputeArmed` (the arm
+    /// was refused for want of collateral, e.g. every scan retry lost to
+    /// other members' scans on a shared bitcoind), or Armed by an older
+    /// daemon with `replacement_collateral: None`.
+    ///
+    /// The arming triggers other than quorum expiry (equivocation, fraud
+    /// proof, non-conforming cosig, a peer's DisputeEnter, a kind:9103
+    /// notice) fire once, so without this such a fork stayed unarmed.
+    /// The arm is idempotent: a fork already armed with collateral is left
+    /// alone. The collateral lookup retries bitcoind's "Scan already in
+    /// progress" with the full [`ScanRetry::default`] (up to ~1 min), so
+    /// the main loop spawns this pass rather than awaiting it under the
+    /// periodic 10 s timeout, and skips a cycle while one is running.
+    ///
+    /// [`ScanRetry::default`]: crate::chain_backend::ScanRetry
+    pub(crate) async fn auto_rearm_disputes(&self) {
+        use deposits_core::types::DisputeState;
+        let our_pk16 = &hex::encode(self.node_id.serialize())[..16];
+        let incomplete: Vec<(String, u64)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(key, _)| key.len() > 64 && key.ends_with(our_pk16))
+                .filter_map(|(key, arc)| {
+                    let seq = super::fork_publish::fork_key_last_valid_seq(key)?;
+                    let l = arc.read().unwrap();
+                    if l.state.parent_pubkey != self.node_id {
+                        return None;
+                    }
+                    let incomplete = match l.state.dispute_state {
+                        DisputeState::Disputed => true,
+                        DisputeState::Armed => matches!(
+                            latest_dispute_armed(&l.history),
+                            Some(deposits_core::messages::LedgerOperation::DisputeArmed {
+                                replacement_collateral: None,
+                                ..
+                            })
+                        ),
+                        _ => false,
+                    };
+                    incomplete.then(|| (key[..64].to_string(), seq))
+                })
+                .collect()
+        };
+        for (ledger_id, last_valid_seq) in incomplete {
+            // A base the replica has since pulled back would make a second
+            // fork; leave that to the triggers that know the new base.
+            if dispute_base(last_valid_seq, self.handler.first_non_conforming(&ledger_id))
+                != last_valid_seq
+            {
+                continue;
+            }
+            match self
+                .arm_dispute(
+                    &ledger_id,
+                    last_valid_seq,
+                    None,
+                    &crate::chain_backend::ScanRetry::default(),
+                )
+                .await
+            {
+                Ok(()) => tracing::debug!("Re-arm pass on {}... done", &ledger_id[..16]),
+                Err(e) => tracing::warn!("Re-arm pass on {}...: {}", &ledger_id[..16], e),
+            }
+        }
+    }
+
     /// Auto-arm carrying the QuorumExpired anchor evidence inline on
     /// the fork-branch `DisputeEnter`. Called by the periodic task that
     /// detects `current_block > quorum_expiry` on ledgers this node
     /// cosigns for, and by future callers that have block info handy.
+    ///
+    /// The replacement-collateral lookup retries bitcoind's "Scan already
+    /// in progress" only briefly ([`ScanRetry::quick`]): the callers run
+    /// under 5-10 s timeouts or on the event loop. If it still fails we do
+    /// not arm; `auto_rearm_disputes` retries in the background with the
+    /// full schedule.
+    ///
+    /// [`ScanRetry::quick`]: crate::chain_backend::ScanRetry::quick
     pub(crate) async fn auto_arm_for_dispute_with_anchor(
         &self,
         ledger_id: &str,
         last_valid_seq: u64,
         anchor: Option<([u8; 32], u32)>,
+    ) -> Result<(), Error> {
+        self.arm_dispute(
+            ledger_id,
+            last_valid_seq,
+            anchor,
+            &crate::chain_backend::ScanRetry::quick(),
+        )
+        .await
+    }
+
+    async fn arm_dispute(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+        anchor: Option<([u8; 32], u32)>,
+        scan_retry: &crate::chain_backend::ScanRetry,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{hash160, Hash};
 
@@ -932,27 +1024,119 @@ impl Node {
             }
         };
 
-        // 3. Publish DisputeArmed with preimage commitment on the fork
+        // 3. Publish DisputeArmed with preimage commitment on the fork.
+        //
+        // 3a. Under a read lock: is there a prior arm, and what floor must
+        // the replacement collateral meet? The UTXO lookup below can take
+        // up to a minute (bitcoind "Scan already in progress" retries), so
+        // it runs with no lock held and the prior-arm check is repeated
+        // under the write lock afterwards.
+        //
+        // We re-arm only when the prior arm was published with
+        // `replacement_collateral: None` (older daemons, or
+        // DEPOSITS_ALLOW_UNCOLLATERALIZED_ARM) and a funded UTXO has since
+        // appeared. The re-arm must reuse the same `commitment_hash` so
+        // the lottery commitment is immutable (otherwise a disputant could
+        // grind for a winning commit after observing the entropy block).
+        let (prior_arm, required_sats, obligations_msat) = {
+            use crate::node::replacement_collateral::{
+                compute_required_replacement_sats, CollateralPolicy,
+            };
+            let fork_ledger = fork_arc.read().unwrap();
+            // The fork's state is the ledger at `last_valid_seq` (rebuilt
+            // from genesis by `fork_state_at`) plus our DisputeEnter/
+            // QuorumAddMember, which move no balances: obligations at the
+            // fork point, as DEP-06 §Phase 1 and the cosigners' check
+            // (`collateral_basis_at`) have it, never the disputed tip's.
+            // Reserves and collateral change only at LedgerOpen/
+            // QuorumBegin, so these are the latest QuorumBegin's, as the
+            // cosigners use.
+            let obligations_msat = fork_ledger.state.total_deposit_balance();
+            let required_sats = compute_required_replacement_sats(
+                obligations_msat,
+                fork_ledger.state.collateral_amount,
+                fork_ledger.state.reserves_amount,
+                &CollateralPolicy::default(),
+            )
+            .unwrap_or(0);
+            (
+                latest_dispute_armed(&fork_ledger.history),
+                required_sats,
+                obligations_msat,
+            )
+        };
+        let prior_collateral_was_none = matches!(
+            &prior_arm,
+            Some(LedgerOperation::DisputeArmed {
+                replacement_collateral: None,
+                ..
+            })
+        );
+        let needs_arm = prior_arm.is_none() || prior_collateral_was_none;
+
+        // P2WPKH of our operator key: the arm's `target_reserves`, and where
+        // the replacement collateral must sit (RC4's claim-TX builder signs
+        // against it).
+        let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
+            .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
+        let op_address = bitcoin::Address::p2wpkh(&compressed, self.wallet.network());
+
+        // 3b. Find the replacement collateral (DEP-03 §"Replacement
+        // collateral declaration": the declared amount must satisfy
+        // `obligations × (collateral / reserves) + fee_estimate`), with no
+        // lock held.
+        let collateral = if needs_arm {
+            let lookup = find_replacement_collateral(
+                &*self.wallet.chain_backend(),
+                op_address.script_pubkey().as_script(),
+                required_sats,
+                scan_retry,
+            )
+            .await;
+            match &lookup {
+                Ok(CollateralLookup::Found(rc)) => tracing::info!(
+                    "Auto-arm replacement collateral: {} sats from {}:{} (required {}; \
+                     obligations {} msat at seq {})",
+                    rc.amount,
+                    bitcoin::Txid::from_byte_array(rc.txid),
+                    rc.vout,
+                    required_sats,
+                    obligations_msat,
+                    last_valid_seq
+                ),
+                Ok(CollateralLookup::Undersized { value_sats }) => tracing::warn!(
+                    "Auto-arm: operator-key P2WPKH {} holds only {} sats, required ≥ {} \
+                     (obligations {} msat at seq {})",
+                    op_address,
+                    value_sats,
+                    required_sats,
+                    obligations_msat,
+                    last_valid_seq
+                ),
+                Ok(CollateralLookup::NotFound) => tracing::warn!(
+                    "Auto-arm: no UTXO at operator-key P2WPKH {} (required ≥ {} sats)",
+                    op_address,
+                    required_sats
+                ),
+                Err(e) => tracing::warn!(
+                    "Auto-arm: replacement-collateral lookup failed after retries: {}",
+                    e
+                ),
+            }
+            Some(lookup)
+        } else {
+            None
+        };
+
+        // 3c. Publish under the write lock, re-checking the prior arm:
+        // another auto-arm pass (the equivocation and fraud-proof paths can
+        // fire together) may have armed while we were scanning.
+        let mut not_armed: Option<String> = None;
         {
             let mut fork_ledger = fork_arc.write().unwrap();
 
-            // Find the most recent DisputeArmed on this fork (if any). We
-            // re-arm only when the prior arm was published with
-            // `replacement_collateral: None` (the "fell back to a path
-            // strict cosigners refuse" branch in this function) — typical
-            // when the operator-key P2WPKH was unfunded at first-arm
-            // time and got funded afterwards. The re-arm must reuse the
-            // same `commitment_hash` so the lottery commitment is
-            // immutable (otherwise a disputant could grind for a
-            // winning commit after observing the entropy block).
-            let prior_arm: Option<deposits_core::messages::LedgerOperation> =
-                fork_ledger.history.iter().rev().find_map(|u| {
-                    match LedgerOperation::tlv_decode(&u.message) {
-                        Ok(op @ LedgerOperation::DisputeArmed { .. }) => Some(op),
-                        _ => None,
-                    }
-                });
-
+            let prior_arm = latest_dispute_armed(&fork_ledger.history);
             let prior_collateral_was_none = matches!(
                 &prior_arm,
                 Some(LedgerOperation::DisputeArmed {
@@ -961,11 +1145,9 @@ impl Node {
                 })
             );
 
-            let already_armed = prior_arm.is_some();
-
-            if already_armed && !prior_collateral_was_none {
+            if prior_arm.is_some() && !prior_collateral_was_none {
                 tracing::info!("Already have DisputeArmed on fork (with replacement_collateral)");
-            } else {
+            } else if let Some(lookup) = collateral {
                 let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) =
                     if let Some(LedgerOperation::DisputeArmed {
                         commitment_hash, ..
@@ -1011,124 +1193,40 @@ impl Node {
                     };
                 let _ = preimage_was_persisted;
 
-                // Use P2WPKH address derived from our operator pubkey for target_reserves
-                let pubkey_bytes: [u8; 33] = our_pubkey.serialize();
-                let compressed = bitcoin::CompressedPublicKey::from_slice(&pubkey_bytes)
-                    .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
-                let target_reserves =
-                    bitcoin::Address::p2wpkh(&compressed, self.wallet.network()).to_string();
+                match dispute_armed_op(
+                    current_block,
+                    commitment_hash,
+                    op_address.to_string(),
+                    lookup,
+                    prior_collateral_was_none,
+                    allow_uncollateralized_arm(),
+                ) {
+                    ArmDecision::Arm(armed_op) => {
+                        fork_ledger
+                            .append_operation_with_block(armed_op, current_block, block_hash)
+                            .map_err(|e| {
+                                Error::Protocol(format!(
+                                    "Failed to append DisputeArmed to fork: {:?}",
+                                    e
+                                ))
+                            })?;
 
-                // Compute the cosigner-required replacement collateral floor
-                // and pick a wallet UTXO that meets it. Per
-                // DEP-03 §"Replacement collateral declaration", the
-                // declared amount must satisfy
-                // `obligations × (collateral / reserves) + fee_estimate`.
-                // The disputant's UTXO must sit at the operator's P2WPKH
-                // address — that's what RC4's claim-TX builder signs against.
-                let replacement_collateral = {
-                    use crate::node::replacement_collateral::{
-                        compute_required_replacement_sats, CollateralPolicy,
-                    };
-                    // The fork's state is the ledger at `last_valid_seq`
-                    // (rebuilt from genesis by `fork_state_at`) plus our
-                    // DisputeEnter/QuorumAddMember, which move no
-                    // balances: obligations at the fork point, as
-                    // DEP-06 §Phase 1 and the cosigners' check
-                    // (`collateral_basis_at`) have it, never the
-                    // disputed tip's. Reserves and collateral change
-                    // only at LedgerOpen/QuorumBegin, so these are the
-                    // latest QuorumBegin's, as the cosigners use.
-                    let obligations_msat = fork_ledger.state.total_deposit_balance();
-                    let collateral_msat = fork_ledger.state.collateral_amount;
-                    let reserves_msat = fork_ledger.state.reserves_amount;
-                    let policy = CollateralPolicy::default();
-                    let required_sats = compute_required_replacement_sats(
-                        obligations_msat,
-                        collateral_msat,
-                        reserves_msat,
-                        &policy,
-                    )
-                    .unwrap_or(0);
-                    let op_script = bitcoin::Address::p2wpkh(&compressed, self.wallet.network())
-                        .script_pubkey();
-                    match self.wallet.find_utxo_for_script(&op_script) {
-                        Ok(Some((outpoint, value_sats))) if value_sats >= required_sats => {
-                            let txid_bytes: [u8; 32] = *outpoint.txid.as_ref();
-                            tracing::info!(
-                                "Auto-arm replacement collateral: {} sats from {}:{} (required {}; \
-                                 obligations {} msat at seq {})",
-                                value_sats, outpoint.txid, outpoint.vout, required_sats,
-                                obligations_msat, last_valid_seq
-                            );
-                            Some(deposits_core::messages::ReplacementCollateral {
-                                txid: txid_bytes,
-                                vout: outpoint.vout,
-                                amount: value_sats,
-                            })
+                        // Patch operator_id
+                        if let Some(update) = fork_ledger.history.last_mut() {
+                            update.operator_id = our_pubkey;
                         }
-                        Ok(Some((_, value_sats))) => {
-                            tracing::warn!(
-                                "Auto-arm: operator-key P2WPKH UTXO has only {} sats, \
-                                 required ≥ {} (obligations {} msat at seq {}) — declaring \
-                                 None and falling back to a path strict cosigners will refuse",
-                                value_sats,
-                                required_sats,
-                                obligations_msat,
-                                last_valid_seq
-                            );
-                            None
-                        }
-                        Ok(None) => {
-                            tracing::warn!(
-                                "Auto-arm: no UTXO found at operator-key P2WPKH; \
-                                 declaring no replacement_collateral"
-                            );
-                            None
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Auto-arm: esplora failure searching operator-key UTXO: {} \
-                                 — declaring no replacement_collateral",
-                                e
-                            );
-                            None
-                        }
+
+                        tracing::info!("Published DisputeArmed on fork");
+                        added_new_operations = true;
                     }
-                };
-
-                // For a re-arm (prior arm had collateral=None), abort if
-                // we still don't have a funded UTXO — publishing
-                // another `None` DisputeArmed gains nothing and just
-                // grows the fork.
-                if prior_collateral_was_none && replacement_collateral.is_none() {
-                    tracing::info!(
+                    // A prior arm without collateral stands; nothing better
+                    // to upgrade it with yet.
+                    ArmDecision::KeepPrior => tracing::info!(
                         "Re-arm skipped: still no funded UTXO at operator-key P2WPKH; \
                          will retry next periodic"
-                    );
-                    drop(fork_ledger);
-                    return Ok(());
+                    ),
+                    ArmDecision::Refuse(why) => not_armed = Some(why),
                 }
-
-                let armed_op = LedgerOperation::DisputeArmed {
-                    armed_block: current_block,
-                    commitment_hash,
-                    target_reserves,
-                    replacement_collateral,
-                };
-
-                fork_ledger
-                    .append_operation_with_block(armed_op, current_block, block_hash)
-                    .map_err(|e| {
-                        Error::Protocol(format!("Failed to append DisputeArmed to fork: {:?}", e))
-                    })?;
-
-                // Patch operator_id
-                if let Some(update) = fork_ledger.history.last_mut() {
-                    update.operator_id = our_pubkey;
-                }
-
-                tracing::info!("Published DisputeArmed on fork");
-                added_new_operations = true;
             }
         }
 
@@ -1162,7 +1260,17 @@ impl Node {
             tracing::debug!("Fork already fully armed and published, skipping re-broadcast");
         }
 
-        Ok(())
+        // Not armed for want of collateral: the fork (DisputeEnter and
+        // QuorumAddMembers) is persisted and published above, and the
+        // periodic `auto_rearm_disputes` calls us again until we arm.
+        match not_armed {
+            Some(why) => Err(Error::Protocol(format!(
+                "not arming dispute fork {} without replacement collateral: {}; will retry",
+                &fork_key[..32.min(fork_key.len())],
+                why
+            ))),
+            None => Ok(()),
+        }
     }
 
     /// Look up our lottery preimage for `ledger_id`. Tries the legacy
@@ -3796,6 +3904,250 @@ pub(crate) fn dispute_base(requested: u64, first_non_conforming: Option<u64>) ->
     match first_non_conforming {
         Some(fault) if fault <= requested => fault.saturating_sub(1),
         _ => requested,
+    }
+}
+
+/// The latest `DisputeArmed` in a fork's history, if any.
+pub(crate) fn latest_dispute_armed(
+    history: &[deposits_core::SignedLedgerUpdate],
+) -> Option<deposits_core::messages::LedgerOperation> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history
+        .iter()
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(op @ LedgerOperation::DisputeArmed { .. }) => Some(op),
+            _ => None,
+        })
+}
+
+/// What the replacement-collateral lookup found at our operator-key P2WPKH.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum CollateralLookup {
+    Found(deposits_core::messages::ReplacementCollateral),
+    /// A UTXO, but below the cosigners' floor.
+    Undersized { value_sats: u64 },
+    NotFound,
+}
+
+/// Look up the replacement collateral at `script` (our operator-key
+/// P2WPKH), retrying bitcoind's "Scan already in progress" per `retry`.
+/// `Err` only when the lookup itself failed (retries exhausted, or any
+/// other backend error).
+pub(crate) async fn find_replacement_collateral(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    script: &bitcoin::Script,
+    required_sats: u64,
+    retry: &crate::chain_backend::ScanRetry,
+) -> Result<CollateralLookup, Error> {
+    let utxo = crate::chain_backend::find_unspent_output_retrying(backend, script, retry).await?;
+    Ok(match utxo {
+        Some(u) if u.value_sats >= required_sats => {
+            CollateralLookup::Found(deposits_core::messages::ReplacementCollateral {
+                txid: *u.outpoint.txid.as_ref(),
+                vout: u.outpoint.vout,
+                amount: u.value_sats,
+            })
+        }
+        Some(u) => CollateralLookup::Undersized {
+            value_sats: u.value_sats,
+        },
+        None => CollateralLookup::NotFound,
+    })
+}
+
+/// Whether to arm without replacement collateral when none is available
+/// (`DEPOSITS_ALLOW_UNCOLLATERALIZED_ARM=1`). Off by default: strict
+/// cosigners refuse a confiscation with any collateral-less armer (DEP-03),
+/// and cl-deposits counts every `DisputeArmed` on a fork, so a None arm
+/// later upgraded by a re-arm still reads as an armer without collateral
+/// there. For test harnesses that dispute without funding the operator key.
+pub(crate) fn allow_uncollateralized_arm() -> bool {
+    matches!(
+        std::env::var("DEPOSITS_ALLOW_UNCOLLATERALIZED_ARM").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// What to do with a (re-)arm, given the collateral lookup.
+#[derive(Debug)]
+pub(crate) enum ArmDecision {
+    Arm(deposits_core::messages::LedgerOperation),
+    /// A re-arm with nothing better than the prior arm's `None`.
+    KeepPrior,
+    /// Don't arm; the reason. The caller returns an error and the arm is
+    /// retried by `auto_rearm_disputes`.
+    Refuse(String),
+}
+
+/// Decide the `DisputeArmed` to publish. A lookup failure never arms (the
+/// scan may simply have lost a race with another member's); a missing or
+/// undersized UTXO arms with `None` only when `allow_uncollateralized`.
+pub(crate) fn dispute_armed_op(
+    armed_block: u32,
+    commitment_hash: [u8; 20],
+    target_reserves: String,
+    lookup: Result<CollateralLookup, Error>,
+    is_rearm: bool,
+    allow_uncollateralized: bool,
+) -> ArmDecision {
+    let replacement_collateral = match lookup {
+        Ok(CollateralLookup::Found(rc)) => Some(rc),
+        _ if is_rearm => return ArmDecision::KeepPrior,
+        Err(e) => return ArmDecision::Refuse(format!("collateral lookup failed: {}", e)),
+        Ok(CollateralLookup::Undersized { value_sats }) if !allow_uncollateralized => {
+            return ArmDecision::Refuse(format!(
+                "operator-key P2WPKH holds only {} sats, below the floor",
+                value_sats
+            ))
+        }
+        Ok(CollateralLookup::NotFound) if !allow_uncollateralized => {
+            return ArmDecision::Refuse("no UTXO at the operator-key P2WPKH".to_string())
+        }
+        Ok(_) => None,
+    };
+    ArmDecision::Arm(deposits_core::messages::LedgerOperation::DisputeArmed {
+        armed_block,
+        commitment_hash,
+        target_reserves,
+        replacement_collateral,
+    })
+}
+
+#[cfg(test)]
+mod arm_collateral_tests {
+    use super::*;
+    use crate::chain_backend::fake::ScriptedScans;
+    use crate::chain_backend::{ScanRetry, UnspentOutput};
+    use deposits_core::messages::LedgerOperation;
+
+    fn utxo(sats: u64) -> UnspentOutput {
+        UnspentOutput {
+            outpoint: bitcoin::OutPoint::new(
+                "4a5e1e4baab89f3a32518a88c31bc87f618f76673e2cc77ab2127b7afdeda33b"
+                    .parse()
+                    .unwrap(),
+                3,
+            ),
+            value_sats: sats,
+        }
+    }
+
+    fn script() -> bitcoin::ScriptBuf {
+        bitcoin::ScriptBuf::new()
+    }
+
+    #[tokio::test]
+    async fn scan_in_progress_twice_then_utxo_arms_with_collateral() {
+        let backend = ScriptedScans::new(vec![
+            Err(ScriptedScans::scan_in_progress()),
+            Err(ScriptedScans::scan_in_progress()),
+            Ok(Some(utxo(50_000))),
+        ]);
+        let lookup =
+            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(12))
+                .await;
+        assert_eq!(backend.calls(), 3);
+        match dispute_armed_op(100, [7u8; 20], "addr".into(), lookup, false, false) {
+            ArmDecision::Arm(LedgerOperation::DisputeArmed {
+                replacement_collateral: Some(rc),
+                ..
+            }) => {
+                assert_eq!(rc.amount, 50_000);
+                assert_eq!(rc.vout, 3);
+                let expected = utxo(0);
+                let want: &[u8; 32] = expected.outpoint.txid.as_ref();
+                assert_eq!(&rc.txid, want);
+            }
+            other => panic!("expected an arm carrying collateral, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn retries_exhausted_refuses_to_arm() {
+        let backend = ScriptedScans::new(
+            (0..5)
+                .map(|_| Err(ScriptedScans::scan_in_progress()))
+                .collect(),
+        );
+        let lookup =
+            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(3))
+                .await;
+        assert_eq!(backend.calls(), 3);
+        // Even with the uncollateralized escape hatch, a failed lookup
+        // never arms: it only means the scan lost a race.
+        assert!(matches!(
+            dispute_armed_op(100, [7u8; 20], "addr".into(), lookup, false, true),
+            ArmDecision::Refuse(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn other_errors_are_not_retried() {
+        let backend = ScriptedScans::new(vec![
+            Err(Error::Wallet("bitcoind scantxoutset error -1: boom".into())),
+            Ok(Some(utxo(50_000))),
+        ]);
+        let lookup =
+            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(12))
+                .await;
+        assert!(lookup.is_err());
+        assert_eq!(backend.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn no_or_small_utxo_refuses_unless_allowed() {
+        for (scan, expect) in [
+            (None, CollateralLookup::NotFound),
+            (
+                Some(utxo(10_000)),
+                CollateralLookup::Undersized { value_sats: 10_000 },
+            ),
+        ] {
+            let backend = ScriptedScans::new(vec![Ok(scan.clone()), Ok(scan)]);
+            let retry = ScanRetry::immediate(12);
+            let lookup = find_replacement_collateral(&backend, &script(), 30_000, &retry).await;
+            assert_eq!(lookup.as_ref().unwrap(), &expect);
+            assert!(matches!(
+                dispute_armed_op(1, [0; 20], "a".into(), lookup, false, false),
+                ArmDecision::Refuse(_)
+            ));
+            let lookup = find_replacement_collateral(&backend, &script(), 30_000, &retry).await;
+            assert!(matches!(
+                dispute_armed_op(1, [0; 20], "a".into(), lookup, false, true),
+                ArmDecision::Arm(LedgerOperation::DisputeArmed {
+                    replacement_collateral: None,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn rearm_without_collateral_keeps_the_prior_arm() {
+        assert!(matches!(
+            dispute_armed_op(
+                1,
+                [0; 20],
+                "a".into(),
+                Ok(CollateralLookup::NotFound),
+                true,
+                true
+            ),
+            ArmDecision::KeepPrior
+        ));
+        assert!(matches!(
+            dispute_armed_op(
+                1,
+                [0; 20],
+                "a".into(),
+                Err(ScriptedScans::scan_in_progress()),
+                true,
+                false
+            ),
+            ArmDecision::KeepPrior
+        ));
     }
 }
 

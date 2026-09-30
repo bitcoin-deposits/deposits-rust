@@ -482,13 +482,24 @@ impl Wallet {
     /// Find an unspent UTXO for a given script pubkey
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.
+    /// A bitcoind "Scan already in progress" refusal is retried per
+    /// [`crate::chain_backend::ScanRetry::quick`] (at most ~3 s: callers
+    /// run on the daemon's event paths) before it is returned.
     pub fn find_utxo_for_script(
         &self,
         script: &bitcoin::ScriptBuf,
     ) -> Result<Option<(OutPoint, u64)>, Error> {
-        let utxo = crate::chain_backend::from_env(&self.electrum_url)
-            .find_unspent_output_at(script.as_script())?;
+        let utxo = crate::chain_backend::find_unspent_output_retrying_blocking(
+            &*self.chain_backend(),
+            script.as_script(),
+            &crate::chain_backend::ScanRetry::quick(),
+        )?;
         Ok(utxo.map(|u| (u.outpoint, u.value_sats)))
+    }
+
+    /// The chain backend this wallet's lookups go through.
+    pub fn chain_backend(&self) -> Box<dyn crate::chain_backend::ChainBackend> {
+        crate::chain_backend::from_env(&self.electrum_url)
     }
 
     /// Send an on-chain withdrawal with OP_RETURN commitment

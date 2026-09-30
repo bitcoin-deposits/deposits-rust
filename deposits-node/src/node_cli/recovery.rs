@@ -1547,7 +1547,7 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_armed.content_hash,
+        previous_hash: our_armed.chain_hash(),
         content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
@@ -2008,7 +2008,7 @@ pub async fn recovery_rebuild_quorum_add(
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_latest.content_hash,
+        previous_hash: our_latest.chain_hash(),
         content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
@@ -2293,14 +2293,60 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-    // Generate random preimage (17-20 bytes for lottery entropy)
-    let mut rng = rand::thread_rng();
-    let preimage_len = rng.gen_range(17..=20);
-    let mut preimage = vec![0u8; preimage_len];
-    rng.fill(&mut preimage[..]);
+    // A prior DisputeArmed on our fork (the daemon's auto-arm, or an earlier
+    // `recovery arm`) fixes the lottery commitment: a re-arm must repeat its
+    // commitment_hash, and may only upgrade a None collateral declaration to
+    // Some (`Ledger::validate_operation`, "dispute_armed_commitment_changed"
+    // / "already_collateralized" / "no_upgrade"). The daemon's
+    // `auto_rearm_disputes` does this upgrade on its own once the
+    // operator-key P2WPKH is funded.
+    let prior_arm = our_updates.iter().rev().find_map(|u| {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeArmed {
+                commitment_hash,
+                replacement_collateral,
+                ..
+            }) => Some((commitment_hash, replacement_collateral)),
+            _ => None,
+        }
+    });
+    let commitment_hash: [u8; 20] = match prior_arm {
+        Some((_, Some(_))) => {
+            return Err("Already armed with replacement_collateral on this ledger;                         a re-arm can only upgrade an arm that declared none"
+                .into())
+        }
+        Some((_, None)) if rc_outpoint_str.is_none() => {
+            return Err("Already armed without replacement_collateral; a re-arm must                         declare it (--replacement-collateral-outpoint TXID:VOUT                         --replacement-collateral-amount SATS)"
+                .into())
+        }
+        Some((prior_commitment, None)) => {
+            println!(
+                "  Re-arming with the prior commitment {} (collateral upgrade)",
+                hex::encode(prior_commitment)
+            );
+            prior_commitment
+        }
+        None => {
+            // Generate random preimage (17-20 bytes for lottery entropy)
+            let mut rng = rand::thread_rng();
+            let preimage_len = rng.gen_range(17..=20);
+            let mut preimage = vec![0u8; preimage_len];
+            rng.fill(&mut preimage[..]);
 
-    // Compute commitment_hash = HASH160(preimage)
-    let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+            // Store preimage for later reveal
+            let preimage_file = format!(
+                "{}/lottery_preimage_{}.hex",
+                config.data_dir.display(),
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+            std::fs::write(&preimage_file, hex::encode(&preimage))
+                .map_err(|e| format!("Failed to store preimage: {}", e))?;
+            println!("  Stored lottery preimage in: {}", preimage_file);
+
+            // commitment_hash = HASH160(preimage)
+            *hash160::Hash::hash(&preimage).as_byte_array()
+        }
+    };
 
     // Get target_reserves address
     let target_reserves_addr = if let Some(addr) = target_reserves {
@@ -2312,16 +2358,6 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
             .map_err(|e| format!("Invalid pubkey: {}", e))?;
         Address::p2wpkh(&compressed, config.network).to_string()
     };
-
-    // Store preimage for later reveal
-    let preimage_file = format!(
-        "{}/lottery_preimage_{}.hex",
-        config.data_dir.display(),
-        &ledger_id[..16.min(ledger_id.len())]
-    );
-    std::fs::write(&preimage_file, hex::encode(&preimage))
-        .map_err(|e| format!("Failed to store preimage: {}", e))?;
-    println!("  Stored lottery preimage in: {}", preimage_file);
 
     // Resolve --replacement-collateral-outpoint into a structured declaration.
     // Verifies the UTXO exists and sits at the operator-key P2WPKH (which is
@@ -2426,7 +2462,10 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: latest.content_hash,
+        // Updates chain on their predecessor's chain_hash (content hash
+        // plus operator signature), as `Ledger::apply_update` checks, not
+        // its bare content hash.
+        previous_hash: latest.chain_hash(),
         content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: [0u8; 32],
@@ -2674,7 +2713,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.content_hash,
+            previous_hash: our_latest.chain_hash(),
             content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash: entropy_block_hash,
@@ -2725,7 +2764,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: our_latest.content_hash,
+            previous_hash: our_latest.chain_hash(),
             content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash: entropy_block_hash,
@@ -2933,7 +2972,7 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
             operator_id: our_pubkey,
             ledger_id: ledger_id_bytes,
             sequence_number: sequence,
-            previous_hash: latest.content_hash,
+            previous_hash: latest.chain_hash(),
             content_hash: [0u8; 32],
             block_height: current_block_height,
             block_hash,
@@ -5130,7 +5169,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_armed.content_hash,
+        previous_hash: our_armed.chain_hash(),
         content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash: current_block_hash,
@@ -5517,7 +5556,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         operator_id: our_pubkey,
         ledger_id: ledger_id_bytes,
         sequence_number: sequence,
-        previous_hash: our_latest.content_hash,
+        previous_hash: our_latest.chain_hash(),
         content_hash: [0u8; 32],
         block_height: current_block_height,
         block_hash,
