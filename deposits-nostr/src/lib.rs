@@ -3835,6 +3835,41 @@ impl NostrTransport {
         Ok(ads)
     }
 
+    /// Ledger ids advertised (Kind 39100) with `o` = `operator_pubkey_hex`, the
+    /// operator's 33-byte compressed pubkey: the `d` tag of every such ad,
+    /// de-duplicated, whoever mirrored it. An ad outlives a confiscation, so
+    /// a listed ledger may since have moved to a new custodian; a fraud
+    /// proof's receivers check the current operator before acting.
+    pub async fn fetch_ledger_ids_operated_by(
+        &self,
+        operator_pubkey_hex: &str,
+    ) -> Result<Vec<String>, Error> {
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
+            .custom_tag(SingleLetterTag::lowercase(Alphabet::O), [operator_pubkey_hex]);
+        let events = self
+            .client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch advertisements: {}", e)))?;
+        let mut ids: Vec<String> = Vec::new();
+        for event in events.iter() {
+            let d = event.tags.iter().find_map(|t| {
+                let s = t.as_slice();
+                (s.first().map(|k| k.as_str()) == Some("d"))
+                    .then(|| s.get(1).cloned())
+                    .flatten()
+            });
+            if let Some(d) = d {
+                if d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()) && !ids.contains(&d)
+                {
+                    ids.push(d);
+                }
+            }
+        }
+        Ok(ids)
+    }
+
     /// Fetch agent service advertisements (Kind 39102)
     pub async fn fetch_agent_advertisements(
         &self,

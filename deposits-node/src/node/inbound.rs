@@ -553,6 +553,77 @@ impl Node {
         }
     }
 
+    /// Ledger ids `operator` operates: its Kind 39100 advertisements (tag
+    /// `o`, the `d` tag of each) and the ledgers we hold whose operator
+    /// (`parent_pubkey`) it is. De-duplicated.
+    pub(crate) async fn ledgers_operated_by(
+        &self,
+        operator: &bitcoin::secp256k1::PublicKey,
+    ) -> Vec<String> {
+        let advertised = self
+            .nostr
+            .fetch_ledger_ids_operated_by(&hex::encode(operator.serialize()))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    "Contagion: advertisement query for {}... failed: {}",
+                    &hex::encode(&operator.serialize()[..8]),
+                    e
+                );
+                Vec::new()
+            });
+        let held: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(_, arc)| arc.read().unwrap().state.parent_pubkey == *operator)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        merge_ledger_ids(advertised, held)
+    }
+
+    /// Contagion (DEP-19 §5–6): every cosigner of the non-conforming `fault`,
+    /// against every ledger it operates. One self-evident kind:9101
+    /// `NonConformingCosignature` per (cosigner, ledger); that ledger's own
+    /// quorum verifies it against the fault ledger's history and disputes.
+    /// Without this a colluding cosigner lost nothing for signing a theft.
+    pub(crate) async fn broadcast_cosigner_contagion(
+        &self,
+        fault: &deposits_core::types::SignedLedgerUpdate,
+        governing_qb: u64,
+    ) {
+        let mut targets: std::collections::HashMap<bitcoin::secp256k1::PublicKey, Vec<String>> =
+            std::collections::HashMap::new();
+        for entry in &fault.cosignatures {
+            let pk = entry.cosigner_pubkey;
+            if pk == self.node_id || targets.contains_key(&pk) {
+                continue;
+            }
+            let ids = self.ledgers_operated_by(&pk).await;
+            targets.insert(pk, ids);
+        }
+        let proofs = deposits_core::fraud::cosigner_contagion_proofs(
+            fault,
+            governing_qb,
+            &|pk| targets.get(pk).cloned().unwrap_or_default(),
+            Some(&self.node_id),
+        );
+        let fault_ledger = hex::encode(fault.ledger_id);
+        for b in &proofs {
+            tracing::warn!(
+                "Contagion: {}... cosigned the fault on {}... seq {}; proof against its ledger {}...",
+                &b.proof.accused[..16.min(b.proof.accused.len())],
+                &fault_ledger[..16],
+                fault.sequence_number,
+                &b.proof.ledger_id[..16.min(b.proof.ledger_id.len())],
+            );
+            if let Err(e) = self.nostr.broadcast_fraud_proof(b).await {
+                tracing::error!("Contagion: fraud broadcast failed: {}", e);
+            }
+        }
+    }
+
     /// Handle an incoming ledger update - validate and auto-dispute if invalid
     #[tracing::instrument(
         name = "handle_ledger_update",
@@ -683,7 +754,10 @@ impl Node {
         // update WE cosigned passes (we checked it), so honest flow never arms.
         // Never accuse ourselves.
         if inbound.update.operator_id != self.node_id && !inbound.update.cosignatures.is_empty() {
-            let non_conforming = {
+            // `Some(governing QuorumBegin seq)` when non-conforming: the
+            // contagion proofs below name it (None if the history we hold
+            // shows none, and then there are no proofs to build).
+            let non_conforming: Option<Option<u64>> = {
                 let l = ledger_arc.read().unwrap();
                 // A replica replayed across a hole in its JSONL holds wrong
                 // balances; it does not judge (ref3 disputed C at 67860 so).
@@ -693,22 +767,27 @@ impl Node {
                 {
                     deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
                         .ok()
-                        .map(|op| {
+                        .filter(|op| {
                             let h = self.wallet.get_block_height().unwrap_or(0);
                             !l.state
                                 .check_speculative(
-                                    &op,
+                                    op,
                                     &deposits_core::dep16::Dep16Authorizer::new(),
                                     h,
                                 )
                                 .is_empty()
                         })
-                        .unwrap_or(false)
+                        .map(|_| {
+                            deposits_core::fraud::governing_quorum_begin_seq(
+                                &l.history,
+                                &inbound.update,
+                            )
+                        })
                 } else {
-                    false
+                    None
                 }
             };
-            if non_conforming {
+            if let Some(governing_qb) = non_conforming {
                 let last_valid = inbound.update.sequence_number.saturating_sub(1);
                 tracing::warn!(
                     "NON-CONFORMING COSIGNED update on {}... seq {}: quorum cosigned an update that fails conformance — arming dispute",
@@ -717,6 +796,7 @@ impl Node {
                 );
                 let node = std::sync::Arc::clone(self);
                 let ledger_id = inbound.ledger_id.clone();
+                let fault = inbound.update.clone();
                 tokio::spawn(async move {
                     if let Err(e) = node
                         .auto_arm_for_dispute_with_anchor(&ledger_id, last_valid, None)
@@ -727,6 +807,15 @@ impl Node {
                             &ledger_id[..16.min(ledger_id.len())],
                             e
                         );
+                    }
+                    match governing_qb {
+                        Some(qb) => node.broadcast_cosigner_contagion(&fault, qb).await,
+                        None => tracing::warn!(
+                            "Non-conforming-cosig on {}... seq {}: no QuorumBegin at or before \
+                             it in our history — no contagion proofs",
+                            &ledger_id[..16.min(ledger_id.len())],
+                            fault.sequence_number
+                        ),
                     }
                 });
             }
@@ -1775,6 +1864,17 @@ pub(crate) fn fork_state_at(
     Some(state)
 }
 
+/// `advertised` then `held`, first occurrence kept, only 64-hex ledger ids.
+pub(crate) fn merge_ledger_ids(advertised: Vec<String>, held: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in advertised.into_iter().chain(held) {
+        if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+
 /// The sequence a dispute started from a verified fraud proof on
 /// `ledger_id` forks after. Where the evidence names a fault on this ledger
 /// that is its predecessor (cl: `(1- fault-sequence)`): NonConformingUpdate's
@@ -1860,6 +1960,23 @@ pub(crate) fn updates_equivocate(
         && a.sequence_number == b.sequence_number
         && a.operator_id == b.operator_id
         && a.content_hash != b.content_hash
+}
+
+#[cfg(test)]
+mod contagion_target_tests {
+    use super::merge_ledger_ids;
+
+    #[test]
+    fn advertised_and_held_ledgers_merge_without_duplicates() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let c = "c".repeat(64);
+        let merged = merge_ledger_ids(
+            vec![a.clone(), b.clone(), a.clone(), "short".into(), "z".repeat(64)],
+            vec![b.clone(), c.clone()],
+        );
+        assert_eq!(merged, vec![a, b, c]);
+    }
 }
 
 #[cfg(test)]

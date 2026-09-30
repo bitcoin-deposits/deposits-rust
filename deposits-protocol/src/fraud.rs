@@ -1993,6 +1993,83 @@ pub fn find_non_conforming_cosignature(
     Some((u.sequence_number, governing(u.sequence_number)?, reason))
 }
 
+/// The governing `QuorumBegin` for `fault`: the latest one at or before its
+/// sequence, among `history` (the fault ledger's updates before it, any
+/// order) and `fault` itself.
+pub fn governing_quorum_begin_seq(
+    history: &[crate::types::SignedLedgerUpdate],
+    fault: &crate::types::SignedLedgerUpdate,
+) -> Option<u64> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    std::iter::once(fault)
+        .chain(history.iter())
+        .filter(|u| u.sequence_number <= fault.sequence_number)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            )
+        })
+        .map(|u| u.sequence_number)
+        .max()
+}
+
+/// Contagion (DEP-19 §5–6): a cosigner of a non-conforming update is
+/// slashable on every ledger it operates, by that ledger's own quorum.
+///
+/// One self-evident `NonConformingCosignature` broadcast per (cosigner of
+/// `fault`, ledger `operated_by` returns for it): `accused` the cosigner,
+/// `ledger_id` its ledger, the evidence the fault on its own ledger. A
+/// cosigner is accused only if its cosignature on `fault` verifies (one the
+/// operator merely listed is not its signature), and never `own_key`.
+/// Duplicate cosigners and duplicate target ledgers yield one proof each.
+pub fn cosigner_contagion_proofs(
+    fault: &crate::types::SignedLedgerUpdate,
+    governing_quorumbegin_seq: u64,
+    operated_by: &dyn Fn(&bitcoin::secp256k1::PublicKey) -> Vec<String>,
+    own_key: Option<&bitcoin::secp256k1::PublicKey>,
+) -> Vec<FraudBroadcast> {
+    use crate::tlv::TlvEncode;
+    let fault_ledger_id = hex::encode(fault.ledger_id);
+    let fault_update_hex = hex::encode(fault.tlv_encode());
+    let mut accused: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+    let mut out = Vec::new();
+    for entry in &fault.cosignatures {
+        let pk = entry.cosigner_pubkey;
+        if Some(&pk) == own_key || accused.contains(&pk) {
+            continue;
+        }
+        let mut only_theirs = fault.clone();
+        only_theirs.cosignatures = vec![entry.clone()];
+        if only_theirs.verify_cosign_signatures(&[pk], 1).is_err() {
+            continue;
+        }
+        accused.push(pk);
+        let mut targets = operated_by(&pk);
+        let mut seen = std::collections::HashSet::new();
+        targets.retain(|t| seen.insert(t.clone()));
+        for target in targets {
+            out.push(FraudBroadcast {
+                proof: FraudProof {
+                    proof_type: FraudProofType::NonConformingCosignature,
+                    accused: hex::encode(pk.serialize()),
+                    ledger_id: target,
+                    evidence: FraudEvidence::NonConformingCosignature {
+                        fault_ledger_id: fault_ledger_id.clone(),
+                        fault_sequence: fault.sequence_number,
+                        governing_quorumbegin_seq,
+                        fault_update_hex: fault_update_hex.clone(),
+                    },
+                },
+                embedding: None,
+                causal_chain: Vec::new(),
+            });
+        }
+    }
+    out
+}
+
 /// Verify a `WinnerCollateralDeviation` claim.
 ///
 /// The accusation: the lottery winner broadcast a claim TX whose shape
