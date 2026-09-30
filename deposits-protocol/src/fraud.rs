@@ -1097,14 +1097,21 @@ pub fn verify_equivocation(
 ///
 /// The disputed ledger is the accused's *own* (proof.ledger_id); the fault
 /// ledger (`fault_ledger_id` inside the evidence) is where the bad update
-/// sits. Cross-ledger contagion is the punitive vehicle.
+/// sits. Cross-ledger contagion is the punitive vehicle, for cosigners and
+/// the fault's operator alike ([`contagion_proofs`]).
 ///
 /// Checks:
 ///   1. The inline fault update decodes, and its sequence and ledger match
 ///      the evidence. Its operator signature verifies.
 ///   2. The accused is the update's operator, or a cosigner whose
 ///      cosignature on it verifies (a listed pubkey with a bogus signature
-///      is the operator's claim, not the cosigner's act).
+///      is the operator's claim, not the cosigner's act). The operator is
+///      accused for operator contagion (DEP-19 §5: the accused "MUST appear
+///      on the update as `operator_id` or in `cosignatures`"): its own
+///      signature, checked in (1), is the evidence, and no cosignature check
+///      applies. Either way the fault is then judged as a
+///      `NonConformingUpdate` of the fault ledger's operator (3–5), so an
+///      operator-accused proof about a conforming update is refused.
 ///   3. The fault links (`previous_hash`) to an update in `fault_history`,
 ///      and that update's chain walks back by hash links to a genesis that
 ///      opens `fault_ledger_id`. The fault's signatures fix that prefix; no
@@ -2015,16 +2022,23 @@ pub fn governing_quorum_begin_seq(
         .max()
 }
 
-/// Contagion (DEP-19 §5–6): a cosigner of a non-conforming update is
-/// slashable on every ledger it operates, by that ledger's own quorum.
+/// Contagion (DEP-19 §5–6): everyone who signed a non-conforming update is
+/// slashable on every other ledger it operates, by that ledger's own quorum.
+/// The accused "MUST appear on the update as `operator_id` or in
+/// `cosignatures`": the operator loses its other ledgers as a colluding
+/// cosigner does, so running several ledgers puts its whole collateral at
+/// stake, not just the attacked ledger's.
 ///
-/// One self-evident `NonConformingCosignature` broadcast per (cosigner of
-/// `fault`, ledger `operated_by` returns for it): `accused` the cosigner,
-/// `ledger_id` its ledger, the evidence the fault on its own ledger. A
-/// cosigner is accused only if its cosignature on `fault` verifies (one the
-/// operator merely listed is not its signature), and never `own_key`.
-/// Duplicate cosigners and duplicate target ledgers yield one proof each.
-pub fn cosigner_contagion_proofs(
+/// One self-evident `NonConformingCosignature` broadcast per (signer of
+/// `fault`, ledger `operated_by` returns for it): `accused` the signer,
+/// `ledger_id` its ledger, the evidence the fault on its own ledger. The
+/// signers are the operator (if its signature on `fault` verifies) and each
+/// cosigner whose cosignature verifies (one the operator merely listed is
+/// not its signature); never `own_key`. The fault ledger itself is never a
+/// target: it is judged by its own `NonConformingUpdate` dispute, from
+/// before the fault. Duplicate signers and duplicate target ledgers yield
+/// one proof each. Mirrors cl-deposits' `broadcast-cosigner-contagion`.
+pub fn contagion_proofs(
     fault: &crate::types::SignedLedgerUpdate,
     governing_quorumbegin_seq: u64,
     operated_by: &dyn Fn(&bitcoin::secp256k1::PublicKey) -> Vec<String>,
@@ -2033,23 +2047,31 @@ pub fn cosigner_contagion_proofs(
     use crate::tlv::TlvEncode;
     let fault_ledger_id = hex::encode(fault.ledger_id);
     let fault_update_hex = hex::encode(fault.tlv_encode());
-    let mut accused: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
-    let mut out = Vec::new();
+    let mut signers: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
+    if fault.verify_operator_signature().is_ok() {
+        signers.push(fault.operator_id);
+    }
     for entry in &fault.cosignatures {
         let pk = entry.cosigner_pubkey;
-        if Some(&pk) == own_key || accused.contains(&pk) {
+        if signers.contains(&pk) {
             continue;
         }
         let mut only_theirs = fault.clone();
         only_theirs.cosignatures = vec![entry.clone()];
-        if only_theirs.verify_cosign_signatures(&[pk], 1).is_err() {
+        if only_theirs.verify_cosign_signatures(&[pk], 1).is_ok() {
+            signers.push(pk);
+        }
+    }
+    let mut out = Vec::new();
+    for pk in signers {
+        if Some(&pk) == own_key {
             continue;
         }
-        accused.push(pk);
-        let mut targets = operated_by(&pk);
         let mut seen = std::collections::HashSet::new();
-        targets.retain(|t| seen.insert(t.clone()));
-        for target in targets {
+        for target in operated_by(&pk) {
+            if target.eq_ignore_ascii_case(&fault_ledger_id) || !seen.insert(target.clone()) {
+                continue;
+            }
             out.push(FraudBroadcast {
                 proof: FraudProof {
                     proof_type: FraudProofType::NonConformingCosignature,

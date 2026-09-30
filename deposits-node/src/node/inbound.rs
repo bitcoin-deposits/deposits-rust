@@ -583,27 +583,32 @@ impl Node {
         merge_ledger_ids(advertised, held)
     }
 
-    /// Contagion (DEP-19 §5–6): every cosigner of the non-conforming `fault`,
-    /// against every ledger it operates. One self-evident kind:9101
-    /// `NonConformingCosignature` per (cosigner, ledger); that ledger's own
-    /// quorum verifies it against the fault ledger's history and disputes.
-    /// Without this a colluding cosigner lost nothing for signing a theft.
-    pub(crate) async fn broadcast_cosigner_contagion(
+    /// Contagion (DEP-19 §5–6): everyone who signed the non-conforming
+    /// `fault` (its operator and each cosigner), against every other ledger
+    /// it operates. One self-evident kind:9101 `NonConformingCosignature` per
+    /// (signer, ledger); that ledger's own quorum verifies it against the
+    /// fault ledger's history and disputes. The fault ledger is not a
+    /// target: its own dispute, armed before the fault, judges it. Without
+    /// this a colluding cosigner lost nothing for signing a theft, and the
+    /// operator lost only the ledger it cheated (cld1 forged on M and kept
+    /// A on the devnet). Mirrors cl-deposits' `broadcast-cosigner-contagion`.
+    pub(crate) async fn broadcast_contagion(
         &self,
         fault: &deposits_core::types::SignedLedgerUpdate,
         governing_qb: u64,
     ) {
         let mut targets: std::collections::HashMap<bitcoin::secp256k1::PublicKey, Vec<String>> =
             std::collections::HashMap::new();
-        for entry in &fault.cosignatures {
-            let pk = entry.cosigner_pubkey;
+        let signers = std::iter::once(fault.operator_id)
+            .chain(fault.cosignatures.iter().map(|e| e.cosigner_pubkey));
+        for pk in signers {
             if pk == self.node_id || targets.contains_key(&pk) {
                 continue;
             }
             let ids = self.ledgers_operated_by(&pk).await;
             targets.insert(pk, ids);
         }
-        let proofs = deposits_core::fraud::cosigner_contagion_proofs(
+        let proofs = deposits_core::fraud::contagion_proofs(
             fault,
             governing_qb,
             &|pk| targets.get(pk).cloned().unwrap_or_default(),
@@ -612,7 +617,7 @@ impl Node {
         let fault_ledger = hex::encode(fault.ledger_id);
         for b in &proofs {
             tracing::warn!(
-                "Contagion: {}... cosigned the fault on {}... seq {}; proof against its ledger {}...",
+                "Contagion: {}... signed the fault on {}... seq {}; proof against its ledger {}...",
                 &b.proof.accused[..16.min(b.proof.accused.len())],
                 &fault_ledger[..16],
                 fault.sequence_number,
@@ -809,7 +814,7 @@ impl Node {
                         );
                     }
                     match governing_qb {
-                        Some(qb) => node.broadcast_cosigner_contagion(&fault, qb).await,
+                        Some(qb) => node.broadcast_contagion(&fault, qb).await,
                         None => tracing::warn!(
                             "Non-conforming-cosig on {}... seq {}: no QuorumBegin at or before \
                              it in our history — no contagion proofs",
@@ -1477,6 +1482,21 @@ impl Node {
             return;
         }
 
+        // Contagion targets the accused's *other* ledgers. A
+        // NonConformingCosignature against its own fault ledger (the
+        // operator accused, as cl's receiver and ours both exclude but
+        // anyone may broadcast) is not a second dispute there: that ledger
+        // is judged by its own NonConformingUpdate dispute, from before the
+        // fault, armed when the fault arrived.
+        if contagion_proof_on_its_fault_ledger(&broadcast.proof.evidence, ledger_id) {
+            tracing::info!(
+                "Not disputing {} on a contagion proof: it is the fault ledger, \
+                 judged by its own dispute from before the fault",
+                &ledger_id[..16.min(ledger_id.len())],
+            );
+            return;
+        }
+
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
             tracing::info!(
@@ -1910,6 +1930,23 @@ pub(crate) fn fraud_proof_last_valid_seq(
     }
 }
 
+/// Whether `evidence` is a `NonConformingCosignature` (contagion) presented
+/// against its own fault ledger. Contagion disputes the accused's *other*
+/// ledgers; the fault ledger is judged by its own dispute from before the
+/// fault, so such a proof must not start a second one there. With operator
+/// contagion the accused is the fault ledger's current operator, so the
+/// stale-proof rule alone would let it through.
+pub(crate) fn contagion_proof_on_its_fault_ledger(
+    evidence: &deposits_core::fraud::FraudEvidence,
+    ledger_id: &str,
+) -> bool {
+    matches!(
+        evidence,
+        deposits_core::fraud::FraudEvidence::NonConformingCosignature { fault_ledger_id, .. }
+            if fault_ledger_id.eq_ignore_ascii_case(ledger_id)
+    )
+}
+
 /// Whether a verified fraud proof accuses the ledger's current operator
 /// (`parent_pubkey` of our replica), the only case in which it may dispute
 /// the ledger. A proof against a former operator, whose custody has already
@@ -1981,7 +2018,10 @@ mod contagion_target_tests {
 
 #[cfg(test)]
 mod fraud_proof_base_tests {
-    use super::{fraud_proof_accuses_current_operator, fraud_proof_last_valid_seq};
+    use super::{
+        contagion_proof_on_its_fault_ledger, fraud_proof_accuses_current_operator,
+        fraud_proof_last_valid_seq,
+    };
     use deposits_core::fraud::FraudEvidence;
 
     fn key(b: u8) -> bitcoin::secp256k1::PublicKey {
@@ -2033,6 +2073,33 @@ mod fraud_proof_base_tests {
         // ledger's chain is intact, so its tip.
         assert_eq!(fraud_proof_last_valid_seq(&cosig("AB"), C, 20_181), 17_839);
         assert_eq!(fraud_proof_last_valid_seq(&cosig("cd"), C, 20_181), 20_181);
+    }
+
+    /// Operator contagion: cld1 forges on M. An operator-accused
+    /// NonConformingCosignature disputes cld1's other ledger A at A's tip,
+    /// but one presented against M itself is not acted on: M is judged by
+    /// its own dispute from before the fault, and cld1 is M's current
+    /// operator, so the stale-proof rule would not stop a second one.
+    #[test]
+    fn a_contagion_proof_never_disputes_its_own_fault_ledger_again() {
+        let (m, a) = ("ab".repeat(32), "cd".repeat(32));
+        let cosig = FraudEvidence::NonConformingCosignature {
+            fault_ledger_id: m.clone(),
+            fault_sequence: 6_969,
+            governing_quorumbegin_seq: 1,
+            fault_update_hex: String::new(),
+        };
+        assert!(contagion_proof_on_its_fault_ledger(&cosig, &m));
+        assert!(contagion_proof_on_its_fault_ledger(&cosig, &m.to_uppercase()));
+        assert!(!contagion_proof_on_its_fault_ledger(&cosig, &a));
+        assert_eq!(fraud_proof_last_valid_seq(&cosig, &a, 7_100), 7_100);
+        // The fault ledger's own proof is not contagion: it still disputes.
+        let ncu = FraudEvidence::NonConformingUpdate {
+            fault_sequence: 6_969,
+            fault_update_hex: String::new(),
+        };
+        assert!(!contagion_proof_on_its_fault_ledger(&ncu, &m));
+        assert_eq!(fraud_proof_last_valid_seq(&ncu, &m, 7_100), 6_968);
     }
 }
 
