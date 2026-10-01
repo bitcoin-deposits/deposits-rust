@@ -921,6 +921,24 @@ impl Node {
             }
 
             if in_dispute {
+                // A deposed operator's backlog arrives one update at a time; a full
+                // reimport per update starved the main loop (minutes per batch).
+                {
+                    let mut times = self.last_relay_fetch_times.lock().unwrap();
+                    let now = std::time::Instant::now();
+                    if times
+                        .get(&inbound.ledger_id)
+                        .is_some_and(|t| now.duration_since(*t) < Self::RELAY_FETCH_COOLDOWN)
+                    {
+                        tracing::debug!(
+                            "Non-operator update seq {} on disputed ledger {}... — reimported recently; dropping",
+                            inbound.update.sequence_number,
+                            &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                        );
+                        return;
+                    }
+                    times.insert(inbound.ledger_id.clone(), now);
+                }
                 // Custody may have transferred via DisputeAcquire. Re-import
                 // to pick up the new operator key, then re-check.
                 tracing::info!(
