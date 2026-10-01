@@ -73,41 +73,20 @@ fn leaf_keys(leaf: &ScriptBuf) -> Vec<XOnlyPublicKey> {
         .collect()
 }
 
-/// Valid when the accused signed (to the tier's threshold) a spend of the
-/// vault outpoint the governing `QuorumBegin` names, and the spend is none of
-/// `spent_history`'s recorded rotations nor any of `extra_authorised`
-/// (confiscations the verifier knows). The block's presence in the verifier's
-/// chain is checked by `verify_fraud_evidence`.
-pub fn verify_unauthorized_vault_spend(
-    proof: &FraudProof,
+/// The keys whose Schnorr signatures on the tier witness of the input that
+/// spends the governing `QuorumBegin`'s vault outpoint verify, provided they
+/// reach the tier's threshold. `Err` when the transaction does not spend that
+/// vault or carries no verifying tier witness (a rotation's sweep of it by
+/// someone who merely holds the outpoint, for example).
+pub fn vault_spend_signers(
     spent_history: &[SignedLedgerUpdate],
-    extra_authorised: &[[u8; 32]],
-) -> Result<(), String> {
-    let FraudEvidence::UnauthorizedVaultSpend {
-        governing_quorumbegin_seq,
-        spend_tx_hex,
-        prevouts,
-        ..
-    } = &proof.evidence
-    else {
-        return Err("verify_unauthorized_vault_spend: wrong evidence type".into());
-    };
-
-    let tx: Transaction = deserialize(&hex::decode(spend_tx_hex).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("spend tx: {}", e))?;
-    let txid = tx.compute_txid().to_byte_array();
-    let prevouts = parse_prevouts(prevouts)?;
+    governing_quorumbegin_seq: u64,
+    tx: &Transaction,
+    prevouts: &[TxOut],
+) -> Result<Vec<XOnlyPublicKey>, String> {
     if prevouts.len() != tx.input.len() {
         return Err("prevouts do not match the inputs".into());
     }
-    if authorised_spend_txids(spent_history)
-        .iter()
-        .chain(extra_authorised)
-        .any(|t| *t == txid)
-    {
-        return Err("the spend is a recorded rotation or confiscation".into());
-    }
-
     // Reserves from the LedgerOpen operator and the governing QuorumBegin.
     let mut ordered: Vec<&SignedLedgerUpdate> = spent_history.iter().collect();
     ordered.sort_by_key(|u| u.sequence_number);
@@ -117,7 +96,7 @@ pub fn verify_unauthorized_vault_spend(
         match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::LedgerOpen { operator_id, .. }) => operator = Some(operator_id),
             Ok(op @ LedgerOperation::QuorumBegin { .. })
-                if u.sequence_number == *governing_quorumbegin_seq =>
+                if u.sequence_number == governing_quorumbegin_seq =>
             {
                 qb = Some(op)
             }
@@ -178,10 +157,10 @@ pub fn verify_unauthorized_vault_spend(
         return Err("the witness control block is not the reserves'".into());
     }
 
-    let sighash = SighashCache::new(&tx)
+    let sighash = SighashCache::new(tx)
         .taproot_script_spend_signature_hash(
             idx,
-            &Prevouts::All(&prevouts),
+            &Prevouts::All(prevouts),
             TapLeafHash::from_script(&leaf, LeafVersion::TapScript),
             TapSighashType::Default,
         )
@@ -204,7 +183,48 @@ pub fn verify_unauthorized_vault_spend(
     if signers.len() < tier.threshold {
         return Err("no tier witness on the vault input verifies".into());
     }
+    Ok(signers)
+}
 
+
+/// Valid when the accused signed (to the tier's threshold) a spend of the
+/// vault outpoint the governing `QuorumBegin` names, and the spend is none of
+/// `spent_history`'s recorded rotations nor any of `extra_authorised`
+/// (confiscations the verifier knows). The block's presence in the verifier's
+/// chain is checked by `verify_fraud_evidence`.
+pub fn verify_unauthorized_vault_spend(
+    proof: &FraudProof,
+    spent_history: &[SignedLedgerUpdate],
+    extra_authorised: &[[u8; 32]],
+) -> Result<(), String> {
+    let FraudEvidence::UnauthorizedVaultSpend {
+        governing_quorumbegin_seq,
+        spend_tx_hex,
+        prevouts,
+        ..
+    } = &proof.evidence
+    else {
+        return Err("verify_unauthorized_vault_spend: wrong evidence type".into());
+    };
+
+    let tx: Transaction = deserialize(&hex::decode(spend_tx_hex).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("spend tx: {}", e))?;
+    let txid = tx.compute_txid().to_byte_array();
+    let prevouts = parse_prevouts(prevouts)?;
+    if authorised_spend_txids(spent_history)
+        .iter()
+        .chain(extra_authorised)
+        .any(|t| *t == txid)
+    {
+        return Err("the spend is a recorded rotation or confiscation".into());
+    }
+
+    let signers = vault_spend_signers(
+        spent_history,
+        *governing_quorumbegin_seq,
+        &tx,
+        &prevouts,
+    )?;
     let accused = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     let accused = bitcoin::secp256k1::PublicKey::from_slice(&accused)
         .map_err(|e| format!("accused pubkey: {}", e))?

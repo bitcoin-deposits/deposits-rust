@@ -449,6 +449,72 @@ impl ChainBackend for BitcoindRpcBackend {
         Ok(None)
     }
 
+    fn scan_outpoint_spends(
+        &self,
+        from: u32,
+        to: u32,
+        watched: &std::collections::HashSet<bitcoin::OutPoint>,
+    ) -> Result<Vec<crate::chain_backend::ScannedSpend>, Error> {
+        let mut out = Vec::new();
+        for height in from..=to {
+            let hash = self.get_block_hash(height)?;
+            // Verbosity 3 is the one that carries each input's `prevout`.
+            let block: serde_json::Value =
+                self.call("getblock", serde_json::json!([hash.to_string(), 3]))?;
+            let txs = block["tx"].as_array().cloned().unwrap_or_default();
+            for t in txs {
+                let vin = t["vin"].as_array().cloned().unwrap_or_default();
+                let spends: Vec<bitcoin::OutPoint> = vin
+                    .iter()
+                    .filter_map(|i| {
+                        Some(bitcoin::OutPoint::new(
+                            i["txid"].as_str()?.parse().ok()?,
+                            i["vout"].as_u64()? as u32,
+                        ))
+                    })
+                    .collect();
+                if !spends.iter().any(|o| watched.contains(o)) {
+                    continue;
+                }
+                let tx_hex = t["hex"]
+                    .as_str()
+                    .ok_or_else(|| Error::Wallet("getblock 3: tx without hex".into()))?;
+                let tx: bitcoin::Transaction =
+                    bitcoin::consensus::deserialize(&hex::decode(tx_hex).map_err(|e| {
+                        Error::Wallet(format!("getblock 3: tx hex: {}", e))
+                    })?)
+                    .map_err(|e| Error::Wallet(format!("getblock 3: tx decode: {}", e)))?;
+                let prevouts = vin
+                    .iter()
+                    .map(|i| {
+                        let p = &i["prevout"];
+                        let sats = (p["value"].as_f64().ok_or("no prevout value")? * 100_000_000.0)
+                            .round() as u64;
+                        let spk = hex::decode(
+                            p["scriptPubKey"]["hex"].as_str().ok_or("no prevout script")?,
+                        )
+                        .map_err(|_| "prevout script hex")?;
+                        Ok(bitcoin::TxOut {
+                            value: bitcoin::Amount::from_sat(sats),
+                            script_pubkey: bitcoin::ScriptBuf::from_bytes(spk),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, &str>>()
+                    .map_err(|e| Error::Wallet(format!("getblock 3: {}", e)))?;
+                for outpoint in spends.into_iter().filter(|o| watched.contains(o)) {
+                    out.push(crate::chain_backend::ScannedSpend {
+                        outpoint,
+                        tx: tx.clone(),
+                        prevouts: prevouts.clone(),
+                        block_hash: hash,
+                        height,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn broadcast_tx(&self, tx: &bitcoin::Transaction) -> Result<bitcoin::Txid, Error> {
         use bitcoin::consensus::serialize;
         let hex_str = hex::encode(serialize(tx));

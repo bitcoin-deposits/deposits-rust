@@ -1795,6 +1795,29 @@ impl Node {
                             "auto_report_derelict_members",
                             node.auto_report_derelict_members()
                         );
+                        // Untimed and one pass at a time: it reads blocks.
+                        {
+                            static VAULT_WATCH_RUNNING: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !VAULT_WATCH_RUNNING
+                                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                            {
+                                let node = Arc::clone(&node);
+                                tokio::spawn(async move {
+                                    struct Done;
+                                    impl Drop for Done {
+                                        fn drop(&mut self) {
+                                            VAULT_WATCH_RUNNING.store(
+                                                false,
+                                                std::sync::atomic::Ordering::Release,
+                                            );
+                                        }
+                                    }
+                                    let _done = Done;
+                                    node.drive_vault_watch().await;
+                                });
+                            }
+                        }
                         timed_periodic!("auto_confiscate", node.auto_confiscate());
                         timed_periodic!(
                             "auto_reveal_on_confiscation",

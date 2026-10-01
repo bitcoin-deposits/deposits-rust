@@ -549,6 +549,14 @@ pub struct Node {
     /// double-accuses the same member for the same ignored proof.
     pub(crate) reported_derelictions: Mutex<std::collections::HashSet<(String, String)>>,
 
+    /// Last block the vault-spend watch has scanned (`node::vault_watch`).
+    pub(crate) vault_scanned: Mutex<Option<u32>>,
+    /// Ledgers whose vault theft we already reported: once each.
+    pub(crate) reported_vault_spends: Mutex<std::collections::HashSet<String>>,
+    /// Txids of confiscations we built, which spend a vault legitimately
+    /// before any `QuorumBegin` records them.
+    pub(crate) known_confiscation_txids: Mutex<std::collections::HashSet<[u8; 32]>>,
+
     /// Preimages from `lottery_reveal` requests received live, by ledger id.
     /// The request kind is ephemeral: the relay does not keep it to fetch
     /// back later (see `lottery_recovery::revealed_lottery_preimages`).
@@ -627,3 +635,4 @@ pub mod main_loop;
 pub mod operations;
 pub mod replacement_collateral;
 pub mod request_handlers;
+pub mod vault_watch;

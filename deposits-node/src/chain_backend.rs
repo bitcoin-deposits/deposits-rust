@@ -110,12 +110,45 @@ pub trait ChainBackend: Send + Sync {
         scan_from_height: u32,
     ) -> Result<Option<Transaction>, Error>;
 
+    /// Every transaction confirmed in blocks `from..=to` that spends one of
+    /// `watched`, with the prevouts of all its inputs (the taproot sighash
+    /// commits to them) and the block it is in. One pass over the range, so
+    /// the cost does not grow with the number of watched outpoints. Only a
+    /// backend that can read whole blocks with prevouts implements it
+    /// (bitcoind, `getblock` verbosity 3); the default declines.
+    fn scan_outpoint_spends(
+        &self,
+        _from: u32,
+        _to: u32,
+        _watched: &std::collections::HashSet<OutPoint>,
+    ) -> Result<Vec<ScannedSpend>, Error> {
+        Err(Error::Wallet(
+            "this chain backend cannot scan blocks for outpoint spends".into(),
+        ))
+    }
+
     /// Broadcast a signed transaction. Returns the txid on success.
     /// Backends propagate to mempool; whether the broadcast actually
     /// reaches the rest of the network depends on the backend's peer
     /// connectivity (always fine for esplora/electrum public hosts; for
     /// bitcoind RPC, depends on the node's peer count).
     fn broadcast_tx(&self, tx: &Transaction) -> Result<Txid, Error>;
+}
+
+/// A confirmed spend of a watched outpoint, as found by
+/// [`ChainBackend::scan_outpoint_spends`].
+#[derive(Debug, Clone)]
+pub struct ScannedSpend {
+    /// The watched outpoint spent.
+    pub outpoint: OutPoint,
+    /// The spending transaction.
+    pub tx: Transaction,
+    /// The output each of `tx`'s inputs spends, in input order.
+    pub prevouts: Vec<bitcoin::TxOut>,
+    /// The block it confirmed in.
+    pub block_hash: BlockHash,
+    /// That block's height.
+    pub height: u32,
 }
 
 /// A single unspent UTXO at a script. Used as the return shape of

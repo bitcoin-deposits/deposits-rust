@@ -1408,8 +1408,8 @@ impl Node {
         // confiscation resolver must run this step.
         // UnauthorizedVaultSpend's witness check needs the reserves tapscript
         // tree, which lives in deposits-core: run it here against the spent
-        // ledger's replica. A confiscation of the vault is a recorded rotation
-        // only once its QuorumBegin lands, so none is excused beyond those.
+        // ledger's replica. Excused: the recorded rotations, and a confiscation
+        // we built ourselves (no QuorumBegin records it).
         if let deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
             spent_ledger_id, ..
         } = &broadcast.proof.evidence
@@ -1418,10 +1418,17 @@ impl Node {
             let history = provider
                 .ledger_history(spent_ledger_id)
                 .ok_or("UnauthorizedVaultSpend: spent ledger not available")?;
+            let known_confiscations: Vec<[u8; 32]> = self
+                .known_confiscation_txids
+                .lock()
+                .unwrap()
+                .iter()
+                .copied()
+                .collect();
             deposits_core::vault_spend::verify_unauthorized_vault_spend(
                 &broadcast.proof,
                 &history,
-                &[],
+                &known_confiscations,
             )
             .map_err(|e| format!("UnauthorizedVaultSpend: {}", e))?;
         }

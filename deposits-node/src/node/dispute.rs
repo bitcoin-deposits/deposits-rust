@@ -3279,6 +3279,13 @@ impl Node {
                 created_at: std::time::Instant::now(),
             };
 
+            {
+                use bitcoin::hashes::Hash;
+                self.known_confiscation_txids
+                    .lock()
+                    .unwrap()
+                    .insert(pending.confiscation_tx.compute_txid().to_byte_array());
+            }
             self.pending_confiscations
                 .lock()
                 .unwrap()

@@ -1,0 +1,402 @@
+//! Unauthorised vault spend watch (DEP-06, `UnauthorizedVaultSpend`).
+//!
+//! One node-wide pass over the blocks that are `VAULT_SPEND_GRACE_BLOCKS` deep:
+//! any spend of the vault outpoint of a ledger we replicate that its history
+//! does not account for (a recorded rotation, or a confiscation we know) and
+//! whose tier witness verifies is a theft. Every verified signer is accused on
+//! every ledger it operates. Mirrors cl-deposits' `drive-vault-watch` and
+//! `report-vault-spend`.
+
+use super::*;
+
+use crate::chain_backend::ScannedSpend;
+use bitcoin::hashes::Hash;
+use bitcoin::OutPoint;
+use deposits_core::messages::LedgerOperation;
+use deposits_core::vault_spend::{authorised_spend_txids, vault_spend_signers};
+use deposits_core::{SignedLedgerUpdate, TlvDecode};
+use std::collections::{HashMap, HashSet};
+
+/// A rotation's `QuorumBegin` can reach us a block or two after the spend
+/// confirms, so a spend is judged only once it is this deep.
+pub(crate) const VAULT_SPEND_GRACE_BLOCKS: u32 = 3;
+/// Blocks before our first scan to look back over.
+const VAULT_SCAN_DEPTH: u32 = 30;
+/// Blocks one pass reads at most; a long gap is caught up over several passes.
+const VAULT_SCAN_CHUNK: u32 = 50;
+
+/// The vault outpoint of the newest `QuorumBegin` in `history`, with its
+/// sequence.
+pub(crate) fn current_vault(history: &[SignedLedgerUpdate]) -> Option<(OutPoint, u64)> {
+    history
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid,
+                new_outpoint_vout,
+                ..
+            }) => Some((
+                OutPoint::new(
+                    bitcoin::Txid::from_byte_array(new_outpoint_txid),
+                    new_outpoint_vout,
+                ),
+                u.sequence_number,
+            )),
+            _ => None,
+        })
+        .max_by_key(|(_, seq)| *seq)
+}
+
+/// A theft found by the scan: which ledger's vault, the governing
+/// `QuorumBegin`, the spend, and the keys that signed it.
+#[derive(Debug)]
+pub(crate) struct VaultTheft {
+    pub ledger_id: String,
+    pub governing_seq: u64,
+    pub spend: ScannedSpend,
+    pub signers: Vec<bitcoin::secp256k1::XOnlyPublicKey>,
+}
+
+/// Which of `spends` are thefts: they spend a ledger's vault, their txid is
+/// none of its recorded rotations nor a confiscation we know, and a tier
+/// witness on the vault input verifies. One per ledger; `reported` ledgers
+/// are skipped.
+pub(crate) fn find_vault_thefts(
+    ledgers: &HashMap<String, Vec<SignedLedgerUpdate>>,
+    spends: &[ScannedSpend],
+    known_confiscations: &HashSet<[u8; 32]>,
+    reported: &HashSet<String>,
+) -> Vec<VaultTheft> {
+    let mut out = Vec::new();
+    for (id, history) in ledgers {
+        if reported.contains(id) {
+            continue;
+        }
+        let Some((vault, seq)) = current_vault(history) else {
+            continue;
+        };
+        for spend in spends.iter().filter(|s| s.outpoint == vault) {
+            let txid = spend.tx.compute_txid().to_byte_array();
+            if known_confiscations.contains(&txid) || authorised_spend_txids(history).contains(&txid)
+            {
+                continue;
+            }
+            let Ok(signers) = vault_spend_signers(history, seq, &spend.tx, &spend.prevouts) else {
+                continue;
+            };
+            if signers.is_empty() {
+                continue;
+            }
+            out.push(VaultTheft {
+                ledger_id: id.clone(),
+                governing_seq: seq,
+                spend: spend.clone(),
+                signers,
+            });
+            break;
+        }
+    }
+    out
+}
+
+fn proof_against(
+    accused: &bitcoin::secp256k1::PublicKey,
+    target_ledger_id: &str,
+    theft: &VaultTheft,
+) -> deposits_core::fraud::FraudBroadcast {
+    use deposits_core::fraud::{FraudBroadcast, FraudEvidence, FraudProof, FraudProofType};
+    FraudBroadcast {
+        proof: FraudProof {
+            proof_type: FraudProofType::UnauthorizedVaultSpend,
+            accused: hex::encode(accused.serialize()),
+            ledger_id: target_ledger_id.to_string(),
+            evidence: FraudEvidence::UnauthorizedVaultSpend {
+                spent_ledger_id: theft.ledger_id.clone(),
+                governing_quorumbegin_seq: theft.governing_seq,
+                spend_tx_hex: hex::encode(bitcoin::consensus::serialize(&theft.spend.tx)),
+                spend_block_hash: theft.spend.block_hash.to_byte_array(),
+                prevouts: theft
+                    .spend
+                    .prevouts
+                    .iter()
+                    .map(|o| format!("{}:{}", o.value.to_sat(), hex::encode(o.script_pubkey.as_bytes())))
+                    .collect(),
+            },
+        },
+        embedding: None,
+        causal_chain: Vec::new(),
+    }
+}
+
+impl crate::Node {
+    /// Scan the blocks that are now `VAULT_SPEND_GRACE_BLOCKS` deep for spends
+    /// of any replicated ledger's vault, and report each theft found.
+    pub(crate) async fn drive_vault_watch(&self) {
+        let backend = self.wallet.chain_backend();
+        let Ok(tip) = backend.get_tip_height() else {
+            return;
+        };
+        let Some(to) = tip.checked_sub(VAULT_SPEND_GRACE_BLOCKS) else {
+            return;
+        };
+        let from = match *self.vault_scanned.lock().unwrap() {
+            Some(done) => done + 1,
+            None => to.saturating_sub(VAULT_SCAN_DEPTH),
+        };
+        if from > to {
+            return;
+        }
+        let to = to.min(from + VAULT_SCAN_CHUNK - 1);
+
+        let histories: HashMap<String, Vec<SignedLedgerUpdate>> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .map(|(id, arc)| (id.clone(), arc.read().unwrap().history.clone()))
+                .collect()
+        };
+        let watched: HashSet<OutPoint> = histories
+            .values()
+            .filter_map(|h| current_vault(h).map(|(o, _)| o))
+            .collect();
+        if !watched.is_empty() {
+            let scan = {
+                let watched = watched.clone();
+                tokio::task::spawn_blocking(move || backend.scan_outpoint_spends(from, to, &watched))
+                    .await
+            };
+            let spends = match scan {
+                Ok(Ok(s)) => s,
+                Ok(Err(e)) => {
+                    tracing::debug!("vault watch: scan {}..={} failed: {}", from, to, e);
+                    return;
+                }
+                Err(_) => return,
+            };
+            let known = self.known_confiscation_txids.lock().unwrap().clone();
+            let reported = self.reported_vault_spends.lock().unwrap().clone();
+            for theft in find_vault_thefts(&histories, &spends, &known, &reported) {
+                self.report_vault_spend(&theft).await;
+            }
+        }
+        *self.vault_scanned.lock().unwrap() = Some(to);
+    }
+
+    async fn report_vault_spend(&self, theft: &VaultTheft) {
+        self.reported_vault_spends
+            .lock()
+            .unwrap()
+            .insert(theft.ledger_id.clone());
+        tracing::warn!(
+            "VAULT SPEND: ledger {}'s reserves were spent by {}, which no rotation or \
+             confiscation accounts for; {} signers",
+            &theft.ledger_id[..8.min(theft.ledger_id.len())],
+            &theft.spend.tx.compute_txid().to_string()[..16],
+            theft.signers.len(),
+        );
+        for x in &theft.signers {
+            // The operated ledgers are advertised under the full key; the
+            // witness gives only its x coordinate, so try both parities.
+            let mut targets: Vec<String> = Vec::new();
+            for parity in [0x02u8, 0x03] {
+                let mut full = [parity; 33];
+                full[1..].copy_from_slice(&x.serialize());
+                let Ok(pk) = bitcoin::secp256k1::PublicKey::from_slice(&full) else {
+                    continue;
+                };
+                if pk == self.node_id {
+                    continue;
+                }
+                for t in self.ledgers_operated_by(&pk).await {
+                    if !targets.contains(&t) {
+                        targets.push(t.clone());
+                        tracing::warn!(
+                            "vault spend: {} signed it; proof against its ledger {}",
+                            hex::encode(&x.serialize()[..4]),
+                            &t[..8.min(t.len())]
+                        );
+                        let b = proof_against(&pk, &t, theft);
+                        if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
+                            tracing::error!("vault spend: fraud broadcast failed: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcoin::hashes::sha256;
+    use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+    use deposits_core::fraud::{FraudEvidence, FraudProof};
+    use deposits_core::messages::QuorumMemberRef;
+    use deposits_core::TlvEncode;
+
+    const CL_PROOF_HASH: &str = "53b34dbf1df8701b5ce43b0216ec4c2967a7cf989bfadfbed950df5978bb2485";
+
+    fn pubkey(i: u64) -> PublicKey {
+        let k = 1_000_000_007u64 + i * 987_654_321;
+        let mut b = [0u8; 32];
+        b[24..].copy_from_slice(&k.to_be_bytes());
+        PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&b).unwrap())
+    }
+
+    fn sha(b: &[u8]) -> [u8; 32] {
+        sha256::Hash::hash(b).to_byte_array()
+    }
+
+    fn update(seq: u64, op: &LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: op.message_type(),
+            operator_id: pubkey(1),
+            ledger_id: sha(&[2]),
+            sequence_number: seq,
+            previous_hash: [0; 32],
+            content_hash: [0; 32],
+            block_height: 100,
+            block_hash: [0; 32],
+            operator_signature: [0; 64],
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn history(rotation_txid: [u8; 32]) -> Vec<SignedLedgerUpdate> {
+        vec![
+            update(
+                0,
+                &LedgerOperation::LedgerOpen {
+                    operator_id: pubkey(1),
+                    reserves_id: String::new(),
+                    genesis_block: 0,
+                    reserves_amount: 0,
+                    collateral_amount: 0,
+                },
+            ),
+            update(
+                1,
+                &LedgerOperation::QuorumBegin {
+                    reserves_id: String::new(),
+                    spending_txid: rotation_txid,
+                    new_outpoint_txid: sha(&[0xf0, 0x0d]),
+                    new_outpoint_vout: 0,
+                    amount: 39_000_000_000,
+                    quorum_expiry: 5000,
+                    ledger_hash: sha(&[0xaa]),
+                    quorum_members: (2..=4)
+                        .map(|i| QuorumMemberRef {
+                            pubkey: pubkey(i),
+                            member_ledger_id: String::new(),
+                        })
+                        .collect(),
+                    collateral_amount: 0,
+                    protocol_version: Some("cltv-offset-v2".into()),
+                },
+            ),
+        ]
+    }
+
+    /// cl-deposits' signed theft of the vault the history above names.
+    fn cl_theft() -> (FraudProof, ScannedSpend) {
+        let p: FraudProof = serde_json::from_str(include_str!(
+            "../../../deposits-core/tests/vectors/vault_spend_cl.json"
+        ))
+        .unwrap();
+        let FraudEvidence::UnauthorizedVaultSpend {
+            spend_tx_hex,
+            spend_block_hash,
+            prevouts,
+            ..
+        } = &p.evidence
+        else {
+            panic!()
+        };
+        let tx: bitcoin::Transaction =
+            bitcoin::consensus::deserialize(&hex::decode(spend_tx_hex).unwrap()).unwrap();
+        let prevouts = prevouts
+            .iter()
+            .map(|s| {
+                let (v, spk) = s.split_once(':').unwrap();
+                bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(v.parse().unwrap()),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(hex::decode(spk).unwrap()),
+                }
+            })
+            .collect();
+        let spend = ScannedSpend {
+            outpoint: OutPoint::new(bitcoin::Txid::from_byte_array(sha(&[0xf0, 0x0d])), 0),
+            tx,
+            prevouts,
+            block_hash: bitcoin::BlockHash::from_byte_array(*spend_block_hash),
+            height: 10,
+        };
+        (p, spend)
+    }
+
+    fn ledgers(rotation_txid: [u8; 32]) -> HashMap<String, Vec<SignedLedgerUpdate>> {
+        HashMap::from([(hex::encode(sha(&[2])), history(rotation_txid))])
+    }
+
+    #[test]
+    fn current_vault_is_the_newest_quorum_begin() {
+        let (v, seq) = current_vault(&history([9; 32])).unwrap();
+        assert_eq!(seq, 1);
+        assert_eq!(v, OutPoint::new(bitcoin::Txid::from_byte_array(sha(&[0xf0, 0x0d])), 0));
+    }
+
+    #[test]
+    fn finds_the_theft_and_its_signers() {
+        let (_, spend) = cl_theft();
+        let t = find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::new(), &HashSet::new());
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].governing_seq, 1);
+        assert!(t[0].signers.len() >= 3);
+    }
+
+    #[test]
+    fn a_recorded_rotation_or_known_confiscation_is_not_theft() {
+        let (_, spend) = cl_theft();
+        let txid = spend.tx.compute_txid().to_byte_array();
+        assert!(find_vault_thefts(&ledgers(txid), &[spend.clone()], &HashSet::new(), &HashSet::new())
+            .is_empty());
+        assert!(find_vault_thefts(
+            &ledgers([9; 32]),
+            &[spend],
+            &HashSet::from([txid]),
+            &HashSet::new()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn reports_each_ledger_once_and_ignores_unrelated_spends() {
+        let (_, spend) = cl_theft();
+        let reported = HashSet::from([hex::encode(sha(&[2]))]);
+        assert!(find_vault_thefts(&ledgers([9; 32]), &[spend.clone()], &HashSet::new(), &reported)
+            .is_empty());
+        let mut other = spend;
+        other.outpoint = OutPoint::new(bitcoin::Txid::from_byte_array([7; 32]), 0);
+        assert!(find_vault_thefts(&ledgers([9; 32]), &[other], &HashSet::new(), &HashSet::new())
+            .is_empty());
+    }
+
+    #[test]
+    fn the_proof_we_build_is_cls_proof_and_verifies() {
+        let (cl, spend) = cl_theft();
+        let theft = find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::new(), &HashSet::new())
+            .pop()
+            .unwrap();
+        let accused = PublicKey::from_slice(&hex::decode(&cl.accused).unwrap()).unwrap();
+        let b = proof_against(&accused, &cl.ledger_id, &theft);
+        assert_eq!(hex::encode(b.proof.proof_hash()), CL_PROOF_HASH);
+        deposits_core::vault_spend::verify_unauthorized_vault_spend(
+            &b.proof,
+            &history([9; 32]),
+            &[],
+        )
+        .unwrap();
+    }
+}
