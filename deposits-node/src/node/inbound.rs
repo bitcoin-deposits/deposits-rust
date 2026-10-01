@@ -1324,6 +1324,12 @@ impl Node {
             } => {
                 needed.insert(fault_ledger_id.clone());
             }
+            deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
+                spent_ledger_id,
+                ..
+            } => {
+                needed.insert(spent_ledger_id.clone());
+            }
             deposits_core::fraud::FraudEvidence::StaleCosign {
                 member_ledger_id, ..
             }
@@ -1400,6 +1406,26 @@ impl Node {
         // which the pure verifier can't fetch. The type is self-evident, so
         // no embedding check stands in for it: both the receive path and the
         // confiscation resolver must run this step.
+        // UnauthorizedVaultSpend's witness check needs the reserves tapscript
+        // tree, which lives in deposits-core: run it here against the spent
+        // ledger's replica. A confiscation of the vault is a recorded rotation
+        // only once its QuorumBegin lands, so none is excused beyond those.
+        if let deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
+            spent_ledger_id, ..
+        } = &broadcast.proof.evidence
+        {
+            use deposits_core::fraud::LedgerProvider;
+            let history = provider
+                .ledger_history(spent_ledger_id)
+                .ok_or("UnauthorizedVaultSpend: spent ledger not available")?;
+            deposits_core::vault_spend::verify_unauthorized_vault_spend(
+                &broadcast.proof,
+                &history,
+                &[],
+            )
+            .map_err(|e| format!("UnauthorizedVaultSpend: {}", e))?;
+        }
+
         if matches!(
             broadcast.proof.proof_type,
             deposits_core::fraud::FraudProofType::WinnerCollateralDeviation

@@ -110,6 +110,13 @@ pub enum FraudProofType {
     /// where the bad update sits; usually a different ledger from
     /// the disputed one.
     NonConformingCosignature,
+    /// A quorum member signed (to threshold) an on-chain spend of the
+    /// vault outpoint its ledger's `QuorumBegin` names, and the spend is
+    /// neither a recorded rotation nor a confiscation (DEP-06
+    /// "unauthorised vault spend"). Self-evident: the signatures on the
+    /// transaction are the evidence. Discriminant 10 (the spec's own
+    /// numbering collides with the implementations' 1–9).
+    UnauthorizedVaultSpend,
 }
 
 impl FraudProofType {
@@ -173,6 +180,7 @@ impl FraudProofType {
             | Self::NonConformingUpdate
             | Self::Equivocation
             | Self::NonConformingCosignature
+            | Self::UnauthorizedVaultSpend
             | Self::StaleCosignature
             | Self::QuorumExpired
             | Self::WinnerCollateralDeviation => false,
@@ -397,6 +405,27 @@ pub enum FraudEvidence {
         /// the inline update as authentic, then applies it to
         /// replayed state to confirm non-conformance.
         fault_update_hex: String,
+    },
+
+    /// An on-chain spend of a ledger's vault outpoint signed by quorum
+    /// members, which no recorded rotation or confiscation accounts for.
+    ///
+    /// The proof's `ledger_id` is a ledger the accused operates (cross-ledger
+    /// contagion); `spent_ledger_id` is the ledger whose vault was spent.
+    UnauthorizedVaultSpend {
+        /// Ledger whose vault was spent (64-char hex).
+        spent_ledger_id: String,
+        /// Sequence of the `QuorumBegin` on `spent_ledger_id` that names the
+        /// vault outpoint and so fixes the reserves' tapscript tree.
+        governing_quorumbegin_seq: u64,
+        /// The spending transaction (consensus bytes, lowercase hex).
+        spend_tx_hex: String,
+        /// Block the spend confirmed in; the verifier must know it.
+        #[serde(with = "crate::types::serde_32_hex")]
+        spend_block_hash: [u8; 32],
+        /// One `"sats:scriptpubkeyhex"` per input of the spend, in order:
+        /// the amounts and scripts the taproot sighash commits to.
+        prevouts: Vec<String>,
     },
 
     /// The operator BIP-340-signed a ledger update that is structurally
@@ -2745,6 +2774,29 @@ pub fn verify_fraud_evidence(
             })?;
             verify_equivocation(proof, &accused_history)?;
         }
+        FraudProofType::UnauthorizedVaultSpend => {
+            // The reserves tapscript tree is built in deposits-core, so the
+            // witness check runs there (`deposits_core::vault_spend`); this
+            // layer settles what needs only the chain and the ledger set.
+            // Every caller acting on the proof must run that step too.
+            let FraudEvidence::UnauthorizedVaultSpend {
+                spent_ledger_id,
+                spend_block_hash,
+                ..
+            } = &proof.evidence
+            else {
+                return Err("UnauthorizedVaultSpend: wrong evidence type".into());
+            };
+            ledgers.ledger_history(spent_ledger_id).ok_or_else(|| {
+                format!(
+                    "spent ledger {} not available",
+                    &spent_ledger_id[..16.min(spent_ledger_id.len())]
+                )
+            })?;
+            block_oracle
+                .confirms(spend_block_hash)
+                .ok_or("UnauthorizedVaultSpend: spend block not in our chain")?;
+        }
         FraudProofType::NonConformingCosignature => {
             let FraudEvidence::NonConformingCosignature {
                 fault_ledger_id, ..
@@ -2854,6 +2906,7 @@ impl FraudProofType {
             Self::WinnerCollateralDeviation => 7,
             Self::Equivocation => 8,
             Self::NonConformingCosignature => 9,
+            Self::UnauthorizedVaultSpend => 10,
         }
     }
 }
@@ -2973,6 +3026,18 @@ impl FraudEvidence {
             } => {
                 out.extend_from_slice(&fault_sequence.to_le_bytes());
                 out.extend_from_slice(fault_update_hex.as_bytes());
+            }
+            Self::UnauthorizedVaultSpend {
+                spent_ledger_id,
+                governing_quorumbegin_seq,
+                spend_tx_hex,
+                spend_block_hash,
+                ..
+            } => {
+                out.extend_from_slice(spent_ledger_id.as_bytes());
+                out.extend_from_slice(&governing_quorumbegin_seq.to_le_bytes());
+                out.extend_from_slice(spend_tx_hex.as_bytes());
+                out.extend_from_slice(spend_block_hash);
             }
         }
         out

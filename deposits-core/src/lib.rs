@@ -81,6 +81,7 @@ pub mod ruleset;
 pub mod tapscript_reserves;
 pub mod time_utils;
 pub mod validation;
+pub mod vault_spend;
 
 // Re-exports for convenience
 pub use constants::{
