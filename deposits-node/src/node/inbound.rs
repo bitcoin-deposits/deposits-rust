@@ -1557,6 +1557,30 @@ impl Node {
             Ok(()) => {
                 tracing::warn!("Successfully armed for dispute based on fraud proof");
 
+                // DEP-19 §6: having disputed on a *punitive* proof, start a
+                // dereliction watch on the faulted ledger. A periodic task
+                // scans the ledger's OTHER quorum members once their response
+                // window elapses and accuses any that stayed active without
+                // acting. Respectful (QuorumExpired) faults don't cascade, and
+                // a DisputeDereliction isn't itself watched (no second-order
+                // cascade).
+                if !broadcast.proof.proof_type.is_respectful()
+                    && !matches!(
+                        broadcast.proof.proof_type,
+                        deposits_core::fraud::FraudProofType::DisputeDereliction
+                    )
+                {
+                    if let Some(visible_block_hash) =
+                        self.dereliction_visible_block_hash(broadcast)
+                    {
+                        self.register_dereliction_watch(
+                            ledger_id,
+                            broadcast.proof.proof_hash(),
+                            visible_block_hash,
+                        );
+                    }
+                }
+
                 // Also broadcast a dispute event referencing the fraud proof.
                 // Routes the operator-key BIP-340 sig through the Signer
                 // so the daemon doesn't need a local keypair.

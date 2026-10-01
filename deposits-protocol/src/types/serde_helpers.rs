@@ -67,6 +67,53 @@ pub mod serde_32 {
     }
 }
 
+/// Serde helper for a 32-byte value carried as a **lowercase hex string**.
+///
+/// cl-deposits serializes every 32-byte evidence field of a fraud proof as a
+/// hex string (`bytes->hex`, see `fraud.lisp`), so fields exchanged with cl —
+/// the fraud-evidence block hashes — use this, not [`serde_32`] (which writes
+/// a JSON byte array). Serialize always emits hex; deserialize accepts a hex
+/// string (cl, and the reference going forward) OR a byte array (older
+/// reference-serialized data), so no stored proof fails to load.
+pub mod serde_32_hex {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    /// Serialize a 32-byte array as a lowercase hex string.
+    pub fn serialize<S>(bytes: &[u8; 32], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        hex::encode(bytes).serialize(serializer)
+    }
+
+    /// Deserialize a 32-byte array from either a hex string or a byte array.
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 32], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum HexOrBytes {
+            Hex(String),
+            Bytes(Vec<u8>),
+        }
+        let vec = match HexOrBytes::deserialize(deserializer)? {
+            HexOrBytes::Hex(s) => hex::decode(&s).map_err(serde::de::Error::custom)?,
+            HexOrBytes::Bytes(b) => b,
+        };
+        if vec.len() == 32 {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&vec);
+            Ok(arr)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "Expected 32 bytes, got {}",
+                vec.len()
+            )))
+        }
+    }
+}
+
 /// Serde helper for 64-byte arrays
 pub mod serde_64 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

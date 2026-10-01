@@ -1791,6 +1791,10 @@ impl Node {
                             node.auto_lottery_claim_or_yield()
                         );
                         timed_periodic!("retry_fork_publications", node.retry_fork_publications());
+                        timed_periodic!(
+                            "auto_report_derelict_members",
+                            node.auto_report_derelict_members()
+                        );
                         timed_periodic!("auto_confiscate", node.auto_confiscate());
                         timed_periodic!(
                             "auto_reveal_on_confiscation",

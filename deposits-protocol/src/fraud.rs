@@ -150,22 +150,27 @@ impl FraudProofType {
     /// - `QuorumExpired`: a block anchor past the ledger's signed expiry.
     /// - `WinnerCollateralDeviation`: the claim TX against the winner's
     ///   signed `DisputeArmed`.
+    /// - `DisputeDereliction` (inactive quorum member): the proof is its own
+    ///   evidence — the response window is anchored by
+    ///   `original_fraud_block_hash`, a block the verifier confirms in its
+    ///   own chain, and the member's own signed, confirmed update proves it
+    ///   stayed active past the deadline. Nothing off-ledger, and the
+    ///   verdict does not depend on a separate embedding of *this* proof's
+    ///   hash (cl-deposits' `verify-dispute-dereliction` classifies it the
+    ///   same way; see `make_dispute_dereliction_proof`).
     ///
     /// Embedding required (off-ledger or timing-dependent):
     /// - `UncreditedOnchainPayment`, `UncreditedLightningPayment`: the
     ///   payment is off-ledger; the proof must be shown to precede the
     ///   operator's (non-)response.
-    /// - `DisputeDereliction` (inactive quorum member): the fault is a
-    ///   response window measured from when the member saw the proof.
     ///
     /// The match is exhaustive on purpose: a new proof type must be
     /// classified here.
     pub fn requires_embedding(&self) -> bool {
         match self {
-            Self::UncreditedOnchainPayment
-            | Self::UncreditedLightningPayment
-            | Self::DisputeDereliction => true,
-            Self::NonConformingUpdate
+            Self::UncreditedOnchainPayment | Self::UncreditedLightningPayment => true,
+            Self::DisputeDereliction
+            | Self::NonConformingUpdate
             | Self::Equivocation
             | Self::NonConformingCosignature
             | Self::StaleCosignature
@@ -261,7 +266,11 @@ pub enum FraudEvidence {
         /// proof_hash was embedded). The verifier confirms this hash is
         /// in its own confirmed chain — the block height alone is not
         /// trusted, only its presence in the chain.
-        #[serde(with = "crate::types::serde_32")]
+        ///
+        /// Hex on the wire (`serde_32_hex`) to match cl-deposits, which
+        /// serializes every 32-byte evidence field as a hex string; the
+        /// deserializer still accepts the reference's older byte-array form.
+        #[serde(with = "crate::types::serde_32_hex")]
         original_fraud_block_hash: [u8; 32],
         required_response_blocks: u32,
         /// The inactive member's collateral ledger.
@@ -2090,6 +2099,56 @@ pub fn contagion_proofs(
         }
     }
     out
+}
+
+/// Build a `DisputeDereliction` fraud broadcast (DEP-19 §6 / DEP-11
+/// §Dispute Participation).
+///
+/// The accusation: `member_pubkey` kept operating its own collateral ledger
+/// (`member_ledger_id`) past the response window without acting on a prior,
+/// valid punitive fraud proof. `original_fraud_hash` identifies that proof;
+/// `original_fraud_block_hash` anchors when it became visible (the verifier
+/// confirms this block in its own chain and reads its height). The member's
+/// own ledger carries an update it signed at `member_active_sequence` whose
+/// block confirms at least `required_response_blocks` after that — proof it
+/// was online past the deadline. Presented against the member's own ledger,
+/// which the proof slashes.
+///
+/// Self-evident: no embedding or causal chain (see
+/// [`FraudProofType::requires_embedding`]).
+///
+/// Mirrors cl-deposits' `make-dispute-dereliction-proof`. The canonical
+/// proof hash binds `original_fraud_hash`, `original_fraud_block_hash`,
+/// `member_ledger_id` and `member_pubkey` (the other two evidence fields are
+/// elided from the hash), so a proof built here hashes identically to cl's
+/// for the same fields.
+pub fn make_dispute_dereliction_proof(
+    member_pubkey: &bitcoin::secp256k1::PublicKey,
+    member_ledger_id: &[u8; 32],
+    original_fraud_hash: &[u8; 32],
+    original_fraud_block_hash: [u8; 32],
+    required_response_blocks: u32,
+    member_active_sequence: u64,
+) -> FraudBroadcast {
+    let member_pubkey_hex = hex::encode(member_pubkey.serialize());
+    let member_ledger_id_hex = hex::encode(member_ledger_id);
+    FraudBroadcast {
+        proof: FraudProof {
+            proof_type: FraudProofType::DisputeDereliction,
+            accused: member_pubkey_hex.clone(),
+            ledger_id: member_ledger_id_hex.clone(),
+            evidence: FraudEvidence::DisputeDereliction {
+                original_fraud_hash: hex::encode(original_fraud_hash),
+                original_fraud_block_hash,
+                required_response_blocks,
+                member_ledger_id: member_ledger_id_hex,
+                member_active_sequence,
+                member_pubkey: member_pubkey_hex,
+            },
+        },
+        embedding: None,
+        causal_chain: Vec::new(),
+    }
 }
 
 /// Verify a `WinnerCollateralDeviation` claim.

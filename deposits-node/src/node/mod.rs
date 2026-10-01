@@ -537,6 +537,18 @@ pub struct Node {
     /// retried every periodic (see `fork_publish`).
     pending_fork_publications: Mutex<std::collections::HashSet<String>>,
 
+    /// Punitive fraud proofs we verified and disputed, awaiting a
+    /// dereliction scan of the faulted ledger's OTHER quorum members once
+    /// their response window elapses (DEP-19 §6, see `node::dereliction`).
+    /// Keyed by the faulted ledger id.
+    pub(crate) pending_dereliction_watches:
+        Mutex<HashMap<String, dereliction::DerelictionWatch>>,
+
+    /// `(member_ledger_id, original_fraud_hash_hex)` pairs we have already
+    /// broadcast a `DisputeDereliction` for, so the periodic scan never
+    /// double-accuses the same member for the same ignored proof.
+    pub(crate) reported_derelictions: Mutex<std::collections::HashSet<(String, String)>>,
+
     /// Preimages from `lottery_reveal` requests received live, by ledger id.
     /// The request kind is ephemeral: the relay does not keep it to fetch
     /// back later (see `lottery_recovery::revealed_lottery_preimages`).
@@ -600,6 +612,7 @@ impl Node {
 
 pub mod auto_tasks;
 pub mod coordination;
+pub mod dereliction;
 pub mod dispute;
 pub mod expiry_watch;
 pub mod fork_publish;

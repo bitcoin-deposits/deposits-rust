@@ -1,0 +1,24 @@
+{
+  "proof": {
+    "proof_type": "DisputeDereliction",
+    "accused": "033d491445426fbdddd26e43919fa986c4adaaf910d302a3aa79d77446dc49eb62",
+    "ledger_id": "d83edbfb5502d3df68174431f83d1b3ed329bce664526e28cceef6eb04677d67",
+    "evidence": {
+      "DisputeDereliction": {
+        "original_fraud_hash": "63b4722f86b950a65b35ef6d4029fe79bcd554e0c0a039770185fc08ddb14df8",
+        "original_fraud_block_hash": "deeccbac3c8f92387b1480882c3c70e6676d35699a3fc4f45c81efee26bfc79b",
+        "required_response_blocks": 144,
+        "member_ledger_id": "d83edbfb5502d3df68174431f83d1b3ed329bce664526e28cceef6eb04677d67",
+        "member_active_sequence": 200,
+        "member_pubkey": "033d491445426fbdddd26e43919fa986c4adaaf910d302a3aa79d77446dc49eb62"
+      }
+    }
+  },
+  "embedding": {
+    "ledger_id": "d83edbfb5502d3df68174431f83d1b3ed329bce664526e28cceef6eb04677d67",
+    "sequence": 0,
+    "update_hash": "",
+    "field": "inline"
+  },
+  "causal_chain": []
+}
