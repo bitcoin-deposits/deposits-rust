@@ -360,6 +360,12 @@ impl Node {
             }
         };
 
+        // A confiscation we cosign spends this vault legitimately; without
+        // this, our own vault watch would accuse its signers.
+        if let Some(txid) = crate::node::vault_watch::confiscation_txid_from_params(&request.params) {
+            self.known_confiscation_txids.lock().unwrap().insert(txid);
+        }
+
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature_bytes),

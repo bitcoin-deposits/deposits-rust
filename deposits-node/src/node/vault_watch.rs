@@ -99,6 +99,15 @@ pub(crate) fn find_vault_thefts(
     out
 }
 
+/// The txid of the confiscation in a `confiscation_sign` request. Its
+/// witness is not yet filled, but a segwit txid excludes the witness, so it is
+/// the txid of the spend that will confirm.
+pub(crate) fn confiscation_txid_from_params(params: &serde_json::Value) -> Option<[u8; 32]> {
+    let bytes = hex::decode(params.get("unsigned_tx")?.as_str()?).ok()?;
+    let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize(&bytes).ok()?;
+    Some(tx.compute_txid().to_byte_array())
+}
+
 fn proof_against(
     accused: &bitcoin::secp256k1::PublicKey,
     target_ledger_id: &str,
@@ -369,6 +378,23 @@ mod tests {
             &HashSet::new()
         )
         .is_empty());
+    }
+
+    #[test]
+    fn a_cosigned_confiscation_is_excused_by_its_unsigned_txid() {
+        let (_, spend) = cl_theft();
+        let mut unsigned = spend.tx.clone();
+        for i in unsigned.input.iter_mut() {
+            i.witness = bitcoin::Witness::new();
+        }
+        let params = serde_json::json!({
+            "unsigned_tx": hex::encode(bitcoin::consensus::serialize(&unsigned)),
+        });
+        let txid = confiscation_txid_from_params(&params).expect("parses");
+        assert_eq!(txid, spend.tx.compute_txid().to_byte_array());
+        assert!(find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::from([txid]), &HashSet::new())
+            .is_empty());
+        assert!(confiscation_txid_from_params(&serde_json::json!({})).is_none());
     }
 
     #[test]
