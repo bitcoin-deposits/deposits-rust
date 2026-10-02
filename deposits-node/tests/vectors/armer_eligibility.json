@@ -1,0 +1,48 @@
+{
+  "description": "DEP-03 replacement-collateral eligibility cut. E = max arm_height over armers. A participant has declared >= required, a pledge confirmed at <= E, unspent through E (spent_at null or > E), and value >= declared. Pledge null = no declaration; created null = unconfirmed.",
+  "cases": [
+    {
+      "name": "veto attempt: one armer pledged a coin spent before E",
+      "required_sats": 10000,
+      "armers": [
+        {"id": "a", "arm_height": 100, "declared": 50000, "pledge": {"created": 90, "value": 50000, "spent_at": null}},
+        {"id": "b", "arm_height": 104, "declared": 50000, "pledge": {"created": 95, "value": 50000, "spent_at": 110}},
+        {"id": "c", "arm_height": 102, "declared": 50000, "pledge": {"created": 95, "value": 50000, "spent_at": 103}}
+      ],
+      "expect": {"snapshot": 104, "participants": ["a", "b"]}
+    },
+    {
+      "name": "every way to fail, each excluding only its armer",
+      "required_sats": 10000,
+      "armers": [
+        {"id": "ok", "arm_height": 200, "declared": 20000, "pledge": {"created": 150, "value": 20000, "spent_at": null}},
+        {"id": "short", "arm_height": 201, "declared": 20000, "pledge": {"created": 150, "value": 19999, "spent_at": null}},
+        {"id": "late", "arm_height": 202, "declared": 20000, "pledge": {"created": 206, "value": 20000, "spent_at": null}},
+        {"id": "floor", "arm_height": 203, "declared": 9999, "pledge": {"created": 150, "value": 9999, "spent_at": null}},
+        {"id": "none", "arm_height": 204, "declared": null, "pledge": null},
+        {"id": "mempool", "arm_height": 205, "declared": 20000, "pledge": {"created": null, "value": 20000, "spent_at": null}},
+        {"id": "at-e", "arm_height": 199, "declared": 20000, "pledge": {"created": 150, "value": 20000, "spent_at": 205}},
+        {"id": "edge", "arm_height": 198, "declared": 20000, "pledge": {"created": 205, "value": 20000, "spent_at": 206}}
+      ],
+      "expect": {"snapshot": 205, "participants": ["edge", "ok"]}
+    },
+    {
+      "name": "winner spends its pledge into the claim after E: still a participant",
+      "required_sats": 5000,
+      "armers": [
+        {"id": "w", "arm_height": 300, "declared": 8000, "pledge": {"created": 280, "value": 9000, "spent_at": 330}},
+        {"id": "x", "arm_height": 301, "declared": 8000, "pledge": {"created": 281, "value": 8000, "spent_at": null}}
+      ],
+      "expect": {"snapshot": 301, "participants": ["w", "x"]}
+    },
+    {
+      "name": "fewer than two survive",
+      "required_sats": 5000,
+      "armers": [
+        {"id": "p", "arm_height": 400, "declared": 8000, "pledge": {"created": 380, "value": 8000, "spent_at": null}},
+        {"id": "q", "arm_height": 401, "declared": 8000, "pledge": {"created": 380, "value": 8000, "spent_at": 395}}
+      ],
+      "expect": {"snapshot": 401, "participants": ["p"]}
+    }
+  ]
+}

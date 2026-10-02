@@ -127,6 +127,30 @@ pub trait ChainBackend: Send + Sync {
         ))
     }
 
+    /// Where `outpoint` was spent on the confirmed chain: `SpentAt(h)` for a
+    /// spend found in blocks `scan_from..=tip`, `SpentBefore(scan_from)` for a
+    /// confirmed spend before that, `Unspent` when no confirmed spend exists
+    /// (a mempool-only spend counts as unspent). DEP-03's eligibility cut
+    /// reads only the confirmed chain, so cosigners agree.
+    fn confirmed_spend(
+        &self,
+        outpoint: &OutPoint,
+        script: &Script,
+        scan_from: u32,
+    ) -> Result<ConfirmedSpend, Error> {
+        match self.is_output_unspent(&outpoint.txid, outpoint.vout)? {
+            Some(false) => {}
+            _ => return Ok(ConfirmedSpend::Unspent),
+        }
+        match self.find_spending_tx(outpoint, script, scan_from)? {
+            Some(tx) => match self.get_tx_block_height(&tx.compute_txid())? {
+                Some(h) => Ok(ConfirmedSpend::SpentAt(h)),
+                None => Ok(ConfirmedSpend::Unspent),
+            },
+            None => Ok(ConfirmedSpend::SpentBefore(scan_from)),
+        }
+    }
+
     /// Broadcast a signed transaction. Returns the txid on success.
     /// Backends propagate to mempool; whether the broadcast actually
     /// reaches the rest of the network depends on the backend's peer
@@ -176,6 +200,14 @@ pub struct UnspentOutput {
 ///
 /// Construction errors panic — these are startup-time misconfiguration
 /// the operator needs to see immediately.
+/// See [`ChainBackend::confirmed_spend`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmedSpend {
+    Unspent,
+    SpentAt(u32),
+    SpentBefore(u32),
+}
+
 pub fn from_env(url: &str) -> std::sync::Arc<dyn ChainBackend> {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex, OnceLock};

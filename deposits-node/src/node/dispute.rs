@@ -2676,7 +2676,6 @@ impl Node {
             // late QuorumJoin records, multi-fork interactions) added stray
             // members and broke the Taproot reconstruction with a
             // "Witness program hash mismatch".
-            let mut participants: Vec<LotteryParticipant> = Vec::new();
             let mut quorum_members: Vec<PublicKey> = Vec::new();
             let mut reserves_address: Option<String> = None;
             let mut ledger_hash: Option<[u8; 32]> = None;
@@ -2722,21 +2721,8 @@ impl Node {
                                 ruleset_at_qb = protocol_version;
                             }
                         }
-                        LedgerOperation::DisputeArmed {
-                            commitment_hash,
-                            target_reserves,
-                            armed_block,
-                            ..
-                        } => {
+                        LedgerOperation::DisputeArmed { armed_block, .. } => {
                             let x_only = update.operator_id.x_only_public_key().0;
-                            // Check if we already have this participant
-                            if !participants.iter().any(|p| p.pubkey == x_only) {
-                                participants.push(LotteryParticipant::new(
-                                    x_only,
-                                    commitment_hash,
-                                    target_reserves,
-                                ));
-                            }
                             // Each armer's first arm (a re-arm repeats it).
                             let h = armed_heights.entry(x_only).or_insert(armed_block);
                             *h = (*h).min(armed_block);
@@ -2746,11 +2732,11 @@ impl Node {
                 }
             }
 
-            // Need at least 2 participants to proceed
-            if participants.len() < 2 {
+            // Need at least 2 armers to proceed
+            if armed_heights.len() < 2 {
                 tracing::debug!(
                     "Not enough DisputeArmed participants yet ({}/2)",
-                    participants.len()
+                    armed_heights.len()
                 );
                 continue;
             }
@@ -2803,7 +2789,7 @@ impl Node {
             // member armed, so the wait runs from the second arm's height:
             // the point where it would otherwise confiscate. cl-deposits
             // waits the same 720 blocks past its arm window.
-            let (q, k) = (quorum_members.len(), participants.len());
+            let (q, k) = (quorum_members.len(), armed_heights.len());
             if k < q {
                 let mut heights: Vec<u32> = armed_heights.values().copied().collect();
                 heights.sort_unstable();
@@ -2835,11 +2821,30 @@ impl Node {
                 );
             }
 
-            tracing::info!("All {} participants armed for ledger {}..., initiating confiscation ({} quorum members)",
-                participants.len(), ledger_prefix, quorum_members.len());
-
-            // Sort participants by pubkey for deterministic order
-            participants.sort_by_key(|a| a.pubkey.serialize());
+            // DEP-03 eligibility cut: armers whose replacement collateral
+            // fails are excluded from the lottery rather than stalling it.
+            let participants: Vec<LotteryParticipant> = match super::armers::eligible_armers(
+                &*self.wallet.chain_backend(),
+                &paginated_updates,
+                None,
+            ) {
+                Ok(set) if set.participants.len() >= 2 => set.lottery_participants(),
+                Ok(set) => {
+                    tracing::info!(
+                        "Only {} of {} armers of ledger {} are lottery participants; waiting",
+                        set.participants.len(),
+                        k,
+                        ledger_prefix
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::debug!("Lottery participants for {}: {}", ledger_prefix, e);
+                    continue;
+                }
+            };
+            tracing::info!("{} of {} armers are lottery participants for ledger {}..., initiating confiscation ({} quorum members)",
+                participants.len(), k, ledger_prefix, quorum_members.len());
 
             // Build recovery voters (quorum minus original operator)
             let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
@@ -3382,40 +3387,20 @@ impl Node {
             ));
         }
 
-        // Extract DisputeArmed participants. The recovery-voter set is
-        // derived separately (below) from the canonical latest-QuorumBegin
-        // source so the reconstructed lottery address matches the one the
-        // confiscation TX actually paid.
-        let mut participants: Vec<LotteryParticipant> = Vec::new();
-
-        for update in &paginated_updates {
-            if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                if let LedgerOperation::DisputeArmed {
-                    commitment_hash,
-                    target_reserves,
-                    ..
-                } = op
-                {
-                    let x_only = update.operator_id.x_only_public_key().0;
-                    if !participants.iter().any(|p| p.pubkey == x_only) {
-                        participants.push(LotteryParticipant::new(
-                            x_only,
-                            commitment_hash,
-                            target_reserves,
-                        ));
-                    }
-                }
-            }
-        }
-
+        // Participants: the DEP-03 eligibility cut, the set the confiscation
+        // was built with. The recovery-voter set is derived separately (below)
+        // from the latest QuorumBegin so the reconstructed lottery address
+        // matches the one the confiscation TX paid.
+        let participants: Vec<LotteryParticipant> = self
+            .lottery_armer_set(ledger_id)
+            .await
+            .map_err(Error::Protocol)?
+            .lottery_participants();
         if participants.len() < 2 {
             return Err(Error::Protocol(
                 "Not enough participants for lottery".to_string(),
             ));
         }
-
-        // Sort participants by x-only pubkey for deterministic order
-        participants.sort_by_key(|a| a.pubkey.serialize());
 
         // Recovery voters = latest-QuorumBegin members minus operator.
         // MUST match `initiate_confiscations` (the on-chain payer), or the

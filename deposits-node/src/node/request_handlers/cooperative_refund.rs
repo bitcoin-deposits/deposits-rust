@@ -224,27 +224,16 @@ impl Node {
         }
 
         // Collect DisputeArmed participants + RC declarations.
-        let mut participants: Vec<LotteryParticipant> = Vec::new();
         let mut rc_by_outpoint: std::collections::HashMap<
             (bitcoin::Txid, u32),
             (bitcoin::secp256k1::PublicKey, u64),
         > = std::collections::HashMap::new();
         for u in &updates {
             if let Ok(LedgerOperation::DisputeArmed {
-                commitment_hash,
-                target_reserves,
                 replacement_collateral,
                 ..
             }) = LedgerOperation::tlv_decode(&u.message)
             {
-                let xonly = u.operator_id.x_only_public_key().0;
-                if !participants.iter().any(|p| p.pubkey == xonly) {
-                    participants.push(LotteryParticipant::new(
-                        xonly,
-                        commitment_hash,
-                        target_reserves,
-                    ));
-                }
                 if let Some(rc) = replacement_collateral {
                     let txid = bitcoin::Txid::from_raw_hash(
                         bitcoin::hashes::Hash::from_byte_array(rc.txid),
@@ -253,17 +242,22 @@ impl Node {
                 }
             }
         }
+        // Participants: the DEP-03 eligibility cut (sorted).
+        let participants: Vec<LotteryParticipant> =
+            match self.lottery_armer_set(main_ledger_id.as_str()).await {
+                Ok(set) => set.lottery_participants(),
+                Err(e) => return (false, None, Some(format!("lottery participants: {}", e))),
+            };
         if participants.len() < 2 {
             return (
                 false,
                 None,
                 Some(format!(
-                    "only {} DisputeArmed participants — refusing",
+                    "only {} lottery participants — refusing",
                     participants.len()
                 )),
             );
         }
-        participants.sort_by_key(|a| a.pubkey.serialize());
 
         let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
             .iter()

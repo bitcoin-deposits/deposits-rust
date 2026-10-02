@@ -562,7 +562,6 @@ impl Node {
             );
         }
 
-        let mut participants: Vec<(XOnlyPublicKey, [u8; 20])> = Vec::new();
         let mut quorum_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
         let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
         let mut saw_dispute_enter = false;
@@ -580,18 +579,23 @@ impl Node {
                     LedgerOperation::DisputeEnter { .. } => {
                         saw_dispute_enter = true;
                     }
-                    LedgerOperation::DisputeArmed {
-                        commitment_hash, ..
-                    } => {
-                        let xonly = u.operator_id.x_only_public_key().0;
-                        if !participants.iter().any(|(pk, _)| *pk == xonly) {
-                            participants.push((xonly, commitment_hash));
-                        }
-                    }
                     _ => {}
                 }
             }
         }
+        let participants: Vec<(XOnlyPublicKey, [u8; 20])> =
+            match crate::node::armers::eligible_armers(
+                &*self.wallet.chain_backend(),
+                &updates,
+                None,
+            ) {
+                Ok(set) => set
+                    .participants
+                    .iter()
+                    .map(|a| (a.xonly(), a.participant.commitment_hash))
+                    .collect(),
+                Err(e) => return (false, None, Some(format!("lottery participants: {}", e))),
+            };
 
         if !fork_disputed && !saw_dispute_enter {
             return (
@@ -615,9 +619,8 @@ impl Node {
             None => return (false, None, Some("no LedgerOpen found".to_string())),
         };
 
-        // Sorted-armer order — must match the confiscation TX's vout
-        // layout (vouts 1..=N in xonly-sorted order).
-        participants.sort_by_key(|(pk, _)| pk.serialize());
+        // `eligible_armers` returns them in sorted-armer order, which must
+        // match the confiscation TX's vout layout (vouts 1..=N).
 
         let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
             .iter()
@@ -1346,50 +1349,14 @@ impl Node {
         (true, Some(result.to_string()), None)
     }
 
-    /// Walk the disputed ledger's history, replay to `last_valid_sequence`,
-    /// and verify every fork-branch `DisputeArmed`'s replacement-collateral
-    /// declaration. Returns `Err(refusal_reason)` for the cosigner to
-    /// surface back to the requester.
-    ///
-    /// Verification mirrors DEP-03 §"Replacement collateral declaration":
-    /// 1. Each disputant's `DisputeArmed` MUST carry a non-`None`
-    ///    `replacement_collateral`.
-    /// 2. The declared amount MUST satisfy
-    ///    `amount ≥ obligations × (collateral / reserves) + fee_estimate`.
-    /// 3. The declared outpoint MUST exist on-chain, be unspent, hold
-    ///    at least the declared amount, and have at least
-    ///    `policy.min_confirmations` confirmations.
+    /// DEP-03 §"Replacement collateral declaration": the lottery's
+    /// participants are the armers that pass the eligibility cut
+    /// ([`crate::node::armers`]). Refuses only when fewer than two pass.
     async fn verify_disputants_replacement_collateral(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> Result<(), String> {
-        use crate::node::replacement_collateral::{
-            check_inequality, collateral_basis_at, CollateralCheck, CollateralPolicy,
-        };
-        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-        use deposits_core::messages::ReplacementCollateral;
         use deposits_core::SignedLedgerUpdate;
-        use nostr_sdk::prelude::*;
-
-        // The sender (operator initiating confiscation) provides
-        // `last_valid_sequence`. Older clients that don't yet send this
-        // field cause us to skip the replacement-collateral check and
-        // fall back to legacy behaviour — log loudly so misconfigured
-        // deployments are visible. RC6 will make this required.
-        let last_valid_sequence = match request
-            .params
-            .get("last_valid_sequence")
-            .and_then(|v| v.as_u64())
-        {
-            Some(seq) => seq,
-            None => {
-                tracing::warn!(
-                    "confiscation_sign request missing last_valid_sequence — \
-                     skipping replacement-collateral verification (legacy sender)"
-                );
-                return Ok(());
-            }
-        };
 
         let ledger_id = &request.ledger_id;
 
@@ -1404,130 +1371,25 @@ impl Node {
         }
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
 
-        // Identify the original operator (sequence 0). All operator-key
-        // updates ≤ lvs come from them; updates with a different
-        // operator_id and sequence > lvs are fork-branch DisputeArmed
-        // candidates we need to verify.
-        let original_operator = updates
-            .iter()
-            .find(|u| u.sequence_number == 0)
-            .map(|u| u.operator_id)
-            .ok_or_else(|| "could not find ledger genesis".to_string())?;
-
-        // Obligations at `last_valid_sequence`, the fork point, never the
-        // disputed tip: a fraudulent credit past lvs must not raise the bond
-        // an honest disputant has to post.
-        let basis = collateral_basis_at(&updates, original_operator, last_valid_sequence)?;
-        let obligations_msat = basis.obligations_msat;
-        let latest_qb_collateral_msat = basis.qb_collateral_msat;
-        let latest_qb_reserves_msat = basis.qb_reserves_msat;
-        let policy = CollateralPolicy::default();
-        let required_sats = basis
-            .required_sats(&policy)
-            .ok_or_else(|| "QuorumBegin reserves were zero".to_string())?;
+        // DEP-03: the participant set is the eligibility cut. A failing
+        // declaration excludes its armer; it is never a reason to refuse.
+        let set =
+            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?;
+        if set.participants.len() < 2 {
+            return Err(format!(
+                "only {} of {} armers are lottery participants (snapshot {})",
+                set.participants.len(),
+                set.participants.len() + set.excluded.len(),
+                set.snapshot
+            ));
+        }
         tracing::info!(
-            "    Required replacement collateral ≥ {} sats (obligations_msat={}, ratio={}/{})",
-            required_sats,
-            obligations_msat,
-            latest_qb_collateral_msat,
-            latest_qb_reserves_msat
+            "    {} lottery participants, {} excluded (snapshot {}, floor {} sats)",
+            set.participants.len(),
+            set.excluded.len(),
+            set.snapshot,
+            set.required_sats
         );
-
-        // Walk fork-branch DisputeArmed events. Each disputant's latest
-        // armed event in this dispute is the one we verify.
-        use std::collections::HashMap;
-        let mut latest_armed: HashMap<
-            bitcoin::secp256k1::PublicKey,
-            (u64, Option<ReplacementCollateral>),
-        > = HashMap::new();
-        for update in &updates {
-            if update.operator_id == original_operator {
-                continue;
-            }
-            if update.sequence_number <= last_valid_sequence {
-                continue;
-            }
-            let op = match deposits_core::messages::LedgerOperation::tlv_decode(&update.message) {
-                Ok(o) => o,
-                Err(_) => continue,
-            };
-            if let deposits_core::messages::LedgerOperation::DisputeArmed {
-                replacement_collateral,
-                ..
-            } = op
-            {
-                let entry = latest_armed.entry(update.operator_id).or_insert((0, None));
-                if update.sequence_number >= entry.0 {
-                    *entry = (update.sequence_number, replacement_collateral);
-                }
-            }
-        }
-
-        if latest_armed.is_empty() {
-            return Err("no fork-branch DisputeArmed events observed".into());
-        }
-
-        for (disputant, (_, decl)) in &latest_armed {
-            let serialized: [u8; 33] = disputant.serialize();
-            let prefix = hex::encode(&serialized[..8]);
-            let rc = match decl {
-                Some(rc) => rc,
-                None => {
-                    return Err(format!(
-                        "disputant {} declared no replacement_collateral",
-                        prefix
-                    ));
-                }
-            };
-            // Pure inequality check first (no I/O).
-            match check_inequality(rc.amount, required_sats) {
-                CollateralCheck::Ok => {}
-                other => {
-                    return Err(format!(
-                        "disputant {} replacement_collateral fails inequality: {:?}",
-                        prefix, other
-                    ));
-                }
-            }
-            // Esplora outpoint check.
-            let txid =
-                bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
-            match self.wallet.get_outpoint_value_and_confs(txid, rc.vout) {
-                Ok(Some((value_sats, confs))) => {
-                    if value_sats < rc.amount {
-                        return Err(format!(
-                            "disputant {} declared {} sats but UTXO holds only {} sats",
-                            prefix, rc.amount, value_sats
-                        ));
-                    }
-                    if confs < policy.min_confirmations {
-                        return Err(format!(
-                            "disputant {} UTXO has {} confirmations (< {} required)",
-                            prefix, confs, policy.min_confirmations
-                        ));
-                    }
-                    tracing::info!(
-                        "    Disputant {} replacement_collateral OK ({} sats @ {} confs)",
-                        prefix,
-                        value_sats,
-                        confs
-                    );
-                }
-                Ok(None) => {
-                    return Err(format!(
-                        "disputant {} replacement_collateral outpoint not on-chain or spent",
-                        prefix
-                    ));
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "esplora error checking disputant {}: {}",
-                        prefix, e
-                    ));
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -1713,35 +1575,16 @@ impl Node {
             latest_qb.ok_or_else(|| "no QuorumBegin observed".to_string())?;
         let obligations_sats = state.total_deposit_balance() / 1000;
 
-        // 6. Collect fork-branch DisputeArmed participants (post last_valid_sequence)
-        let mut participants: Vec<LotteryParticipant> = Vec::new();
-        for u in &updates {
-            if u.sequence_number <= last_valid_sequence {
-                continue;
-            }
-            if let Ok(LedgerOperation::DisputeArmed {
-                commitment_hash,
-                target_reserves,
-                ..
-            }) = LedgerOperation::tlv_decode(&u.message)
-            {
-                let xonly = u.operator_id.x_only_public_key().0;
-                if !participants.iter().any(|p| p.pubkey == xonly) {
-                    participants.push(LotteryParticipant::new(
-                        xonly,
-                        commitment_hash,
-                        target_reserves,
-                    ));
-                }
-            }
-        }
+        // 6. Lottery participants: the DEP-03 eligibility cut.
+        let participants: Vec<LotteryParticipant> =
+            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?
+                .lottery_participants();
         if participants.len() < 2 {
             return Err(format!(
                 "only {} DisputeArmed participants found",
                 participants.len()
             ));
         }
-        participants.sort_by_key(|a| a.pubkey.serialize());
 
         let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
             .iter()

@@ -431,10 +431,6 @@ impl Node {
         // ledger's whole chain inside the claim task's 10 s periodic.
         let updates = self.fetch_lottery_updates(ledger_id).await;
 
-        // One participant per armer: a re-arm (collateral upgrade) repeats
-        // DisputeArmed with the same commitment, and a duplicate would put
-        // the wrong k into the claim leaf (as `initiate_confiscations`).
-        let mut participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = Vec::new();
         let mut our_armed = None;
         let mut original_operator = None;
         for update in &updates {
@@ -442,31 +438,27 @@ impl Node {
                 Ok(LedgerOperation::LedgerOpen { operator_id, .. }) => {
                     original_operator = Some(operator_id);
                 }
-                Ok(LedgerOperation::DisputeArmed {
-                    commitment_hash,
-                    target_reserves,
-                    ..
-                }) => {
-                    let x_only = update.operator_id.x_only_public_key().0;
-                    if !participants.iter().any(|(_, p)| p.pubkey == x_only) {
-                        participants.push((
-                            update.operator_id,
-                            LotteryParticipant::new(x_only, commitment_hash, target_reserves),
-                        ));
-                    }
-                    if update.operator_id == self.node_id {
-                        our_armed = Some(update.clone());
-                    }
+                Ok(LedgerOperation::DisputeArmed { .. }) if update.operator_id == self.node_id => {
+                    our_armed = Some(update.clone());
                 }
                 _ => {}
             }
         }
+        // Participants: the DEP-03 eligibility cut, one per armer, sorted
+        // (the set the confiscation was built with).
+        let participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = self
+            .lottery_armer_set(ledger_id)
+            .await
+            .map_err(Error::Protocol)?
+            .participants
+            .into_iter()
+            .map(|a| (a.key, a.participant))
+            .collect();
         if participants.is_empty() {
             return Err(Error::Protocol(
                 "No DisputeArmed participants found".to_string(),
             ));
         }
-        participants.sort_by_key(|a| a.1.pubkey.serialize());
 
         // Preimages are matched to participants by HASH160(preimage) ==
         // commitment_hash, NOT by who published them: the reveal is authored

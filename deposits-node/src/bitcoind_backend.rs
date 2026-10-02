@@ -463,6 +463,31 @@ impl ChainBackend for BitcoindRpcBackend {
         Ok(None)
     }
 
+    fn confirmed_spend(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+        script: &bitcoin::Script,
+        scan_from: u32,
+    ) -> Result<crate::chain_backend::ConfirmedSpend, Error> {
+        use crate::chain_backend::ConfirmedSpend;
+        // include_mempool=false: null means spent on the confirmed chain (the
+        // caller has already checked the output exists).
+        let confirmed: Option<GetTxOut> = self.call(
+            "gettxout",
+            serde_json::json!([outpoint.txid.to_string(), outpoint.vout, false]),
+        )?;
+        if confirmed.is_some() {
+            return Ok(ConfirmedSpend::Unspent);
+        }
+        match self.find_spending_tx(outpoint, script, scan_from)? {
+            Some(tx) => match self.get_tx_block_height(&tx.compute_txid())? {
+                Some(h) => Ok(ConfirmedSpend::SpentAt(h)),
+                None => Ok(ConfirmedSpend::SpentBefore(scan_from)),
+            },
+            None => Ok(ConfirmedSpend::SpentBefore(scan_from)),
+        }
+    }
+
     fn scan_outpoint_spends(
         &self,
         from: u32,

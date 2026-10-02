@@ -3183,6 +3183,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         }
     }
 
+    // DEP-03 eligibility cut: the participant set every party agrees on.
+    participants = crate::node::armers::cli_armer_set(&config.electrum_url, events.iter())?
+        .lottery_participants();
     if participants.len() < 2 {
         return Err(format!(
             "Need at least 2 DisputeArmed participants, found {}",
@@ -3927,6 +3930,9 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
         }
     }
 
+    // DEP-03 eligibility cut: the participant set every party agrees on.
+    participants = crate::node::armers::cli_armer_set(&config.electrum_url, events.iter())?
+        .lottery_participants();
     if participants.len() < 2 {
         return Err(format!(
             "Need at least 2 DisputeArmed participants, found {}",
@@ -4675,12 +4681,15 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         }
     }
 
+    // DEP-03 eligibility cut (sorted): the set the confiscation was built with.
+    participants = crate::node::armers::cli_armer_set(&config.electrum_url, update_events.iter())?
+        .participants
+        .into_iter()
+        .map(|a| (a.key, a.participant))
+        .collect();
     if participants.is_empty() {
         return Err("No DisputeArmed participants found".into());
     }
-
-    // Sort participants by x-only pubkey for deterministic order (must match confiscate)
-    participants.sort_by_key(|a| a.1.pubkey.serialize());
 
     // Debug: print participant order with full details
     println!("  Participant order (lottery-claim):");
@@ -6188,7 +6197,15 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
             }
         }
     }
-    participants.sort_by_key(|a| a.pubkey.serialize());
+    let set = crate::node::armers::eligible_armers(&*node.wallet.chain_backend(), &updates, None)?;
+    for (a, reason) in &set.excluded {
+        println!(
+            "  - {} EXCLUDED: {}",
+            hex::encode(a.xonly().serialize()),
+            reason
+        );
+    }
+    participants = set.lottery_participants();
     for p in &participants {
         println!(
             "  - {} target={}",
@@ -6613,8 +6630,12 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
         )
         .into());
     }
-    participants.sort_by_key(|a| a.1.pubkey.serialize());
-    println!("  {} DisputeArmed participants", participants.len());
+    participants = crate::node::armers::cli_armer_set_updates(&config.electrum_url, &updates)?
+        .participants
+        .into_iter()
+        .map(|a| (a.key, a.participant))
+        .collect();
+    println!("  {} lottery participants", participants.len());
     println!("  {} replacement-collateral declarations", rc_decls.len());
 
     // All participants MUST have declared RCs — otherwise we have no
