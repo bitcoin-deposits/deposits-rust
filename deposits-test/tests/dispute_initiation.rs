@@ -19,9 +19,11 @@
 //!      follows the real chain past it → "conforming". A quiescent victim
 //!      makes the forged update the unambiguous chain tip.
 //!   3. op0 publishes a deliberately non-conforming `kind:9100` update via
-//!      `deposits-node danger publish-invalid <ledger> invalid-hash` — a
-//!      feature-gated test command. `invalid-hash` links the new update to a
-//!      corrupted `previous_hash`, so any chain-validating member detects it.
+//!      `deposits-node danger publish-invalid <ledger> skip-sequence` — a
+//!      feature-gated test command. `skip-sequence` follows the tip but claims
+//!      a later sequence: a NonConformingUpdate members prove on sight. (An
+//!      update linking to nothing — `invalid-hash` — is not provable, so
+//!      members do not dispute it.)
 //!   4. A real quorum member (op0's first cosigner) runs
 //!      `deposits-node recovery start <ledger>`. That command independently
 //!      scans the ledger, finds the break, and publishes the `kind:9103`
@@ -115,9 +117,9 @@ fn fraud_proof_triggers_dispute_state() {
     );
 
     // ── 3. Op0 publishes a deliberately broken update ─────────────
-    eprintln!("[fraud] op0 publishes invalid-hash update via `danger publish-invalid`");
+    eprintln!("[fraud] op0 publishes skip-sequence update via `danger publish-invalid`");
     let out = Command::new(&node)
-        .args(["danger", "publish-invalid", &ledger, "invalid-hash"])
+        .args(["danger", "publish-invalid", &ledger, "skip-sequence"])
         .args(["--seed", &op_seed(accused_op_idx)])
         .args(["--name", &op_name(accused_op_idx)])
         .args(["--network", "regtest"])
@@ -153,7 +155,7 @@ fn fraud_proof_triggers_dispute_state() {
     );
     let out = Command::new(&node)
         .args(["recovery", "start", &ledger])
-        .args(["--reason", "integration test: forged invalid-hash"])
+        .args(["--reason", "integration test: forged skip-sequence"])
         .args(["--seed", &disputer_seed])
         .args(["--name", &op_name(disputer_op)])
         .args(["--network", "regtest"])

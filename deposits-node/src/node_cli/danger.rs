@@ -636,7 +636,8 @@ async fn danger_publish_invalid(args: &[String]) -> Result<(), Box<dyn std::erro
 
     let last_update = ledger.history.last().unwrap();
     let current_seq = last_update.sequence_number;
-    let content_hash = last_update.content_hash;
+    // An update names its predecessor by chain_hash (DEP-02 §Hash Chain), not content_hash.
+    let content_hash = last_update.chain_hash();
 
     println!("=== DANGER: Publishing Invalid Ledger Update ===");
     println!();

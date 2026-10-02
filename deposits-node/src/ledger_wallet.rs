@@ -301,7 +301,9 @@ impl LedgerWallet {
         quorum_members: Vec<PublicKey>,
         member_expiries: Vec<u32>,
         ledger_hash: [u8; 32],
-        amount_sats: u64,
+        // `None` sweeps the whole ledger wallet into the vault, the fee
+        // taken out of it by the builder (sized to the inputs it spends).
+        amount_sats: Option<u64>,
         fee_rate_sat_per_vb: f32,
         // Name of the protocol ruleset the new UTXO commits to. Same
         // value that the QuorumBegin operation will record. Caller's
@@ -351,11 +353,19 @@ impl LedgerWallet {
         let mut psbt = {
             let mut wallet = self.inner.lock().unwrap();
             let mut tx_builder = wallet.build_tx();
-            tx_builder
-                .add_recipient(new_script_pubkey.clone(), Amount::from_sat(amount_sats))
-                .fee_rate(FeeRate::from_sat_per_vb_u32(
-                    fee_rate_sat_per_vb.max(1.0) as u32
-                ));
+            match amount_sats {
+                Some(a) => {
+                    tx_builder.add_recipient(new_script_pubkey.clone(), Amount::from_sat(a));
+                }
+                None => {
+                    tx_builder
+                        .drain_wallet()
+                        .drain_to(new_script_pubkey.clone());
+                }
+            }
+            tx_builder.fee_rate(FeeRate::from_sat_per_vb_u32(
+                fee_rate_sat_per_vb.max(1.0) as u32
+            ));
             tx_builder
                 .finish()
                 .map_err(|e| Error::Wallet(format!("build activation tx: {}", e)))?
@@ -472,6 +482,7 @@ impl LedgerWallet {
             txid: tx.compute_txid(),
             vout,
         };
+        let amount_sats = tx.output[vout as usize].value.to_sat();
         let new_info = TaprootReservesInfo {
             outpoint: new_outpoint,
             amount: amount_sats,

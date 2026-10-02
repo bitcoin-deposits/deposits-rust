@@ -93,7 +93,8 @@ pub use constants::{
 };
 pub use error::{DepositsError, DepositsResult, HandlerError};
 pub use ledger::{
-    Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator, StagedUpdate,
+    IncomingUpdate, Ledger, LedgerManager, LedgerProtocolState, LedgerRole, LedgerValidator,
+    StagedUpdate,
 };
 pub use messages::{DepositsMessage, HashStrategy, LedgerOperation};
 pub use tapscript_reserves::{

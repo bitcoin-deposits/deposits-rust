@@ -982,7 +982,21 @@ impl Node {
         {
             let ledger = ledger_arc.read().unwrap();
             let local_seq = ledger.next_sequence();
-            if inbound.update.sequence_number > local_seq {
+            let position = ledger.classify_incoming_update(&inbound.update);
+            if position == deposits_core::IncomingUpdate::Unlinked {
+                // Follows nothing we hold. Not proof (the NonConformingUpdate
+                // verifier fails closed on it), so no dispute; the actor
+                // refuses to apply it.
+                tracing::warn!(
+                    "Ledger {}...: update at seq {} does not follow our tip — ignored, not disputable",
+                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                    inbound.update.sequence_number,
+                );
+                return;
+            }
+            // A skip follows our tip: nothing is missing, it is the fault
+            // validation below reports. Only a true gap is backfilled.
+            if position == deposits_core::IncomingUpdate::Gap {
                 tracing::info!(
                     "Ledger {}... has gap: local={}, incoming seq={}. Attempting event store catch-up.",
                     &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
@@ -1080,11 +1094,13 @@ impl Node {
                 return;
             }
 
-            // Get the last valid sequence number (the one before this invalid update)
-            let last_valid_seq = if inbound.update.sequence_number > 0 {
-                inbound.update.sequence_number - 1
-            } else {
-                0
+            // The last valid update is our tip: the faulty update follows it.
+            let last_valid_seq = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&inbound.ledger_id)
+                    .map(|arc| arc.read().unwrap().next_sequence().saturating_sub(1))
+                    .unwrap_or_else(|| inbound.update.sequence_number.saturating_sub(1))
             };
 
             // Auto-arm for the dispute

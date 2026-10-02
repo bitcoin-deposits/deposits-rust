@@ -875,11 +875,19 @@ impl Node {
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();
 
-            // Inherit the active ruleset by default — rotating an
-            // existing legacy ledger keeps it on legacy. Operator
-            // overrides via `--protocol-version`; we still verify
-            // every pending member supports it before proceeding.
-            let rs = ledger.state.active_ruleset_name.clone();
+            // A rotation inherits the active ruleset (an existing legacy
+            // ledger stays on legacy until the operator passes
+            // `--protocol-version`). A first QuorumBegin has nothing to
+            // inherit — a fresh ledger's state merely defaults to "legacy" —
+            // so it takes the newest ruleset every member supports: DEP-03
+            // anchors the recovery tiers to quorum_expiry, which legacy's
+            // literal 1008/2016/4032 heights do not. Either way every
+            // pending member's support is checked below.
+            let rs = if ledger.state.quorum_expiry.is_none() {
+                newest_ruleset_supported_by(source)
+            } else {
+                ledger.state.active_ruleset_name.clone()
+            };
 
             (members, lids, expiries, hash, collateral, rs)
         };
@@ -1091,22 +1099,20 @@ impl Node {
                 // balance minus a small fee buffer. With external
                 // pre-funding, the operator has already sent the
                 // activation amount to the ledger's deposit address.
-                let chosen_amount = match amount_sats {
-                    Some(a) => a,
-                    None => {
-                        let bal = ledger_wallet.balance_sats().unwrap_or(0);
-                        if bal <= 1000 {
-                            return Err(Error::Wallet(format!(
-                                "QuorumBegin: insufficient ledger wallet balance: {} sats \
-                                 (need > 1000 sats to leave a fee buffer; \
-                                 use `deposits-node ledger address {}` and pre-fund it)",
-                                bal,
-                                &ledger_id[..16.min(ledger_id.len())]
-                            )));
-                        }
-                        bal.saturating_sub(1000)
-                    }
-                };
+                // Without an explicit amount the whole ledger wallet is swept
+                // into the vault and the builder sizes the fee to the inputs
+                // (a flat buffer fell short once the wallet held 3+ coins).
+                let bal = ledger_wallet.balance_sats().unwrap_or(0);
+                if amount_sats.is_none() && bal <= 1000 {
+                    return Err(Error::Wallet(format!(
+                        "QuorumBegin: insufficient ledger wallet balance: {} sats \
+                         (need > 1000 sats to leave a fee buffer; \
+                         use `deposits-node ledger address {}` and pre-fund it)",
+                        bal,
+                        &ledger_id[..16.min(ledger_id.len())]
+                    )));
+                }
+                let chosen_amount = amount_sats.unwrap_or(bal);
                 // Guard against the cryptic "Insufficient funds: 0 available"
                 // that BDK's coin selector emits when the ledger wallet is
                 // empty. With an explicit --amount-sats (the bootstrap always
@@ -1147,7 +1153,7 @@ impl Node {
                     quorum_members.clone(),
                     quorum_expiries.clone(),
                     ledger_hash,
-                    chosen_amount,
+                    amount_sats,
                     5.0,
                     &new_ruleset_name,
                 )?;
@@ -2952,5 +2958,67 @@ async fn wait_for_outpoint_confs(
             )));
         }
         tokio::time::sleep(poll_interval).await;
+    }
+}
+
+/// The newest registered ruleset that every member declares support for
+/// (an empty declaration means legacy only); legacy if none newer is shared.
+fn newest_ruleset_supported_by(members: &[deposits_core::types::QuorumMember]) -> String {
+    deposits_core::ruleset::all_supported_names()
+        .into_iter()
+        .rev()
+        .find(|name| {
+            members
+                .iter()
+                .all(|m| deposits_core::ruleset::member_supports(&m.supported_rulesets, name))
+        })
+        .unwrap_or("legacy")
+        .to_string()
+}
+
+#[cfg(test)]
+mod first_ruleset_tests {
+    use super::newest_ruleset_supported_by;
+    use deposits_core::types::QuorumMember;
+
+    fn member(supported: &[&str]) -> QuorumMember {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
+        QuorumMember {
+            pubkey: bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk),
+            ledger_id: String::new(),
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
+            membership_until: None,
+            dispute_response_blocks: None,
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
+            supported_rulesets: supported.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn first_quorum_takes_the_newest_shared_ruleset() {
+        let all = deposits_core::ruleset::all_supported_names();
+        let newest = *all.last().unwrap();
+        assert_eq!(
+            newest_ruleset_supported_by(&[member(&all), member(&all)]),
+            newest
+        );
+        assert_eq!(
+            newest_ruleset_supported_by(&[member(&all), member(&["legacy", "cltv-offset-v2"])]),
+            "cltv-offset-v2"
+        );
+        // A member that declares nothing supports legacy only.
+        assert_eq!(
+            newest_ruleset_supported_by(&[member(&all), member(&[])]),
+            "legacy"
+        );
     }
 }

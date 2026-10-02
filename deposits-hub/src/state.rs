@@ -160,9 +160,16 @@ impl HubState {
         // sync it into state.hub_pubkey if it changed (shouldn't, but
         // be defensive — a wiped secret with a stale state file would
         // be confusing otherwise).
-        let secret_bytes = if secret_path.exists() {
-            let raw = std::fs::read_to_string(&secret_path)?;
-            let bytes = hex::decode(raw.trim())
+        // Created once, atomically: the hub and a concurrent `spawn-line`
+        // (or two hubs) on a fresh dir must end up with the same key, or
+        // the signer is told to register with a hub nobody runs.
+        let secret_hex = create_secret_once(&secret_path, || {
+            use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1};
+            let (sk, _pk) = Secp256k1::new().generate_keypair(&mut OsRng);
+            hex::encode(sk.secret_bytes())
+        })?;
+        let secret_bytes = {
+            let bytes = hex::decode(secret_hex.trim())
                 .map_err(|e| StateError::Hex(format!("nostr secret: {}", e)))?;
             if bytes.len() != 32 {
                 return Err(StateError::BadKeyLen(bytes.len()));
@@ -170,24 +177,6 @@ impl HubState {
             let mut out = [0u8; 32];
             out.copy_from_slice(&bytes);
             out
-        } else {
-            // Generate fresh + persist mode 0600.
-            use bitcoin::secp256k1::{rand::rngs::OsRng, Secp256k1, SecretKey};
-            let secp = Secp256k1::new();
-            let (sk, _pk) = secp.generate_keypair(&mut OsRng);
-            let bytes = sk.secret_bytes();
-            // Cast to bitcoin::secp256k1 to ensure type alignment.
-            let _: SecretKey =
-                SecretKey::from_slice(&bytes).expect("freshly generated key is valid");
-            std::fs::write(&secret_path, hex::encode(bytes))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = std::fs::metadata(&secret_path)?.permissions();
-                perms.set_mode(0o600);
-                std::fs::set_permissions(&secret_path, perms)?;
-            }
-            bytes
         };
 
         // Derive pubkey from secret to populate / sanity-check state.
@@ -227,7 +216,7 @@ impl HubState {
     /// during write leaves the prior state intact.
     pub fn save(&self, dir: &Path) -> Result<(), StateError> {
         let path = dir.join("hub.json");
-        let tmp = path.with_extension("json.tmp");
+        let tmp = unique_tmp(&path);
         let body = serde_json::to_string_pretty(self)?;
         std::fs::write(&tmp, body)?;
         std::fs::rename(tmp, path)?;
@@ -259,34 +248,28 @@ impl HubState {
     /// actually needs to derive.
     pub fn load_or_init_master_seed(dir: &Path) -> Result<[u8; 32], StateError> {
         let path = Self::master_seed_path(dir);
-        if path.exists() {
-            let raw = std::fs::read_to_string(&path)?;
-            let bytes = hex::decode(raw.trim())
-                .map_err(|e| StateError::Hex(format!("master seed: {}", e)))?;
-            if bytes.len() != 32 {
-                return Err(StateError::BadKeyLen(bytes.len()));
-            }
-            let mut out = [0u8; 32];
-            out.copy_from_slice(&bytes);
-            return Ok(out);
+        let existed = path.exists();
+        let raw = create_secret_once(&path, || {
+            use bitcoin::secp256k1::rand::rngs::OsRng;
+            use bitcoin::secp256k1::rand::RngCore;
+            let mut seed = [0u8; 32];
+            OsRng.fill_bytes(&mut seed);
+            hex::encode(seed)
+        })?;
+        let bytes =
+            hex::decode(raw.trim()).map_err(|e| StateError::Hex(format!("master seed: {}", e)))?;
+        if bytes.len() != 32 {
+            return Err(StateError::BadKeyLen(bytes.len()));
         }
-        use bitcoin::secp256k1::rand::rngs::OsRng;
-        use bitcoin::secp256k1::rand::RngCore;
         let mut seed = [0u8; 32];
-        OsRng.fill_bytes(&mut seed);
-        std::fs::write(&path, hex::encode(seed))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&path)?.permissions();
-            perms.set_mode(0o600);
-            std::fs::set_permissions(&path, perms)?;
+        seed.copy_from_slice(&bytes);
+        if !existed {
+            tracing::warn!(
+                "hub: generated new master seed at {} — back this file up; \
+                 losing it means losing every hub-spawned signer's keys",
+                path.display()
+            );
         }
-        tracing::warn!(
-            "hub: generated new master seed at {} — back this file up; \
-             losing it means losing every hub-spawned signer's keys",
-            path.display()
-        );
         Ok(seed)
     }
 
@@ -379,10 +362,85 @@ pub fn derive_signer_seed(master: &[u8; 32], index: u32) -> Result<[u8; 32], Sta
     Ok(out)
 }
 
+/// A sibling temp path no other writer (process or thread) will pick.
+fn unique_tmp(path: &Path) -> PathBuf {
+    use bitcoin::secp256k1::rand::{rngs::OsRng, RngCore};
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(
+        ".tmp.{}.{:016x}",
+        std::process::id(),
+        OsRng.next_u64()
+    ));
+    path.with_file_name(name)
+}
+
+/// The contents of a mode-0600 secret file at `path`, creating it with
+/// `make()` if absent. Creation is atomic and exclusive: the secret is
+/// written to a private temp file and hard-linked into place, which fails
+/// if another process got there first; the loser then reads the winner's.
+/// So concurrent first runs agree, and no reader ever sees a partial file.
+fn create_secret_once(path: &Path, make: impl FnOnce() -> String) -> Result<String, StateError> {
+    if let Ok(existing) = std::fs::read_to_string(path) {
+        return Ok(existing);
+    }
+    let tmp = unique_tmp(path);
+    {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(make().as_bytes())?;
+        f.sync_all()?;
+    }
+    let linked = std::fs::hard_link(&tmp, path);
+    let _ = std::fs::remove_file(&tmp);
+    match linked {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok(std::fs::read_to_string(path)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn concurrent_first_inits_agree_on_the_hub_key() {
+        // The hub and `spawn-line` both init a fresh dir at startup. They
+        // used to race exists()/write() and could each mint their own key.
+        for _ in 0..20 {
+            let tmp = TempDir::new().unwrap();
+            let dir = tmp.path().to_path_buf();
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+            let keys: Vec<String> = (0..8)
+                .map(|_| {
+                    let (dir, barrier) = (dir.clone(), barrier.clone());
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        HubState::load_or_init(&dir).unwrap().hub_pubkey
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect();
+            assert!(
+                keys.windows(2).all(|w| w[0] == w[1]),
+                "keys diverged: {:?}",
+                keys
+            );
+            let on_disk = HubState::load_or_init(&dir).unwrap().hub_pubkey;
+            assert_eq!(keys[0], on_disk);
+        }
+    }
 
     #[test]
     fn fresh_init_generates_keypair_and_persists() {

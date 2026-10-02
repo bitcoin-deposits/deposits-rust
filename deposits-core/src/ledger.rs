@@ -119,6 +119,21 @@ pub struct LedgerProtocolState {
     pub pending_updates: HashMap<u64, SignedLedgerUpdate>,
 }
 
+/// An incoming update against a replica's tip ([`Ledger::classify_incoming_update`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IncomingUpdate {
+    /// Already at or below our tip: redelivery, or a conflicting copy.
+    Past,
+    /// The next sequence, following our tip.
+    Next,
+    /// The next sequence, following something other than our tip.
+    Unlinked,
+    /// Follows our tip but claims a later sequence: a provable skip.
+    Skip,
+    /// A later sequence that does not follow our tip: updates are missing.
+    Gap,
+}
+
 /// Ledger state manager.
 ///
 /// Maintains the hash-chained ledger state and provides methods
@@ -486,49 +501,52 @@ impl Ledger {
         Ok(())
     }
 
+    /// Where an incoming update sits against this replica's tip, by sequence and
+    /// `previous_hash` alone (no signature check).
+    pub fn classify_incoming_update(&self, update: &SignedLedgerUpdate) -> IncomingUpdate {
+        let next_seq = self.next_sequence();
+        let tip_hash = self.history.last().map(|u| u.chain_hash());
+        let follows_tip = tip_hash == Some(update.previous_hash)
+            || (tip_hash.is_none() && update.previous_hash == [0u8; 32]);
+        if update.sequence_number < next_seq {
+            IncomingUpdate::Past
+        } else if update.sequence_number == next_seq {
+            if follows_tip {
+                IncomingUpdate::Next
+            } else {
+                IncomingUpdate::Unlinked
+            }
+        } else if tip_hash.is_some() && follows_tip {
+            IncomingUpdate::Skip
+        } else {
+            IncomingUpdate::Gap
+        }
+    }
+
     /// Validate only the hash chain of an incoming update (no signature check).
     ///
-    /// Used by the daemon to detect fraudulent hash-chain breaks without
-    /// relying on operator signature verification (which has a format
-    /// mismatch across the codebase).
+    /// The one chain fault a replica can prove on sight is a skip: an update
+    /// that follows our tip by `previous_hash` but claims a later sequence.
+    /// That is the structural NonConformingUpdate `verify_non_conforming_update`
+    /// grounds ("follows an update of this ledger at another sequence"), so a
+    /// member that disputes on it holds the proof its cosigners will demand.
+    /// An update that follows nothing we hold (`Unlinked`) is not reported:
+    /// the verifier fails closed on it, so a dispute on it could never
+    /// confiscate. A later sequence that does not follow our tip is a gap.
     pub fn validate_incoming_update_hash_chain(
         &self,
         update: &SignedLedgerUpdate,
     ) -> DepositsResult<()> {
-        // Validate hash chain for the expected next update only.
-        //
-        // Past updates (seq < next_seq) were already validated when first
-        // received — redelivery via Nostr is normal and not a violation.
-        // Future updates (seq > next_seq) can't be validated until we
-        // catch up — the caller handles gap detection separately.
-        //
-        // After history truncation, entries aren't addressable by
-        // sequence_number as an index, so we compare against the tip.
-        if update.sequence_number > 0 {
-            let next_seq = self.next_sequence();
-
-            if update.sequence_number == next_seq {
-                // Expected next update — previous_hash must match our tip's chain_hash
-                // chain_hash = SHA256(content_hash || operator_signature)
-                let tip_hash = self
-                    .history
-                    .last()
-                    .map(|u| u.chain_hash())
-                    .unwrap_or([0u8; 32]);
-                if update.previous_hash != tip_hash {
-                    return Err(DepositsError::ProtocolViolation {
-                        violation_type: "hash_chain_break".to_string(),
-                        details: format!(
-                            "Previous hash mismatch at seq {}: expected {:02x?}, got {:02x?}",
-                            update.sequence_number,
-                            &tip_hash[..8],
-                            &update.previous_hash[..8]
-                        ),
-                    });
-                }
-            }
+        if self.classify_incoming_update(update) == IncomingUpdate::Skip {
+            return Err(DepositsError::ProtocolViolation {
+                violation_type: "sequence_skip".to_string(),
+                details: format!(
+                    "update at seq {} follows our tip at seq {}",
+                    update.sequence_number,
+                    self.next_sequence().saturating_sub(1)
+                ),
+            });
         }
-
         Ok(())
     }
 
@@ -2379,6 +2397,82 @@ mod tests {
             ledger.state.deposits.get(&deposit_id).unwrap().balance,
             50_000
         );
+    }
+
+    #[test]
+    fn incoming_update_classified_against_the_tip() {
+        let op = test_pubkey();
+        let mut ledger = Ledger::new_as_operator(op, test_pubkey_2().to_string(), 0);
+        let applied = ledger
+            .apply_operation(&LedgerOperation::LedgerOpen {
+                operator_id: op,
+                reserves_id: "bcrt1q...".to_string(),
+                genesis_block: 0,
+                reserves_amount: 100_000,
+                collateral_amount: 0,
+            })
+            .unwrap();
+        let tip = SignedLedgerUpdate {
+            message: vec![1, 2, 3],
+            message_type: 1,
+            operator_id: op,
+            ledger_id: [9u8; 32],
+            sequence_number: applied.sequence_number,
+            previous_hash: applied.previous_hash,
+            content_hash: [5u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            operator_signature: [7u8; 64],
+            cosignatures: Vec::new(),
+        };
+        ledger.history = vec![tip.clone()];
+        let at = |seq: u64, prev: [u8; 32]| SignedLedgerUpdate {
+            sequence_number: seq,
+            previous_hash: prev,
+            ..tip.clone()
+        };
+        let next = tip.sequence_number + 1;
+        let linked = tip.chain_hash();
+        let mut other = linked;
+        other[0] ^= 0xFF;
+
+        assert_eq!(ledger.classify_incoming_update(&tip), IncomingUpdate::Past);
+        assert_eq!(
+            ledger.classify_incoming_update(&at(next, linked)),
+            IncomingUpdate::Next
+        );
+        assert_eq!(
+            ledger.classify_incoming_update(&at(next, other)),
+            IncomingUpdate::Unlinked
+        );
+        assert_eq!(
+            ledger.classify_incoming_update(&at(next + 4, linked)),
+            IncomingUpdate::Skip
+        );
+        assert_eq!(
+            ledger.classify_incoming_update(&at(next + 4, other)),
+            IncomingUpdate::Gap
+        );
+        // A content_hash is not a link: only chain_hash names the predecessor.
+        assert_eq!(
+            ledger.classify_incoming_update(&at(next + 4, tip.content_hash)),
+            IncomingUpdate::Gap
+        );
+
+        // Only the skip is reported: it is the chain fault the verifier proves.
+        assert!(ledger
+            .validate_incoming_update_hash_chain(&at(next, linked))
+            .is_ok());
+        assert!(ledger
+            .validate_incoming_update_hash_chain(&at(next, other))
+            .is_ok());
+        assert!(ledger
+            .validate_incoming_update_hash_chain(&at(next + 4, other))
+            .is_ok());
+        assert!(matches!(
+            ledger.validate_incoming_update_hash_chain(&at(next + 4, linked)),
+            Err(DepositsError::ProtocolViolation { violation_type, .. }) if violation_type == "sequence_skip"
+        ));
     }
 
     #[test]

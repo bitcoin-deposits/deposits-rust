@@ -107,7 +107,7 @@ fn dispute_creates_well_formed_fork_branches() {
 
     // ── 1. Inject invalid update via op0 ──
     let out = Command::new(&node)
-        .args(["danger", "publish-invalid", &ledger, "invalid-hash"])
+        .args(["danger", "publish-invalid", &ledger, "skip-sequence"])
         .args(["--seed", op0_seed()])
         .args(["--name", &op_name(0)])
         .args(["--network", "regtest"])
@@ -128,7 +128,7 @@ fn dispute_creates_well_formed_fork_branches() {
     let op1_dir = op_data_dir(1);
     let out = Command::new(&node)
         .args(["recovery", "start", &ledger])
-        .args(["--reason", "fork-shape test: forged invalid-hash"])
+        .args(["--reason", "fork-shape test: forged skip-sequence"])
         .args(["--seed", &op1_seed])
         .args(["--name", &op_name(1)])
         .args(["--network", "regtest"])

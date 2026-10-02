@@ -30,22 +30,21 @@ use tokio::process::{Child, Command};
 /// crate but not for sibling binaries — so we have to derive the path
 /// from our own test executable.
 fn workspace_bin(name: &str) -> PathBuf {
-    // `CARGO_MANIFEST_DIR` is set by cargo for tests.
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // workspace root is one level above `deposits-hub/`.
-    let target = manifest.parent().expect("workspace root").join("target");
-    // Prefer debug, fall back to release.
-    for profile in ["debug", "release"] {
-        let candidate = target.join(profile).join(name);
-        if candidate.exists() {
-            return candidate;
-        }
-    }
-    panic!(
-        "could not find binary `{}` under {}",
+    // This test runs from target/<profile>/deps/; the sibling binaries cargo
+    // built for the same profile (and the same CARGO_TARGET_DIR) sit one up.
+    let exe = std::env::current_exe().expect("current_exe");
+    let profile_dir = exe
+        .parent()
+        .and_then(|deps| deps.parent())
+        .expect("target/<profile> directory");
+    let candidate = profile_dir.join(name);
+    assert!(
+        candidate.exists(),
+        "could not find binary `{}` in {} (build the workspace binaries first)",
         name,
-        target.display()
+        profile_dir.display()
     );
+    candidate
 }
 
 async fn spawn_hub(
@@ -298,30 +297,23 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     let mut hub_proc = spawn_hub(&hub_dir, &relay_url, &log_dir, &["--auto-approve"]).await;
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Ask the hub for a launch line, the same way setup.sh does.
-    // The hub writes its state file at boot; on a slow runner that can lag
-    // the fixed sleep above, so retry spawn-line until it can read it.
+    // Ask the hub for a launch line, the same way setup.sh does. It may run
+    // before the hub has written its key; both init the dir and agree on one
+    // key (HubState::load_or_init creates the secret atomically).
     let seed_hex = hex::encode([0x33u8; 32]);
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let out = loop {
-        let out = Command::new(workspace_bin("deposits-hub"))
-            .arg("spawn-line")
-            .arg("--data-dir")
-            .arg(&hub_dir)
-            .arg("--name")
-            .arg("op0")
-            .arg("--seed")
-            .arg(&seed_hex)
-            .arg("--relay")
-            .arg(&relay_url)
-            .output()
-            .await
-            .expect("run spawn-line");
-        if out.status.success() || std::time::Instant::now() >= deadline {
-            break out;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    };
+    let out = Command::new(workspace_bin("deposits-hub"))
+        .arg("spawn-line")
+        .arg("--data-dir")
+        .arg(&hub_dir)
+        .arg("--name")
+        .arg("op0")
+        .arg("--seed")
+        .arg(&seed_hex)
+        .arg("--relay")
+        .arg(&relay_url)
+        .output()
+        .await
+        .expect("run spawn-line");
     assert!(
         out.status.success(),
         "spawn-line failed: {}",

@@ -6,8 +6,10 @@
 #   3  dispute     alice equivocates (two cosigned updates at one sequence); the members
 #                  detect it, prove it, confiscate the vault to the lottery output, and one
 #                  claims custody
-#   4  recovery    charlie's ledger C with a short quorum expiry: a Tier-1 (single member)
-#                  vault spend is non-final before its CLTV and confirms after it
+#   4  skip        bob signs an update that skips sequences; the members prove it (a
+#                  NonConformingUpdate) and confiscate B's vault
+#   5  recovery    charlie's ledger C with a short quorum expiry: diana's single-member
+#                  vault spend is non-final before quorum_expiry + 720 (DEP-03), then confirms
 #
 # Everything runs natively under $WORK: bitcoind (regtest), an Esplora shim over it
 # (the node's BDK wallet syncs through Esplora), a relay, four deposits-node daemons.
@@ -29,7 +31,7 @@ BITCOIND="${BITCOIND:-bitcoind}"
 BITCOIN_CLI="${BITCOIN_CLI:-bitcoin-cli}"
 STRFRY_BIN="${STRFRY_BIN:-$HERE/strfry}"
 WORK="${WORK:-$(mktemp -d /tmp/deposits-ci.XXXXXX)}"
-PHASES="${PHASES:-1 2 3 4}"
+PHASES="${PHASES:-1 2 3 4 5}"
 BASE="${PORT_BASE:-29400}"
 RPC_PORT=$((BASE + 1)); P2P_PORT=$((BASE + 2)); ESPLORA_PORT=$((BASE + 3)); RELAY_PORT=$((BASE + 4))
 OPS=(alice bob charlie diana)
@@ -54,6 +56,7 @@ cleanup() {
   sleep 2; rm -rf "$WORK"
 }
 trap cleanup EXIT
+trap 'echo "FAIL: line $LINENO: $BASH_COMMAND" >&2' ERR
 
 bcli()  { "${BCLI[@]}" "$@"; }
 mine()  { bcli -rpcwallet=miner -generate "${1:-1}" >/dev/null; }
@@ -132,11 +135,15 @@ start_nodes() {
   for op in "${OPS[@]}"; do
     PK[$op]=$(cli "$op" quorum show-identity | sed -nE 's/.*[Pp]ubkey: *([0-9a-f]{66}).*/\1/p' | head -1)
     [ -n "${PK[$op]}" ] || fail "$op identity"
-    CA=$(env $(node_env) RUST_LOG=error "$NODE" pubkey-to-p2wpkh --network regtest --seed-file "$WORK/$op/seed.hex" --data-dir "$WORK/$op" 2>&1 | grep -oE 'bcrt1[0-9a-z]+' | head -1)
-    [ -n "$CA" ] || fail "$op collateral address"
-    bcli -rpcwallet=miner sendtoaddress "$CA" 0.02 >/dev/null   # replacement collateral for arming a dispute
-    ok "$op ${PK[$op]:0:16}  collateral at $CA"
+    COLL[$op]=$(env $(node_env) RUST_LOG=error "$NODE" pubkey-to-p2wpkh --network regtest --seed-file "$WORK/$op/seed.hex" --data-dir "$WORK/$op" 2>&1 | grep -oE 'bcrt1[0-9a-z]+' | head -1)
+    [ -n "${COLL[$op]}" ] || fail "$op collateral address"
+    ok "$op ${PK[$op]:0:16}  collateral at ${COLL[$op]}"
   done
+  fund_collateral
+}
+fund_collateral() {   # replacement collateral for arming a dispute; each dispute consumes it
+  local op
+  for op in "${OPS[@]}"; do bcli -rpcwallet=miner sendtoaddress "${COLL[$op]}" 0.02 >/dev/null; done
   mine 1
 }
 
@@ -161,7 +168,7 @@ begin_quorum() {  # begin_quorum OP LEDGER [extra args] — fund the vault addre
   addr=$(cli "$op" ledger address "$l" | grep -oE 'bcrt1[0-9a-z]+' | head -1); [ -n "$addr" ] || fail "$op ledger address"
   bcli -rpcwallet=miner sendtoaddress "$addr" 0.5 >/dev/null; mine 3; sleep 20
   for i in 1 2 3 4 5 6; do
-    out=$(cli "$op" quorum begin "$l" --collateral-ratio 0.5 "$@")
+    out=$(cli "$op" quorum begin "$l" --collateral-ratio 0.5 "$@") || true
     echo "$out" | grep -qiE 'No response|timed out' || { echo "$out" | tail -2 | sed 's/^/    /'; return 0; }
     mine 1; sleep 10
   done
@@ -171,7 +178,7 @@ vault_outpoint() {  # the vault the ledger's latest QuorumBegin created, as txid
   cli "$1" reserves list | grep -A3 "${2:0:16}" | grep -oE '[0-9a-f]{64}:[0-9]+' | head -1
 }
 
-declare -A PK OWN
+declare -A PK OWN COLL
 
 phase1() {
   step "1  quorum formation"
@@ -188,6 +195,9 @@ phase1() {
       || fail "$op did not cosign A's QuorumBegin"
   done
   VAULT_A=$(vault_outpoint alice "$A"); ok "QuorumBegin cosigned by every member; vault ${VAULT_A:-?}"
+  local rs; rs=$(cli alice reserves list | sed -nE 's/.*active_ruleset: *([a-z0-9-]+).*/\1/p' | head -1)
+  [ -n "$rs" ] && [ "$rs" != legacy ] || fail "A's first QuorumBegin is on ruleset '${rs:-?}', not an expiry-anchored one"
+  ok "ruleset $rs"
   cli alice ledger advertise "$A" | grep -q "Advertisement published" || fail "advertise A"   # wallets find ledgers by their ad
   ok "A advertised"
 }
@@ -227,9 +237,32 @@ phase3() {
 }
 
 phase4() {
-  step "4  recovery tiers: a single member spends an expired vault after its CLTV"
+  step "4  skip: bob signs an update that skips sequences on B; members prove it, confiscate"
+  local B=${OWN[bob]} op who vault
+  fund_collateral
+  for op in alice charlie diana; do add_member bob "$B" "$op" || fail "add $op to B"; done
+  begin_quorum bob "$B" || fail "quorum begin on B"
+  vault=$(vault_outpoint bob "$B"); [ -n "$vault" ] || fail "B's vault"
+  sleep 8
+  cli bob danger publish-invalid "$B" skip-sequence | grep -E 'Sequence|Violation' | sed 's/^/    /'
+  WATCH=(alice charlie diana)
+  who=$(wait_any_log "INVALID UPDATE DETECTED on ledger ${B:0:16}.*sequence_skip" 180 10) || fail "no member reported the skip"
+  ok "$who reported the skip as a NonConformingUpdate"
+  for i in $(seq 1 180); do
+    [ -z "$(bcli gettxout "${vault%:*}" "${vault#*:}")" ] && break
+    [ $((i % 5)) -eq 0 ] && mine 1; sleep 1
+  done
+  [ -z "$(bcli gettxout "${vault%:*}" "${vault#*:}")" ] || fail "B's vault $vault was not confiscated"
+  ok "B's vault $vault confiscated"
+  WATCH=(bob charlie diana)
+}
+
+phase5() {
+  step "5  recovery tiers: a single member spends an expired vault after its CLTV"
   local C=${OWN[charlie]} op
-  for op in alice bob diana; do add_member charlie "$C" "$op" || fail "add $op to C"; done
+  # alice and bob were accused in phases 3-4, so C's one member is diana: with two
+  # voters the post-expiry tiers collapse to "single member after expiry + 720".
+  add_member charlie "$C" diana || fail "add diana to C"
   begin_quorum charlie "$C" --quorum-expiry-blocks 20 || fail "quorum begin on C"
   sleep 5
   local list; list=$(cli charlie reserves list); echo "$list" | sed 's/^/    /' | head -20
@@ -239,14 +272,16 @@ phase4() {
   qexp=$(echo "$list" | sed -nE 's/.*First Expiry: block ([0-9]+).*/\1/p' | head -1)
   t1=$(echo "$list" | sed -nE 's/.*Tier 1: .*timelock=([0-9]+)\).*/\1/p' | head -1)
   [ -n "$qexp" ] && [ -n "$t1" ] || fail "could not read quorum expiry / tier-1 timelock from reserves list"
-  ok "quorum expiry $qexp, tier 1 (one member) timelock $t1"
+  [ "$t1" -eq $((qexp + 720)) ] || fail "tier-1 CLTV $t1 is not quorum_expiry + 720 ($((qexp + 720))) as DEP-03 requires"
+  ok "quorum expiry $qexp, tier-1 CLTV $t1 = expiry + 720"
   dest=$(bcli -rpcwallet=miner getnewaddress)
-  mkdir -p "$WORK/seeds/alice"; cp "$WORK/alice/seed.hex" "$WORK/seeds/alice/seed.hex"   # alice is one of C's members
-  out=$(cli alice reserves spend "$dest" --ledger "$C" --seed-dir "$WORK/seeds" --tier 1)
+  # The spend reads C's history from charlie's replica and signs with diana's seed only.
+  mkdir -p "$WORK/seeds/diana"; cp "$WORK/diana/seed.hex" "$WORK/seeds/diana/seed.hex"
+  out=$(cli charlie reserves spend "$dest" --ledger "$C" --seed-dir "$WORK/seeds" --tier 1) || true
   echo "$out" | grep -qiE 'non-final|non-BIP68-final|locktime' || fail "tier-1 spend before CLTV was not refused as non-final: $(echo "$out" | tail -3)"
   ok "tier-1 spend at $(height) refused: non-final"
-  mine $(( qexp + t1 - $(height) + 1 ))
-  out=$(cli alice reserves spend "$dest" --ledger "$C" --seed-dir "$WORK/seeds" --tier 1)
+  mine $(( t1 - $(height) + 1 ))
+  out=$(cli charlie reserves spend "$dest" --ledger "$C" --seed-dir "$WORK/seeds" --tier 1) || true
   local txid; txid=$(echo "$out" | grep -oE '[0-9a-f]{64}' | tail -1)
   [ -n "$txid" ] && mine 1 && [ "$(bcli getrawtransaction "$txid" true | python3 -c 'import json,sys; print(json.load(sys.stdin).get("confirmations",0))')" -ge 1 ] \
     || fail "tier-1 spend after CLTV: $(echo "$out" | tail -3)"
