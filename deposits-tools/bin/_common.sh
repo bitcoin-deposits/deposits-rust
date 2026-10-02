@@ -162,6 +162,7 @@ start_relay() {
             attempts=$((attempts + 1))
             if [ $attempts -ge 15 ]; then
                 log_error "Ledgers relay not ready after 15s"
+                tail -30 "$logfile" >&2 || true
                 return 1
             fi
         done
