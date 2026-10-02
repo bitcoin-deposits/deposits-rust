@@ -669,6 +669,17 @@ impl Node {
 
         use nostr_sdk::{Filter, Kind, Timestamp};
 
+        // Only a ledger id names relay history. A fork tracking key (`<id>_<seq>_<pk>`) used to
+        // reach here from fraud-proof gap-fill and stale-ledger lists, and each call walked the
+        // ledger's whole relay history before failing to decode the id: seconds of main loop per
+        // copy of a proof, enough to starve consent and cosign replies.
+        if ledger_id.len() != 64 || !ledger_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::Protocol(format!(
+                "not a ledger id: {}",
+                &ledger_id[..ledger_id.len().min(80)]
+            )));
+        }
+
         // Skip our own ledgers — they're managed via open_ledger, not reimport
         {
             let ledgers = self.handler.ledgers.lock().unwrap();

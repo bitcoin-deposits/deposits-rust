@@ -171,18 +171,32 @@ impl BitcoindRpcBackend {
         let envelope: BitcoindRpcResponse<R> = resp
             .json()
             .map_err(|e| Error::Wallet(format!("bitcoind parse {}: {}", method, e)))?;
-        if let Some(err) = envelope.error {
-            return Err(Error::Wallet(format!(
-                "bitcoind {} error {}: {}",
-                method, err.code, err.message
-            )));
-        }
-        envelope.result.ok_or_else(|| {
+        decode_envelope(method, envelope)
+    }
+}
+
+/// The `result` of a JSON-RPC envelope, or the error bitcoind reported.
+fn decode_envelope<R: for<'de> serde::Deserialize<'de>>(
+    method: &str,
+    envelope: BitcoindRpcResponse<R>,
+) -> Result<R, Error> {
+    if let Some(err) = envelope.error {
+        return Err(Error::Wallet(format!(
+            "bitcoind {} error {}: {}",
+            method, err.code, err.message
+        )));
+    }
+    // `"result": null` is a real answer for some calls (gettxout on a spent or unknown
+    // output): serde folds it into the envelope's `None`, so give it to R as null, which
+    // succeeds when R is an Option and fails as before otherwise.
+    match envelope.result {
+        Some(r) => Ok(r),
+        None => serde_json::from_value(serde_json::Value::Null).map_err(|_| {
             Error::Wallet(format!(
                 "bitcoind {}: response had neither result nor error",
                 method
             ))
-        })
+        }),
     }
 }
 
@@ -578,6 +592,22 @@ mod tests {
 
     /// scantxoutset returns BTC amounts as floats — common bitcoind
     /// gotcha. Verify the round-to-sats conversion handles realistic
+    /// gettxout on a spent or unknown output answers `"result": null`; that is `None`, not
+    /// an error, for a caller asking for an `Option`.
+    #[test]
+    fn null_result_is_none_for_an_option() {
+        let env: BitcoindRpcResponse<Option<GetTxOut>> =
+            serde_json::from_str(r#"{"result":null,"error":null,"id":"x"}"#).unwrap();
+        assert!(decode_envelope("gettxout", env).unwrap().is_none());
+        let env: BitcoindRpcResponse<u32> =
+            serde_json::from_str(r#"{"result":null,"error":null,"id":"x"}"#).unwrap();
+        assert!(decode_envelope("getblockcount", env).is_err());
+        let env: BitcoindRpcResponse<Option<GetTxOut>> =
+            serde_json::from_str(r#"{"result":null,"error":{"code":-8,"message":"bad"},"id":"x"}"#)
+                .unwrap();
+        assert!(decode_envelope("gettxout", env).is_err());
+    }
+
     /// precision (1 sat = 0.00000001 BTC).
     #[test]
     fn scantxoutset_amount_round_trip() {

@@ -1358,6 +1358,11 @@ impl Node {
             _ => {}
         }
         for lid in &needed {
+            // Only a ledger id can be fetched; anything else (e.g. a fork tracking key a faulty
+            // producer named) would cost a full relay walk per copy of the proof and still fail.
+            if lid.len() != 64 || !lid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                continue;
+            }
             let have = {
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 ledgers.contains_key(lid)

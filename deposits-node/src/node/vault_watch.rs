@@ -69,7 +69,10 @@ pub(crate) fn find_vault_thefts(
 ) -> Vec<VaultTheft> {
     let mut out = Vec::new();
     for (id, history) in ledgers {
-        if reported.contains(id) {
+        // A fork-branch replica (`<ledger_id>_<seq>_<pk>`) shares its ledger's vault: the main
+        // replica reports the spend, under the ledger id a proof must name.
+        if reported.contains(id) || crate::node::fork_publish::fork_key_last_valid_seq(id).is_some()
+        {
             continue;
         }
         let Some((vault, seq)) = current_vault(history) else {
@@ -380,6 +383,21 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].governing_seq, 1);
         assert!(t[0].signers.len() >= 3);
+    }
+
+    #[test]
+    fn a_fork_replica_is_reported_under_its_ledger_id_once() {
+        let (_, spend) = cl_theft();
+        let mut both = ledgers([9; 32]);
+        let (id, history) = both
+            .iter()
+            .next()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .unwrap();
+        both.insert(format!("{}_000001_0123456789abcdef", id), history);
+        let t = find_vault_thefts(&both, &[spend], &HashSet::new(), &HashSet::new());
+        assert_eq!(t.len(), 1);
+        assert_eq!(t[0].ledger_id, id);
     }
 
     #[test]
