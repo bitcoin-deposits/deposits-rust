@@ -604,7 +604,7 @@ impl Node {
                 Some("Ledger is not in a disputed state per local records".to_string()),
             );
         }
-        if participants.len() < 2 {
+        if participants.is_empty() {
             return (
                 false,
                 None,
@@ -1373,7 +1373,7 @@ impl Node {
         // declaration excludes its armer; it is never a reason to refuse.
         let set =
             crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?;
-        if set.participants.len() < 2 {
+        if set.participants.is_empty() {
             return Err(format!(
                 "only {} of {} armers are lottery participants (snapshot {})",
                 set.participants.len(),
@@ -1577,7 +1577,7 @@ impl Node {
         let participants: Vec<LotteryParticipant> =
             crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?
                 .lottery_participants();
-        if participants.len() < 2 {
+        if participants.is_empty() {
             return Err(format!(
                 "only {} DisputeArmed participants found",
                 participants.len()

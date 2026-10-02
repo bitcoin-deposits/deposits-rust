@@ -1073,7 +1073,32 @@ impl Node {
                 ..
             })
         );
-        let needs_arm = prior_arm.is_none() || prior_collateral_was_none;
+        // DEP-03: a pledge that has stopped passing the eligibility cut (spent,
+        // or never confirmed) excludes us from the lottery. Re-arm with a fresh
+        // one, which reopens the window (the latest arm counts and moves E), at
+        // most `MAX_ARMS` arms in all.
+        let arms_so_far = {
+            let fork_ledger = fork_arc.read().unwrap();
+            super::armers::arm_count(&fork_ledger.history)
+        };
+        let prior_pledge_failed = match &prior_arm {
+            Some(LedgerOperation::DisputeArmed {
+                replacement_collateral: Some(rc),
+                ..
+            }) if arms_so_far < super::armers::MAX_ARMS => {
+                let chain = self.wallet.chain_backend();
+                let tip = chain.get_tip_height().unwrap_or(0);
+                match super::armers::pledge_failure(&*chain, rc, tip, 0) {
+                    Ok(Some(why)) => {
+                        tracing::warn!("Our pledge no longer counts ({}); re-arming", why);
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        let needs_arm = prior_arm.is_none() || prior_collateral_was_none || prior_pledge_failed;
 
         // P2WPKH of our operator key: the arm's `target_reserves`, and where
         // the replacement collateral must sit (RC4's claim-TX builder signs
@@ -1146,7 +1171,7 @@ impl Node {
                 })
             );
 
-            if prior_arm.is_some() && !prior_collateral_was_none {
+            if prior_arm.is_some() && !prior_collateral_was_none && !prior_pledge_failed {
                 tracing::info!("Already have DisputeArmed on fork (with replacement_collateral)");
             } else if let Some(lookup) = collateral {
                 let (commitment_hash, preimage_was_persisted): ([u8; 20], bool) =
@@ -1199,7 +1224,7 @@ impl Node {
                     commitment_hash,
                     op_address.to_string(),
                     lookup,
-                    prior_collateral_was_none,
+                    prior_collateral_was_none || prior_pledge_failed,
                     allow_uncollateralized_arm(),
                 ) {
                     ArmDecision::Arm(armed_op) => {
@@ -2733,7 +2758,7 @@ impl Node {
             }
 
             // Need at least 2 armers to proceed
-            if armed_heights.len() < 2 {
+            if armed_heights.is_empty() {
                 tracing::debug!(
                     "Not enough DisputeArmed participants yet ({}/2)",
                     armed_heights.len()
@@ -2795,6 +2820,7 @@ impl Node {
                 heights.sort_unstable();
                 let deadline = heights
                     .get(1)
+                    .or(heights.first())
                     .copied()
                     .unwrap_or(0)
                     .saturating_add(super::lottery_recovery::FULL_ARMING_WAIT_BLOCKS);
@@ -2828,7 +2854,7 @@ impl Node {
                 &paginated_updates,
                 None,
             ) {
-                Ok(set) if set.participants.len() >= 2 => set.lottery_participants(),
+                Ok(set) if !set.participants.is_empty() => set.lottery_participants(),
                 Ok(set) => {
                     tracing::info!(
                         "Only {} of {} armers of ledger {} are lottery participants; waiting",
@@ -3396,7 +3422,7 @@ impl Node {
             .await
             .map_err(Error::Protocol)?
             .lottery_participants();
-        if participants.len() < 2 {
+        if participants.is_empty() {
             return Err(Error::Protocol(
                 "Not enough participants for lottery".to_string(),
             ));

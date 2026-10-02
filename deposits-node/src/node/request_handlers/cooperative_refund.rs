@@ -248,7 +248,7 @@ impl Node {
                 Ok(set) => set.lottery_participants(),
                 Err(e) => return (false, None, Some(format!("lottery participants: {}", e))),
             };
-        if participants.len() < 2 {
+        if participants.is_empty() {
             return (
                 false,
                 None,

@@ -3186,9 +3186,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     // DEP-03 eligibility cut: the participant set every party agrees on.
     participants = crate::node::armers::cli_armer_set(&config.electrum_url, events.iter())?
         .lottery_participants();
-    if participants.len() < 2 {
+    if participants.is_empty() {
         return Err(format!(
-            "Need at least 2 DisputeArmed participants, found {}",
+            "Need at least 1 lottery participant, found {}",
             participants.len()
         )
         .into());
@@ -3933,9 +3933,9 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
     // DEP-03 eligibility cut: the participant set every party agrees on.
     participants = crate::node::armers::cli_armer_set(&config.electrum_url, events.iter())?
         .lottery_participants();
-    if participants.len() < 2 {
+    if participants.is_empty() {
         return Err(format!(
-            "Need at least 2 DisputeArmed participants, found {}",
+            "Need at least 1 lottery participant, found {}",
             participants.len()
         )
         .into());
@@ -6209,14 +6209,14 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
             p.target_reserves
         );
     }
-    if participants.len() < 2 {
+    if participants.is_empty() {
         println!(
-            "  ⚠ only {} participant(s) — confiscation requires ≥ 2",
+            "  ⚠ {} lottery participants — confiscation requires ≥ 1",
             participants.len()
         );
         println!();
         println!("Plan ends here: sections 5–8 (lottery / confiscation tx / sighash /");
-        println!("cosigner self-check) need at least 2 armed participants. After more");
+        println!("cosigner self-check) need at least 1 lottery participant. After more");
         println!("members arm (auto-arm fires on kind:9103 dispute notifications),");
         println!("re-run this dry-run to see the full plan.");
         return Ok(());
@@ -6619,9 +6619,9 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
             }
         }
     }
-    if participants.len() < 2 {
+    if participants.is_empty() {
         return Err(format!(
-            "only {} DisputeArmed participants — need at least 2",
+            "only {} lottery participants — need at least 1",
             participants.len()
         )
         .into());

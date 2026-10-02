@@ -21,6 +21,23 @@ use crate::chain_backend::{ChainBackend, ConfirmedSpend};
 /// reference feerate (this implementation never records one).
 pub const CLAIM_FEE_FLOOR_SATS: u64 = 5_000;
 
+/// Arms that count per armer: the first arm and up to three re-arms. Later
+/// arms are ignored, so a griefer cannot keep moving E (DEP-03).
+pub const MAX_ARMS: usize = 4;
+
+/// `DisputeArmed` updates in a fork's history.
+pub fn arm_count(history: &[SignedLedgerUpdate]) -> usize {
+    history
+        .iter()
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeArmed { .. })
+            )
+        })
+        .count()
+}
+
 /// Depth past E at which a verdict can no longer change, so it is cached.
 const BURIED: u32 = 6;
 
@@ -73,8 +90,12 @@ pub fn original_operator(updates: &[SignedLedgerUpdate]) -> Option<PublicKey> {
 /// the declaration), excluding the original operator, sorted by x-only key.
 pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
     let operator = original_operator(updates);
+    // Each armer's first `MAX_ARMS` arms, by sequence; the latest of them counts.
+    let mut by_seq: Vec<&SignedLedgerUpdate> = updates.iter().collect();
+    by_seq.sort_by_key(|u| u.sequence_number);
+    let mut seen_arms: HashMap<PublicKey, usize> = HashMap::new();
     let mut latest: HashMap<PublicKey, (u64, Armer)> = HashMap::new();
-    for u in updates {
+    for u in by_seq {
         if Some(u.operator_id) == operator {
             continue;
         }
@@ -87,6 +108,11 @@ pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
         else {
             continue;
         };
+        let count = seen_arms.entry(u.operator_id).or_insert(0);
+        *count += 1;
+        if *count > MAX_ARMS {
+            continue;
+        }
         let armer = Armer {
             key: u.operator_id,
             participant: LotteryParticipant::new(

@@ -958,10 +958,18 @@ impl LotteryScriptBuilder {
     /// contract continue to spend the sub-leaf.
     fn build_lottery_script_with_bounds_n(&self, bounds_n: usize) -> DepositsResult<ScriptBuf> {
         let n = self.participants.len();
-        if n < 2 {
+        if n == 0 {
             return Err(DepositsError::InvalidState(
-                "Lottery requires at least 2 participants".to_string(),
+                "Lottery requires at least 1 participant".to_string(),
             ));
+        }
+        // DEP-03: a sole eligible armer takes custody without a draw. Its
+        // claim leaf is a plain signature check; no preimage is revealed.
+        if n == 1 {
+            return Ok(Builder::new()
+                .push_x_only_key(&self.participants[0].pubkey)
+                .push_opcode(OP_CHECKSIG)
+                .into_script());
         }
         if n > crate::constants::MAX_DISPUTANTS {
             return Err(DepositsError::InvalidState(format!(
@@ -1570,9 +1578,12 @@ impl LotteryOutput {
     /// the winning participant's index.
     pub fn calculate_winner(preimages: &[Vec<u8>]) -> DepositsResult<usize> {
         let n = preimages.len();
+        if n == 1 {
+            return Ok(0); // a sole participant (DEP-03): no draw
+        }
         if n < 2 {
             return Err(DepositsError::InvalidState(
-                "Need at least 2 preimages".to_string(),
+                "Need at least 1 preimage".to_string(),
             ));
         }
 
@@ -1720,8 +1731,11 @@ impl LotteryOutput {
 
         witness.push(&winner_signature[..]);
 
-        for preimage in preimages.iter().rev() {
-            witness.push(preimage);
+        // A sole participant's leaf checks only the signature (DEP-03).
+        if self.participants.len() > 1 {
+            for preimage in preimages.iter().rev() {
+                witness.push(preimage);
+            }
         }
 
         // Push the lottery script
@@ -2382,12 +2396,8 @@ mod tests {
 
     #[test]
     fn test_lottery_reject_invalid_participant_count() {
-        // Too few participants
-        let participants = vec![LotteryParticipant::new(
-            generate_x_only_pubkey(1),
-            test_commitment_hash(1),
-            "bcrt1p...".to_string(),
-        )];
+        // Too few participants (one is a sole-participant leaf, DEP-03; zero is invalid)
+        let participants: Vec<LotteryParticipant> = vec![];
 
         let builder = LotteryScriptBuilder::new(
             participants,
@@ -3387,6 +3397,46 @@ mod frozen_builder_snapshot {
              Skipping steps 1-2 means on-chain UTXOs built before this commit\n\
              become unspendable by migrate-snapshot / legacy-recover.\n",
             actual
+        );
+    }
+}
+
+#[cfg(test)]
+mod sole_participant_tests {
+    use super::*;
+
+    fn xonly(seed: u8) -> XOnlyPublicKey {
+        let secp = Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[seed; 32]).unwrap();
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .x_only_public_key()
+            .0
+    }
+
+    /// DEP-03: one eligible armer takes custody without a draw.
+    #[test]
+    fn a_sole_participant_claims_with_a_signature_alone() {
+        let p = vec![LotteryParticipant::new(xonly(1), [1u8; 20], "tb1p1".into())];
+        let out =
+            LotteryScriptBuilder::new(p, vec![xonly(21), xonly(22), xonly(23)], 2, Network::Signet)
+                .build()
+                .unwrap();
+        let mut expect = vec![0x20];
+        expect.extend_from_slice(&xonly(1).serialize());
+        expect.push(0xac);
+        assert_eq!(out.lottery_script.as_bytes(), &expect[..]);
+        assert!(out.partial_reveal_scripts.is_empty());
+        assert_eq!(
+            LotteryOutput::calculate_winner(&[vec![7u8; 25]]).unwrap(),
+            0
+        );
+        let w = out
+            .create_claim_witness(&[9u8; 64], &[vec![7u8; 25]])
+            .unwrap();
+        assert_eq!(w.len(), 3, "signature, leaf, control block: no preimage");
+        assert_eq!(
+            out.address.to_string(),
+            "tb1p0fnnskqkq6ntxvgt6vyrnxp9spre03dwa7vtxjscedeaz8qtc7cqsqmjlp"
         );
     }
 }
