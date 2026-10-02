@@ -31,10 +31,7 @@ fn default_ruleset_name() -> String {
 pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
     // `balance-commit-v4` is a strict superset of `fee-cap-v3` (its rules plus
     // the balance-commitment requirement), so it enforces the fee cap too.
-    matches!(
-        ruleset_name,
-        "fee-cap-v3" | "balance-commit-v4" | "minority-v5"
-    )
+    matches!(ruleset_name, "fee-cap-v3" | "balance-commit-v4")
 }
 
 /// Whether a ledger's active ruleset REQUIRES a balance commitment on every
@@ -45,7 +42,7 @@ pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
 /// match the replayed state) is intrinsic to every ruleset and is NOT gated by
 /// this — see `check_conformance`.
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "balance-commit-v4" | "minority-v5")
+    matches!(ruleset_name, "balance-commit-v4")
 }
 
 /// Whether this binary knows the named ruleset at all. Mirrors the
@@ -65,7 +62,6 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
         "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" => "cltv-offset-v2",
-        "minority-v5" => "minority-v5",
         _ => "",
     }
 }

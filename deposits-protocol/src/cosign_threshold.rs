@@ -9,7 +9,7 @@
 //!
 //! Gated by the ledger's `active_ruleset_name`:
 //! - every registered ruleset: DEP-05 §Lifecycle cascade (tier-1 minority
-//!   `ceil(n/2) - 1` under `minority-v5`, `n/3` under the v2 family);
+//!   `ceil(n/2) - 1`);
 //! - an unknown ruleset (or none yet): strict majority always.
 
 use crate::messages::LedgerOperation;
@@ -134,14 +134,9 @@ fn majority(n: usize) -> usize {
 }
 
 /// Minority used at Tier 1, mirroring the on-chain script's
-/// Tier-1 minority threshold of the ruleset's cascade: `ceil(n/2) - 1` under
-/// `minority-v5`, `n/3` under the `cltv-offset-v2` family (at least 1).
-fn minority(n: usize, ruleset_name: &str) -> usize {
-    if crate::types::reserves_family(ruleset_name) == "minority-v5" {
-        n.div_ceil(2).saturating_sub(1).max(1)
-    } else {
-        (n / 3).max(1)
-    }
+/// Tier-1 minority threshold: `ceil(n/2) - 1` (= n - majority), at least 1.
+fn minority(n: usize) -> usize {
+    n.div_ceil(2).saturating_sub(1).max(1)
 }
 
 /// Compute the cosignature requirement for an operation against a
@@ -202,11 +197,9 @@ pub fn cosign_requirement(
         (OperationClass::Establishment, LifecycleTier::Tier0PostExpiry) => {
             CosignRequirement::allowed(majority(signer_count), tier, false)
         }
-        (OperationClass::Establishment, LifecycleTier::Tier1) => CosignRequirement::allowed(
-            minority(signer_count, &state.active_ruleset_name),
-            tier,
-            false,
-        ),
+        (OperationClass::Establishment, LifecycleTier::Tier1) => {
+            CosignRequirement::allowed(minority(signer_count), tier, false)
+        }
         (OperationClass::Establishment, LifecycleTier::Tier2) => {
             CosignRequirement::allowed(1, tier, false)
         }
@@ -319,8 +312,8 @@ mod tests {
         let s = state_with_quorum(5, "cltv-offset-v2", Some(1000));
         let r = cosign_requirement(&s, &establishment_op(), 1000 + TIER_1_OFFSET);
         assert!(r.allowed);
-        // minority(5) = 5/3 = 1
-        assert_eq!(r.required_sigs, 1);
+        // minority(5) = ceil(5/2) - 1 = 2
+        assert_eq!(r.required_sigs, 2);
         assert_eq!(r.tier, LifecycleTier::Tier1);
     }
 
@@ -328,8 +321,8 @@ mod tests {
     fn tier1_minority_n7() {
         let s = state_with_quorum(7, "cltv-offset-v2", Some(1000));
         let r = cosign_requirement(&s, &establishment_op(), 1000 + TIER_1_OFFSET);
-        // minority(7) = 7/3 = 2
-        assert_eq!(r.required_sigs, 2);
+        // minority(7) = ceil(7/2) - 1 = 3
+        assert_eq!(r.required_sigs, 3);
     }
 
     #[test]
@@ -370,12 +363,10 @@ mod tests {
         assert!(!r.allowed);
     }
 
-    // ---- minority-v5: ceil(n/2) - 1 ---------------------------------
-
     #[test]
-    fn tier1_minority_v5() {
+    fn tier1_minority_is_n_minus_majority() {
         for (n, want) in [(5, 2), (6, 2), (7, 3)] {
-            let s = state_with_quorum(n, "minority-v5", Some(1000));
+            let s = state_with_quorum(n, "balance-commit-v4", Some(1000));
             let r = cosign_requirement(&s, &establishment_op(), 1000 + TIER_1_OFFSET);
             assert!(r.allowed);
             assert_eq!(r.required_sigs, want, "n={n}");

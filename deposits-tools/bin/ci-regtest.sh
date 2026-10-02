@@ -196,7 +196,7 @@ phase1() {
   done
   VAULT_A=$(vault_outpoint alice "$A"); ok "QuorumBegin cosigned by every member; vault ${VAULT_A:-?}"
   local rs; rs=$(cli alice reserves list | sed -nE 's/.*active_ruleset: *([a-z0-9-]+).*/\1/p' | head -1)
-  [ "$rs" = minority-v5 ] || fail "A's first QuorumBegin is on ruleset '${rs:-?}', not minority-v5"
+  [ "$rs" = balance-commit-v4 ] || fail "A's first QuorumBegin is on ruleset '${rs:-?}', not balance-commit-v4"
   ok "ruleset $rs"
   cli alice ledger advertise "$A" | grep -q "Advertisement published" || fail "advertise A"   # wallets find ledgers by their ad
   ok "A advertised"

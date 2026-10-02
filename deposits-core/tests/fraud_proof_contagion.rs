@@ -354,7 +354,7 @@ fn every_produced_proof_verifies_with_the_dep16_authorizer() {
     );
 }
 
-/// Verbatim from cl-deposits (regenerated 2026-10-02, minority-v5 change): `(broadcast->json
+/// Verbatim from cl-deposits (regenerated 2026-10-02 for the ruleset change): `(broadcast->json
 /// (make-non-conforming-cosignature-proof accused target fault 1))`, with
 /// `fault` cl's `decode-update` of this file's `fault(&prefix())` TLV (its
 /// `fault_update_hex` re-encodes byte-identical), `accused` pubkey(ACCUSED)

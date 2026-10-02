@@ -2804,7 +2804,7 @@ mod tests {
                 .map(crate::messages::QuorumMemberRef::pubkey_only)
                 .collect(),
             collateral_amount: 0,
-            protocol_version: Some("minority-v5".to_string()),
+            protocol_version: Some("cltv-offset-v2".to_string()),
         };
 
         // Q is the cosigner count, operator not counted. Each value in
@@ -2920,7 +2920,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: vec!["minority-v5".to_string()],
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         }];
 
         // Before expiry → accept.
@@ -2997,7 +2997,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: vec!["minority-v5".to_string()],
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         }];
 
         let current = 100_000u32;

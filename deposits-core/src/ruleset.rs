@@ -20,9 +20,10 @@
 //! fixed forever. Protocol changes that would break that invariant
 //! must register a new name instead.
 //!
-//! The registry holds the v2 cascade family and `minority-v5`; the
-//! pre-anchor absolute-height cascades (`legacy`, `cltv-offset-literal`)
-//! were removed. See `tapscript_reserves` for the only
+//! The registry holds the `cltv-offset-v2` cascade family; the pre-anchor
+//! absolute-height cascades (`legacy`, `cltv-offset-literal`) were removed,
+//! and the cascade's tier-1 minority changed from `n/3` to `ceil(n/2) - 1`
+//! in place (2026-10-02; no deployed vaults depended on it). See `tapscript_reserves` for the only
 //! consumer wired in P0; future phases retrofit validators, fraud
 //! verifiers, etc. behind the same lookup.
 
@@ -58,20 +59,19 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "cltv-offset-v2" => Some(&CLTV_OFFSET_V2),
         "fee-cap-v3" => Some(&FEE_CAP_V3),
         "balance-commit-v4" => Some(&BALANCE_COMMIT_V4),
-        "minority-v5" => Some(&MINORITY_V5),
         _ => None,
     }
 }
 
 /// The ruleset new ledgers and rotations commit to when every member supports it.
-pub const CURRENT: &str = "minority-v5";
+pub const CURRENT: &str = "balance-commit-v4";
 
 /// Resolve a name to a ruleset, falling back to [`CURRENT`] for a missing or
 /// unknown name. Acceptance paths reject unknown names before calling this
 /// (a `QuorumBegin` without `protocol_version` is refused at apply), so the
 /// fallback only covers display and pre-`QuorumBegin` state.
 pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
-    name.and_then(lookup).unwrap_or(&MINORITY_V5)
+    name.and_then(lookup).unwrap_or(&BALANCE_COMMIT_V4)
 }
 
 /// All ruleset names this binary knows how to enforce. Order is the
@@ -79,12 +79,7 @@ pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
 /// `QuorumMemberResponse` so an operator can pick a `protocol_version`
 /// at `quorum begin` time that every member can validate.
 pub fn all_supported_names() -> Vec<&'static str> {
-    vec![
-        CLTV_OFFSET_V2.name,
-        FEE_CAP_V3.name,
-        BALANCE_COMMIT_V4.name,
-        MINORITY_V5.name,
-    ]
+    vec![CLTV_OFFSET_V2.name, FEE_CAP_V3.name, BALANCE_COMMIT_V4.name]
 }
 
 /// Decide whether a candidate member's declared `supported_rulesets`
@@ -109,9 +104,12 @@ mod gating_tests {
 
     #[test]
     fn list_with_multiple_entries() {
-        let both = vec!["balance-commit-v4".to_string(), "minority-v5".to_string()];
+        let both = vec![
+            "cltv-offset-v2".to_string(),
+            "balance-commit-v4".to_string(),
+        ];
+        assert!(member_supports(&both, "cltv-offset-v2"));
         assert!(member_supports(&both, "balance-commit-v4"));
-        assert!(member_supports(&both, "minority-v5"));
         assert!(!member_supports(&both, "unknown"));
     }
 }
@@ -159,28 +157,16 @@ pub static BALANCE_COMMIT_V4: Ruleset = Ruleset {
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 
-/// `balance-commit-v4`'s op rules on a new reserves cascade: the tier-1
-/// minority is `ceil(n/2) - 1` (= n - majority: the members a strict majority
-/// leaves out), not `n/3`. Timelocks as `cltv-offset-v2`. A new script, so a
-/// ledger adopts it by an on-chain rotation.
-pub static MINORITY_V5: Ruleset = Ruleset {
-    name: "minority-v5",
-    tier_config_factory: minority_v5_tier_config,
-};
-
 // ============================================================================
 // Factories
 // ============================================================================
 
 fn cltv_offset_v2_tier_config(n: usize, quorum_expiry: u32) -> ThresholdConfig {
-    anchored_tier_config(n, quorum_expiry, (n / 3).max(1))
-}
-
-fn minority_v5_tier_config(n: usize, quorum_expiry: u32) -> ThresholdConfig {
     anchored_tier_config(n, quorum_expiry, recovery_minority(n))
 }
 
-/// `ceil(n/2) - 1`, at least 1.
+/// Tier-1 minority: `ceil(n/2) - 1` (= n - majority, the members a strict
+/// majority leaves out), at least 1.
 pub fn recovery_minority(n: usize) -> usize {
     (n.div_ceil(2).saturating_sub(1)).max(1)
 }
@@ -259,10 +245,10 @@ mod tests {
     }
 
     #[test]
-    fn minority_v5_is_n_minus_majority() {
+    fn tier1_minority_is_n_minus_majority() {
         for (n, want) in [(3, 1), (4, 1), (5, 2), (6, 2), (7, 3), (8, 3), (9, 4)] {
             assert_eq!(recovery_minority(n), want, "n={n}");
-            let cfg = (MINORITY_V5.tier_config_factory)(n, 800_000);
+            let cfg = (CLTV_OFFSET_V2.tier_config_factory)(n, 800_000);
             assert_eq!(cfg.tiers[1].threshold, want);
             assert_eq!(cfg.tiers[1].timelock_blocks, 800_720);
         }

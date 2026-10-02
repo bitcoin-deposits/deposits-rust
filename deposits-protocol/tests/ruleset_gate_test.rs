@@ -67,7 +67,7 @@ fn quorum_begin(member: PublicKey, protocol_version: Option<String>) -> LedgerOp
 fn quorum_begin_without_protocol_version_is_refused() {
     let operator = pk(1);
     let member = pk(2);
-    let s = state_with_staged_member(operator, member, vec!["minority-v5".into()]);
+    let s = state_with_staged_member(operator, member, vec!["cltv-offset-v2".into()]);
     assert!(s.apply(&quorum_begin(member, None)).is_err());
 }
 
