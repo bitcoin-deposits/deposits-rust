@@ -3313,6 +3313,33 @@ mod frozen_builder_snapshot {
     const EXPECTED_CURRENT_SCRIPT_HEX: &str =
         "51202da85682af56fd62b6fa106e30831a8dbfa05c74259bdca8e0cfad0242ff0e55";
 
+    /// Cross-implementation vector (cl-deposits inspect/lottery-test.lisp pins the
+    /// same hex): operator + 6 members (7 voters), `cltv-offset-v2` at
+    /// quorum_expiry 800000, signet. Tier 1 is ceil(7/2) - 1 = 3 of 7.
+    pub(crate) const CLTV_OFFSET_V2_SEVEN_VOTERS_HEX: &str =
+        "51206e92587c6bcdf7bd653c242c1937224eac71bc486fe7c3b9fc6edb70b129dbeb";
+
+    #[test]
+    fn cltv_offset_v2_seven_voters_matches_pinned_vector() {
+        let key = |i: u8| {
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(
+                &secp,
+                &bitcoin::secp256k1::SecretKey::from_slice(&[i; 32]).unwrap(),
+            )
+        };
+        let members: Vec<PublicKey> = (2..=7).map(key).collect();
+        let voter_set = VoterSet::new(key(1), members);
+        let rs = crate::ruleset::lookup("cltv-offset-v2").unwrap();
+        let config = (rs.tier_config_factory)(7, 800_000);
+        assert_eq!(config.tiers[1].threshold, 3);
+        let out = TapscriptReservesBuilder::new(voter_set, config, Network::Signet, [0x5a; 32])
+            .build()
+            .unwrap();
+        let actual = hex::encode(out.script_pubkey().as_bytes());
+        assert_eq!(actual, CLTV_OFFSET_V2_SEVEN_VOTERS_HEX);
+    }
+
     #[test]
     fn current_builder_matches_pinned_snapshot() {
         let operator = PublicKey::from_str(
