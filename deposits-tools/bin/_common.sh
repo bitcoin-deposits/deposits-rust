@@ -113,6 +113,7 @@ generate_relay_config() {
         -e "s|^db = .*|db = \"$db_dir/\"|" \
         -e "s|port = 7777|port = $port|" \
         -e "s|plugin = \"/app/drop-ephemeral-policy.sh\"|plugin = \"$TOOLS_DIR/drop-ephemeral-policy.sh\"|" \
+        -e "s|^\( *\)nofiles = .*|\1nofiles = 0|" \
         "$src_conf" > "$conf"
 
     # Node relays are real-time message buses — keep events only 30 seconds
