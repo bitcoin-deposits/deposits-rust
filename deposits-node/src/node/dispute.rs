@@ -322,7 +322,7 @@ mod recovery_voter_derivation_tests {
                 .map(QuorumMemberRef::pubkey_only)
                 .collect(),
             collateral_amount: 0,
-            protocol_version: None,
+            protocol_version: Some("cltv-offset-v2".to_string()),
         }
     }
 
@@ -3008,7 +3008,7 @@ impl Node {
             // ruleset would produce the wrong scriptPubKey.
             let voter_set = VoterSet::new(original_operator, quorum_members.clone());
             let voter_count = voter_set.all_voters().len();
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
+            let ruleset = deposits_core::ruleset::resolve_or_current(ruleset_at_qb.as_deref());
             let threshold_config = (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
             let taproot_builder = TapscriptReservesBuilder::new(
@@ -3789,7 +3789,7 @@ mod recovery_chaining_tests {
                 winner,
             )],
             collateral_amount: 0,
-            protocol_version: None,
+            protocol_version: Some("cltv-offset-v2".to_string()),
         };
         let u2 = signed(2, winner, &qb, u1.chain_hash());
         let u3 = signed(3, winner, &deposit_open(0xCD), u2.chain_hash());

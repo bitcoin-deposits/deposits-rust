@@ -284,7 +284,7 @@ fn strictest_limits_single_member() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
@@ -311,7 +311,7 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -328,7 +328,7 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
     ];
 
@@ -357,7 +357,7 @@ fn strictest_limits_with_none_values() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -374,7 +374,7 @@ fn strictest_limits_with_none_values() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
     ];
 
@@ -402,7 +402,7 @@ fn strictest_limits_all_none() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let (bps, fixed, period) = strictest_quorum_limits(&members);
@@ -432,7 +432,7 @@ fn fees_meeting_all_limits_pass() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let fees = FeeStructure {
@@ -461,7 +461,7 @@ fn fees_below_min_bps_rejected() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let fees = FeeStructure {
@@ -491,7 +491,7 @@ fn fees_below_min_fixed_rejected() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let fees = FeeStructure {
@@ -525,7 +525,7 @@ fn fees_exceeding_max_period_rejected() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     let fees = FeeStructure {
@@ -559,7 +559,7 @@ fn fees_with_no_quorum_limits_always_pass() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
 
     // Even zero fees pass when member has no limits
@@ -590,7 +590,7 @@ fn fees_must_satisfy_strictest_member() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -607,7 +607,7 @@ fn fees_must_satisfy_strictest_member() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
     ];
 
@@ -720,7 +720,7 @@ fn quorum_member_struct_fee_limits_survive_json_roundtrip() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -749,7 +749,7 @@ fn quorum_member_struct_no_limits_json_roundtrip() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     };
 
     let json = serde_json::to_string(&member).unwrap();
@@ -824,7 +824,7 @@ fn membership_duration_limited_by_shortest_commitment() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
         QuorumMember {
             pubkey: test_pubkey_3(),
@@ -841,7 +841,7 @@ fn membership_duration_limited_by_shortest_commitment() {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         },
     ];
 
@@ -865,7 +865,7 @@ fn membership_duration_no_commitments_no_limit() {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }];
     assert_eq!(max_membership_block(&members), None);
 }

@@ -16,12 +16,10 @@ use super::conformance::ConformanceViolation;
 use super::core::*;
 use super::serde_helpers::*;
 
-/// Serde default for `LedgerState::active_ruleset_name`. Pins to
-/// `"legacy"` so existing on-disk ledgers (no `active_ruleset_name`
-/// in their persisted JSON) deserialize to the legacy ruleset —
-/// matches the on-chain shape they were built under.
+/// Serde default for `LedgerState::active_ruleset_name`: no ruleset until a
+/// `QuorumBegin` commits one.
 fn default_ruleset_name() -> String {
-    "legacy".to_string()
+    String::new()
 }
 
 /// Whether a ledger's active ruleset enforces the DEP-07 one-period maintenance
@@ -33,7 +31,10 @@ fn default_ruleset_name() -> String {
 pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
     // `balance-commit-v4` is a strict superset of `fee-cap-v3` (its rules plus
     // the balance-commitment requirement), so it enforces the fee cap too.
-    matches!(ruleset_name, "fee-cap-v3" | "balance-commit-v4")
+    matches!(
+        ruleset_name,
+        "fee-cap-v3" | "balance-commit-v4" | "minority-v5"
+    )
 }
 
 /// Whether a ledger's active ruleset REQUIRES a balance commitment on every
@@ -44,7 +45,7 @@ pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
 /// match the replayed state) is intrinsic to every ruleset and is NOT gated by
 /// this — see `check_conformance`.
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "balance-commit-v4")
+    matches!(ruleset_name, "balance-commit-v4" | "minority-v5")
 }
 
 /// Whether this binary knows the named ruleset at all. Mirrors the
@@ -63,9 +64,8 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 /// the `cltv-offset-v2` cascade.
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
-        "legacy" => "legacy",
-        "cltv-offset-literal" => "cltv-offset-literal",
         "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" => "cltv-offset-v2",
+        "minority-v5" => "minority-v5",
         _ => "",
     }
 }
@@ -140,10 +140,8 @@ pub struct LedgerState {
     #[serde(default)]
     pub quorum_begin_hash: Option<[u8; 32]>,
     /// Protocol-ruleset name this ledger is currently governed by.
-    /// Set from `QuorumBegin.protocol_version`; missing field
-    /// (legacy QuorumBegins) resolves to `"legacy"` via
-    /// `crate::ruleset::resolve_or_legacy` — that's the on-chain
-    /// shape every pre-versioned ledger has.
+    /// Set from `QuorumBegin.protocol_version` (required); empty before the
+    /// first `QuorumBegin`.
     #[serde(default = "default_ruleset_name")]
     pub active_ruleset_name: String,
     /// Pending conditional transfers between deposits.
@@ -418,9 +416,16 @@ impl LedgerState {
                 protocol_version,
                 ..
             } => {
-                let chosen_ruleset = protocol_version
-                    .clone()
-                    .unwrap_or_else(default_ruleset_name);
+                let chosen_ruleset = protocol_version.clone().unwrap_or_default();
+                if !ruleset_known(&chosen_ruleset) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "unknown_ruleset".to_string(),
+                        details: format!(
+                            "QuorumBegin protocol_version {:?} is not a known ruleset",
+                            protocol_version
+                        ),
+                    });
+                }
 
                 // Promote the subset of staged members that the operation
                 // declared (validated upstream to be ⊆ next_quorum_members).
@@ -442,16 +447,12 @@ impl LedgerState {
                     .cloned()
                     .collect();
 
-                // Ruleset attestation gate. Skipped for "legacy" so
-                // pre-Q1 chains (every QuorumAddMember has empty
-                // `supported_rulesets`) still validate; for any other
-                // ruleset, every promoted member must have signed a
-                // `QuorumMemberResponse` declaring support, otherwise
-                // we have no proof this member can validate the rules
-                // we're about to commit to. Caught here in `apply` so
-                // every node that replays the chain enforces it, not
-                // just the rotating operator.
-                if chosen_ruleset != default_ruleset_name() {
+                // Ruleset attestation gate: every promoted member must have
+                // signed a `QuorumMemberResponse` declaring support, otherwise
+                // we have no proof this member can validate the rules we're
+                // about to commit to. Caught here in `apply` so every node that
+                // replays the chain enforces it, not just the rotating operator.
+                {
                     let unsupported: Vec<String> = promoted
                         .iter()
                         .filter(|m| !m.supported_rulesets.iter().any(|s| s == &chosen_ruleset))
@@ -822,9 +823,8 @@ impl LedgerState {
                             .map(|r| r.supported_rulesets)
                             .unwrap_or_default()
                     }
-                    // Legacy QuorumAddMember without a blob: leave
-                    // empty. `quorum begin` treats empty as "unknown"
-                    // and assumes legacy-only support.
+                    // QuorumAddMember without a blob: no declared support,
+                    // so no QuorumBegin can promote this member.
                     None => Vec::new(),
                 };
                 let staged = QuorumMember {

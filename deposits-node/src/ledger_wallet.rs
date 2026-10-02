@@ -306,10 +306,7 @@ impl LedgerWallet {
         amount_sats: Option<u64>,
         fee_rate_sat_per_vb: f32,
         // Name of the protocol ruleset the new UTXO commits to. Same
-        // value that the QuorumBegin operation will record. Caller's
-        // policy decision: rotating an existing legacy ledger usually
-        // wants to flip to "cltv-offset-v2"; bootstrapping a new
-        // ledger picks whatever the deployer's default is.
+        // value that the QuorumBegin operation will record.
         ruleset_name: &str,
     ) -> Result<(TaprootReservesCreateResult, TaprootReservesInfo), Error> {
         use bdk_wallet::bitcoin::ecdsa::Signature as BtcEcdsaSignature;
@@ -327,9 +324,7 @@ impl LedgerWallet {
 
         let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
         // Look up the named ruleset and run its tier_config_factory.
-        // The factory takes `quorum_expiry` so cltv-offset-v2 can bake
-        // `quorum_expiry + offset` into the leaf scripts; legacy
-        // ignores it and returns plain literals.
+        // The factory bakes `quorum_expiry + offset` into the leaf scripts.
         let config = if quorum_members.is_empty() {
             ThresholdConfig::custom(vec![ThresholdTier::new(
                 1,
@@ -338,7 +333,7 @@ impl LedgerWallet {
                 "Operator only (no quorum)",
             )])
         } else {
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+            let ruleset = deposits_core::ruleset::resolve_or_current(Some(ruleset_name));
             (ruleset.tier_config_factory)(quorum_members.len() + 1, first_expiry)
         };
         let builder = TapscriptReservesBuilder::new(voter_set, config, self.network, ledger_hash);
@@ -611,7 +606,7 @@ impl LedgerWallet {
         ruleset_name: &str,
         candidate_expiries: &[u32],
     ) -> Result<TaprootReservesInfo, Error> {
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+        let ruleset = deposits_core::ruleset::resolve_or_current(Some(ruleset_name));
         for &expiry in candidate_expiries {
             let voter_set = VoterSet::new(self.operator_pubkey, quorum_members.clone());
             // Mirror build_activation_tx exactly: factory takes the full voter
@@ -794,12 +789,12 @@ impl LedgerWallet {
 
         let voter_set = VoterSet::new(operator_pubkey, quorum_members.clone());
         // Look up the persisted ruleset and run its tier_config_factory
-        // so the rebuilt script matches the on-chain UTXO. Pre-versioned
-        // files lack `ruleset_name`; serde defaults that to "legacy".
+        // so the rebuilt script matches the on-chain UTXO.
         let config = if quorum_members.is_empty() {
             ThresholdConfig::custom(vec![ThresholdTier::new(1, true, 0, "Operator only")])
         } else {
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&serde_info.ruleset_name));
+            let ruleset =
+                deposits_core::ruleset::resolve_or_current(Some(&serde_info.ruleset_name));
             (ruleset.tier_config_factory)(quorum_members.len() + 1, serde_info.quorum_expiry)
         };
         let taproot_output = TapscriptReservesBuilder::new(voter_set, config, network, ledger_hash)
@@ -964,9 +959,7 @@ struct TaprootReservesInfoSerde {
     ledger_hash: String, // hex
     address: String,
     confirmed: bool,
-    /// Pre-existing files don't have this; serde default fills in
-    /// `"legacy"` so the reconstruction path stays consistent with
-    /// the on-chain UTXO that file describes.
+    /// Files without it default to the current ruleset.
     #[serde(default = "default_ruleset_name")]
     ruleset_name: String,
 
@@ -1010,7 +1003,7 @@ struct TierLeafSerde {
 }
 
 fn default_ruleset_name() -> String {
-    "legacy".to_string()
+    deposits_core::ruleset::CURRENT.to_string()
 }
 
 #[cfg(test)]
@@ -1126,7 +1119,7 @@ mod tests {
         // a given expiry. This is the "on-chain" output the recovery sees.
         let build_spk = |expiry: u32| {
             let voter_set = VoterSet::new(w.operator_pubkey(), members.clone());
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(ruleset_name));
+            let ruleset = deposits_core::ruleset::resolve_or_current(Some(ruleset_name));
             let config = (ruleset.tier_config_factory)(members.len() + 1, expiry);
             TapscriptReservesBuilder::new(voter_set, config, Network::Regtest, ledger_hash)
                 .build()
@@ -1307,7 +1300,7 @@ mod tests {
                 quorum_expiry: 1000,
                 ledger_hash: h,
                 taproot_output,
-                ruleset_name: "legacy".to_string(),
+                ruleset_name: deposits_core::ruleset::CURRENT.to_string(),
                 confirmed: false,
             }
         };

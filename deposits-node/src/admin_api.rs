@@ -349,10 +349,7 @@ async fn get_lifecycle(State(node): State<Arc<Node>>) -> Json<Vec<LifecycleEntry
         let l = arc.read().unwrap();
         let is_ours = l.operator_key() == node.node_id;
         let req = cosign_requirement(&l.state, &probe_op, chain_tip);
-        let cascade_active = matches!(
-            l.state.active_ruleset_name.as_str(),
-            "cltv-offset-v2" | "cltv-offset-literal"
-        );
+        let cascade_active = deposits_core::ruleset::lookup(&l.state.active_ruleset_name).is_some();
 
         // Determine next-tier boundary for the UX countdown. Only
         // meaningful while the cascade is active and an expiry is set.

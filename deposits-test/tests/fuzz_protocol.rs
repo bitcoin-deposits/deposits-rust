@@ -196,6 +196,10 @@ impl ProtocolSim {
                     .unwrap();
             }
 
+            // Stand in for the members' signed QuorumMemberResponses.
+            for m in operators[i].ledger.state.next_quorum_members.iter_mut() {
+                m.supported_rulesets = vec!["cltv-offset-v2".to_string()];
+            }
             let member_pks: Vec<PublicKey> =
                 members.iter().map(|&m| operators[m].public_key).collect();
             operators[i]
@@ -213,7 +217,7 @@ impl ProtocolSim {
                         .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
                         .collect(),
                     collateral_amount: 600_000,
-                    protocol_version: None,
+                    protocol_version: Some("cltv-offset-v2".to_string()),
                 })
                 .unwrap();
         }

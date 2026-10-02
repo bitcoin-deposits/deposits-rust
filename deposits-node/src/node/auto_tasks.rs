@@ -1037,7 +1037,7 @@ impl Node {
             // (`post_expiry_cosign_refused`), so a refresh attempt
             // 0/N-times-out every periodic cycle. Bail quietly.
             //
-            // cltv-offset-v2 / cltv-offset-literal: DEP-05 §Lifecycle
+            // Every registered ruleset: DEP-05 §Lifecycle
             // cascade applies. The cosign coordinator picks the right
             // tier threshold (majority at Tier-0 post-expiry, degraded
             // at higher tiers), the wallet picks the right on-chain
@@ -1045,10 +1045,7 @@ impl Node {
             // establishment ops past expiry. Drive the self-rescue
             // autonomously without waiting for `quorum repair`. Opt
             // out with `DEPOSITS_DISABLE_AUTO_SELF_RESCUE=1`.
-            let cascade_active = matches!(
-                snap.ruleset_name.as_str(),
-                "cltv-offset-v2" | "cltv-offset-literal"
-            );
+            let cascade_active = deposits_core::ruleset::lookup(&snap.ruleset_name).is_some();
             let post_expiry = current_block > snap.quorum_expiry;
             let auto_self_rescue_disabled = std::env::var("DEPOSITS_DISABLE_AUTO_SELF_RESCUE")
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))

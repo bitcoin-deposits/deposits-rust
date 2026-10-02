@@ -113,7 +113,7 @@ fn quorum_begin() {
             pk(),
         )],
         collateral_amount: 50_000_000,
-        protocol_version: None,
+        protocol_version: Some("cltv-offset-v2".to_string()),
     });
 }
 

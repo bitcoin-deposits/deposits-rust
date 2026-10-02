@@ -8,10 +8,9 @@
 //! past `quorum_expiry` until a fresh `QuorumBegin` resets the schedule.
 //!
 //! Gated by the ledger's `active_ruleset_name`:
-//! - `legacy`: pre-Lifecycle behavior. Strict majority always; past
-//!   expiry every op is uncosignable (the operator must rotate before
-//!   the deadline).
-//! - `cltv-offset-v2` / `cltv-offset-literal`: DEP-05 §Lifecycle cascade.
+//! - every registered ruleset: DEP-05 §Lifecycle cascade (tier-1 minority
+//!   `ceil(n/2) - 1` under `minority-v5`, `n/3` under the v2 family);
+//! - an unknown ruleset (or none yet): strict majority always.
 
 use crate::messages::LedgerOperation;
 use crate::types::LedgerState;
@@ -108,7 +107,7 @@ impl CosignRequirement {
 /// cascade. Legacy ledgers keep the pre-Lifecycle "strict majority,
 /// fatal at expiry" behavior.
 fn uses_lifecycle_cascade(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "cltv-offset-v2" | "cltv-offset-literal")
+    crate::types::ruleset_known(ruleset_name)
 }
 
 /// Resolve the lifecycle tier for a chain tip against a quorum's
@@ -135,9 +134,14 @@ fn majority(n: usize) -> usize {
 }
 
 /// Minority used at Tier 1, mirroring the on-chain script's
-/// `cltv-offset-v2` minority threshold (`max(n/3, 1)`).
-fn minority(n: usize) -> usize {
-    (n / 3).max(1)
+/// Tier-1 minority threshold of the ruleset's cascade: `ceil(n/2) - 1` under
+/// `minority-v5`, `n/3` under the `cltv-offset-v2` family (at least 1).
+fn minority(n: usize, ruleset_name: &str) -> usize {
+    if crate::types::reserves_family(ruleset_name) == "minority-v5" {
+        n.div_ceil(2).saturating_sub(1).max(1)
+    } else {
+        (n / 3).max(1)
+    }
 }
 
 /// Compute the cosignature requirement for an operation against a
@@ -198,9 +202,11 @@ pub fn cosign_requirement(
         (OperationClass::Establishment, LifecycleTier::Tier0PostExpiry) => {
             CosignRequirement::allowed(majority(signer_count), tier, false)
         }
-        (OperationClass::Establishment, LifecycleTier::Tier1) => {
-            CosignRequirement::allowed(minority(signer_count), tier, false)
-        }
+        (OperationClass::Establishment, LifecycleTier::Tier1) => CosignRequirement::allowed(
+            minority(signer_count, &state.active_ruleset_name),
+            tier,
+            false,
+        ),
         (OperationClass::Establishment, LifecycleTier::Tier2) => {
             CosignRequirement::allowed(1, tier, false)
         }
@@ -240,7 +246,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         }
     }
 
@@ -364,26 +370,27 @@ mod tests {
         assert!(!r.allowed);
     }
 
-    // ---- Legacy ruleset preserves old behavior --------------------
+    // ---- minority-v5: ceil(n/2) - 1 ---------------------------------
 
     #[test]
-    fn legacy_always_strict_majority_value_moving() {
-        let s = state_with_quorum(5, "legacy", Some(1000));
-        // Even past expiry, the helper itself returns strict majority —
-        // the post-expiry refusal lives in validate_for_cosign for
-        // legacy ledgers.
-        let r = cosign_requirement(&s, &value_moving_op(), 9000);
-        assert!(r.allowed);
-        assert_eq!(r.required_sigs, 3);
-        assert_eq!(r.tier, LifecycleTier::Tier0);
+    fn tier1_minority_v5() {
+        for (n, want) in [(5, 2), (6, 2), (7, 3)] {
+            let s = state_with_quorum(n, "minority-v5", Some(1000));
+            let r = cosign_requirement(&s, &establishment_op(), 1000 + TIER_1_OFFSET);
+            assert!(r.allowed);
+            assert_eq!(r.required_sigs, want, "n={n}");
+        }
     }
 
+    // ---- Unknown ruleset: strict majority -------------------------
+
     #[test]
-    fn legacy_always_strict_majority_establishment() {
+    fn unknown_ruleset_strict_majority() {
         let s = state_with_quorum(5, "legacy", Some(1000));
         let r = cosign_requirement(&s, &establishment_op(), 9000);
         assert!(r.allowed);
         assert_eq!(r.required_sigs, 3);
+        assert_eq!(r.tier, LifecycleTier::Tier0);
     }
 
     // ---- Edge cases ----------------------------------------------

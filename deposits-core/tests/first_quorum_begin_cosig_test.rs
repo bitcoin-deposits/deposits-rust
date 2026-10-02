@@ -38,7 +38,7 @@ fn staged_member(pk: PublicKey) -> QuorumMember {
         compensation_bps: None,
         compensation_deposit_id: None,
         compensation_frequency_blocks: None,
-        supported_rulesets: Vec::new(),
+        supported_rulesets: vec!["cltv-offset-v2".to_string()],
     }
 }
 
@@ -73,7 +73,7 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
             .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
             .collect(),
         collateral_amount: 500_000_000,
-        protocol_version: None,
+        protocol_version: Some("cltv-offset-v2".to_string()),
     }
 }
 

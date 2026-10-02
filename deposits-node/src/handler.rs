@@ -3196,7 +3196,7 @@ mod tests {
                 ledger_hash: [0; 32],
                 quorum_members: vec![QuorumMemberRef::pubkey_only(member)],
                 collateral_amount: 30_000_000_000,
-                protocol_version: None,
+                protocol_version: Some("cltv-offset-v2".to_string()),
             },
             LedgerOperation::DepositOpen {
                 deposit_id: [0xAB; 16],

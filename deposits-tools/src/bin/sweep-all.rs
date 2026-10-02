@@ -610,7 +610,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
             Some(tup) => tup,
             None => return Ok(None), // ledger never reached an Active quorum
         };
-    let mut ruleset_name = ruleset.unwrap_or_else(|| "legacy".to_string());
+    let mut ruleset_name = ruleset.unwrap_or_else(|| deposits_core::ruleset::CURRENT.to_string());
     let mut outpoint: Option<(bitcoin::Txid, u32)> = None;
     let mut persisted_tree: Option<PersistedTree> = None;
 
@@ -937,7 +937,7 @@ fn summarize_from_snapshot(
     let ruleset_name = v
         .get("ruleset_name")
         .and_then(|x| x.as_str())
-        .unwrap_or("legacy")
+        .unwrap_or(deposits_core::ruleset::CURRENT)
         .to_string();
     let quorum_expiry = v.get("quorum_expiry").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
     let outpoint = match (
@@ -1266,7 +1266,7 @@ fn sweep_ledger(
         .collect();
     let voter_set = VoterSet::new(summary.operator_key, other_voters.clone());
     let total_voters = voter_set.all_voters().len();
-    let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&summary.ruleset_name));
+    let ruleset = deposits_core::ruleset::resolve_or_current(Some(&summary.ruleset_name));
     let config = (ruleset.tier_config_factory)(total_voters, summary.quorum_expiry);
     let mut tier0 = config
         .tiers
@@ -2295,7 +2295,7 @@ mod reconstruct_tests {
 
         // balance-commit-v4 shares cltv-offset-v2's tier factory (same family
         // as the live mainnet vaults).
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let ruleset = deposits_core::ruleset::resolve_or_current(Some("balance-commit-v4"));
         let factory = ruleset.tier_config_factory;
 
         let base_expiry = 957_999u32;
@@ -2353,7 +2353,7 @@ mod reconstruct_tests {
         let voter_set = VoterSet::new(op, others);
         let total = voter_set.all_voters().len();
         let network = Network::Bitcoin;
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let ruleset = deposits_core::ruleset::resolve_or_current(Some("balance-commit-v4"));
         let factory = ruleset.tier_config_factory;
         let base_expiry = 957_999u32;
 
@@ -2391,7 +2391,7 @@ mod reconstruct_tests {
         let voter_set = VoterSet::new(op, others);
         let total = voter_set.all_voters().len();
         let network = Network::Bitcoin;
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some("balance-commit-v4"));
+        let ruleset = deposits_core::ruleset::resolve_or_current(Some("balance-commit-v4"));
         let factory = ruleset.tier_config_factory;
         let base_expiry = 957_999u32;
         let new_expiry = base_expiry + 743; // current_block + 1000 style

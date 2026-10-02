@@ -1065,10 +1065,8 @@ impl Node {
             // and the operator's collected cosignature count must still
             // both line up; this gate just removes the blanket refusal
             // so the lifecycle cascade can engage.
-            let cascade_active = matches!(
-                state.active_ruleset_name.as_str(),
-                "cltv-offset-v2" | "cltv-offset-literal"
-            );
+            let cascade_active =
+                deposits_core::ruleset::lookup(&state.active_ruleset_name).is_some();
             if qe != 0 && block_height > qe && !cascade_active {
                 return (
                     false,
@@ -1170,7 +1168,7 @@ impl Node {
                 .copied()
                 .collect();
             let voter_set = VoterSet::new(operator_key, others);
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
+            let ruleset = deposits_core::ruleset::resolve_or_current(Some(&ruleset_name));
             let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), qe);
             TapscriptReservesBuilder::new(voter_set, config, self.wallet.network(), lh).build()
         };
@@ -1285,7 +1283,7 @@ impl Node {
                 .copied()
                 .collect();
             let voter_set = VoterSet::new(operator_key, others);
-            let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&ruleset_name));
+            let ruleset = deposits_core::ruleset::resolve_or_current(Some(&ruleset_name));
             let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), quorum_expiry);
             let builder = TapscriptReservesBuilder::new(
                 voter_set,
@@ -1679,7 +1677,7 @@ impl Node {
         //    the operator told us to sign.
         let voter_set = VoterSet::new(original_operator, qb_members.clone());
         let voter_count = voter_set.all_voters().len();
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
+        let ruleset = deposits_core::ruleset::resolve_or_current(qb_ruleset.as_deref());
         let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
 
         let taproot_builder = TapscriptReservesBuilder::new(

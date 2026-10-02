@@ -305,6 +305,11 @@ impl Operator {
                 filler = filler.wrapping_add(1);
             }
         }
+        // Stand in for each member's signed QuorumMemberResponse (not modelled
+        // here): the QuorumBegin's ruleset must be one every member declared.
+        for m in self.ledger.state.next_quorum_members.iter_mut() {
+            m.supported_rulesets = vec!["cltv-offset-v2".to_string()];
+        }
         let members: Vec<deposits_core::messages::QuorumMemberRef> = self
             .ledger
             .state
@@ -333,7 +338,7 @@ impl Operator {
             ledger_hash: self.ledger.state.chain_tip_hash,
             quorum_members: members,
             collateral_amount: 50_000,
-            protocol_version: None,
+            protocol_version: Some("cltv-offset-v2".to_string()),
         };
         self.ledger.append_operation(op).unwrap();
     }

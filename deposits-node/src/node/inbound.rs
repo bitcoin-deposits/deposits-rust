@@ -2417,7 +2417,7 @@ mod fork_point_collateral_tests {
                 ledger_hash: [0; 32],
                 quorum_members: vec![QuorumMemberRef::pubkey_only(pk(2))],
                 collateral_amount: COLLATERAL,
-                protocol_version: None,
+                protocol_version: Some("cltv-offset-v2".to_string()),
             },
             LedgerOperation::DepositOpen {
                 deposit_id: [0xAB; 16],

@@ -3450,7 +3450,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     let voter_count = voter_set.all_voters().len();
     // Reconstruct under the same ruleset the disputed UTXO was built
     // with — read from the latest QuorumBegin's protocol_version.
-    let ruleset = deposits_core::ruleset::resolve_or_legacy(ruleset_at_qb.as_deref());
+    let ruleset = deposits_core::ruleset::resolve_or_current(ruleset_at_qb.as_deref());
     let threshold_config = (ruleset.tier_config_factory)(voter_count, quorum_expiry_at_qb);
 
     let taproot_builder = TapscriptReservesBuilder::new(
@@ -5419,14 +5419,10 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         .map_err(|e| format!("Failed to get block height: {}", e))?;
     let quorum_expiry = pre_rotation_height + 144;
 
-    // Build Taproot quorum address. `recovery rotate-to-quorum` is a
-    // standalone bring-up path (not the post-dispute one); it picks
-    // the ruleset for the new UTXO. Default to legacy for parity with
-    // existing chain. A `--protocol-version` flag is the natural
-    // extension when migrations to v2 are wanted from this CLI path.
+    // Build Taproot quorum address on the current ruleset.
     let voter_set = VoterSet::new(our_pubkey, quorum_members.clone());
     let voter_count = voter_set.all_voters().len();
-    let new_ruleset = deposits_core::ruleset::resolve_or_legacy(Some("legacy"));
+    let new_ruleset = deposits_core::ruleset::resolve_or_current(None);
     let threshold_config = (new_ruleset.tier_config_factory)(voter_count, quorum_expiry);
 
     let taproot_builder =
@@ -6162,7 +6158,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
     println!("    ledger_hash:       {}", hex::encode(qb_ledger_hash));
     println!(
         "    ruleset:           {:?}",
-        qb_ruleset.as_deref().unwrap_or("legacy")
+        qb_ruleset.as_deref().unwrap_or("(none)")
     );
     println!("    quorum_expiry:     {}", qb_expiry);
     println!("    members:           {}", qb_members.len());
@@ -6340,7 +6336,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
     // ── 7. Sighash ──
     let voter_set = VoterSet::new(original_operator, qb_members.clone());
     let voter_count = voter_set.all_voters().len();
-    let ruleset = deposits_core::ruleset::resolve_or_legacy(qb_ruleset.as_deref());
+    let ruleset = deposits_core::ruleset::resolve_or_current(qb_ruleset.as_deref());
     let threshold_config = (ruleset.tier_config_factory)(voter_count, qb_expiry);
     let taproot_builder = TapscriptReservesBuilder::new(
         voter_set,

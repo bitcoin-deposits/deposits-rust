@@ -257,6 +257,10 @@ mod tests {
             "Hash should change after QuorumAddMember"
         );
 
+        // Stand in for the members' signed QuorumMemberResponses.
+        for m in ledger.state.next_quorum_members.iter_mut() {
+            m.supported_rulesets = vec!["cltv-offset-v2".to_string()];
+        }
         // QuorumBegin — hash should change again
         let update = ledger
             .apply_operation(&LedgerOperation::QuorumBegin {
@@ -272,7 +276,7 @@ mod tests {
                     .map(deposits_core::messages::QuorumMemberRef::pubkey_only)
                     .collect(),
                 collateral_amount: 50_000,
-                protocol_version: None,
+                protocol_version: Some("cltv-offset-v2".to_string()),
             })
             .unwrap();
         let hash_after_begin = update.content_hash;

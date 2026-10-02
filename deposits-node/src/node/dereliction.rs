@@ -333,7 +333,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: vec![],
+            supported_rulesets: vec!["cltv-offset-v2".to_string()],
         }
     }
 

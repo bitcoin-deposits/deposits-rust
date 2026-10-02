@@ -61,35 +61,25 @@ fn quorum_begin(member: PublicKey, protocol_version: Option<String>) -> LedgerOp
     }
 }
 
-/// Pre-Q1 chain shape: every QuorumAddMember was applied without a
-/// signed response blob, so each `QuorumMember.supported_rulesets` is
-/// empty. The QuorumBegin omits `protocol_version` (defaults to
-/// `legacy`). This is the exact shape every production ledger on relay
-/// has today — must keep validating cleanly forever.
+/// A QuorumBegin must name a ruleset: one without `protocol_version` is
+/// refused (the pre-anchor `legacy` default was removed).
 #[test]
-fn legacy_quorum_begin_with_empty_supported_rulesets_passes() {
+fn quorum_begin_without_protocol_version_is_refused() {
     let operator = pk(1);
     let member = pk(2);
-    let s = state_with_staged_member(operator, member, Vec::new());
-    let op = quorum_begin(member, None);
-    let next = s.apply(&op).expect("legacy QuorumBegin must still apply");
-    assert_eq!(next.active_ruleset_name, "legacy");
-    assert_eq!(next.quorum_members.len(), 1);
+    let s = state_with_staged_member(operator, member, vec!["minority-v5".into()]);
+    assert!(s.apply(&quorum_begin(member, None)).is_err());
 }
 
-/// Same shape as above but the operator passes `protocol_version =
-/// Some("legacy")` explicitly. Must also pass — `legacy` is the
-/// migration-grandfather ruleset and skips the attestation gate.
+/// `legacy` is no longer a ruleset.
 #[test]
-fn explicit_legacy_protocol_version_also_skips_gate() {
+fn explicit_legacy_protocol_version_is_refused() {
     let operator = pk(1);
     let member = pk(2);
-    let s = state_with_staged_member(operator, member, Vec::new());
-    let op = quorum_begin(member, Some("legacy".into()));
-    let next = s
-        .apply(&op)
-        .expect("explicit legacy QuorumBegin must apply");
-    assert_eq!(next.active_ruleset_name, "legacy");
+    let s = state_with_staged_member(operator, member, vec!["legacy".into()]);
+    assert!(s
+        .apply(&quorum_begin(member, Some("legacy".into())))
+        .is_err());
 }
 
 /// Non-legacy ruleset with a member who never declared support →

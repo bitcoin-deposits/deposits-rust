@@ -92,17 +92,10 @@ impl Node {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        // Resolve the ruleset this quorum will be locked into. For an initial
-        // QuorumAdd before any QuorumBegin, our ledger's `active_ruleset_name`
-        // may still be the default — that's fine, the member just signs the
-        // value we propose, and a later QuorumBegin reaffirms it.
-        let chosen_ruleset = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            match ledgers.get(&ledger_id) {
-                Some(arc) => arc.read().unwrap().state.active_ruleset_name.clone(),
-                None => "legacy".to_string(),
-            }
-        };
+        // The ruleset proposed to the member: the one the next QuorumBegin
+        // will commit to (rotations move to the current ruleset rather than
+        // inheriting); a later QuorumBegin reaffirms it.
+        let chosen_ruleset = deposits_core::ruleset::CURRENT.to_string();
 
         let proposed_terms = crate::node::coordination::ConsentProposedTerms {
             chosen_ruleset: &chosen_ruleset,
@@ -593,7 +586,7 @@ impl Node {
             .params
             .get("chosen_ruleset")
             .and_then(|v| v.as_str())
-            .unwrap_or("legacy")
+            .unwrap_or(deposits_core::ruleset::CURRENT)
             .to_string();
 
         // Refuse to attest to a ruleset this binary can't enforce. Without

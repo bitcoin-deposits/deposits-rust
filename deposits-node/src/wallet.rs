@@ -98,9 +98,7 @@ pub struct TaprootReservesInfo {
     /// Name of the protocol ruleset that this UTXO was built under.
     /// The reconstruction path looks this up via
     /// `deposits_core::ruleset::lookup` to recover the exact tier
-    /// shape encoded in the on-chain script. Defaults to `"legacy"`
-    /// when missing from persisted JSON — that's the on-chain shape
-    /// for every pre-versioned QuorumBegin.
+    /// shape encoded in the on-chain script.
     pub ruleset_name: String,
 
     /// Whether this output is confirmed

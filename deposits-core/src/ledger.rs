@@ -1725,14 +1725,10 @@ impl Ledger {
 
         self.validate_operation(operation)?;
 
-        // Legacy ledgers: keep the old "fatal at expiry" behavior. The
-        // cltv-offset-v2 lifecycle cascade doesn't apply because legacy
-        // timelocks are literal (1008/2016/4032), not anchored to
-        // quorum_expiry — the off-chain side can't safely mirror an
-        // on-chain schedule that doesn't exist.
-        if self.state.active_ruleset_name != "cltv-offset-v2"
-            && self.state.active_ruleset_name != "cltv-offset-literal"
-        {
+        // An unknown ruleset (or none yet) keeps "fatal at expiry"; every
+        // registered ruleset anchors its tiers to quorum_expiry, so the
+        // DEP-05 §Lifecycle cascade applies.
+        if crate::ruleset::lookup(&self.state.active_ruleset_name).is_none() {
             if let Some(expiry) = self.state.quorum_expiry {
                 if current_block_height > expiry
                     && self.state.quorum_state == deposits_protocol::QuorumState::Active
@@ -2808,7 +2804,7 @@ mod tests {
                 .map(crate::messages::QuorumMemberRef::pubkey_only)
                 .collect(),
             collateral_amount: 0,
-            protocol_version: None,
+            protocol_version: Some("minority-v5".to_string()),
         };
 
         // Q is the cosigner count, operator not counted. Each value in
@@ -2924,7 +2920,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["minority-v5".to_string()],
         }];
 
         // Before expiry → accept.
@@ -3001,7 +2997,7 @@ mod tests {
             compensation_bps: None,
             compensation_deposit_id: None,
             compensation_frequency_blocks: None,
-            supported_rulesets: Vec::new(),
+            supported_rulesets: vec!["minority-v5".to_string()],
         }];
 
         let current = 100_000u32;

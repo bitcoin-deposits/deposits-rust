@@ -1705,7 +1705,7 @@ impl BinaryCodec for LedgerOperation {
                     // Bytewise codec is legacy-only, never used for
                     // protocol-version'd QuorumBegins. Always None;
                     // resolves to legacy ruleset on apply.
-                    protocol_version: None,
+                    protocol_version: Some("cltv-offset-v2".to_string()),
                 })
             }
             // Deposit operations (20-25) - legacy decoding extracts deposit_id from embedded bytes

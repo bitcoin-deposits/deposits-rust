@@ -132,9 +132,7 @@ pub struct ThresholdTier {
     /// **Absolute** `OP_CLTV` target (block height) for this tier. `0`
     /// means no timelock — the tier is the immediate quorum-majority
     /// path routine rotations use. The Ruleset's tier-config factory
-    /// is responsible for picking the right value: `legacy` returns
-    /// plain literals (1008/2016/4032), `cltv-offset-v2` returns
-    /// `quorum_expiry + offset`. The script builder treats this as
+    /// is responsible for picking the right value (`quorum_expiry + offset`). The script builder treats this as
     /// the literal value to push before `OP_CLTV`.
     pub timelock_blocks: u32,
     /// Human-readable description
@@ -199,10 +197,8 @@ pub struct ThresholdConfig {
 }
 
 impl ThresholdConfig {
-    /// Build a [`ThresholdConfig`] for `n` voters under the
-    /// **legacy** ruleset — the shape every pre-`protocol_version`
-    /// QuorumBegin on chain commits to. `quorum_expiry` is ignored
-    /// (legacy tiers use plain literal CLTV targets).
+    /// Build a [`ThresholdConfig`] for `n` voters under the current
+    /// ruleset, anchored at `quorum_expiry = 0` (tests and shape checks).
     ///
     /// Provided as a thin compatibility shim so existing call sites
     /// that haven't been ruleset-aware yet keep compiling. New code
@@ -211,7 +207,7 @@ impl ThresholdConfig {
     /// this routes through the version the ledger committed to in
     /// its QuorumBegin.
     pub fn default_for_voter_count(n: usize) -> Self {
-        (crate::ruleset::LEGACY.tier_config_factory)(n, 0)
+        (crate::ruleset::resolve_or_current(None).tier_config_factory)(n, 0)
     }
 
     /// Custom configuration
@@ -250,11 +246,9 @@ impl TapscriptReservesBuilder {
         }
     }
 
-    /// Create with the **legacy** ruleset's threshold configuration.
-    /// Compatibility shim for call sites not yet ruleset-aware. New
-    /// code should look up the ledger's active ruleset and run its
-    /// `tier_config_factory` directly so v2 ledgers don't get the
-    /// wrong cascade.
+    /// Create with the current ruleset's tiers anchored at `quorum_expiry = 0`.
+    /// For tests and script-shape checks only: a real vault must be built from
+    /// its ledger's ruleset and quorum expiry.
     pub fn with_defaults(voter_set: VoterSet, network: Network, ledger_hash: [u8; 32]) -> Self {
         let config = ThresholdConfig::default_for_voter_count(voter_set.total_count());
         Self::new(voter_set, config, network, ledger_hash)
@@ -2097,25 +2091,18 @@ mod tests {
     }
 
     #[test]
-    fn test_default_threshold_config_returns_legacy() {
-        // `default_for_voter_count` is a compat shim that delegates to
-        // the LEGACY ruleset (it doesn't know quorum_expiry). New
-        // call sites should look up the ledger's active ruleset
-        // directly — see `crate::ruleset`. This test pins the legacy
-        // shape so a regression here would break script reconstruction
-        // for every pre-`protocol_version` QuorumBegin on chain.
+    fn test_default_threshold_config_is_current_ruleset() {
         let config_2 = ThresholdConfig::default_for_voter_count(2);
         assert_eq!(config_2.tiers.len(), 3);
         assert_eq!(config_2.tiers[0].timelock_blocks, 0);
-        assert_eq!(config_2.tiers[1].timelock_blocks, 2016);
-        assert_eq!(config_2.tiers[2].timelock_blocks, 4032);
+        assert_eq!(config_2.tiers[1].timelock_blocks, 720);
+        assert_eq!(config_2.tiers[2].timelock_blocks, 8064);
 
-        let config_5 = ThresholdConfig::default_for_voter_count(5);
-        assert_eq!(config_5.tiers.len(), 4);
-        assert_eq!(config_5.tiers[0].timelock_blocks, 0);
-        assert_eq!(config_5.tiers[1].timelock_blocks, 1008);
-        assert_eq!(config_5.tiers[2].timelock_blocks, 2016);
-        assert_eq!(config_5.tiers[3].timelock_blocks, 4032);
+        let config_7 = ThresholdConfig::default_for_voter_count(7);
+        assert_eq!(config_7.tiers.len(), 4);
+        assert_eq!(config_7.tiers[0].threshold, 4);
+        assert_eq!(config_7.tiers[1].threshold, 3);
+        assert_eq!(config_7.tiers[1].timelock_blocks, 720);
     }
 
     fn test_ledger_hash() -> [u8; 32] {
@@ -3346,7 +3333,15 @@ mod frozen_builder_snapshot {
                 .unwrap()
                 .try_into()
                 .unwrap();
-        let config = ThresholdConfig::default_for_voter_count(members.len() + 1);
+        // Pins the builder's script assembly, independent of any ruleset: the
+        // tier table is fixed here (majority 3, minority 1 at 1008, operator at
+        // 2016, emergency at 4032).
+        let config = ThresholdConfig::custom(vec![
+            ThresholdTier::new(3, false, 0, "3-of-4 quorum (immediate)"),
+            ThresholdTier::new(1, false, 1008, "1-of-4 quorum (after 1008 blocks)"),
+            ThresholdTier::new(1, true, 2016, "Operator only (after 2016 blocks)"),
+            ThresholdTier::emergency_recovery(4032),
+        ]);
         let builder =
             TapscriptReservesBuilder::new(voter_set, config, Network::Bitcoin, ledger_hash);
         let out = builder.build().expect("build current");

@@ -203,12 +203,17 @@ impl Node {
         // Compute ledger hash
         let ledger_hash = our_latest.content_hash;
 
-        // Build Taproot reserves with default (legacy) config. P0d
-        // will route through the active ruleset's factory once
-        // QuorumBegin carries `protocol_version`.
-        let _ = quorum_expiry;
-        let tapscript_builder =
-            TapscriptReservesBuilder::with_defaults(voter_set, self.wallet.network(), ledger_hash);
+        // Build Taproot reserves on the current ruleset, anchored to the new
+        // quorum's expiry; the QuorumBegin below commits to the same name.
+        let ruleset = deposits_core::ruleset::resolve_or_current(None);
+        let threshold_config =
+            (ruleset.tier_config_factory)(voter_set.all_voters().len(), quorum_expiry);
+        let tapscript_builder = TapscriptReservesBuilder::new(
+            voter_set,
+            threshold_config,
+            self.wallet.network(),
+            ledger_hash,
+        );
 
         let taproot_output = tapscript_builder
             .build()
@@ -320,7 +325,7 @@ impl Node {
                 })
                 .collect(),
             collateral_amount: collateral_msats,
-            protocol_version: None,
+            protocol_version: Some(ruleset.name.to_string()),
         };
 
         let message_bytes = operation.tlv_encode();
@@ -875,19 +880,11 @@ impl Node {
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();
 
-            // A rotation inherits the active ruleset (an existing legacy
-            // ledger stays on legacy until the operator passes
-            // `--protocol-version`). A first QuorumBegin has nothing to
-            // inherit — a fresh ledger's state merely defaults to "legacy" —
-            // so it takes the newest ruleset every member supports: DEP-03
-            // anchors the recovery tiers to quorum_expiry, which legacy's
-            // literal 1008/2016/4032 heights do not. Either way every
+            // Every QuorumBegin, first or rotation, takes the newest ruleset
+            // every incoming member supports (rotations do not inherit), so a
+            // ledger moves onto the current cascade at its next rotation. Every
             // pending member's support is checked below.
-            let rs = if ledger.state.quorum_expiry.is_none() {
-                newest_ruleset_supported_by(source)
-            } else {
-                ledger.state.active_ruleset_name.clone()
-            };
+            let rs = newest_ruleset_supported_by(source);
 
             (members, lids, expiries, hash, collateral, rs)
         };
@@ -934,11 +931,8 @@ impl Node {
                     &m.supported_rulesets,
                     &new_ruleset_name,
                 ) {
-                    let declared: Vec<&str> = if m.supported_rulesets.is_empty() {
-                        vec!["legacy"]
-                    } else {
-                        m.supported_rulesets.iter().map(|s| s.as_str()).collect()
-                    };
+                    let declared: Vec<&str> =
+                        m.supported_rulesets.iter().map(|s| s.as_str()).collect();
                     unsupported.push(format!(
                         "{} (supports: {:?})",
                         hex::encode(m.pubkey.serialize()),
@@ -1365,7 +1359,7 @@ impl Node {
             .copied()
             .collect();
         let new_voter_set = VoterSet::new(operator_key, new_others);
-        let ruleset = deposits_core::ruleset::resolve_or_legacy(Some(new_ruleset_name));
+        let ruleset = deposits_core::ruleset::resolve_or_current(Some(new_ruleset_name));
         let new_first_expiry = *new_expiries.iter().min().unwrap_or(&0);
         let new_config =
             (ruleset.tier_config_factory)(new_voter_set.all_voters().len(), new_first_expiry);
@@ -1389,7 +1383,7 @@ impl Node {
             .copied()
             .collect();
         let cur_voter_set = VoterSet::new(existing.operator, cur_voters_others);
-        let cur_ruleset = deposits_core::ruleset::resolve_or_legacy(Some(&existing.ruleset_name));
+        let cur_ruleset = deposits_core::ruleset::resolve_or_current(Some(&existing.ruleset_name));
         let cur_config = (cur_ruleset.tier_config_factory)(
             cur_voter_set.all_voters().len(),
             existing.quorum_expiry,
@@ -2972,7 +2966,7 @@ fn newest_ruleset_supported_by(members: &[deposits_core::types::QuorumMember]) -
                 .iter()
                 .all(|m| deposits_core::ruleset::member_supports(&m.supported_rulesets, name))
         })
-        .unwrap_or("legacy")
+        .unwrap_or(deposits_core::ruleset::CURRENT)
         .to_string()
 }
 
@@ -3012,13 +3006,13 @@ mod first_ruleset_tests {
             newest
         );
         assert_eq!(
-            newest_ruleset_supported_by(&[member(&all), member(&["legacy", "cltv-offset-v2"])]),
+            newest_ruleset_supported_by(&[member(&all), member(&["cltv-offset-v2"])]),
             "cltv-offset-v2"
         );
-        // A member that declares nothing supports legacy only.
+        // Nothing shared: the current ruleset, which the support check then refuses.
         assert_eq!(
             newest_ruleset_supported_by(&[member(&all), member(&[])]),
-            "legacy"
+            deposits_core::ruleset::CURRENT
         );
     }
 }

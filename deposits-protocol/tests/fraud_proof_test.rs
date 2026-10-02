@@ -2621,7 +2621,7 @@ mod quorum_expired_verifier {
             ledger_hash: [0; 32],
             quorum_members: vec![],
             collateral_amount: 50_000,
-            protocol_version: None,
+            protocol_version: Some("cltv-offset-v2".to_string()),
         };
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let sk = bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap();

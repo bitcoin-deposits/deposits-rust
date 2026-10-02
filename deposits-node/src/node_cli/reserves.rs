@@ -634,7 +634,8 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 &ledger_id[..16]
             )
         })?;
-        let resolved_ruleset = matched_name.unwrap_or_else(|| "legacy".to_string());
+        let resolved_ruleset =
+            matched_name.unwrap_or_else(|| deposits_core::ruleset::CURRENT.to_string());
 
         (
             outpoint,
@@ -674,7 +675,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         quorum_expiry: 0,
         ledger_hash,
         taproot_output,
-        ruleset_name: ruleset_at_qb.unwrap_or_else(|| "legacy".to_string()),
+        ruleset_name: ruleset_at_qb.unwrap_or_else(|| deposits_core::ruleset::CURRENT.to_string()),
         confirmed: true,
     };
 
