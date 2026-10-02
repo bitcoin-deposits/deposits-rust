@@ -1118,11 +1118,19 @@ impl Node {
         };
         let ledger_id = ledger.ledger_id_hex();
 
-        // Mark dirty so the run loop's broadcast-dirty pass picks it up. We
-        // can't call broadcast_all_updates here directly: it holds a ledger
-        // read-guard across an await, and this handler is invoked from a
-        // Send-requiring tokio::spawn in main_loop.
+        // Persist via the dirty pass, and publish the genesis LedgerOpen now:
+        // the dirty pass only writes to disk, and without seq 0 on the relay a
+        // member can never find the original operator, so a dispute stalls
+        // before confiscation. (broadcast_last_update clones before awaiting,
+        // so it is safe from this Send-requiring handler.)
         self.dirty_ledgers.lock().unwrap().insert(ledger_id.clone());
+        if let Err(e) = self.broadcast_last_update(&ledger_id).await {
+            tracing::warn!(
+                "ledger_open: LedgerOpen for {} not published: {}",
+                &ledger_id[..16],
+                e
+            );
+        }
 
         let result = serde_json::json!({
             "ledger_id": ledger_id,

@@ -13,7 +13,7 @@ jobs:
   integration:
     name: Integration (4-operator regtest)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -24,12 +24,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # dangerous-testing: the dispute phase has the operator equivocate.
       - name: Build
         run: |
-          cargo build --release \
-            -p deposits-node --bin deposits-node \
-            -p deposits-wallet --bin deposits-wallet \
-            -p deposits-tools --bin replay-ledger
+          cargo build --release -p deposits-node --features dangerous-testing --bin deposits-node
+          cargo build --release -p deposits-wallet --bin deposits-wallet
+
+      - name: Install Bitcoin Core 28.1
+        run: |
+          curl -sSL -o /tmp/btc.tgz https://bitcoincore.org/bin/bitcoin-core-28.1/bitcoin-28.1-x86_64-linux-gnu.tar.gz
+          echo "07f77afd326639145b9ba9562912b2ad2ccec47b8a305bd075b4f4cb127b7ed7  /tmp/btc.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/btc.tgz -C /opt
+          sudo ln -s /opt/bitcoin-28.1/bin/bitcoind /opt/bitcoin-28.1/bin/bitcoin-cli /usr/local/bin/
 
       - name: Install strfry
         run: |
@@ -40,187 +46,8 @@ jobs:
           make -j$(nproc)
           cp strfry ${{ github.workspace }}/deposits-tools/bin/strfry
 
-      # =====================================================================
-      # Test 1: Quorum protocol (formation, rotation, deposits, collateral)
-      # test-quorum.sh handles its own setup via reinit-like flow
-      # =====================================================================
-
-      - name: Test quorum protocol
-        working-directory: deposits-tools
-        run: |
-          # Start infrastructure (test-quorum.sh expects infra running)
-          source bin/_common.sh
-          $DC up -d bitcoin
-          wait_for_bitcoin
-          start_all_electrs
-          wait_for_all_electrs
-          start_all_relays
-          wait_for_nostr
-          setup_faucet
-          $DC up -d miner
-
-          # Run the test (it does its own operator setup)
-          ./bin/test-quorum.sh
-        timeout-minutes: 20
-
-      # Verify ledgers from relay after quorum test
-      - name: Verify ledgers after quorum test
-        working-directory: deposits-tools
-        run: |
-          source bin/_common.sh && init_topology
-
-          echo "=== Ledgers on slow relay ($RELAY_LEDGERS) ==="
-          ../target/release/replay-ledger --relay "$RELAY_LEDGERS" 2>/dev/null || true
-
-          FAILURES=0
-          for op in alice bob charlie diana; do
-            LEDGER_ID=$(run_node_cmd "$op" ledger list 2>/dev/null \
-              | grep "Ledger ID:" | grep -oE '[0-9a-f]{48,}' | head -1)
-            [ -z "$LEDGER_ID" ] && continue
-            PREFIX="${LEDGER_ID:0:8}"
-            OUTPUT=$(../target/release/replay-ledger "$PREFIX" --relay "$RELAY_LEDGERS" 2>/dev/null) || true
-            if echo "$OUTPUT" | grep -q "updates in chain"; then
-              echo "  $op ($PREFIX): OK"
-            else
-              echo "  $op ($PREFIX): FAILED"
-              FAILURES=$((FAILURES + 1))
-            fi
-          done
-          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES ledger(s) failed replay"; exit 1; }
-
-      # =====================================================================
-      # Test 2: Dispute protocol (invalid update, dispute, lottery, recovery)
-      # Needs a fresh environment
-      # =====================================================================
-
-      - name: Test dispute protocol
-        working-directory: deposits-tools
-        run: |
-          # Clean reset for dispute test
-          source bin/_common.sh
-          stop_all_nodes 2>/dev/null || true
-
-          # Clear node data for fresh state
-          rm -rf "$DATA_ROOT"
-
-          # Setup fresh faucet (mine more blocks for new funds)
-          FAUCET=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            -rpcwallet=faucet getnewaddress 2>/dev/null)
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            generatetoaddress 110 "$FAUCET" 2>/dev/null
-
-          # Run the test (it does its own operator setup)
-          ./bin/test-dispute-4op.sh
-        timeout-minutes: 20
-
-      # =====================================================================
-      # Test 3: Reserves-UTXO post-expiry tier cascade
-      # Verifies the new CLTV-anchored-to-quorum_expiry tier structure
-      # (DEP-03 §"Spending Tiers"). Bootstraps a 2-op cluster with short
-      # membership_until, runs quorum begin, mines past quorum_expiry+720,
-      # and broadcasts a Tier-1 (single quorum member) spend.
-      # =====================================================================
-
-      - name: Test recovery cascade (post-expiry tiers)
-        working-directory: deposits-tools
-        run: |
-          # Fresh environment (test does its own 2-op bootstrap)
-          source bin/_common.sh
-          stop_all_nodes 2>/dev/null || true
-          rm -rf "$DATA_ROOT"
-
-          FAUCET=$(docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            -rpcwallet=faucet getnewaddress 2>/dev/null)
-          docker exec bitcoind bitcoin-cli -regtest -rpcuser=user -rpcpassword=pass \
-            generatetoaddress 110 "$FAUCET" 2>/dev/null
-
-          ./bin/test-recovery-cascade.sh
-        timeout-minutes: 10
-
-      # =====================================================================
-      # Verify: on-chain UTXO history matches ledger claims
-      # =====================================================================
-
-      - name: Verify reserves UTXO history
-        working-directory: deposits-tools
-        run: |
-          source bin/_common.sh && init_topology
-          FAILURES=0
-
-          # Find a working electrs port
-          EURL=""
-          for port in 3201 3202 3102; do
-            curl -sf "http://localhost:$port/blocks/tip/height" >/dev/null 2>&1 && EURL="http://localhost:$port" && break
-          done
-          [ -z "$EURL" ] && { echo "ERROR: No electrs available"; exit 1; }
-          echo "Using electrs at $EURL"
-
-          for op in alice bob charlie diana; do
-            echo ""
-            echo "=== $op ==="
-            RESERVES=$(run_node_cmd "$op" reserves list 2>/dev/null | grep -v '^\[2m') || true
-            OUTPOINTS=$(echo "$RESERVES" | grep "Outpoint:" | grep -oE '[0-9a-f]{64}:[0-9]+')
-
-            for outpoint in $OUTPOINTS; do
-              TXID="${outpoint%%:*}"
-              VOUT="${outpoint##*:}"
-              DECLARED=$(echo "$RESERVES" | grep -A3 "$TXID" | grep "Amount:" | grep -oE '[0-9]+' | head -1)
-
-              echo "  UTXO: ${TXID:0:12}...:$VOUT"
-
-              # Verify output exists and amount matches
-              TX_JSON=$(curl -sf "$EURL/tx/$TXID" 2>/dev/null) || true
-              if [ -z "$TX_JSON" ]; then
-                echo "    WARNING: tx not found in electrs"
-                continue
-              fi
-
-              ACTUAL=$(echo "$TX_JSON" | python3 -c "
-          import sys,json; tx=json.load(sys.stdin); v=int('$VOUT')
-          out=tx['vout'][v]; print(f\"{out['value']} {out.get('scriptpubkey_type','?')} {out.get('scriptpubkey_address','?')[:40]}\")" 2>/dev/null)
-              echo "    On-chain: $ACTUAL"
-
-              ACTUAL_VALUE=$(echo "$ACTUAL" | awk '{print $1}')
-              if [ -n "$DECLARED" ] && [ -n "$ACTUAL_VALUE" ]; then
-                if [ "$DECLARED" = "$ACTUAL_VALUE" ]; then
-                  echo "    Amount: MATCH ($DECLARED sats)"
-                else
-                  echo "    Amount: MISMATCH (declared=$DECLARED actual=$ACTUAL_VALUE)"
-                  FAILURES=$((FAILURES + 1))
-                fi
-              fi
-
-              # Trace inputs (where did the funds come from?)
-              echo "$TX_JSON" | python3 -c "
-          import sys,json
-          tx=json.load(sys.stdin)
-          for i,inp in enumerate(tx['vin']):
-              if 'coinbase' in inp: print(f'    vin{i}: coinbase')
-              else:
-                  p=inp.get('prevout',{})
-                  print(f\"    vin{i}: {inp['txid'][:12]}...:vout{inp['vout']} ({p.get('value','?')} sats)\")" 2>/dev/null
-
-              # Check spent status
-              SPENT_JSON=$(curl -sf "$EURL/tx/$TXID/outspend/$VOUT" 2>/dev/null) || true
-              if echo "$SPENT_JSON" | grep -q '"spent":false'; then
-                echo "    Status: unspent"
-              elif echo "$SPENT_JSON" | grep -q '"spent":true'; then
-                SPEND_TXID=$(echo "$SPENT_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['txid'][:12])" 2>/dev/null)
-                echo "    Status: spent by ${SPEND_TXID}... (rotation or dispute)"
-              fi
-            done
-          done
-
-          echo ""
-          [ "$FAILURES" -eq 0 ] || { echo "ERROR: $FAILURES amount mismatch(es)"; exit 1; }
-          echo "=== ALL UTXO HISTORY VERIFIED ==="
-
-      - name: Cleanup
-        if: always()
-        working-directory: deposits-tools
-        run: |
-          source bin/_common.sh
-          stop_all_nodes 2>/dev/null || true
-          stop_all_relays 2>/dev/null || true
-          stop_all_electrs 2>/dev/null || true
-          $DC down -v --remove-orphans 2>/dev/null || true
+      # Quorum formation, deposits and a transfer, an equivocation disputed through
+      # confiscation and lottery claim, and a Tier-1 recovery spend past its CLTV.
+      - name: Regtest end to end
+        run: deposits-tools/bin/ci-regtest.sh
+        timeout-minutes: 40

@@ -164,6 +164,7 @@ async fn danger_forge_non_conforming_cosig(
         expiry: u32::MAX,
         timeout_height: None,
         fee: None,
+        commitment: None,
         witness: deposits_core::DescriptorWitness::default(),
     };
     let message = bad_op.tlv_encode();
