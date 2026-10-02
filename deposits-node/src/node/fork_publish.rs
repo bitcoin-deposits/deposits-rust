@@ -325,7 +325,7 @@ mod tests {
             sends.lock().unwrap().push(u.sequence_number);
             let fail = u.sequence_number == 11
                 && failures
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |f| f.checked_sub(1))
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |f| f.checked_sub(1))
                     .is_ok();
             async move {
                 if fail {

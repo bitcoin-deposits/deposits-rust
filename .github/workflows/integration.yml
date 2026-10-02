@@ -36,7 +36,7 @@ jobs:
           sudo apt-get update && sudo apt-get install -y git g++ make pkg-config libtool \
             libssl-dev zlib1g-dev liblmdb-dev libflatbuffers-dev libsecp256k1-dev libzstd-dev
           git clone --depth 1 https://github.com/hoytech/strfry.git /tmp/strfry-build
-          cd /tmp/strfry-build && git submodule update --init
+          cd /tmp/strfry-build && git submodule update --init && make setup-golpe
           make -j$(nproc)
           cp strfry ${{ github.workspace }}/deposits-tools/bin/strfry
 
