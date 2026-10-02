@@ -1478,6 +1478,19 @@ impl Node {
             &ledger_id[..16.min(ledger_id.len())]
         );
 
+        // Only a quorum member of the accused ledger acts on a proof (step 4),
+        // so a non-member stops here. Verifying first gap-filled every ledger
+        // the proof names from the relay: contagion proofs name each of the
+        // accused's operated ledgers, and the re-imports held the main loop
+        // for up to 60 s apiece, timing out consents on healthy ledgers.
+        if !self.is_quorum_member_of_ledger(ledger_id) {
+            tracing::info!(
+                "Not a quorum member of accused ledger {}, not verifying",
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+            return;
+        }
+
         // A fraud notice is a SIGNAL, not authoritative: fully verify it
         // (gap-fill + structural/embedding/causal/per-type evidence + the
         // on-chain WinnerCollateralDeviation step) before acting on it.
