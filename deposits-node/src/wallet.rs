@@ -58,7 +58,18 @@ pub struct Wallet {
 
     /// Last revealed address index (persisted to disk)
     address_index: Mutex<u32>,
+
+    /// Blocks `confirms_block` found buried at least [`CONFIRMED_BLOCK_CACHE_DEPTH`] deep: hash →
+    /// height. Fork-branch DisputeEnters are re-validated whenever they are seen, and each
+    /// cites an anchor block.
+    confirmed_blocks: Mutex<std::collections::HashMap<[u8; 32], u32>>,
 }
+
+/// How deep a block must be before `confirms_block` remembers it (a shallower one can still
+/// be reorganised out).
+const CONFIRMED_BLOCK_CACHE_DEPTH: u32 = 6;
+/// Entries kept before the cache is cleared.
+const CONFIRMED_BLOCK_CACHE_MAX: usize = 4096;
 
 /// Information about a Taproot reserves output (quorum-based spending)
 #[derive(Debug, Clone)]
@@ -149,6 +160,7 @@ impl Wallet {
             operator_pubkey,
             block_height: Mutex::new(0),
             block_hash: Mutex::new([0u8; 32]),
+            confirmed_blocks: Mutex::new(std::collections::HashMap::new()),
             data_dir,
             address_index: Mutex::new(address_index),
         })
@@ -309,11 +321,23 @@ impl Wallet {
     /// reject on `None`, so the conservative failure mode is "not
     /// confirmed" rather than crashing the verifier.
     pub fn confirms_block(&self, block_hash: &[u8; 32]) -> Option<u32> {
+        if let Some(h) = self.confirmed_blocks.lock().unwrap().get(block_hash) {
+            return Some(*h);
+        }
         let bh = bitcoin::BlockHash::from_byte_array(*block_hash);
-        crate::chain_backend::from_env(&self.electrum_url)
+        let height = crate::chain_backend::from_env(&self.electrum_url)
             .get_block_height_if_in_best_chain(&bh)
             .ok()
-            .flatten()
+            .flatten()?;
+        let tip = *self.block_height.lock().unwrap();
+        if tip >= height.saturating_add(CONFIRMED_BLOCK_CACHE_DEPTH) {
+            let mut cache = self.confirmed_blocks.lock().unwrap();
+            if cache.len() >= CONFIRMED_BLOCK_CACHE_MAX {
+                cache.clear();
+            }
+            cache.insert(*block_hash, height);
+        }
+        Some(height)
     }
 
     /// Get the wallet balance (non-reserves funds)
@@ -498,7 +522,7 @@ impl Wallet {
     }
 
     /// The chain backend this wallet's lookups go through.
-    pub fn chain_backend(&self) -> Box<dyn crate::chain_backend::ChainBackend> {
+    pub fn chain_backend(&self) -> std::sync::Arc<dyn crate::chain_backend::ChainBackend> {
         crate::chain_backend::from_env(&self.electrum_url)
     }
 
@@ -755,6 +779,7 @@ impl Wallet {
             operator_pubkey,
             block_height: Mutex::new(800_000),
             block_hash: Mutex::new([0u8; 32]),
+            confirmed_blocks: Mutex::new(std::collections::HashMap::new()),
             data_dir,
             address_index: Mutex::new(0),
         }

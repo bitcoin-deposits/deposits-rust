@@ -24,6 +24,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // one is feature-enabled; the first wss:// handshake panics
     // otherwise. The helper is idempotent.
     deposits_nostr::install_default_crypto_provider();
+    if std::env::var_os("DEPOSITS_STACK_DUMP").is_some() {
+        install_stack_dump_handler();
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -144,3 +147,25 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
+/// With `DEPOSITS_STACK_DUMP` set, SIGUSR2 writes the receiving thread's backtrace to stderr.
+/// Direct it at one thread with tgkill (the main thread's tid is the pid). For a node that
+/// stalls where no debugger may attach; the handler allocates, so it is diagnostic only.
+#[cfg(unix)]
+fn install_stack_dump_handler() {
+    extern "C" fn on_usr2(_: libc::c_int) {
+        let bt = std::backtrace::Backtrace::force_capture();
+        let s = format!(
+            "=== SIGUSR2 stack (thread {:?}) ===\n{}\n",
+            std::thread::current().name(),
+            bt
+        );
+        unsafe { libc::write(2, s.as_ptr() as *const libc::c_void, s.len()) };
+    }
+    unsafe {
+        libc::signal(libc::SIGUSR2, on_usr2 as *const () as libc::sighandler_t);
+    }
+}
+
+#[cfg(not(unix))]
+fn install_stack_dump_handler() {}

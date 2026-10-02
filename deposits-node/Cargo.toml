@@ -43,6 +43,7 @@ native-tls = "0.2.17"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+libc = "0.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

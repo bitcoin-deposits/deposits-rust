@@ -176,18 +176,37 @@ pub struct UnspentOutput {
 ///
 /// Construction errors panic — these are startup-time misconfiguration
 /// the operator needs to see immediately.
-pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
-    match std::env::var("CHAIN_BACKEND")
-        .ok()
-        .as_deref()
-        .unwrap_or("esplora")
-    {
-        "esplora" => Box::new(crate::esplora_backend::EsploraBackend::new(url)),
-        "bitcoind" => Box::new(
+pub fn from_env(url: &str) -> std::sync::Arc<dyn ChainBackend> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+    // One backend per configuration for the life of the process. Building one constructs an
+    // HTTP client (reqwest's blocking client spawns a thread and a runtime); doing that on
+    // every lookup made a burst of anchor checks on the main loop take minutes.
+    static CACHE: OnceLock<Mutex<HashMap<String, Arc<dyn ChainBackend>>>> = OnceLock::new();
+    let kind = std::env::var("CHAIN_BACKEND").unwrap_or_else(|_| "esplora".to_string());
+    let var = |k: &str| std::env::var(k).unwrap_or_default();
+    let key = [
+        kind.as_str(),
+        url,
+        &var("BITCOIND_RPC_URL"),
+        &var("BITCOIND_RPC_USER"),
+        &var("BITCOIND_RPC_PASS"),
+        &var("BITCOIND_COOKIE_FILE"),
+        &var("ELECTRUM_HOST"),
+        &var("ELECTRUM_PORT"),
+    ]
+    .join("\0");
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(b) = cache.lock().unwrap().get(&key) {
+        return b.clone();
+    }
+    let built: Arc<dyn ChainBackend> = match kind.as_str() {
+        "esplora" => Arc::new(crate::esplora_backend::EsploraBackend::new(url)),
+        "bitcoind" => Arc::new(
             crate::bitcoind_backend::BitcoindRpcBackend::from_env()
                 .unwrap_or_else(|e| panic!("bitcoind backend init failed: {}", e)),
         ),
-        "electrum" => Box::new(
+        "electrum" => Arc::new(
             crate::electrum_backend::ElectrumBackend::from_env()
                 .unwrap_or_else(|e| panic!("electrum backend init failed: {}", e)),
         ),
@@ -195,7 +214,8 @@ pub fn from_env(url: &str) -> Box<dyn ChainBackend> {
             "CHAIN_BACKEND={:?} not supported. Supported: \"esplora\", \"bitcoind\", \"electrum\".",
             other
         ),
-    }
+    };
+    cache.lock().unwrap().entry(key).or_insert(built).clone()
 }
 
 // -- "Scan already in progress" --------------------------------------------
@@ -408,5 +428,27 @@ pub(crate) mod fake {
         fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
             Err(Error::Wallet("fake".into()))
         }
+    }
+}
+
+#[cfg(test)]
+mod from_env_tests {
+    use super::*;
+
+    // Only CHAIN_BACKEND's default (esplora) is exercised: no test sets CHAIN_BACKEND, and an
+    // esplora backend is built without touching the network.
+    #[test]
+    fn one_backend_per_configuration() {
+        let a = from_env("http://127.0.0.1:1/memo-test-a");
+        let a2 = from_env("http://127.0.0.1:1/memo-test-a");
+        let b = from_env("http://127.0.0.1:1/memo-test-b");
+        assert!(
+            std::sync::Arc::ptr_eq(&a, &a2),
+            "same configuration, same backend"
+        );
+        assert!(
+            !std::sync::Arc::ptr_eq(&a, &b),
+            "different url, different backend"
+        );
     }
 }
