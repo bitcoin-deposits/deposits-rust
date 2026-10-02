@@ -301,6 +301,11 @@ pub struct NostrTransport {
     /// Separate client connected to the slow (durable) relay, used only for
     /// gap-fill `fetch_events` calls. None if no slow relay is configured.
     slow_client: Option<Client>,
+    /// Client for one-shot history fetches: the same relays as `client`, but nothing drains
+    /// its notifications. nostr-sdk delivers a fetch's events to the fetching client's
+    /// notification stream, so fetching on `client` replayed every page of a ledger walk
+    /// (60k updates on a long ledger) through the live update handlers.
+    history_client: Client,
 
     /// Work queue for mirroring events to the durable relay in the background.
     /// Events are sent here and a background task drains them to slow_client.
@@ -1606,6 +1611,17 @@ impl NostrTransport {
             None
         };
 
+        let history_client = Client::builder().signer(keys.clone()).build();
+        for relay in relay_list.iter().chain(slow_relays.iter()) {
+            history_client
+                .add_relay(relay)
+                .await
+                .map_err(|e| Error::Nostr(format!("Failed to add relay {}: {}", relay, e)))?;
+        }
+        history_client
+            .connect_with_timeout(std::time::Duration::from_secs(10))
+            .await;
+
         // Create channels for inbound messages, ledger updates, requests, responses, and disputes
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         let (ledger_tx, ledger_rx) = mpsc::unbounded_channel();
@@ -1655,6 +1671,7 @@ impl NostrTransport {
             client,
             primary_relay_url,
             slow_client,
+            history_client,
             mirror_tx,
             keys,
             our_pubkey,
@@ -1728,7 +1745,7 @@ impl NostrTransport {
     /// Get the client to use for gap-fill `fetch_events` calls.
     /// Returns the slow (durable) relay client if configured, otherwise the main client.
     pub fn fetch_client(&self) -> &Client {
-        self.slow_client.as_ref().unwrap_or(&self.client)
+        self.slow_client.as_ref().unwrap_or(&self.history_client)
     }
 
     /// Add a single ledger ID to the interested set.
@@ -4351,7 +4368,7 @@ impl NostrTransport {
             }
 
             let events = self
-                .client
+                .history_client
                 .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
                 .await
                 .map_err(|e| Error::Nostr(format!("Failed to fetch events: {}", e)))?;
@@ -4477,7 +4494,7 @@ impl NostrTransport {
             .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
         let events = self
-            .client
+            .history_client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch update seq {}: {}", seq, e)))?;
@@ -4511,7 +4528,7 @@ impl NostrTransport {
             .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]);
 
         let events = self
-            .client
+            .history_client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
             .await
             .map_err(|e| Error::Nostr(format!("Failed to fetch updates range: {}", e)))?;
