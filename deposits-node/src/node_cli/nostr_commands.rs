@@ -738,10 +738,7 @@ pub async fn nostr_import(args: &[String]) -> Result<(), Box<dyn std::error::Err
         let longest_chain = {
             let mut chain: Vec<&SignedLedgerUpdate> = Vec::new();
             let mut content_hash = [0u8; 32];
-            loop {
-                let Some(children) = by_prev.get(&content_hash) else {
-                    break;
-                };
+            while let Some(children) = by_prev.get(&content_hash) {
                 let next = if children.len() == 1 {
                     children[0]
                 } else {
@@ -2411,7 +2408,7 @@ pub async fn nostr_watch(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         let mut joined = HashSet::new();
         let ledgers = node.list_ledgers();
 
-        for (_ledger_id, ledger_arc) in ledgers.iter() {
+        for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
 
             // Scan history for QuorumJoin operations

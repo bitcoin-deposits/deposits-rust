@@ -71,7 +71,7 @@ fn signed_update(
 /// depositor's key, 3 a credit to it.
 fn prefix() -> Vec<SignedLedgerUpdate> {
     let depositor = bitcoin::PublicKey::new(pubkey(DEPOSITOR));
-    let ops = vec![
+    let ops = [
         LedgerOperation::LedgerOpen {
             operator_id: pubkey(OP),
             reserves_id: "bcrt1qreserves".to_string(),
@@ -154,7 +154,12 @@ fn signed_lock(nonce: u64, expiry: u32, transfer: u8) -> LedgerOperation {
     );
     let sk = SecretKey::from_slice(&[DEPOSITOR; 32]).unwrap();
     let sig = EcdsaVerifier::new().sign(&sk, &preimage);
-    lock(nonce, expiry, transfer, DescriptorWitness { stack: vec![sig.0] })
+    lock(
+        nonce,
+        expiry,
+        transfer,
+        DescriptorWitness { stack: vec![sig.0] },
+    )
 }
 
 fn proof_for(update: &SignedLedgerUpdate) -> FraudProof {
@@ -190,7 +195,12 @@ fn violations_at(
 #[test]
 fn a_correctly_witnessed_transfer_lock_is_not_proof() {
     let prefix = prefix();
-    let honest = signed_update(4, prefix[3].chain_hash(), &signed_lock(1, HEIGHT + 10, 1), HEIGHT);
+    let honest = signed_update(
+        4,
+        prefix[3].chain_hash(),
+        &signed_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
     assert_eq!(violations_at(&prefix, &honest), vec![]);
     let err = verify_non_conforming_update(&proof_for(&honest), &prefix, &Dep16Authorizer::new())
         .unwrap_err();
@@ -207,10 +217,18 @@ fn a_correctly_witnessed_transfer_lock_is_not_proof() {
 #[test]
 fn the_same_lock_with_an_empty_witness_is_proof() {
     let prefix = prefix();
-    let forged = signed_update(4, prefix[3].chain_hash(), &unsigned_lock(1, HEIGHT + 10, 1), HEIGHT);
+    let forged = signed_update(
+        4,
+        prefix[3].chain_hash(),
+        &unsigned_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
     let v = violations_at(&prefix, &forged);
     assert!(
-        matches!(v[..], [deposits_protocol::types::ConformanceViolation::InvalidWitness { .. }]),
+        matches!(
+            v[..],
+            [deposits_protocol::types::ConformanceViolation::InvalidWitness { .. }]
+        ),
         "{:?}",
         v
     );
@@ -235,11 +253,19 @@ fn the_same_lock_with_an_empty_witness_is_proof() {
 #[test]
 fn an_expired_lock_is_proof() {
     let prefix = prefix();
-    let expired = signed_update(4, prefix[3].chain_hash(), &signed_lock(1, HEIGHT - 1, 1), HEIGHT);
+    let expired = signed_update(
+        4,
+        prefix[3].chain_hash(),
+        &signed_lock(1, HEIGHT - 1, 1),
+        HEIGHT,
+    );
     // Its only defect: the witness is the depositor's.
     let v = violations_at(&prefix, &expired);
     assert!(
-        matches!(v[..], [deposits_protocol::types::ConformanceViolation::ExpiryPassed { .. }]),
+        matches!(
+            v[..],
+            [deposits_protocol::types::ConformanceViolation::ExpiryPassed { .. }]
+        ),
         "{:?}",
         v
     );
@@ -252,13 +278,26 @@ fn an_expired_lock_is_proof() {
 #[test]
 fn a_nonce_replayed_lock_is_proof() {
     let mut chain = prefix();
-    let first = signed_update(4, chain[3].chain_hash(), &signed_lock(1, HEIGHT + 10, 1), HEIGHT);
+    let first = signed_update(
+        4,
+        chain[3].chain_hash(),
+        &signed_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
     chain.push(first);
     // Its own transfer, correctly signed, but nonce 1 again.
-    let replay = signed_update(5, chain[4].chain_hash(), &signed_lock(1, HEIGHT + 10, 2), HEIGHT);
+    let replay = signed_update(
+        5,
+        chain[4].chain_hash(),
+        &signed_lock(1, HEIGHT + 10, 2),
+        HEIGHT,
+    );
     let v = violations_at(&chain, &replay);
     assert!(
-        matches!(v[..], [deposits_protocol::types::ConformanceViolation::NonceReplay { .. }]),
+        matches!(
+            v[..],
+            [deposits_protocol::types::ConformanceViolation::NonceReplay { .. }]
+        ),
         "{:?}",
         v
     );
@@ -266,7 +305,12 @@ fn a_nonce_replayed_lock_is_proof() {
         .expect("a replayed nonce is non-conforming");
 
     // A fresh nonce at the same place is fine.
-    let fresh = signed_update(5, chain[4].chain_hash(), &signed_lock(2, HEIGHT + 10, 2), HEIGHT);
+    let fresh = signed_update(
+        5,
+        chain[4].chain_hash(),
+        &signed_lock(2, HEIGHT + 10, 2),
+        HEIGHT,
+    );
     assert_eq!(violations_at(&chain, &fresh), vec![]);
     assert!(
         verify_non_conforming_update(&proof_for(&fresh), &chain, &Dep16Authorizer::new()).is_err()

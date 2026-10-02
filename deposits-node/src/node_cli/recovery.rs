@@ -1365,7 +1365,6 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let sequence = last_valid_sequence + 1;
 
-
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
             hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
@@ -1414,7 +1413,10 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         "  Sequence: {} (forked from {})",
         sequence, last_valid_sequence
     );
-    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+    println!(
+        "  Hash: {}...",
+        &hex::encode(signed_update.content_hash)[..16]
+    );
     println!("  Reason: {}", violation_details);
     println!();
     println!("Next steps (dispute protocol):");
@@ -1530,7 +1532,6 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
 
     let sequence = our_armed.sequence_number + 1;
 
-
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
             hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
@@ -1575,7 +1576,10 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     println!();
     println!("DisputeYield published successfully!");
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+    println!(
+        "  Hash: {}...",
+        &hex::encode(signed_update.content_hash)[..16]
+    );
     println!();
     println!("Your candidate branch is now closed.");
     println!("Your quorum members are released from attestation obligations.");
@@ -1785,7 +1789,6 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
             hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
@@ -1834,7 +1837,10 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         "  Sequence: {} (forked from {})",
         sequence, last_valid_sequence_u64
     );
-    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+    println!(
+        "  Hash: {}...",
+        &hex::encode(signed_update.content_hash)[..16]
+    );
     println!();
     println!("Ledger is now in DISPUTED state. Quorum has been disbanded.");
     println!();
@@ -1990,7 +1996,6 @@ pub async fn recovery_rebuild_quorum_add(
     let message_bytes = operation.tlv_encode();
 
     let sequence = our_latest.sequence_number + 1;
-
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -2300,16 +2305,18 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     // / "already_collateralized" / "no_upgrade"). The daemon's
     // `auto_rearm_disputes` does this upgrade on its own once the
     // operator-key P2WPKH is funded.
-    let prior_arm = our_updates.iter().rev().find_map(|u| {
-        match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::DisputeArmed {
-                commitment_hash,
-                replacement_collateral,
-                ..
-            }) => Some((commitment_hash, replacement_collateral)),
-            _ => None,
-        }
-    });
+    let prior_arm =
+        our_updates
+            .iter()
+            .rev()
+            .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::DisputeArmed {
+                    commitment_hash,
+                    replacement_collateral,
+                    ..
+                }) => Some((commitment_hash, replacement_collateral)),
+                _ => None,
+            });
     let commitment_hash: [u8; 20] = match prior_arm {
         Some((_, Some(_))) => {
             return Err("Already armed with replacement_collateral on this ledger;                         a re-arm can only upgrade an arm that declared none"
@@ -2445,7 +2452,6 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     let sequence = latest.sequence_number + 1;
 
-
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
             hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
@@ -2496,7 +2502,10 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     println!("DisputeArmed published successfully!");
     println!("  Armed block: {}", current_block_height);
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+    println!(
+        "  Hash: {}...",
+        &hex::encode(signed_update.content_hash)[..16]
+    );
     println!();
     println!("Ledger is now in ARMED state. Quorum is locked.");
     println!();
@@ -2696,7 +2705,6 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
 
         let sequence = our_latest.sequence_number + 1;
 
-
         let ledger_id_bytes: [u8; 32] = {
             let decoded =
                 hex::decode(&ledger_id).map_err(|e| format!("Invalid ledger_id hex: {}", e))?;
@@ -2738,7 +2746,10 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         println!();
         println!("DisputeAcquire published successfully!");
         println!("  Sequence: {}", sequence);
-        println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+        println!(
+            "  Hash: {}...",
+            &hex::encode(signed_update.content_hash)[..16]
+        );
     } else {
         println!("You did NOT win. Publishing DisputeYield...");
 
@@ -2746,7 +2757,6 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         let message_bytes = operation.tlv_encode();
 
         let sequence = our_latest.sequence_number + 1;
-
 
         let ledger_id_bytes: [u8; 32] = {
             let decoded =
@@ -2789,7 +2799,10 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
         println!();
         println!("DisputeYield published successfully!");
         println!("  Sequence: {}", sequence);
-        println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+        println!(
+            "  Hash: {}...",
+            &hex::encode(signed_update.content_hash)[..16]
+        );
         println!();
         println!("Your branch is now TOMBSTONED.");
     }
@@ -2962,7 +2975,6 @@ pub async fn recovery_continue(args: &[String]) -> Result<(), Box<dyn std::error
         let message_bytes = operation.tlv_encode();
 
         let sequence = latest.sequence_number + 1;
-
 
         let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
@@ -3212,7 +3224,7 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     }
 
     // Sort participants by pubkey for deterministic order
-    participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+    participants.sort_by_key(|a| a.pubkey.serialize());
 
     // Debug: print participant order
     println!("  Participant order (confiscate):");
@@ -4668,7 +4680,7 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     }
 
     // Sort participants by x-only pubkey for deterministic order (must match confiscate)
-    participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+    participants.sort_by_key(|a| a.1.pubkey.serialize());
 
     // Debug: print participant order with full details
     println!("  Participant order (lottery-claim):");
@@ -5151,7 +5163,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // Build update continuing from our DisputeArmed
     let sequence = our_armed.sequence_number + 1;
 
-
     // Parse ledger_id into bytes
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -5195,7 +5206,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!();
     println!("DisputeAcquire published successfully!");
     println!("  Sequence: {}", sequence);
-    println!("  Hash: {}...", &hex::encode(signed_update.content_hash)[..16]);
+    println!(
+        "  Hash: {}...",
+        &hex::encode(signed_update.content_hash)[..16]
+    );
     println!("  Claim txid: {}...", &hex::encode(claim_txid_bytes)[..16]);
     println!(
         "  New reserves: {}...",
@@ -5538,7 +5552,6 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let message_bytes = operation.tlv_encode();
 
     let sequence = our_latest.sequence_number + 1;
-
 
     let ledger_id_bytes: [u8; 32] = {
         let decoded =
@@ -6175,7 +6188,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
             }
         }
     }
-    participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+    participants.sort_by_key(|a| a.pubkey.serialize());
     for p in &participants {
         println!(
             "  - {} target={}",
@@ -6600,7 +6613,7 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
         )
         .into());
     }
-    participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+    participants.sort_by_key(|a| a.1.pubkey.serialize());
     println!("  {} DisputeArmed participants", participants.len());
     println!("  {} replacement-collateral declarations", rc_decls.len());
 

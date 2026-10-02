@@ -177,7 +177,7 @@ async fn ledger_list(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     println!();
 
     let mut sorted: Vec<_> = ledgers.into_iter().collect();
-    sorted.sort_by(|a, b| b.1 .0.cmp(&a.1 .0)); // Sort by max sequence desc
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.1 .0)); // Sort by max sequence desc
 
     for (lid, (max_seq, count)) in sorted {
         println!("  {}  seq={:<4} updates={}", lid, max_seq, count);

@@ -203,7 +203,7 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     let (op_idx, txid_str) = poll_confiscation_txid(&accused_ledger, Duration::from_secs(180));
     eprintln!(
         "[ok] verified QuorumExpired drove confiscation: tx {} (observed via op{})",
-        &txid_str, op_idx
+        txid_str, op_idx
     );
 
     // ── 7. Assert the on-chain confiscation tx is bifurcated ──
@@ -213,7 +213,7 @@ fn fraud_proof_quorum_expired_triggers_respectful_confiscation() {
     //   • output[1].script_pubkey is the original operator's P2WPKH (change)
     // For QuorumExpired with no deposits in the cluster, obligations = 0
     // so the lottery output should equal the dust floor (330 sats).
-    eprintln!("[onchain]  fetching confiscation tx {}", &txid_str);
+    eprintln!("[onchain]  fetching confiscation tx {}", txid_str);
 
     let tx_url = format!("{}/tx/{}", ELECTRS_URL, txid_str);
     let tx_json: serde_json::Value = reqwest::blocking::get(&tx_url)

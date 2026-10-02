@@ -27,7 +27,8 @@ jobs:
       - name: Build
         run: |
           cargo build --release \
-            -p deposits-node --bin deposits-node --bin deposits-wallet \
+            -p deposits-node --bin deposits-node \
+            -p deposits-wallet --bin deposits-wallet \
             -p deposits-tools --bin replay-ledger
 
       - name: Install strfry

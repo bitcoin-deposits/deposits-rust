@@ -291,7 +291,10 @@ impl DepositsHandler {
             let mut next = HashMap::new();
             for (id, arc) in &ledgers {
                 Self::truncate_history(arc, retain);
-                next.insert(id.clone(), Self::next_seq_after(&arc.read().unwrap().history));
+                next.insert(
+                    id.clone(),
+                    Self::next_seq_after(&arc.read().unwrap().history),
+                );
             }
             Mutex::new(next)
         };
@@ -1390,7 +1393,11 @@ impl DepositsHandler {
     /// sits at the top of an append-only log, so stream it, parse only
     /// `Update` rows, and stop once 0..n are all present. A log whose early
     /// updates are scattered (compaction) is read to the end, as before.
-    pub fn read_persisted_history_prefix(&self, ledger_id: &str, n: u64) -> Option<Vec<SignedLedgerUpdate>> {
+    pub fn read_persisted_history_prefix(
+        &self,
+        ledger_id: &str,
+        n: u64,
+    ) -> Option<Vec<SignedLedgerUpdate>> {
         Self::read_persisted_history_prefix_at(&self.data_dir, ledger_id, n)
     }
 
@@ -1629,7 +1636,11 @@ impl DepositsHandler {
                     append.history_len,
                     append.updates.len(),
                     total_elapsed,
-                    if append.state.is_some() { " (with state)" } else { "" }
+                    if append.state.is_some() {
+                        " (with state)"
+                    } else {
+                        ""
+                    }
                 );
             }
         }
@@ -1719,7 +1730,11 @@ impl DepositsHandler {
                 let arc = self.ledgers.lock().unwrap().get(ledger_id).cloned();
                 let s = arc.and_then(|arc| {
                     let l = arc.read().unwrap();
-                    let operator = l.history.first().filter(|g| g.sequence_number == 0)?.operator_id;
+                    let operator = l
+                        .history
+                        .first()
+                        .filter(|g| g.sequence_number == 0)?
+                        .operator_id;
                     // The dep-16 descriptor verifier, as the replica's
                     // apply_and_check uses: a forged witness is a fault.
                     deposits_core::fraud::find_non_conforming_update(
@@ -2623,7 +2638,7 @@ impl ValidationContext for DepositsHandler {
     fn get_ledger(&self, operator: &PublicKey, reserves_id: &str) -> Option<Arc<RwLock<Ledger>>> {
         // Search ledgers by operator and reserves_key (reserves_id)
         let ledgers = self.ledgers.lock().unwrap();
-        for (_ledger_id, ledger_arc) in ledgers.iter() {
+        for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             if ledger.operator_key() == *operator && ledger.reserves_key() == reserves_id {
                 return Some(ledger_arc.clone());
@@ -3122,9 +3137,19 @@ mod tests {
             false,
         );
         let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        let ledger_id = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         for seq in 0..10u64 {
-            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
             handler.persist_ledger_to_disk(&ledger_id).unwrap();
         }
         (handler, arc, ledger_id, op_pk)
@@ -3153,7 +3178,7 @@ mod tests {
             funding_address: "tb1qfund".to_string(),
             commitment: None,
         };
-        let ops = vec![
+        let ops = [
             LedgerOperation::LedgerOpen {
                 operator_id: op,
                 reserves_id: "tb1qres".to_string(),
@@ -3226,7 +3251,14 @@ mod tests {
         );
         let (op, chain) = replica_past_a_fault();
         let arc = handler.get_or_create_ledger(op, "tb1qres".to_string());
-        let ledger_key = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        let ledger_key = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         arc.write().unwrap().history = chain;
 
         assert_eq!(handler.first_non_conforming(&ledger_key), Some(4));
@@ -3279,7 +3311,10 @@ mod tests {
 
         // A batch applied to memory (seqs 10..13), not yet persisted...
         for seq in 10..13u64 {
-            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
         }
         // ...when the background compaction runs.
         handler.compact_ledger(&ledger_id).unwrap();
@@ -3305,7 +3340,12 @@ mod tests {
         handler.compact_ledger(&ledger_id).unwrap();
 
         arc.write().unwrap().history.push(mk_update(op_pk, 10, 10));
-        let cursor = *handler.persisted_next_seq.lock().unwrap().get(&ledger_id).unwrap();
+        let cursor = *handler
+            .persisted_next_seq
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .unwrap();
         let append = handler
             .persist_append_snapshot(&ledger_id, &arc, cursor)
             .expect("seq 10 to write");
@@ -3319,7 +3359,10 @@ mod tests {
         handler.persist_append_commit(&ledger_id, &append);
 
         for seq in 11..16u64 {
-            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
             handler.persist_ledger_to_disk(&ledger_id).unwrap();
         }
         assert_eq!(disk_seqs(&handler, &ledger_id), (0..16).collect::<Vec<_>>());
@@ -3336,7 +3379,10 @@ mod tests {
         let (handler, arc, ledger_id, op_pk) = compaction_race_fixture(&temp_dir);
         handler.compact_ledger(&ledger_id).unwrap();
         for seq in 10..16u64 {
-            arc.write().unwrap().history.push(mk_update(op_pk, seq, seq as u8));
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
         }
         // Six unwritten on top of three written: only the written may go.
         assert_eq!(handler.cap_history(&ledger_id, &arc, 1), 6);
@@ -3365,7 +3411,14 @@ mod tests {
             let (handler, _rx) =
                 DepositsHandler::new(test_local_signer(), wallet.clone(), data_dir.clone(), false);
             let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-            let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+            let ledger_id = handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .keys()
+                .next()
+                .unwrap()
+                .clone();
             assert!(handler.damaged_ledgers().is_empty());
             // Written with 4 and 7-8 missing, as the race left replicas.
             for u in &all {
@@ -3382,7 +3435,11 @@ mod tests {
         assert_eq!(damaged.len(), 1);
         assert_eq!(damaged[0].0, ledger_id);
         assert_eq!(
-            damaged[0].1.iter().map(|g| (g.first, g.last)).collect::<Vec<_>>(),
+            damaged[0]
+                .1
+                .iter()
+                .map(|g| (g.first, g.last))
+                .collect::<Vec<_>>(),
             vec![(4, 4), (7, 8)]
         );
         assert_eq!(describe_gaps(&damaged[0].1), "4, 7-8");
@@ -3392,7 +3449,10 @@ mod tests {
         let left = handler
             .repair_ledger_gaps(&ledger_id, &[all[4].clone()])
             .unwrap();
-        assert_eq!(left.iter().map(|g| (g.first, g.last)).collect::<Vec<_>>(), vec![(7, 8)]);
+        assert_eq!(
+            left.iter().map(|g| (g.first, g.last)).collect::<Vec<_>>(),
+            vec![(7, 8)]
+        );
         assert!(handler.is_damaged(&ledger_id));
         let left = handler
             .repair_ledger_gaps(&ledger_id, &[all[7].clone(), all[8].clone()])
@@ -3400,9 +3460,20 @@ mod tests {
         assert!(left.is_empty());
         assert!(!handler.is_damaged(&ledger_id));
         assert_eq!(disk_seqs(&handler, &ledger_id), (0..12).collect::<Vec<_>>());
-        let arc = handler.ledgers.lock().unwrap().get(&ledger_id).unwrap().clone();
+        let arc = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .unwrap()
+            .clone();
         assert_eq!(
-            arc.read().unwrap().history.iter().map(|u| u.sequence_number).collect::<Vec<_>>(),
+            arc.read()
+                .unwrap()
+                .history
+                .iter()
+                .map(|u| u.sequence_number)
+                .collect::<Vec<_>>(),
             (0..12).collect::<Vec<_>>(),
             "rebuilt from the whole file"
         );
@@ -3587,7 +3658,14 @@ mod tests {
         let (handler, _rx) =
             DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
         let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
-        let ledger_id = handler.ledgers.lock().unwrap().keys().next().unwrap().clone();
+        let ledger_id = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
         for seq in 0..10u64 {
             let u = mk_update(op_pk, seq, seq as u8);
             arc.write().unwrap().history.push(u.clone());
@@ -3596,17 +3674,29 @@ mod tests {
         handler.persist_ledger_to_disk(&ledger_id).unwrap();
         DepositsHandler::truncate_history(&arc, 3);
 
-        let seqs = |v: Vec<SignedLedgerUpdate>| v.iter().map(|u| u.sequence_number).collect::<Vec<_>>();
-        let head = handler.read_persisted_history_prefix(&ledger_id, 4).expect("JSONL exists");
+        let seqs =
+            |v: Vec<SignedLedgerUpdate>| v.iter().map(|u| u.sequence_number).collect::<Vec<_>>();
+        let head = handler
+            .read_persisted_history_prefix(&ledger_id, 4)
+            .expect("JSONL exists");
         assert_eq!(seqs(head.clone()), vec![0, 1, 2, 3]);
-        assert_eq!(head[0].content_hash[0], 0x00, "starts at the genesis update");
+        assert_eq!(
+            head[0].content_hash[0], 0x00,
+            "starts at the genesis update"
+        );
         let full = handler.read_persisted_history(&ledger_id).unwrap();
         assert_eq!(head, full[..4].to_vec(), "same updates as the full reader");
         assert_eq!(
-            seqs(handler.read_persisted_history_prefix(&ledger_id, 40).unwrap()),
+            seqs(
+                handler
+                    .read_persisted_history_prefix(&ledger_id, 40)
+                    .unwrap()
+            ),
             (0..10).collect::<Vec<_>>(),
             "a chain shorter than n comes back whole"
         );
-        assert!(handler.read_persisted_history_prefix("00".repeat(32).as_str(), 4).is_none());
+        assert!(handler
+            .read_persisted_history_prefix("00".repeat(32).as_str(), 4)
+            .is_none());
     }
 }

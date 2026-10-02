@@ -992,7 +992,6 @@ impl Ledger {
         // sequence number after compaction → "Sequence gap before persist".
         let sequence = self.next_sequence();
 
-
         // Create SignedLedgerUpdate (unsigned - caller should populate signatures)
         let mut signed_update = SignedLedgerUpdate {
             message_type: operation.message_type(),
@@ -1125,7 +1124,6 @@ impl Ledger {
         let message_bytes = operation.tlv_encode();
         let prev_hash = self.state.chain_tip_hash;
         let sequence = self.next_sequence();
-
 
         let mut update = SignedLedgerUpdate {
             message_type: operation.message_type(),

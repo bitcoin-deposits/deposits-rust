@@ -466,11 +466,9 @@ impl LedgerConformanceValidator {
         // Check reserves backing (100% requirement)
         let total_deposits = state.total_deposit_balance();
 
-        let reserves_ratio_percent = if total_deposits > 0 {
-            (claimed_reserves * 100) / total_deposits
-        } else {
-            100
-        };
+        let reserves_ratio_percent = (claimed_reserves * 100)
+            .checked_div(total_deposits)
+            .unwrap_or(100);
 
         if claimed_reserves < total_deposits {
             violations.push(ConformanceViolation::InsufficientReserves {
@@ -483,11 +481,9 @@ impl LedgerConformanceValidator {
         // Check collateral backing (100% requirement)
         let total_collateral: u64 = collateral_amounts.iter().sum();
 
-        let collateral_ratio_percent = if total_deposits > 0 {
-            (total_collateral * 100) / total_deposits
-        } else {
-            100
-        };
+        let collateral_ratio_percent = (total_collateral * 100)
+            .checked_div(total_deposits)
+            .unwrap_or(100);
 
         if total_collateral < total_deposits {
             violations.push(ConformanceViolation::InsufficientCollateral {
@@ -938,11 +934,9 @@ impl LedgerConformanceValidator {
                 "reserves: {} sats, deposits: {} sats ({}%)",
                 reserves_msats / 1000,
                 total_deposits_msats / 1000,
-                if total_deposits_msats > 0 {
-                    (reserves_msats * 100) / total_deposits_msats
-                } else {
-                    100
-                }
+                (reserves_msats * 100)
+                    .checked_div(total_deposits_msats)
+                    .unwrap_or(100)
             )),
         });
 

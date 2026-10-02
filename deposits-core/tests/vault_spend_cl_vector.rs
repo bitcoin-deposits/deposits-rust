@@ -127,7 +127,10 @@ fn reserves_must_match_the_governing_quorum_begin() {
     h[1] = update(1, &qb([9; 32], 5001, "cltv-offset-v2"));
     assert!(verify_unauthorized_vault_spend(&proof(), &h, &[]).is_err());
     let mut p = proof();
-    let FraudEvidence::UnauthorizedVaultSpend { governing_quorumbegin_seq, .. } = &mut p.evidence
+    let FraudEvidence::UnauthorizedVaultSpend {
+        governing_quorumbegin_seq,
+        ..
+    } = &mut p.evidence
     else {
         panic!()
     };
@@ -160,7 +163,10 @@ impl LedgerProvider for Ledgers {
 #[test]
 fn dispatch_needs_the_spent_ledger_and_the_block() {
     let p = proof();
-    assert!(matches!(p.proof_type, FraudProofType::UnauthorizedVaultSpend));
+    assert!(matches!(
+        p.proof_type,
+        FraudProofType::UnauthorizedVaultSpend
+    ));
     let auth = deposits_core::dep16::Dep16Authorizer::new();
     let known = |_: &[u8; 32]| Some(1u32);
     let unknown = |_: &[u8; 32]| None;

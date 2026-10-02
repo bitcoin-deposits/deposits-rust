@@ -380,14 +380,12 @@ impl AttackLog {
                 let json = format!(
                     "{{\"name\":{:?},\"result\":{:?},\"notes\":{:?},\"blocked\":{}}}",
                     result.name,
-                    format!(
-                        "{}",
-                        if result.blocked {
-                            format!("BLOCKED at {}", result.defense)
-                        } else {
-                            format!("EXPLOITABLE (defense: {})", result.defense)
-                        }
-                    ),
+                    (if result.blocked {
+                        format!("BLOCKED at {}", result.defense)
+                    } else {
+                        format!("EXPLOITABLE (defense: {})", result.defense)
+                    })
+                    .to_string(),
                     {
                         let s = &result.notes;
                         let end = (0..=200.min(s.len()))

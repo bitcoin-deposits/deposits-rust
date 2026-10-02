@@ -84,7 +84,14 @@ const OP: u8 = 7;
 /// two byte-string "operations" (enough for the structural checks, which
 /// never replay; a verdict that needs a replay fails closed on them).
 fn canonical_chain() -> Vec<SignedLedgerUpdate> {
-    let g = signed_update(0, ledger(), [0u8; 32], OP, &genesis_op().tlv_encode(), false);
+    let g = signed_update(
+        0,
+        ledger(),
+        [0u8; 32],
+        OP,
+        &genesis_op().tlv_encode(),
+        false,
+    );
     let one = signed_update(1, ledger(), g.chain_hash(), OP, b"one", false);
     let two = signed_update(2, ledger(), one.chain_hash(), OP, b"two", false);
     vec![g, one, two]
@@ -106,7 +113,14 @@ fn proof_for(update: &SignedLedgerUpdate) -> FraudProof {
 fn broken_previous_hash_is_non_conforming() {
     let history = canonical_chain();
     // Operator signs a seq-2 update that does NOT chain onto seq 1.
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let proof = proof_for(&bad);
     assert!(
         verify_non_conforming_update(&proof, &history, &AllowAll).is_ok(),
@@ -142,7 +156,14 @@ fn same_seq_fork_with_valid_prev_is_not_this_fault() {
     // from the canonical seq 2 is an Equivocation, not a NonConformingUpdate.
     // verify_non_conforming_update must decline it (fail closed).
     let history = canonical_chain();
-    let fork = signed_update(2, ledger(), history[1].chain_hash(), OP, b"different", false);
+    let fork = signed_update(
+        2,
+        ledger(),
+        history[1].chain_hash(),
+        OP,
+        b"different",
+        false,
+    );
     let proof = proof_for(&fork);
     assert!(
         verify_non_conforming_update(&proof, &history, &AllowAll).is_err(),
@@ -153,7 +174,14 @@ fn same_seq_fork_with_valid_prev_is_not_this_fault() {
 #[test]
 fn tampered_operator_signature_is_rejected() {
     let history = canonical_chain();
-    let mut bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let mut bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     bad.operator_signature = [0x00; 64]; // invalidate
     let proof = proof_for(&bad);
     assert!(
@@ -165,7 +193,14 @@ fn tampered_operator_signature_is_rejected() {
 #[test]
 fn accused_mismatch_is_rejected() {
     let history = canonical_chain();
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let mut proof = proof_for(&bad);
     // Point the accusation at a different pubkey than the signer.
     let other = {
@@ -183,7 +218,14 @@ fn accused_mismatch_is_rejected() {
 #[test]
 fn sequence_redundancy_mismatch_is_rejected() {
     let history = canonical_chain();
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let mut proof = proof_for(&bad);
     if let FraudEvidence::NonConformingUpdate { fault_sequence, .. } = &mut proof.evidence {
         *fault_sequence = 5; // lie about the sequence
@@ -211,7 +253,14 @@ fn missing_predecessor_is_inconclusive() {
 #[test]
 fn seq_zero_with_nonzero_prev_is_non_conforming() {
     // A seq-0 open must link to the all-zero hash; anything else is fraud.
-    let bad = signed_update(0, ledger(), [0x11; 32], OP, &genesis_op().tlv_encode(), false);
+    let bad = signed_update(
+        0,
+        ledger(),
+        [0x11; 32],
+        OP,
+        &genesis_op().tlv_encode(),
+        false,
+    );
     let proof = proof_for(&bad);
     assert!(
         verify_non_conforming_update(&proof, &[], &AllowAll).is_ok(),
@@ -251,7 +300,14 @@ fn cl_placeholder(ledger_id: &str) -> ProofEmbedding {
 
 #[test]
 fn ncu_broadcast_without_embedding_verifies() {
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let b = FraudBroadcast {
         proof: proof_for(&bad),
         embedding: None,
@@ -263,7 +319,14 @@ fn ncu_broadcast_without_embedding_verifies() {
 
 #[test]
 fn ncu_broadcast_with_cl_placeholder_verifies() {
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let proof = proof_for(&bad);
     let b = FraudBroadcast {
         embedding: Some(cl_placeholder(&proof.ledger_id)),
@@ -290,7 +353,14 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
     assert!(err.contains("conforming"), "wrong error: {}", err);
 
     // A non-conforming update not signed by the accused: impersonation.
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let mut proof = proof_for(&bad);
     proof.accused = hex::encode(
         Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[9; 32]).unwrap())
@@ -305,7 +375,14 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
     assert!(verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll).is_err());
 
     // The accused ledger unavailable: fail closed, not skip.
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let b = FraudBroadcast {
         proof: proof_for(&bad),
         embedding: None,
@@ -319,7 +396,14 @@ fn ncu_broadcast_with_bogus_evidence_still_rejected() {
 /// placeholder), and the embedding-less shapes it can move to.
 #[test]
 fn cl_shaped_json_round_trip() {
-    let bad = signed_update(2, ledger(), canonical_chain()[0].chain_hash(), OP, b"orphan", false);
+    let bad = signed_update(
+        2,
+        ledger(),
+        canonical_chain()[0].chain_hash(),
+        OP,
+        b"orphan",
+        false,
+    );
     let accused = hex::encode(bad.operator_id.serialize());
     let ledger = hex::encode(ledger());
     let fault_hex = hex::encode(bad.tlv_encode());
@@ -346,15 +430,27 @@ fn cl_shaped_json_round_trip() {
         verify_fraud_broadcast(&b, &accused_history, &no_blocks, &AllowAll)
             .unwrap_or_else(|e| panic!("{name}: verify: {e}"));
         // Round trip through the reference's serializer.
-        let again: FraudBroadcast = serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
-        assert_eq!(again.proof.proof_hash(), expected_hash, "{name}: round trip");
-        assert_eq!(again.embedding.is_some(), b.embedding.is_some(), "{name}: embedding");
+        let again: FraudBroadcast =
+            serde_json::from_str(&serde_json::to_string(&b).unwrap()).unwrap();
+        assert_eq!(
+            again.proof.proof_hash(),
+            expected_hash,
+            "{name}: round trip"
+        );
+        assert_eq!(
+            again.embedding.is_some(),
+            b.embedding.is_some(),
+            "{name}: embedding"
+        );
     }
 
     // The reference omits the key (not `null`) when it has no embedding.
     let b: FraudBroadcast = serde_json::from_str(&key_absent).unwrap();
     let out: serde_json::Value = serde_json::to_value(&b).unwrap();
-    assert!(out.get("embedding").is_none(), "embedding key must be omitted: {out}");
+    assert!(
+        out.get("embedding").is_none(),
+        "embedding key must be omitted: {out}"
+    );
     assert_eq!(out["causal_chain"], serde_json::json!([]));
 }
 
@@ -393,7 +489,7 @@ fn credit(n: u8, amount: u64) -> LedgerOperation {
 /// seq 0 LedgerOpen, 1 QuorumBegin, 2 DepositOpen, 3 the honest credit. Each
 /// update is a real operation, signed by `OP`, chained onto the one before.
 fn ledger_c_prefix() -> Vec<SignedLedgerUpdate> {
-    let ops = vec![
+    let ops = [
         genesis_op(),
         LedgerOperation::QuorumBegin {
             reserves_id: "bcrt1qreserves".to_string(),
@@ -426,7 +522,14 @@ fn ledger_c_prefix() -> Vec<SignedLedgerUpdate> {
     let mut chain: Vec<SignedLedgerUpdate> = Vec::new();
     for (seq, op) in ops.iter().enumerate() {
         let prev = chain.last().map(|u| u.chain_hash()).unwrap_or([0u8; 32]);
-        chain.push(signed_update(seq as u64, ledger(), prev, OP, &op.tlv_encode(), false));
+        chain.push(signed_update(
+            seq as u64,
+            ledger(),
+            prev,
+            OP,
+            &op.tlv_encode(),
+            false,
+        ));
     }
     chain
 }
@@ -547,13 +650,19 @@ fn a_forged_predecessor_does_not_frame_an_honest_update() {
         honest4.clone(),
     ];
     assert!(verify_non_conforming_update(&proof_for(&honest4), &history, &AllowAll).is_err());
-    assert_eq!(find_non_conforming_update(&history, &pubkey(OP), &AllowAll), None);
+    assert_eq!(
+        find_non_conforming_update(&history, &pubkey(OP), &AllowAll),
+        None
+    );
 }
 
 #[test]
 fn find_locates_the_chained_fault_once() {
     let prefix = ledger_c_prefix();
-    assert_eq!(find_non_conforming_update(&prefix, &pubkey(OP), &AllowAll), None);
+    assert_eq!(
+        find_non_conforming_update(&prefix, &pubkey(OP), &AllowAll),
+        None
+    );
     let mut history = prefix.clone();
     history.push(ledger_c_fraud(&prefix, OP));
     let (seq, reason) = find_non_conforming_update(&history, &pubkey(OP), &AllowAll).unwrap();
@@ -634,12 +743,9 @@ fn a_rewritten_block_height_does_not_frame_an_honest_update() {
 
 /// Ledger X: another ledger by the same operator key, with its own reserves.
 fn ledger_x() -> Vec<SignedLedgerUpdate> {
-    let id = deposits_protocol::types::LedgerState::compute_ledger_id(
-        &pubkey(OP),
-        "bcrt1qreservesX",
-        0,
-    );
-    let ops = vec![
+    let id =
+        deposits_protocol::types::LedgerState::compute_ledger_id(&pubkey(OP), "bcrt1qreservesX", 0);
+    let ops = [
         LedgerOperation::LedgerOpen {
             operator_id: pubkey(OP),
             reserves_id: "bcrt1qreservesX".to_string(),
@@ -668,7 +774,14 @@ fn ledger_x() -> Vec<SignedLedgerUpdate> {
     let mut chain: Vec<SignedLedgerUpdate> = Vec::new();
     for (seq, op) in ops.iter().enumerate() {
         let prev = chain.last().map(|u| u.chain_hash()).unwrap_or([0u8; 32]);
-        chain.push(signed_update(seq as u64, id, prev, OP, &op.tlv_encode(), false));
+        chain.push(signed_update(
+            seq as u64,
+            id,
+            prev,
+            OP,
+            &op.tlv_encode(),
+            false,
+        ));
     }
     chain
 }
@@ -693,7 +806,10 @@ fn an_honest_update_of_another_ledger_relabelled_is_not_proof() {
         u
     }));
     assert!(verify_non_conforming_update(&proof_for(&relabelled), &mixed, &AllowAll).is_err());
-    assert_eq!(find_non_conforming_update(&mixed, &pubkey(OP), &AllowAll), None);
+    assert_eq!(
+        find_non_conforming_update(&mixed, &pubkey(OP), &AllowAll),
+        None
+    );
     // And on X, where it belongs, it is an honest update.
     assert!(verify_non_conforming_update(&proof_for(&x[4]), &x, &AllowAll).is_err());
 }
@@ -752,8 +868,22 @@ fn two_ledgers_updates_at_one_sequence_are_not_equivocation() {
 fn a_genuine_equivocation_still_verifies() {
     use deposits_protocol::fraud::{find_equivocation, verify_equivocation};
     let y = ledger_c_prefix();
-    let a = signed_update(4, ledger(), y[3].chain_hash(), OP, &credit(3, 1).tlv_encode(), false);
-    let b = signed_update(4, ledger(), y[3].chain_hash(), OP, &credit(4, 2).tlv_encode(), false);
+    let a = signed_update(
+        4,
+        ledger(),
+        y[3].chain_hash(),
+        OP,
+        &credit(3, 1).tlv_encode(),
+        false,
+    );
+    let b = signed_update(
+        4,
+        ledger(),
+        y[3].chain_hash(),
+        OP,
+        &credit(4, 2).tlv_encode(),
+        false,
+    );
     verify_equivocation(&equivocation(&a, &b), &y).unwrap();
     let mut history = y.clone();
     history.extend([a.clone(), b.clone()]);
@@ -786,8 +916,22 @@ const MEMBER: u8 = 2; // ledger C's quorum member
 fn a_member_accusing_itself_is_refused() {
     use deposits_protocol::fraud::verify_equivocation;
     let y = ledger_c_prefix();
-    let a = signed_update(4, ledger(), y[3].chain_hash(), MEMBER, &credit(3, 1).tlv_encode(), false);
-    let b = signed_update(4, ledger(), y[3].chain_hash(), MEMBER, &credit(4, 2).tlv_encode(), false);
+    let a = signed_update(
+        4,
+        ledger(),
+        y[3].chain_hash(),
+        MEMBER,
+        &credit(3, 1).tlv_encode(),
+        false,
+    );
+    let b = signed_update(
+        4,
+        ledger(),
+        y[3].chain_hash(),
+        MEMBER,
+        &credit(4, 2).tlv_encode(),
+        false,
+    );
     let mut history = y.clone();
     history.extend([a.clone(), b.clone()]);
     for h in [&y, &history] {
@@ -839,7 +983,14 @@ fn taken_over() -> Vec<SignedLedgerUpdate> {
     for op in ops {
         let prev = chain.last().unwrap().chain_hash();
         let seq = chain.len() as u64;
-        chain.push(signed_update(seq, ledger(), prev, SUCCESSOR, &op.tlv_encode(), false));
+        chain.push(signed_update(
+            seq,
+            ledger(),
+            prev,
+            SUCCESSOR,
+            &op.tlv_encode(),
+            false,
+        ));
     }
     chain
 }
@@ -861,14 +1012,36 @@ fn custody_follows_dispute_acquire() {
 
     let by_former = signed_update(7, ledger(), tip, OP, &over_reserves, false);
     let err = verify_non_conforming_update(&proof_for(&by_former), &chain, &AllowAll).unwrap_err();
-    assert!(err.contains("does not operate the ledger"), "wrong error: {}", err);
+    assert!(
+        err.contains("does not operate the ledger"),
+        "wrong error: {}",
+        err
+    );
 
     let a = signed_update(7, ledger(), tip, OP, &credit(3, 1).tlv_encode(), false);
     let b = signed_update(7, ledger(), tip, OP, &credit(4, 2).tlv_encode(), false);
     let err = verify_equivocation(&equivocation(&a, &b), &chain).unwrap_err();
-    assert!(err.contains("does not operate the ledger"), "wrong error: {}", err);
-    let a = signed_update(7, ledger(), tip, SUCCESSOR, &credit(3, 1).tlv_encode(), false);
-    let b = signed_update(7, ledger(), tip, SUCCESSOR, &credit(4, 2).tlv_encode(), false);
+    assert!(
+        err.contains("does not operate the ledger"),
+        "wrong error: {}",
+        err
+    );
+    let a = signed_update(
+        7,
+        ledger(),
+        tip,
+        SUCCESSOR,
+        &credit(3, 1).tlv_encode(),
+        false,
+    );
+    let b = signed_update(
+        7,
+        ledger(),
+        tip,
+        SUCCESSOR,
+        &credit(4, 2).tlv_encode(),
+        false,
+    );
     verify_equivocation(&equivocation(&a, &b), &chain).unwrap();
 
     // The former operator's fault from before the takeover still verifies:

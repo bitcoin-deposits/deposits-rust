@@ -10,8 +10,8 @@
 
 use bitcoin::secp256k1::{Keypair, Message, PublicKey, Secp256k1, SecretKey};
 use deposits_protocol::fraud::{
-    find_non_conforming_cosignature, verify_non_conforming_cosignature, FraudEvidence,
-    FraudProof, FraudProofType,
+    find_non_conforming_cosignature, verify_non_conforming_cosignature, FraudEvidence, FraudProof,
+    FraudProofType,
 };
 use deposits_protocol::messages::{LedgerOperation, QuorumMemberRef};
 use deposits_protocol::tlv::TlvEncode;
@@ -32,7 +32,10 @@ const COLLATERAL: u64 = 30_000_000_000;
 const DEPOSIT: [u8; 16] = [0xAB; 16];
 
 fn keypair(seed: u8) -> Keypair {
-    Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[seed; 32]).unwrap())
+    Keypair::from_secret_key(
+        &Secp256k1::new(),
+        &SecretKey::from_slice(&[seed; 32]).unwrap(),
+    )
 }
 
 fn pubkey(seed: u8) -> PublicKey {
@@ -109,7 +112,7 @@ fn withdrawal(amount: u64) -> LedgerOperation {
 /// seq 0 LedgerOpen, 1 QuorumBegin (member `MEMBER`), 2 DepositOpen, 3 a
 /// 480,000,000 credit, cosigned from the QuorumBegin on.
 fn prefix() -> Vec<SignedLedgerUpdate> {
-    let ops = vec![
+    let ops = [
         LedgerOperation::LedgerOpen {
             operator_id: pubkey(OP),
             reserves_id: "bcrt1qreserves".to_string(),
@@ -206,7 +209,10 @@ fn an_honest_cosigned_withdrawal_is_not_proof() {
     }
     let mut with_it = history.clone();
     with_it.push(honest);
-    assert_eq!(find_non_conforming_cosignature(&with_it, &pubkey(OP), &AllowAll), None);
+    assert_eq!(
+        find_non_conforming_cosignature(&with_it, &pubkey(OP), &AllowAll),
+        None
+    );
 }
 
 #[test]
@@ -216,11 +222,13 @@ fn a_genuine_non_conforming_cosignature_is_proof() {
     for op in [credit(2, 40_000_000_000), withdrawal(0)] {
         let fault = next(&history, &op);
         for accused in [pubkey(OP), pubkey(MEMBER)] {
-            verify_non_conforming_cosignature(&proof(&fault, accused), &history, &AllowAll).unwrap();
+            verify_non_conforming_cosignature(&proof(&fault, accused), &history, &AllowAll)
+                .unwrap();
         }
         let mut with_it = history.clone();
         with_it.push(fault);
-        let (seq, qb, _) = find_non_conforming_cosignature(&with_it, &pubkey(OP), &AllowAll).unwrap();
+        let (seq, qb, _) =
+            find_non_conforming_cosignature(&with_it, &pubkey(OP), &AllowAll).unwrap();
         assert_eq!((seq, qb), (4, 1));
     }
 }
@@ -237,7 +245,10 @@ fn a_cosigner_listed_without_their_signature_is_not_accused() {
     fault.operator_signature = Secp256k1::new()
         .sign_schnorr_no_aux_rand(&Message::from_digest(digest), &keypair(OP))
         .serialize();
-    assert!(verify_non_conforming_cosignature(&proof(&fault, pubkey(MEMBER)), &history, &AllowAll).is_err());
+    assert!(
+        verify_non_conforming_cosignature(&proof(&fault, pubkey(MEMBER)), &history, &AllowAll)
+            .is_err()
+    );
     // The operator did sign it.
     verify_non_conforming_cosignature(&proof(&fault, pubkey(OP)), &history, &AllowAll).unwrap();
 }
@@ -247,7 +258,8 @@ fn a_fault_that_links_to_nothing_is_not_judged() {
     let history = prefix();
     let mut fault = update(4, [0xEE; 32], &credit(2, 40_000_000_000), &[MEMBER]);
     fault.block_height = 0;
-    let err = verify_non_conforming_cosignature(&proof(&fault, pubkey(OP)), &history, &AllowAll).unwrap_err();
+    let err = verify_non_conforming_cosignature(&proof(&fault, pubkey(OP)), &history, &AllowAll)
+        .unwrap_err();
     assert!(err.contains("links to no update"), "{}", err);
 }
 
@@ -260,6 +272,11 @@ fn a_rewritten_block_height_is_not_proof() {
     // re-dated copy carries no valid operator signature or cosignature.
     honest.block_height = 50_000;
     assert!(honest.verify_operator_signature().is_err());
-    assert!(honest.verify_cosign_signatures(&[pubkey(MEMBER)], 1).is_err());
-    assert!(verify_non_conforming_cosignature(&proof(&honest, pubkey(OP)), &history, &AllowAll).is_err());
+    assert!(honest
+        .verify_cosign_signatures(&[pubkey(MEMBER)], 1)
+        .is_err());
+    assert!(
+        verify_non_conforming_cosignature(&proof(&honest, pubkey(OP)), &history, &AllowAll)
+            .is_err()
+    );
 }

@@ -937,7 +937,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "deposit-bot '{}' · deposit {} · ledger {}… · {} peers ({} transfer, {} lightning) · behavior={}",
         cfg.alias,
         hex::encode(id.deposit_id),
-        &ledger_tag,
+        ledger_tag,
         id.peers.len(),
         same,
         cross,

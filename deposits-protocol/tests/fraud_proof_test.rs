@@ -268,9 +268,8 @@ fn embedding_classification() {
 
 #[test]
 fn uncredited_payment_without_embedding_rejected() {
-    let empty = |_: &str| -> Option<Vec<deposits_protocol::types::SignedLedgerUpdate>> {
-        Some(vec![])
-    };
+    let empty =
+        |_: &str| -> Option<Vec<deposits_protocol::types::SignedLedgerUpdate>> { Some(vec![]) };
     let oracle = |_: &[u8; 32]| -> Option<u32> { None };
     for proof in [make_onchain_proof(), make_lightning_proof()] {
         let b = FraudBroadcast {
@@ -279,9 +278,17 @@ fn uncredited_payment_without_embedding_rejected() {
             causal_chain: vec![],
         };
         let err = b.verify_chain_structure().unwrap_err();
-        assert!(err.contains("requires an embedding"), "wrong error: {}", err);
+        assert!(
+            err.contains("requires an embedding"),
+            "wrong error: {}",
+            err
+        );
         let err = verify_fraud_broadcast(&b, &empty, &oracle, &AllowAll).unwrap_err();
-        assert!(err.contains("requires an embedding"), "wrong error: {}", err);
+        assert!(
+            err.contains("requires an embedding"),
+            "wrong error: {}",
+            err
+        );
     }
 
     // DisputeDereliction is self-evident: a missing embedding is never the
@@ -674,9 +681,9 @@ fn chain_hash_includes_operator_signature() {
 
 mod dispatch {
     use deposits_protocol::fraud::*;
-    use deposits_protocol::types::AllowAll;
     use deposits_protocol::messages::LedgerOperation;
     use deposits_protocol::tlv::TlvEncode;
+    use deposits_protocol::types::AllowAll;
     use deposits_protocol::types::{CosignEntry, SignedLedgerUpdate};
     use sha2::{Digest, Sha256};
     use std::collections::HashMap;
@@ -814,27 +821,9 @@ mod dispatch {
 
         // Member history.
         let member_history = vec![
-            update_with(
-                5,
-                member_ledger,
-                dummy_transfer_lock([0; 32]),
-                &[],
-                90,
-            ),
-            update_with(
-                6,
-                member_ledger,
-                dummy_transfer_lock([1; 32]),
-                &[],
-                95,
-            ),
-            update_with(
-                7,
-                member_ledger,
-                dummy_transfer_lock([2; 32]),
-                &[],
-                100,
-            ),
+            update_with(5, member_ledger, dummy_transfer_lock([0; 32]), &[], 90),
+            update_with(6, member_ledger, dummy_transfer_lock([1; 32]), &[], 95),
+            update_with(7, member_ledger, dummy_transfer_lock([2; 32]), &[], 100),
         ];
         let h_old = member_history[0].chain_hash();
         let later_hash = member_history[2].chain_hash();
@@ -930,13 +919,7 @@ mod dispatch {
         let mut histories = histories;
         let accused_id = broadcast.embedding.as_ref().unwrap().ledger_id.clone();
         let accused_history = histories.get_mut(&accused_id).unwrap();
-        accused_history[1] = update_with(
-            50,
-            [0xAA; 32],
-            dummy_transfer_lock(proof_hash),
-            &[],
-            120,
-        );
+        accused_history[1] = update_with(50, [0xAA; 32], dummy_transfer_lock(proof_hash), &[], 120);
         let provider = provider_from(histories);
         let oracle = MockOracle(HashMap::new());
         let err = verify_fraud_broadcast(&broadcast, &provider, &oracle, &AllowAll).unwrap_err();
@@ -1082,13 +1065,8 @@ mod dispatch {
         blocks.insert(member_block, 1000 + elapsed);
 
         let member_pk = pk_from_seed(0xEF);
-        let mut member_active_update = update_with(
-            200,
-            member_ledger,
-            dummy_transfer_lock([0; 32]),
-            &[],
-            0,
-        );
+        let mut member_active_update =
+            update_with(200, member_ledger, dummy_transfer_lock([0; 32]), &[], 0);
         member_active_update.operator_id = member_pk;
         member_active_update.block_hash = member_block;
 
@@ -1108,13 +1086,8 @@ mod dispatch {
         let proof_hash = proof_template.proof_hash();
 
         // Embedding lives on the accused's ledger.
-        let embedding_update = update_with(
-            50,
-            accused_ledger,
-            dummy_transfer_lock(proof_hash),
-            &[],
-            0,
-        );
+        let embedding_update =
+            update_with(50, accused_ledger, dummy_transfer_lock(proof_hash), &[], 0);
 
         let mut histories = HashMap::new();
         histories.insert(hex::encode(accused_ledger), vec![embedding_update]);
@@ -1136,15 +1109,25 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_inactive_quorum_member() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(200, 144);
-        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll).unwrap();
+        verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+            &AllowAll,
+        )
+        .unwrap();
     }
 
     #[test]
     fn dispatch_rejects_inactive_quorum_within_window() {
         let (broadcast, histories, blocks) = inactive_quorum_scenario(100, 144);
-        let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
-                .unwrap_err();
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+            &AllowAll,
+        )
+        .unwrap_err();
         assert!(err.contains("only 100 blocks past"), "wrong error: {}", err);
     }
 
@@ -1223,13 +1206,8 @@ mod dispatch {
         };
         let proof_hash = proof_template.proof_hash();
 
-        let mut proof_update = update_with(
-            50,
-            accused_ledger,
-            dummy_transfer_lock(proof_hash),
-            &[],
-            0,
-        );
+        let mut proof_update =
+            update_with(50, accused_ledger, dummy_transfer_lock(proof_hash), &[], 0);
         proof_update.block_hash = proof_block;
 
         let mut histories = HashMap::new();
@@ -1251,15 +1229,25 @@ mod dispatch {
     #[test]
     fn dispatch_accepts_genuine_uncredited_onchain() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
-        verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll).unwrap();
+        verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+            &AllowAll,
+        )
+        .unwrap();
     }
 
     #[test]
     fn dispatch_rejects_uncredited_onchain_with_insufficient_confs() {
         let (broadcast, histories, blocks) = uncredited_onchain_scenario(3, 6);
-        let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
-                .unwrap_err();
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+            &AllowAll,
+        )
+        .unwrap_err();
         assert!(err.contains("only 3 blocks past"), "wrong error: {}", err);
     }
 
@@ -1282,9 +1270,13 @@ mod dispatch {
             u.block_hash = [0xEE; 32];
             u
         };
-        let err =
-            verify_fraud_broadcast(&broadcast, &provider_from(histories), &MockOracle(blocks), &AllowAll)
-                .unwrap_err();
+        let err = verify_fraud_broadcast(
+            &broadcast,
+            &provider_from(histories),
+            &MockOracle(blocks),
+            &AllowAll,
+        )
+        .unwrap_err();
         assert!(
             err.contains("offer cosignature failed BIP-340"),
             "wrong error: {}",

@@ -54,7 +54,8 @@ fn signed_update() -> SignedLedgerUpdate {
             member_ledger_hash: mlh,
         });
     }
-    u.cosignatures.sort_by_key(|e| e.cosigner_pubkey.serialize());
+    u.cosignatures
+        .sort_by_key(|e| e.cosigner_pubkey.serialize());
     u.content_hash = u.compute_hash();
     u.operator_signature = secp
         .sign_schnorr_no_aux_rand(&Message::from_digest(u.operator_digest()), &op)
@@ -69,7 +70,8 @@ fn each_cosignature_verifies(u: &SignedLedgerUpdate) -> Vec<bool> {
         .map(|e| {
             let mut one = u.clone();
             one.cosignatures = vec![e.clone()];
-            one.verify_cosign_signatures(&[e.cosigner_pubkey], 1).is_ok()
+            one.verify_cosign_signatures(&[e.cosigner_pubkey], 1)
+                .is_ok()
         })
         .collect()
 }
@@ -86,7 +88,10 @@ fn assert_all_signatures_broken(original: &SignedLedgerUpdate, tampered: &Signed
     );
     assert!(tampered.verify_cosign_signatures(&members(), 2).is_err());
     assert_ne!(tampered.compute_hash(), original.content_hash);
-    assert!(!tampered.verify_hash(), "stale content_hash must not verify");
+    assert!(
+        !tampered.verify_hash(),
+        "stale content_hash must not verify"
+    );
 }
 
 #[test]

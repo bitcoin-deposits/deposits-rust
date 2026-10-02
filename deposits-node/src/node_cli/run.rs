@@ -305,7 +305,7 @@ pub async fn run_node(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                             if !stacks.is_empty() {
                                 let total: isize = stacks.values().sum();
                                 let mut sorted: Vec<_> = stacks.into_iter().collect();
-                                sorted.sort_by(|a, b| b.1.cmp(&a.1));
+                                sorted.sort_by_key(|a| std::cmp::Reverse(a.1));
                                 if let Ok(mut f) = std::fs::File::create(&collapsed_path) {
                                     use std::io::Write;
                                     for (stack, count) in &sorted {

@@ -159,7 +159,13 @@ impl Node {
                     let base_expiry = ledgers
                         .get(&base_id)
                         .and_then(|b| b.read().unwrap().state.quorum_expiry);
-                    Some((key.clone(), base_id, reason, base_expiry, fork.state.dispute_state))
+                    Some((
+                        key.clone(),
+                        base_id,
+                        reason,
+                        base_expiry,
+                        fork.state.dispute_state,
+                    ))
                 })
                 .collect()
         };
@@ -303,27 +309,51 @@ mod tests {
     /// C's quorum now runs to 8888; at height 8160 an expiry dispute stands down.
     #[test]
     fn stands_down_once_the_quorum_is_reestablished() {
-        assert!(expiry_dispute_stands_down("quorum_expired", Some(8888), 8160));
+        assert!(expiry_dispute_stands_down(
+            "quorum_expired",
+            Some(8888),
+            8160
+        ));
         // Still valid at the expiry block itself (expired means past it).
-        assert!(expiry_dispute_stands_down("quorum_expired", Some(8160), 8160));
+        assert!(expiry_dispute_stands_down(
+            "quorum_expired",
+            Some(8160),
+            8160
+        ));
     }
 
     /// The replica still shows the lapsed quorum (7191 at 8160): keep going.
     #[test]
     fn keeps_a_dispute_whose_quorum_is_still_expired() {
-        assert!(!expiry_dispute_stands_down("quorum_expired", Some(7191), 8160));
+        assert!(!expiry_dispute_stands_down(
+            "quorum_expired",
+            Some(7191),
+            8160
+        ));
         // Expired but inside the auto-dispute hold-off: another member may
         // have opened it (the peer path arms without the hold-off); the
         // quorum has not come back, so neither do we stand down.
-        assert!(!expiry_dispute_stands_down("quorum_expired", Some(8000), 8160));
+        assert!(!expiry_dispute_stands_down(
+            "quorum_expired",
+            Some(8000),
+            8160
+        ));
         assert!(!expiry_dispute_stands_down("quorum_expired", None, 8160));
     }
 
     /// Only expiry disputes: a fraud dispute is not answered by a rotation.
     #[test]
     fn other_disputes_do_not_stand_down() {
-        assert!(!expiry_dispute_stands_down("auto_dispute", Some(8888), 8160));
-        assert!(!expiry_dispute_stands_down("non_conforming_update", Some(8888), 8160));
+        assert!(!expiry_dispute_stands_down(
+            "auto_dispute",
+            Some(8888),
+            8160
+        ));
+        assert!(!expiry_dispute_stands_down(
+            "non_conforming_update",
+            Some(8888),
+            8160
+        ));
     }
 
     #[test]
@@ -341,7 +371,10 @@ mod tests {
             enter,
             update([0; 32], 67_861, pk(2)),
         ];
-        assert_eq!(dispute_enter_reason(&history).as_deref(), Some("quorum_expired"));
+        assert_eq!(
+            dispute_enter_reason(&history).as_deref(),
+            Some("quorum_expired")
+        );
         assert_eq!(dispute_enter_reason(&history[..1]), None);
     }
 }

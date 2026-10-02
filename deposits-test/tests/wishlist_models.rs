@@ -396,11 +396,7 @@ fn tier1_4_lightning_bounded_theft() {
         // Maximum safe theft rate: steal only from type C wallets
         let safe_targets = (num_wallets as f64 * pop.type_c_fraction) as u64;
         let monthly_theft = safe_targets * payments_per_wallet_per_month * avg_payment_sats;
-        let months_to_exceed_collateral = if monthly_theft > 0 {
-            collateral / monthly_theft
-        } else {
-            u64::MAX
-        };
+        let months_to_exceed_collateral = collateral.checked_div(monthly_theft).unwrap_or(u64::MAX);
         let theft_rate = pop.type_c_fraction; // fraction of payments stealable
 
         if theft_rate > worst_case_theft_rate {

@@ -77,7 +77,8 @@ pub(crate) fn find_vault_thefts(
         };
         for spend in spends.iter().filter(|s| s.outpoint == vault) {
             let txid = spend.tx.compute_txid().to_byte_array();
-            if known_confiscations.contains(&txid) || authorised_spend_txids(history).contains(&txid)
+            if known_confiscations.contains(&txid)
+                || authorised_spend_txids(history).contains(&txid)
             {
                 continue;
             }
@@ -128,7 +129,13 @@ fn proof_against(
                     .spend
                     .prevouts
                     .iter()
-                    .map(|o| format!("{}:{}", o.value.to_sat(), hex::encode(o.script_pubkey.as_bytes())))
+                    .map(|o| {
+                        format!(
+                            "{}:{}",
+                            o.value.to_sat(),
+                            hex::encode(o.script_pubkey.as_bytes())
+                        )
+                    })
                     .collect(),
             },
         },
@@ -171,8 +178,10 @@ impl crate::Node {
         if !watched.is_empty() {
             let scan = {
                 let watched = watched.clone();
-                tokio::task::spawn_blocking(move || backend.scan_outpoint_spends(from, to, &watched))
-                    .await
+                tokio::task::spawn_blocking(move || {
+                    backend.scan_outpoint_spends(from, to, &watched)
+                })
+                .await
             };
             let spends = match scan {
                 Ok(Ok(s)) => s,
@@ -353,13 +362,21 @@ mod tests {
     fn current_vault_is_the_newest_quorum_begin() {
         let (v, seq) = current_vault(&history([9; 32])).unwrap();
         assert_eq!(seq, 1);
-        assert_eq!(v, OutPoint::new(bitcoin::Txid::from_byte_array(sha(&[0xf0, 0x0d])), 0));
+        assert_eq!(
+            v,
+            OutPoint::new(bitcoin::Txid::from_byte_array(sha(&[0xf0, 0x0d])), 0)
+        );
     }
 
     #[test]
     fn finds_the_theft_and_its_signers() {
         let (_, spend) = cl_theft();
-        let t = find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::new(), &HashSet::new());
+        let t = find_vault_thefts(
+            &ledgers([9; 32]),
+            &[spend],
+            &HashSet::new(),
+            &HashSet::new(),
+        );
         assert_eq!(t.len(), 1);
         assert_eq!(t[0].governing_seq, 1);
         assert!(t[0].signers.len() >= 3);
@@ -369,8 +386,13 @@ mod tests {
     fn a_recorded_rotation_or_known_confiscation_is_not_theft() {
         let (_, spend) = cl_theft();
         let txid = spend.tx.compute_txid().to_byte_array();
-        assert!(find_vault_thefts(&ledgers(txid), &[spend.clone()], &HashSet::new(), &HashSet::new())
-            .is_empty());
+        assert!(find_vault_thefts(
+            &ledgers(txid),
+            std::slice::from_ref(&spend),
+            &HashSet::new(),
+            &HashSet::new()
+        )
+        .is_empty());
         assert!(find_vault_thefts(
             &ledgers([9; 32]),
             &[spend],
@@ -392,8 +414,13 @@ mod tests {
         });
         let txid = confiscation_txid_from_params(&params).expect("parses");
         assert_eq!(txid, spend.tx.compute_txid().to_byte_array());
-        assert!(find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::from([txid]), &HashSet::new())
-            .is_empty());
+        assert!(find_vault_thefts(
+            &ledgers([9; 32]),
+            &[spend],
+            &HashSet::from([txid]),
+            &HashSet::new()
+        )
+        .is_empty());
         assert!(confiscation_txid_from_params(&serde_json::json!({})).is_none());
     }
 
@@ -401,20 +428,35 @@ mod tests {
     fn reports_each_ledger_once_and_ignores_unrelated_spends() {
         let (_, spend) = cl_theft();
         let reported = HashSet::from([hex::encode(sha(&[2]))]);
-        assert!(find_vault_thefts(&ledgers([9; 32]), &[spend.clone()], &HashSet::new(), &reported)
-            .is_empty());
+        assert!(find_vault_thefts(
+            &ledgers([9; 32]),
+            std::slice::from_ref(&spend),
+            &HashSet::new(),
+            &reported
+        )
+        .is_empty());
         let mut other = spend;
         other.outpoint = OutPoint::new(bitcoin::Txid::from_byte_array([7; 32]), 0);
-        assert!(find_vault_thefts(&ledgers([9; 32]), &[other], &HashSet::new(), &HashSet::new())
-            .is_empty());
+        assert!(find_vault_thefts(
+            &ledgers([9; 32]),
+            &[other],
+            &HashSet::new(),
+            &HashSet::new()
+        )
+        .is_empty());
     }
 
     #[test]
     fn the_proof_we_build_is_cls_proof_and_verifies() {
         let (cl, spend) = cl_theft();
-        let theft = find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::new(), &HashSet::new())
-            .pop()
-            .unwrap();
+        let theft = find_vault_thefts(
+            &ledgers([9; 32]),
+            &[spend],
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .pop()
+        .unwrap();
         let accused = PublicKey::from_slice(&hex::decode(&cl.accused).unwrap()).unwrap();
         let b = proof_against(&accused, &cl.ledger_id, &theft);
         assert_eq!(hex::encode(b.proof.proof_hash()), CL_PROOF_HASH);

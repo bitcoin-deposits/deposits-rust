@@ -398,8 +398,8 @@ impl Wallet {
 
         let spks: Vec<ScriptBuf> = wallet
             .all_unbounded_spk_iters()
-            .into_iter()
-            .flat_map(|(_, iter)| iter.take(20).map(|(_, spk)| spk))
+            .into_values()
+            .flat_map(|iter| iter.take(20).map(|(_, spk)| spk))
             .collect();
 
         if !spks.is_empty() {

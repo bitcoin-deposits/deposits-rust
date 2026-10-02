@@ -30,7 +30,10 @@ const DEPOSIT: [u8; 16] = [0xAB; 16];
 const HEIGHT: u32 = 1_000;
 
 fn keypair(seed: u8) -> Keypair {
-    Keypair::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[seed; 32]).unwrap())
+    Keypair::from_secret_key(
+        &Secp256k1::new(),
+        &SecretKey::from_slice(&[seed; 32]).unwrap(),
+    )
 }
 
 fn pubkey(seed: u8) -> PublicKey {
@@ -103,7 +106,7 @@ fn quorum_begin() -> LedgerOperation {
 /// DepositOpen whose descriptor is the depositor's key, 3 a credit to it.
 fn prefix() -> Vec<SignedLedgerUpdate> {
     let depositor = bitcoin::PublicKey::new(pubkey(DEPOSITOR));
-    let ops = vec![
+    let ops = [
         LedgerOperation::LedgerOpen {
             operator_id: pubkey(OP),
             reserves_id: "bcrt1qreserves".to_string(),
@@ -167,7 +170,10 @@ fn fault(prefix: &[SignedLedgerUpdate]) -> SignedLedgerUpdate {
 struct Ledgers(Vec<(String, Vec<SignedLedgerUpdate>)>);
 impl LedgerProvider for Ledgers {
     fn ledger_history(&self, ledger_id: &str) -> Option<Vec<SignedLedgerUpdate>> {
-        self.0.iter().find(|(id, _)| id == ledger_id).map(|(_, h)| h.clone())
+        self.0
+            .iter()
+            .find(|(id, _)| id == ledger_id)
+            .map(|(_, h)| h.clone())
     }
 }
 struct NoChain;
@@ -192,7 +198,11 @@ fn operated_by(pk: &PublicKey) -> Vec<String> {
     if *pk == pubkey(OP) {
         vec![hex::encode(ledger()), own_ledger(OP, 1)]
     } else if *pk == pubkey(ACCUSED) {
-        vec![own_ledger(ACCUSED, 1), own_ledger(ACCUSED, 2), own_ledger(ACCUSED, 1)]
+        vec![
+            own_ledger(ACCUSED, 1),
+            own_ledger(ACCUSED, 2),
+            own_ledger(ACCUSED, 1),
+        ]
     } else if *pk == pubkey(COLLUDER) {
         vec![own_ledger(COLLUDER, 1)]
     } else {
@@ -217,11 +227,20 @@ fn the_governing_quorum_begin_is_the_latest_at_or_before_the_fault() {
         commitment: None,
     };
     let at = |seq: u64, op: &LedgerOperation| update(seq, [0; 32], op, &[]);
-    let history = vec![at(1, &qb), at(3, &noop), at(4, &qb), at(5, &noop), at(7, &qb)];
+    let history = vec![
+        at(1, &qb),
+        at(3, &noop),
+        at(4, &qb),
+        at(5, &noop),
+        at(7, &qb),
+    ];
     assert_eq!(governing_quorum_begin_seq(&history, &at(6, &noop)), Some(4));
     // The fault itself may be the QuorumBegin.
     assert_eq!(governing_quorum_begin_seq(&history, &at(4, &qb)), Some(4));
-    assert_eq!(governing_quorum_begin_seq(&history[1..2], &at(3, &noop)), None);
+    assert_eq!(
+        governing_quorum_begin_seq(&history[1..2], &at(3, &noop)),
+        None
+    );
 }
 
 #[test]
@@ -231,8 +250,10 @@ fn the_producer_accuses_each_signer_on_each_other_ledger_it_operates() {
     let qb = governing_quorum_begin_seq(&prefix, &fault).unwrap();
     let proofs = contagion_proofs(&fault, qb, &operated_by, None);
 
-    let got: Vec<(String, String)> =
-        proofs.iter().map(|b| (b.proof.accused.clone(), b.proof.ledger_id.clone())).collect();
+    let got: Vec<(String, String)> = proofs
+        .iter()
+        .map(|b| (b.proof.accused.clone(), b.proof.ledger_id.clone()))
+        .collect();
     let operator = hex::encode(pubkey(OP).serialize());
     let accused = hex::encode(pubkey(ACCUSED).serialize());
     let colluder = hex::encode(pubkey(COLLUDER).serialize());
@@ -248,7 +269,10 @@ fn the_producer_accuses_each_signer_on_each_other_ledger_it_operates() {
         ]
     );
     for b in &proofs {
-        assert!(matches!(b.proof.proof_type, FraudProofType::NonConformingCosignature));
+        assert!(matches!(
+            b.proof.proof_type,
+            FraudProofType::NonConformingCosignature
+        ));
         assert!(b.embedding.is_none() && b.causal_chain.is_empty());
         let FraudEvidence::NonConformingCosignature {
             fault_ledger_id,
@@ -267,9 +291,13 @@ fn the_producer_accuses_each_signer_on_each_other_ledger_it_operates() {
 
     // Our own key is never accused.
     let mine = contagion_proofs(&fault, qb, &operated_by, Some(&pubkey(ACCUSED)));
-    assert!(mine.iter().all(|b| b.proof.accused != hex::encode(pubkey(ACCUSED).serialize())));
+    assert!(mine
+        .iter()
+        .all(|b| b.proof.accused != hex::encode(pubkey(ACCUSED).serialize())));
     assert_eq!(mine.len(), 2);
-    assert!(proofs.iter().all(|b| b.proof.ledger_id != hex::encode(ledger())));
+    assert!(proofs
+        .iter()
+        .all(|b| b.proof.ledger_id != hex::encode(ledger())));
 
     // A cosigner the operator listed without its signature is not accused.
     let mut forged = fault.clone();
@@ -277,7 +305,10 @@ fn the_producer_accuses_each_signer_on_each_other_ledger_it_operates() {
     // The operator signs the update with the bogus listing on it.
     forged.content_hash = forged.compute_hash();
     forged.operator_signature = Secp256k1::new()
-        .sign_schnorr_no_aux_rand(&Message::from_digest(forged.operator_digest()), &keypair(OP))
+        .sign_schnorr_no_aux_rand(
+            &Message::from_digest(forged.operator_digest()),
+            &keypair(OP),
+        )
         .serialize();
     let proofs = contagion_proofs(&forged, qb, &operated_by, None);
     assert_eq!(proofs.len(), 2);
@@ -318,7 +349,9 @@ fn every_produced_proof_verifies_with_the_dep16_authorizer() {
     {
         *governing_quorumbegin_seq = 2; // a DepositOpen, not a QuorumBegin
     }
-    assert!(verify_fraud_broadcast(&wrong_qb, &ledgers, &NoChain, &Dep16Authorizer::new()).is_err());
+    assert!(
+        verify_fraud_broadcast(&wrong_qb, &ledgers, &NoChain, &Dep16Authorizer::new()).is_err()
+    );
 }
 
 /// Verbatim from cl-deposits (d4614e7): `(broadcast->json
@@ -344,9 +377,14 @@ fn a_cl_shaped_proof_against_the_accuseds_own_ledger_verifies() {
             state.apply_update_in_place(u).unwrap();
         }
         let op = LedgerOperation::tlv_decode(&fault.message).unwrap();
-        let (_, v) = state.apply_with_verifier(&op, &Dep16Authorizer::new(), HEIGHT).unwrap();
+        let (_, v) = state
+            .apply_with_verifier(&op, &Dep16Authorizer::new(), HEIGHT)
+            .unwrap();
         assert!(
-            matches!(v[..], [deposits_protocol::types::ConformanceViolation::InvalidWitness { .. }]),
+            matches!(
+                v[..],
+                [deposits_protocol::types::ConformanceViolation::InvalidWitness { .. }]
+            ),
             "{:?}",
             v
         );
@@ -356,9 +394,15 @@ fn a_cl_shaped_proof_against_the_accuseds_own_ledger_verifies() {
     let b: FraudBroadcast = serde_json::from_str(json).expect("cl's JSON parses");
     assert_eq!(b.proof.ledger_id, target);
     // What the kind:9101 receive path checks before handing it on.
-    b.verify_chain_structure().expect("self-evident: no embedding needed");
-    verify_fraud_broadcast(&b, &provider(&prefix, &fault), &NoChain, &Dep16Authorizer::new())
-        .expect("cl's contagion proof verifies on the reference");
+    b.verify_chain_structure()
+        .expect("self-evident: no embedding needed");
+    verify_fraud_broadcast(
+        &b,
+        &provider(&prefix, &fault),
+        &NoChain,
+        &Dep16Authorizer::new(),
+    )
+    .expect("cl's contagion proof verifies on the reference");
     // The fault ledger's history is what grounds it: withheld, it fails closed.
     let err = verify_fraud_broadcast(&b, &Ledgers(vec![]), &NoChain, &Dep16Authorizer::new())
         .unwrap_err();
@@ -390,8 +434,13 @@ fn an_operator_accused_proof_on_its_other_ledger_verifies() {
     let op = deposits_protocol::tlv::TlvDecode::tlv_decode(&fault.message).unwrap();
     let alone = update(4, prefix[3].chain_hash(), &op, &[]);
     let b = operator_proof(&alone);
-    verify_fraud_broadcast(&b, &provider(&prefix, &alone), &NoChain, &Dep16Authorizer::new())
-        .expect("an uncosigned forgery accuses its operator too");
+    verify_fraud_broadcast(
+        &b,
+        &provider(&prefix, &alone),
+        &NoChain,
+        &Dep16Authorizer::new(),
+    )
+    .expect("an uncosigned forgery accuses its operator too");
 }
 
 #[test]
@@ -408,8 +457,13 @@ fn an_operator_accused_proof_about_a_conforming_update_does_not_verify() {
     };
     let honest = update(4, prefix[3].chain_hash(), &credit, &[ACCUSED, COLLUDER]);
     let b = operator_proof(&honest);
-    let err = verify_fraud_broadcast(&b, &provider(&prefix, &honest), &NoChain, &Dep16Authorizer::new())
-        .unwrap_err();
+    let err = verify_fraud_broadcast(
+        &b,
+        &provider(&prefix, &honest),
+        &NoChain,
+        &Dep16Authorizer::new(),
+    )
+    .unwrap_err();
     assert!(err.contains("applies cleanly"), "{}", err);
 
     // Someone who signed nothing is not accused through the operator's slot.
@@ -440,8 +494,17 @@ fn a_cl_shaped_operator_accused_proof_verifies() {
     assert_eq!(b.proof.accused, hex::encode(pubkey(OP).serialize()));
     assert_eq!(b.proof.ledger_id, own_ledger(OP, 1));
     // Byte-for-byte what the reference's producer builds.
-    assert_eq!(b.proof.proof_hash(), operator_proof(&fault).proof.proof_hash());
-    b.verify_chain_structure().expect("self-evident: no embedding needed");
-    verify_fraud_broadcast(&b, &provider(&prefix, &fault), &NoChain, &Dep16Authorizer::new())
-        .expect("cl's operator-contagion proof verifies on the reference");
+    assert_eq!(
+        b.proof.proof_hash(),
+        operator_proof(&fault).proof.proof_hash()
+    );
+    b.verify_chain_structure()
+        .expect("self-evident: no embedding needed");
+    verify_fraud_broadcast(
+        &b,
+        &provider(&prefix, &fault),
+        &NoChain,
+        &Dep16Authorizer::new(),
+    )
+    .expect("cl's operator-contagion proof verifies on the reference");
 }

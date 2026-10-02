@@ -1253,11 +1253,9 @@ impl Node {
             total_msats,
             reserves_msats,
             collateral_msats,
-            if total_msats > 0 {
-                (collateral_msats * 100) / total_msats
-            } else {
-                0
-            },
+            (collateral_msats * 100)
+                .checked_div(total_msats)
+                .unwrap_or(0),
         );
 
         let operation = LedgerOperation::QuorumBegin {

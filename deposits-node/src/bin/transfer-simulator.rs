@@ -1933,7 +1933,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let eff = effective_tps_w.load(Ordering::Relaxed);
                         if eff > tps {
                             effective_tps_w.store(tps, Ordering::Relaxed);
-                            let new_interval = if tps > 0 { 1_000_000 / tps } else { 0 };
+                            let new_interval = 1_000_000u64.checked_div(tps).unwrap_or(0);
                             interval_us_w.store(new_interval, Ordering::Relaxed);
                         }
                         current_tps = tps;
@@ -2043,7 +2043,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let increase = (current / 10).max(2);
                 let new_tps = (current + increase).min(target_tps);
                 effective_tps.store(new_tps, Ordering::Relaxed);
-                let new_interval = if new_tps > 0 { 1_000_000 / new_tps } else { 0 };
+                let new_interval = 1_000_000u64.checked_div(new_tps).unwrap_or(0);
                 interval_us.store(new_interval, Ordering::Relaxed);
                 if new_tps == target_tps {
                     eprintln!("[ramp] reached target {} TPS", target_tps);

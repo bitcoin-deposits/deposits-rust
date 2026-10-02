@@ -1343,8 +1343,7 @@ impl Node {
                 needed.insert(fault_ledger_id.clone());
             }
             deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
-                spent_ledger_id,
-                ..
+                spent_ledger_id, ..
             } => {
                 needed.insert(spent_ledger_id.clone());
             }
@@ -1532,8 +1531,10 @@ impl Node {
                 .get(ledger_id)
                 .map(|arc| arc.read().unwrap().state.parent_pubkey)
         };
-        if !fraud_proof_accuses_current_operator(&broadcast.proof.accused, current_operator.as_ref())
-        {
+        if !fraud_proof_accuses_current_operator(
+            &broadcast.proof.accused,
+            current_operator.as_ref(),
+        ) {
             tracing::info!(
                 "Not disputing {}: proof against a former operator; custody already moved \
                  (accused {}, current operator {})",
@@ -1634,8 +1635,7 @@ impl Node {
                         deposits_core::fraud::FraudProofType::DisputeDereliction
                     )
                 {
-                    if let Some(visible_block_hash) =
-                        self.dereliction_visible_block_hash(broadcast)
+                    if let Some(visible_block_hash) = self.dereliction_visible_block_hash(broadcast)
                     {
                         self.register_dereliction_watch(
                             ledger_id,
@@ -2045,9 +2045,8 @@ pub(crate) fn fraud_proof_accuses_current_operator(
     accused_hex: &str,
     current_operator: Option<&bitcoin::secp256k1::PublicKey>,
 ) -> bool {
-    current_operator.is_some_and(|op| {
-        hex::decode(accused_hex).is_ok_and(|a| a[..] == op.serialize()[..])
-    })
+    current_operator
+        .is_some_and(|op| hex::decode(accused_hex).is_ok_and(|a| a[..] == op.serialize()[..]))
 }
 
 /// Whether `update` belongs to ledger `ledger_id`, whose `history` we hold,
@@ -2097,7 +2096,13 @@ mod contagion_target_tests {
         let b = "b".repeat(64);
         let c = "c".repeat(64);
         let merged = merge_ledger_ids(
-            vec![a.clone(), b.clone(), a.clone(), "short".into(), "z".repeat(64)],
+            vec![
+                a.clone(),
+                b.clone(),
+                a.clone(),
+                "short".into(),
+                "z".repeat(64),
+            ],
             vec![b.clone(), c.clone()],
         );
         assert_eq!(merged, vec![a, b, c]);
@@ -2126,9 +2131,18 @@ mod fraud_proof_base_tests {
     fn a_proof_against_a_former_operator_does_not_dispute_the_successor() {
         let (cld1, cld3) = (key(1), key(3));
         let accuses = |k: bitcoin::secp256k1::PublicKey| hex::encode(k.serialize());
-        assert!(!fraud_proof_accuses_current_operator(&accuses(cld1), Some(&cld3)));
-        assert!(fraud_proof_accuses_current_operator(&accuses(cld3), Some(&cld3)));
-        assert!(fraud_proof_accuses_current_operator(&accuses(cld1), Some(&cld1)));
+        assert!(!fraud_proof_accuses_current_operator(
+            &accuses(cld1),
+            Some(&cld3)
+        ));
+        assert!(fraud_proof_accuses_current_operator(
+            &accuses(cld3),
+            Some(&cld3)
+        ));
+        assert!(fraud_proof_accuses_current_operator(
+            &accuses(cld1),
+            Some(&cld1)
+        ));
         // Nothing to judge against, or garbage: not acted on.
         assert!(!fraud_proof_accuses_current_operator(&accuses(cld1), None));
         assert!(!fraud_proof_accuses_current_operator("zz", Some(&cld1)));
@@ -2178,7 +2192,10 @@ mod fraud_proof_base_tests {
             fault_update_hex: String::new(),
         };
         assert!(contagion_proof_on_its_fault_ledger(&cosig, &m));
-        assert!(contagion_proof_on_its_fault_ledger(&cosig, &m.to_uppercase()));
+        assert!(contagion_proof_on_its_fault_ledger(
+            &cosig,
+            &m.to_uppercase()
+        ));
         assert!(!contagion_proof_on_its_fault_ledger(&cosig, &a));
         assert_eq!(fraud_proof_last_valid_seq(&cosig, &a, 7_100), 7_100);
         // The fault ledger's own proof is not contagion: it still disputes.
@@ -2244,7 +2261,11 @@ mod equivocation_detection_tests {
         assert!(updates_equivocate(&ours[3], &relabelled));
         assert!(!inbound_binds_to_ledger(&relabelled, &l, &ours));
         // A seq-0 update binds only if it opens this ledger.
-        assert!(!inbound_binds_to_ledger(&upd(l, 0, op, [0xEE; 32]), &l, &ours));
+        assert!(!inbound_binds_to_ledger(
+            &upd(l, 0, op, [0xEE; 32]),
+            &l,
+            &ours
+        ));
     }
 
     #[test]
@@ -2357,7 +2378,7 @@ mod fork_point_collateral_tests {
     /// (the last valid update), 4 the fraudulent credit.
     fn ledger_c() -> (PublicKey, Vec<SignedLedgerUpdate>) {
         let operator = pk(1);
-        let ops = vec![
+        let ops = [
             LedgerOperation::LedgerOpen {
                 operator_id: operator,
                 reserves_id: "bcrt1qreserves".to_string(),

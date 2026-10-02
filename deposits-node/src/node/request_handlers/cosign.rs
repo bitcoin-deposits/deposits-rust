@@ -606,7 +606,11 @@ impl Node {
                 Ok(operation) => {
                     // Validate against local ledger state — unless it is already
                     // part of that state (see `already_committed`).
-                    let validate_against = if already_committed { None } else { operator_ledger_arc.as_ref() };
+                    let validate_against = if already_committed {
+                        None
+                    } else {
+                        operator_ledger_arc.as_ref()
+                    };
                     if let Some(arc) = validate_against {
                         let ledger = arc.read().unwrap();
                         // Cosigner-edge policy + expiry check. Refuses to
@@ -963,7 +967,7 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let mut found_hash = None;
 
-            for (_ledger_id, arc) in ledgers.iter() {
+            for arc in ledgers.values() {
                 let ledger = arc.read().unwrap();
 
                 // Only look at ledgers where we are the operator
@@ -1265,8 +1269,7 @@ mod cosign_header_tests {
         // Zero block_hash: never looked up.
         let z = fields(850_000, [0u8; 32]);
         assert!(
-            check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| panic!("no lookup"))
-                .is_ok()
+            check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| panic!("no lookup")).is_ok()
         );
     }
 }

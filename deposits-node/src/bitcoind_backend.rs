@@ -479,11 +479,11 @@ impl ChainBackend for BitcoindRpcBackend {
                 let tx_hex = t["hex"]
                     .as_str()
                     .ok_or_else(|| Error::Wallet("getblock 3: tx without hex".into()))?;
-                let tx: bitcoin::Transaction =
-                    bitcoin::consensus::deserialize(&hex::decode(tx_hex).map_err(|e| {
-                        Error::Wallet(format!("getblock 3: tx hex: {}", e))
-                    })?)
-                    .map_err(|e| Error::Wallet(format!("getblock 3: tx decode: {}", e)))?;
+                let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(
+                    &hex::decode(tx_hex)
+                        .map_err(|e| Error::Wallet(format!("getblock 3: tx hex: {}", e)))?,
+                )
+                .map_err(|e| Error::Wallet(format!("getblock 3: tx decode: {}", e)))?;
                 let prevouts = vin
                     .iter()
                     .map(|i| {
@@ -491,7 +491,9 @@ impl ChainBackend for BitcoindRpcBackend {
                         let sats = (p["value"].as_f64().ok_or("no prevout value")? * 100_000_000.0)
                             .round() as u64;
                         let spk = hex::decode(
-                            p["scriptPubKey"]["hex"].as_str().ok_or("no prevout script")?,
+                            p["scriptPubKey"]["hex"]
+                                .as_str()
+                                .ok_or("no prevout script")?,
                         )
                         .map_err(|_| "prevout script hex")?;
                         Ok(bitcoin::TxOut {

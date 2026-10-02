@@ -3830,7 +3830,7 @@ impl NostrTransport {
         }
 
         // Sort by timestamp descending (newest first)
-        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        ads.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
 
         Ok(ads)
     }
@@ -3846,7 +3846,10 @@ impl NostrTransport {
     ) -> Result<Vec<String>, Error> {
         let filter = Filter::new()
             .kind(Kind::Custom(KIND_LEDGER_ADVERTISE))
-            .custom_tag(SingleLetterTag::lowercase(Alphabet::O), [operator_pubkey_hex]);
+            .custom_tag(
+                SingleLetterTag::lowercase(Alphabet::O),
+                [operator_pubkey_hex],
+            );
         let events = self
             .client
             .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
@@ -3861,8 +3864,7 @@ impl NostrTransport {
                     .flatten()
             });
             if let Some(d) = d {
-                if d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()) && !ids.contains(&d)
-                {
+                if d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()) && !ids.contains(&d) {
                     ids.push(d);
                 }
             }
@@ -3896,7 +3898,7 @@ impl NostrTransport {
             }
         }
 
-        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        ads.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         Ok(ads)
     }
 
@@ -3970,7 +3972,7 @@ impl NostrTransport {
             }
         }
 
-        ads.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        ads.sort_by_key(|a| std::cmp::Reverse(a.timestamp));
         Ok(ads)
     }
 
@@ -5978,7 +5980,9 @@ fn plan_paged_fetch(
     // the rest missing, and re-published it 500 at a time in one second —
     // building the next wall. Step past the second instead.
     match oldest_secs {
-        Some(s) if fresh == 0 => PagedFetchStep::Continue { until_secs: s.saturating_sub(1) },
+        Some(s) if fresh == 0 => PagedFetchStep::Continue {
+            until_secs: s.saturating_sub(1),
+        },
         Some(s) => PagedFetchStep::Continue { until_secs: s },
         None => PagedFetchStep::Stop,
     }

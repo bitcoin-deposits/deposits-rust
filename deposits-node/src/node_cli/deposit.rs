@@ -913,7 +913,7 @@ async fn deposit_verify_custodian(args: &[String]) -> Result<(), Box<dyn std::er
     // Find majority
     let total_responses: usize = attestations.values().map(|v| v.len()).sum();
     let mut sorted: Vec<_> = attestations.iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by_key(|a| std::cmp::Reverse(a.1.len()));
 
     println!("Received {} attestations:", total_responses);
     println!();
@@ -968,7 +968,7 @@ async fn deposit_collect_fees(args: &[String]) -> Result<(), Box<dyn std::error:
 
     // Debug: show deposit fee info
     let ledgers = node.handler.ledgers.lock().unwrap().clone();
-    for (_ledger_id, ledger_arc) in ledgers.iter() {
+    for ledger_arc in ledgers.values() {
         let ledger = ledger_arc.read().unwrap();
         if ledger.operator_key() != node.node_id {
             continue;

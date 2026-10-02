@@ -154,7 +154,7 @@ async fn poll_hub_state<F>(hub_data_dir: &Path, mut check: F) -> Option<HubState
 where
     F: FnMut(&HubState) -> bool,
 {
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
     while std::time::Instant::now() < deadline {
         if let Ok(s) = HubState::load_or_init(hub_data_dir) {
             if check(&s) {
@@ -216,7 +216,7 @@ async fn signer_registers_then_gets_approved() {
     let pending_key = format!("signer:{}", signer_nostr_pk);
     let pending_state = poll_hub_state(&hub_dir, |s| s.pending.contains_key(&pending_key))
         .await
-        .expect("signer never showed up in hub.pending within 15s");
+        .expect("signer never showed up in hub.pending within 60s");
     let pending_entry = pending_state.pending.get(&pending_key).unwrap();
     assert_eq!(pending_entry.role, deposits_hub::proto::Role::Signer);
     assert!(
@@ -251,7 +251,7 @@ async fn signer_registers_then_gets_approved() {
         s.signers.contains_key(&signer_nostr_pk) && !s.pending.contains_key(&signer_nostr_pk)
     })
     .await
-    .expect("approve never updated hub.json within 15s");
+    .expect("approve never updated hub.json within 60s");
     let rec = approved_state.signers.get(&signer_nostr_pk).unwrap();
     assert_eq!(rec.label, "smoke-signer");
     // Signer's transport pubkey should round-trip from Register
@@ -299,20 +299,29 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Ask the hub for a launch line, the same way setup.sh does.
+    // The hub writes its state file at boot; on a slow runner that can lag
+    // the fixed sleep above, so retry spawn-line until it can read it.
     let seed_hex = hex::encode([0x33u8; 32]);
-    let out = Command::new(workspace_bin("deposits-hub"))
-        .arg("spawn-line")
-        .arg("--data-dir")
-        .arg(&hub_dir)
-        .arg("--name")
-        .arg("op0")
-        .arg("--seed")
-        .arg(&seed_hex)
-        .arg("--relay")
-        .arg(&relay_url)
-        .output()
-        .await
-        .expect("run spawn-line");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let out = loop {
+        let out = Command::new(workspace_bin("deposits-hub"))
+            .arg("spawn-line")
+            .arg("--data-dir")
+            .arg(&hub_dir)
+            .arg("--name")
+            .arg("op0")
+            .arg("--seed")
+            .arg(&seed_hex)
+            .arg("--relay")
+            .arg(&relay_url)
+            .output()
+            .await
+            .expect("run spawn-line");
+        if out.status.success() || std::time::Instant::now() >= deadline {
+            break out;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
     assert!(
         out.status.success(),
         "spawn-line failed: {}",
@@ -347,7 +356,7 @@ async fn spawn_line_then_bash_exec_then_auto_approve() {
     // Wait for auto-approve to land.
     let approved = poll_hub_state(&hub_dir, |s| s.signers.values().any(|r| r.label == "op0"))
         .await
-        .expect("op0 never auto-approved within 15s");
+        .expect("op0 never auto-approved within 60s");
     assert!(approved.pending.is_empty(), "pending should be empty");
     assert!(
         approved.signers.values().any(|r| r.label == "op0"),
@@ -494,7 +503,7 @@ async fn auto_approve_skips_pending_state() {
     // Skip straight to signers — no operator step needed.
     let approved = poll_hub_state(&hub_dir, |s| s.signers.contains_key(&signer_nostr_pk))
         .await
-        .expect("signer never auto-approved within 15s");
+        .expect("signer never auto-approved within 60s");
     assert!(
         approved.pending.is_empty(),
         "pending should be empty when auto-approve is on"

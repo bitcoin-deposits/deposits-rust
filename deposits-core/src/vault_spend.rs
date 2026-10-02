@@ -103,26 +103,27 @@ pub fn vault_spend_signers(
             _ => {}
         }
     }
-    let (Some(operator), Some(LedgerOperation::QuorumBegin {
-        new_outpoint_txid,
-        new_outpoint_vout,
-        quorum_expiry,
-        ledger_hash,
-        quorum_members,
-        protocol_version,
-        ..
-    })) = (operator, qb)
+    let (
+        Some(operator),
+        Some(LedgerOperation::QuorumBegin {
+            new_outpoint_txid,
+            new_outpoint_vout,
+            quorum_expiry,
+            ledger_hash,
+            quorum_members,
+            protocol_version,
+            ..
+        }),
+    ) = (operator, qb)
     else {
         return Err("no such QuorumBegin on the spent ledger".into());
     };
     let rs = ruleset::lookup(protocol_version.as_deref().unwrap_or(DEFAULT_RULESET))
         .ok_or("unknown ruleset")?;
-    let voters = VoterSet::new(
-        operator,
-        quorum_members.iter().map(|m| m.pubkey).collect(),
-    );
+    let voters = VoterSet::new(operator, quorum_members.iter().map(|m| m.pubkey).collect());
     let config = (rs.tier_config_factory)(voters.total_count(), quorum_expiry);
-    let builder = TapscriptReservesBuilder::new(voters, config.clone(), Network::Bitcoin, ledger_hash);
+    let builder =
+        TapscriptReservesBuilder::new(voters, config.clone(), Network::Bitcoin, ledger_hash);
     let output = builder.build().map_err(|e| e.to_string())?;
 
     // The input spending the vault, and its witness [sig_{n-1}..sig_0, leaf, control].
@@ -186,7 +187,6 @@ pub fn vault_spend_signers(
     Ok(signers)
 }
 
-
 /// Valid when the accused signed (to the tier's threshold) a spend of the
 /// vault outpoint the governing `QuorumBegin` names, and the spend is none of
 /// `spent_history`'s recorded rotations nor any of `extra_authorised`
@@ -219,12 +219,7 @@ pub fn verify_unauthorized_vault_spend(
         return Err("the spend is a recorded rotation or confiscation".into());
     }
 
-    let signers = vault_spend_signers(
-        spent_history,
-        *governing_quorumbegin_seq,
-        &tx,
-        &prevouts,
-    )?;
+    let signers = vault_spend_signers(spent_history, *governing_quorumbegin_seq, &tx, &prevouts)?;
     let accused = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     let accused = bitcoin::secp256k1::PublicKey::from_slice(&accused)
         .map_err(|e| format!("accused pubkey: {}", e))?

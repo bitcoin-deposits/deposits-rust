@@ -1308,7 +1308,6 @@ impl BinaryCodec for LedgerOperation {
                 // doesn't fit the legacy fixed-shape encoder. The TLV codec
                 // (tlv_codec.rs) carries it; legacy consumers see the same
                 // shape they always did.
-                wallet_authorization: _,
                 ..
             } => {
                 write_32(w, payment_hash)?;

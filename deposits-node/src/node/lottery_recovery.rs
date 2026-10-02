@@ -236,11 +236,10 @@ pub(crate) fn assemble_lottery_recovery(
             present, sweep.threshold
         ));
     }
-    if !sweep.control_block.verify_taproot_commitment(
-        &secp,
-        sweep.output_key,
-        &sweep.leaf_script,
-    ) {
+    if !sweep
+        .control_block
+        .verify_taproot_commitment(&secp, sweep.output_key, &sweep.leaf_script)
+    {
         return Err("control block does not commit to the recovery leaf".to_string());
     }
 
@@ -280,7 +279,7 @@ pub(crate) fn parse_unsigned_tx(bytes: &[u8]) -> Result<Transaction, String> {
     if bytes.len() < 6 || bytes[4] != 0 || bytes[5] != 1 {
         return Err("unsigned_tx does not parse".to_string());
     }
-    let mut r = &bytes[..];
+    let mut r = bytes;
     let version = bitcoin::transaction::Version::consensus_decode(&mut r)
         .map_err(|e| format!("unsigned_tx version: {}", e))?;
     r = &r[2..]; // marker, flag
@@ -435,8 +434,7 @@ impl Node {
         // One participant per armer: a re-arm (collateral upgrade) repeats
         // DisputeArmed with the same commitment, and a duplicate would put
         // the wrong k into the claim leaf (as `initiate_confiscations`).
-        let mut participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> =
-            Vec::new();
+        let mut participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = Vec::new();
         let mut our_armed = None;
         let mut original_operator = None;
         for update in &updates {
@@ -468,7 +466,7 @@ impl Node {
                 "No DisputeArmed participants found".to_string(),
             ));
         }
-        participants.sort_by(|a, b| a.1.pubkey.serialize().cmp(&b.1.pubkey.serialize()));
+        participants.sort_by_key(|a| a.1.pubkey.serialize());
 
         // Preimages are matched to participants by HASH160(preimage) ==
         // commitment_hash, NOT by who published them: the reveal is authored
@@ -487,8 +485,8 @@ impl Node {
                     "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
                 )
             })?;
-        let original_operator = original_operator
-            .ok_or_else(|| Error::Protocol("No LedgerOpen found".to_string()))?;
+        let original_operator =
+            original_operator.ok_or_else(|| Error::Protocol("No LedgerOpen found".to_string()))?;
 
         Ok(LotteryContext {
             participants,
@@ -623,12 +621,14 @@ impl Node {
         lottery: &LotteryOutput,
     ) -> Result<Option<(OutPoint, u64, bool)>, Error> {
         let file = self.lottery_outpoint_file(ledger_id);
-        if let Some((outpoint, value)) = self.wallet.find_utxo_for_script(&lottery.script_pubkey())?
+        if let Some((outpoint, value)) =
+            self.wallet.find_utxo_for_script(&lottery.script_pubkey())?
         {
             if !file.exists() {
-                if let Err(e) =
-                    std::fs::write(&file, format!("{}:{}:{}", outpoint.txid, outpoint.vout, value))
-                {
+                if let Err(e) = std::fs::write(
+                    &file,
+                    format!("{}:{}:{}", outpoint.txid, outpoint.vout, value),
+                ) {
                     tracing::warn!("Failed to record lottery outpoint: {}", e);
                 }
             }
@@ -890,18 +890,18 @@ impl Node {
             if !answers_us {
                 continue;
             }
-            let response = match serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
-            {
-                Ok(r) if r.success => r,
-                Ok(r) => {
-                    tracing::info!(
-                        "lottery_recovery_sign refused: {}",
-                        r.error.unwrap_or_default()
-                    );
-                    continue;
-                }
-                Err(_) => continue,
-            };
+            let response =
+                match serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content) {
+                    Ok(r) if r.success => r,
+                    Ok(r) => {
+                        tracing::info!(
+                            "lottery_recovery_sign refused: {}",
+                            r.error.unwrap_or_default()
+                        );
+                        continue;
+                    }
+                    Err(_) => continue,
+                };
             let result = match &response.result {
                 Some(r) => r,
                 None => continue,
@@ -1054,7 +1054,7 @@ mod tests {
         let mut participants: Vec<LotteryParticipant> = (1..=2u8)
             .map(|i| LotteryParticipant::new(xonly(i), [i; 20], format!("tb1p{}", i)))
             .collect();
-        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+        participants.sort_by_key(|a| a.pubkey.serialize());
         LotteryScriptBuilder::new(
             participants,
             vec![xonly(21), xonly(22), xonly(23)],
@@ -1072,8 +1072,13 @@ mod tests {
         OutPoint::new(bitcoin::Txid::from_byte_array(bytes), 0)
     }
     fn fixture_sweep() -> LotteryRecoverySweep {
-        build_lottery_recovery_sweep(&fixture_lottery(), fixture_outpoint(), 478_907, &pubkey(0x11))
-            .unwrap()
+        build_lottery_recovery_sweep(
+            &fixture_lottery(),
+            fixture_outpoint(),
+            478_907,
+            &pubkey(0x11),
+        )
+        .unwrap()
     }
     fn sign(seed: u8, sighash: [u8; 32]) -> [u8; 64] {
         let kp = Keypair::from_secret_key(&Secp256k1::new(), &secret(seed));
@@ -1141,8 +1146,7 @@ mod tests {
         assert_eq!(sweep.voters, lottery.recovery_voter_order());
         // Too small to pay the fee.
         assert!(
-            build_lottery_recovery_sweep(&lottery, fixture_outpoint(), 500, &pubkey(0x11))
-                .is_err()
+            build_lottery_recovery_sweep(&lottery, fixture_outpoint(), 500, &pubkey(0x11)).is_err()
         );
     }
 
@@ -1271,10 +1275,14 @@ mod tests {
             max_len: 18,
         };
         // The sweep we rebuild, past the CSV: signed.
-        assert!(
-            check_lottery_recovery_proposal(unclaimable, 144, &sweep, &sweep.tx, &sweep.sighash)
-                .is_ok()
-        );
+        assert!(check_lottery_recovery_proposal(
+            unclaimable,
+            144,
+            &sweep,
+            &sweep.tx,
+            &sweep.sighash
+        )
+        .is_ok());
         // A lottery that can still be claimed (or may yet be).
         for c in [LotteryClaimability::Claimable, LotteryClaimability::Unknown] {
             assert!(
@@ -1284,25 +1292,32 @@ mod tests {
             );
         }
         // Before the CSV.
-        assert!(
-            check_lottery_recovery_proposal(unclaimable, 143, &sweep, &sweep.tx, &sweep.sighash)
-                .unwrap_err()
-                .contains("not open yet")
-        );
+        assert!(check_lottery_recovery_proposal(
+            unclaimable,
+            143,
+            &sweep,
+            &sweep.tx,
+            &sweep.sighash
+        )
+        .unwrap_err()
+        .contains("not open yet"));
         // A tx that differs from our rebuild: another destination, and a
         // different fee.
         let mut elsewhere = sweep.tx.clone();
-        elsewhere.output[0].script_pubkey = ScriptBuf::new_p2wpkh(
-            &bitcoin::CompressedPublicKey(pubkey(9)).wpubkey_hash(),
-        );
+        elsewhere.output[0].script_pubkey =
+            ScriptBuf::new_p2wpkh(&bitcoin::CompressedPublicKey(pubkey(9)).wpubkey_hash());
         let mut richer = sweep.tx.clone();
         richer.output[0].value = bitcoin::Amount::from_sat(478_907 - 200);
         for proposed in [elsewhere, richer] {
-            assert!(
-                check_lottery_recovery_proposal(unclaimable, 200, &sweep, &proposed, &sweep.sighash)
-                    .unwrap_err()
-                    .contains("not the sweep we expect")
-            );
+            assert!(check_lottery_recovery_proposal(
+                unclaimable,
+                200,
+                &sweep,
+                &proposed,
+                &sweep.sighash
+            )
+            .unwrap_err()
+            .contains("not the sweep we expect"));
         }
         // Our tx, but a sighash that is not ours.
         assert!(

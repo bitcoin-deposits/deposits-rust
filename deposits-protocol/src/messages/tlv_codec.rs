@@ -1568,8 +1568,10 @@ impl TlvDecode for CoordinationMsg {
                 // Decode Vec<u64> from concatenated big-endian bytes
                 let collateral_raw = reader.read_raw(COLLATERAL_AMOUNTS)?;
                 let collateral_amounts: Vec<u64> = collateral_raw
-                    .chunks_exact(8)
-                    .map(|chunk| u64::from_be_bytes(chunk.try_into().unwrap()))
+                    .as_chunks::<8>()
+                    .0
+                    .iter()
+                    .map(|chunk| u64::from_be_bytes(*chunk))
                     .collect();
                 Ok(Self::QuorumVoteRequest {
                     vote_round_id: reader.read_bytes(VOTE_ROUND_ID)?,
@@ -1759,8 +1761,10 @@ impl TlvDecode for CoordinationResponseMsg {
                 // Decode Vec<PublicKey> from concatenated 33-byte compressed pubkeys
                 let members_raw = reader.read_raw(MEMBERS)?;
                 let members: Result<Vec<PublicKey>, _> = members_raw
-                    .chunks_exact(33)
-                    .map(PublicKey::from_slice)
+                    .as_chunks::<33>()
+                    .0
+                    .iter()
+                    .map(|c| PublicKey::from_slice(c))
                     .collect();
                 let members = members.map_err(|e| TlvError::InvalidFieldValue {
                     field_type: MEMBERS,
@@ -1788,8 +1792,10 @@ impl TlvDecode for CoordinationResponseMsg {
                 // Decode Vec<PublicKey> from concatenated 33-byte compressed pubkeys
                 let new_members_raw = reader.read_raw(NEW_MEMBERS)?;
                 let new_members: Result<Vec<PublicKey>, _> = new_members_raw
-                    .chunks_exact(33)
-                    .map(PublicKey::from_slice)
+                    .as_chunks::<33>()
+                    .0
+                    .iter()
+                    .map(|c| PublicKey::from_slice(c))
                     .collect();
                 let new_members = new_members.map_err(|e| TlvError::InvalidFieldValue {
                     field_type: NEW_MEMBERS,

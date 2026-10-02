@@ -1320,7 +1320,10 @@ mod tests {
         // Test signing data generation
         let cosign_data = update.cosign_data();
         assert_eq!(cosign_data.len(), CosignData::HEADER_LEN + 3);
-        assert_eq!(CosignData::parse(&cosign_data).unwrap(), update.cosign_fields());
+        assert_eq!(
+            CosignData::parse(&cosign_data).unwrap(),
+            update.cosign_fields()
+        );
 
         // Operator data appends n (2 LE) and one signature per entry.
         assert_eq!(update.operator_signing_data().len(), cosign_data.len() + 2);
@@ -1335,7 +1338,10 @@ mod tests {
             cosign_signature: [0xaa; 64],
             member_ledger_hash: [0u8; 32],
         });
-        assert_eq!(update.operator_signing_data().len(), cosign_data.len() + 2 + 64);
+        assert_eq!(
+            update.operator_signing_data().len(),
+            cosign_data.len() + 2 + 64
+        );
         assert!(update.has_cosign_signature());
         assert!(!update.is_fully_signed());
 

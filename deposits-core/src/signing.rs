@@ -347,7 +347,6 @@ pub fn sign_op(
             expiry,
             timeout_height,
             fee,
-            witness: _,
             ..
         } => LedgerOperation::InvoiceLock {
             deposit_id,
@@ -369,7 +368,6 @@ pub fn sign_op(
             withdrawal_id,
             nonce,
             expiry,
-            witness: _,
             ..
         } => LedgerOperation::OnchainLock {
             deposit_id,
@@ -393,7 +391,6 @@ pub fn sign_op(
             transfer_id,
             nonce,
             expiry,
-            witness: _,
             ..
         } => LedgerOperation::TransferLock {
             transfer_nonce,
@@ -422,16 +419,14 @@ pub fn sign_op(
             expiry,
             witness,
         },
-        LedgerOperation::TransferComplete {
-            transfer_id,
-            script_witness: _,
-            ..
-        } => LedgerOperation::TransferComplete {
-            transfer_id,
-            script_witness: witness,
-            commitment: None,
-            dest_commitment: None,
-        },
+        LedgerOperation::TransferComplete { transfer_id, .. } => {
+            LedgerOperation::TransferComplete {
+                transfer_id,
+                script_witness: witness,
+                commitment: None,
+                dest_commitment: None,
+            }
+        }
         // operation_sighash returned Some only for signature-bearing variants —
         // unreachable for any other.
         other => return Some(other),

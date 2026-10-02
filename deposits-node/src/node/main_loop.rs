@@ -48,7 +48,9 @@ pub(crate) fn plan_reimport_page(
     // pass) ended every walk there; step past it (see deposits-nostr
     // `plan_paged_fetch`).
     match page_min_ts {
-        Some(ts) if fresh == 0 => ReimportPage::Continue { until_ts: ts.saturating_sub(1) },
+        Some(ts) if fresh == 0 => ReimportPage::Continue {
+            until_ts: ts.saturating_sub(1),
+        },
         Some(ts) => ReimportPage::Continue { until_ts: ts },
         None => ReimportPage::Stop,
     }
@@ -94,7 +96,7 @@ impl Node {
         let mut ledger_ids: Vec<String> = Vec::new();
 
         let ledgers = self.handler.ledgers.lock().unwrap().clone();
-        for (_ledger_id_key, ledger_arc) in ledgers.iter() {
+        for ledger_arc in ledgers.values() {
             let ledger = ledger_arc.read().unwrap();
             if ledger.operator_key() == self.node_id {
                 ledger_ids.push(ledger.ledger_id_hex());
@@ -423,10 +425,7 @@ impl Node {
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
                 let mut cursor = [0u8; 32];
-                loop {
-                    let Some(children) = by_prev.get(&cursor) else {
-                        break;
-                    };
+                while let Some(children) = by_prev.get(&cursor) {
                     // Single child (common case): just follow it
                     let next = if children.len() == 1 {
                         children[0]
@@ -1008,10 +1007,7 @@ impl Node {
             let best_chain = {
                 let mut chain: Vec<&deposits_core::SignedLedgerUpdate> = Vec::new();
                 let mut cursor = [0u8; 32];
-                loop {
-                    let Some(children) = by_prev.get(&cursor) else {
-                        break;
-                    };
+                while let Some(children) = by_prev.get(&cursor) {
                     let next = if children.len() == 1 {
                         children[0]
                     } else {
@@ -1775,10 +1771,8 @@ impl Node {
                                     struct Done;
                                     impl Drop for Done {
                                         fn drop(&mut self) {
-                                            REARM_RUNNING.store(
-                                                false,
-                                                std::sync::atomic::Ordering::Release,
-                                            );
+                                            REARM_RUNNING
+                                                .store(false, std::sync::atomic::Ordering::Release);
                                         }
                                     }
                                     let _done = Done;
@@ -1799,18 +1793,15 @@ impl Node {
                         {
                             static VAULT_WATCH_RUNNING: std::sync::atomic::AtomicBool =
                                 std::sync::atomic::AtomicBool::new(false);
-                            if !VAULT_WATCH_RUNNING
-                                .swap(true, std::sync::atomic::Ordering::AcqRel)
+                            if !VAULT_WATCH_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel)
                             {
                                 let node = Arc::clone(&node);
                                 tokio::spawn(async move {
                                     struct Done;
                                     impl Drop for Done {
                                         fn drop(&mut self) {
-                                            VAULT_WATCH_RUNNING.store(
-                                                false,
-                                                std::sync::atomic::Ordering::Release,
-                                            );
+                                            VAULT_WATCH_RUNNING
+                                                .store(false, std::sync::atomic::Ordering::Release);
                                         }
                                     }
                                     let _done = Done;
@@ -1896,8 +1887,7 @@ impl Node {
                     for (lid, arc) in ledgers.iter() {
                         let before = arc.read().unwrap().history.len();
                         if before > JOINED_HISTORY_RETAIN * 2 {
-                            let after =
-                                self.handler.cap_history(lid, arc, JOINED_HISTORY_RETAIN);
+                            let after = self.handler.cap_history(lid, arc, JOINED_HISTORY_RETAIN);
                             tracing::debug!(
                                 "Truncated history for {}: {} -> {} entries",
                                 &lid[..16.min(lid.len())],

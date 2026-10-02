@@ -1960,7 +1960,7 @@ fn print_chain_graph(updates: &[SignedLedgerUpdate]) -> Result<(), Box<dyn std::
     }
     // Sort each branch newest first
     for v in &mut per_branch {
-        v.sort_by(|a, b| b.0.cmp(&a.0));
+        v.sort_by_key(|a| std::cmp::Reverse(a.0));
     }
 
     // Layout: operator entries above fork point, then each fork branch, then operator below fork

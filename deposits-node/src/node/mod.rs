@@ -526,8 +526,7 @@ pub struct Node {
 
     /// Pending `lottery_recovery_sign` requests for unclaimable lotteries,
     /// keyed by ledger id (see `lottery_recovery`).
-    pending_lottery_recoveries:
-        Mutex<HashMap<String, lottery_recovery::PendingLotteryRecovery>>,
+    pending_lottery_recoveries: Mutex<HashMap<String, lottery_recovery::PendingLotteryRecovery>>,
 
     /// Joined ledger IDs detected as stale during cosign requests.
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
@@ -541,8 +540,7 @@ pub struct Node {
     /// dereliction scan of the faulted ledger's OTHER quorum members once
     /// their response window elapses (DEP-19 §6, see `node::dereliction`).
     /// Keyed by the faulted ledger id.
-    pub(crate) pending_dereliction_watches:
-        Mutex<HashMap<String, dereliction::DerelictionWatch>>,
+    pub(crate) pending_dereliction_watches: Mutex<HashMap<String, dereliction::DerelictionWatch>>,
 
     /// `(member_ledger_id, original_fraud_hash_hex)` pairs we have already
     /// broadcast a `DisputeDereliction` for, so the periodic scan never

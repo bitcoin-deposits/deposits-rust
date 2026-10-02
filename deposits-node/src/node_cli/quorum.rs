@@ -364,7 +364,7 @@ async fn quorum_repair(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     };
     drop(node);
 
-    println!("Ledger {}", &ledger_id);
+    println!("Ledger {}", ledger_id);
     match (expiry_block, tier) {
         (None, _) => {
             return Err(

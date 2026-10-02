@@ -263,7 +263,7 @@ impl Node {
                 )),
             );
         }
-        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+        participants.sort_by_key(|a| a.pubkey.serialize());
 
         let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
             .iter()

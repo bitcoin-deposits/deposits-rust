@@ -425,7 +425,7 @@ mod recovery_voter_derivation_tests {
             LotteryParticipant::new(d2.x_only_public_key().0, [2u8; 20], "bcrt1qbbb".to_string()),
         ];
         let mut sorted = participants.clone();
-        sorted.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+        sorted.sort_by_key(|a| a.pubkey.serialize());
 
         // Canonical (on-chain) recovery voters = QB members minus operator.
         let canonical_voters: Vec<XOnlyPublicKey> = [m1, m2, m3]
@@ -689,8 +689,10 @@ impl Node {
         for (ledger_id, last_valid_seq) in incomplete {
             // A base the replica has since pulled back would make a second
             // fork; leave that to the triggers that know the new base.
-            if dispute_base(last_valid_seq, self.handler.first_non_conforming(&ledger_id))
-                != last_valid_seq
+            if dispute_base(
+                last_valid_seq,
+                self.handler.first_non_conforming(&ledger_id),
+            ) != last_valid_seq
             {
                 continue;
             }
@@ -755,8 +757,7 @@ impl Node {
         // C's fault at 17,840 from last_valid_seq=20181) would carry the
         // fraud into the fork.
         let requested = last_valid_seq;
-        let last_valid_seq =
-            dispute_base(requested, self.handler.first_non_conforming(ledger_id));
+        let last_valid_seq = dispute_base(requested, self.handler.first_non_conforming(ledger_id));
         if last_valid_seq != requested {
             tracing::warn!(
                 "Dispute on {}: last_valid_seq {} is past the first non-conforming update \
@@ -1551,7 +1552,7 @@ impl Node {
             // Check if we've already claimed/yielded (completed marker)
             let completed_marker = self
                 .data_dir
-                .join(format!("lottery_completed_{}.marker", &ledger_prefix));
+                .join(format!("lottery_completed_{}.marker", ledger_prefix));
             if completed_marker.exists() {
                 continue;
             }
@@ -2077,7 +2078,7 @@ impl Node {
                     .map(|b| (e.created_at.as_u64(), b))
             })
             .collect();
-        candidates.sort_by(|a, b| b.0.cmp(&a.0)); // newest first
+        candidates.sort_by_key(|a| std::cmp::Reverse(a.0)); // newest first
         for (_ts, broadcast) in &candidates {
             match self.verify_fraud_broadcast_locally(broadcast).await {
                 Ok(()) => return Some(broadcast.proof.proof_type.clone()),
@@ -2838,7 +2839,7 @@ impl Node {
                 participants.len(), ledger_prefix, quorum_members.len());
 
             // Sort participants by pubkey for deterministic order
-            participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+            participants.sort_by_key(|a| a.pubkey.serialize());
 
             // Build recovery voters (quorum minus original operator)
             let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
@@ -3414,7 +3415,7 @@ impl Node {
         }
 
         // Sort participants by x-only pubkey for deterministic order
-        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+        participants.sort_by_key(|a| a.pubkey.serialize());
 
         // Recovery voters = latest-QuorumBegin members minus operator.
         // MUST match `initiate_confiscations` (the on-chain payer), or the
@@ -3934,7 +3935,9 @@ pub(crate) fn latest_dispute_armed(
 pub(crate) enum CollateralLookup {
     Found(deposits_core::messages::ReplacementCollateral),
     /// A UTXO, but below the cosigners' floor.
-    Undersized { value_sats: u64 },
+    Undersized {
+        value_sats: u64,
+    },
     NotFound,
 }
 

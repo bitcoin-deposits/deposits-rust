@@ -224,11 +224,11 @@ impl OperatorPolicy {
         let blocks_per_year: u64 = 52560;
         let period = self.fee_period_blocks.unwrap_or(2016).max(1) as u64;
         let periods_per_year = blocks_per_year / period;
-        let fixed_per_period = if periods_per_year > 0 {
-            self.annualized_fixed_msats.unwrap_or(0) / periods_per_year
-        } else {
-            0
-        };
+        let fixed_per_period = self
+            .annualized_fixed_msats
+            .unwrap_or(0)
+            .checked_div(periods_per_year)
+            .unwrap_or(0);
         (bps, fixed_per_period)
     }
 }

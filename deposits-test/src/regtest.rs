@@ -540,11 +540,10 @@ pub fn wallet_lookup_deposit(data_dir: &Path, alias: &str) -> Option<(String, u6
         }
         let id_hex = if let Some(id) = d.get("deposit_id").and_then(|v| v.as_str()) {
             id.to_string()
-        } else if let Some(pk) = d.get("deposit_pubkey").and_then(|v| v.as_str()) {
+        } else {
+            let pk = d.get("deposit_pubkey").and_then(|v| v.as_str())?;
             let descriptor = format!("pk({})", pk);
             hex::encode(deposits_core::types::compute_deposit_id(&descriptor))
-        } else {
-            return None;
         };
         let amount = d.get("amount_sats").and_then(|v| v.as_u64()).unwrap_or(0);
         return Some((id_hex, amount));

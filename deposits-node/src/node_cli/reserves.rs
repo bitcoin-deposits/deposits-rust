@@ -55,7 +55,7 @@ pub async fn reserves_list(args: &[String]) -> Result<(), Box<dyn std::error::Er
             None => continue,
         };
         found_any = true;
-        println!("=== Ledger {} ===", &ledger_id);
+        println!("=== Ledger {} ===", ledger_id);
         println!("  Outpoint: {}", info.outpoint);
         println!("    Amount: {} sats", info.amount);
         println!("    Operator: {}", info.operator);

@@ -572,13 +572,23 @@ impl Node {
             drop(ledgers);
             let (tip, in_memory) = {
                 let ledger = arc.read().unwrap();
-                let tip = ledger.history.last().map(|u| u.sequence_number).unwrap_or(0);
+                let tip = ledger
+                    .history
+                    .last()
+                    .map(|u| u.sequence_number)
+                    .unwrap_or(0);
                 // In-memory history is capped to the most recent entries
                 // (handler::history_retain); only when it still starts at the
                 // LedgerOpen can the prefix come from it.
                 let rooted = ledger.history.first().map(|u| u.sequence_number) == Some(0);
-                let prefix: Option<Vec<_>> = rooted
-                    .then(|| ledger.history.iter().take(CONSENT_HISTORY_MAX).cloned().collect());
+                let prefix: Option<Vec<_>> = rooted.then(|| {
+                    ledger
+                        .history
+                        .iter()
+                        .take(CONSENT_HISTORY_MAX)
+                        .cloned()
+                        .collect()
+                });
                 (tip, prefix)
             };
             let prefix = match in_memory {
@@ -588,7 +598,10 @@ impl Node {
                     .read_persisted_history_prefix(our_ledger_id, CONSENT_HISTORY_MAX as u64)
                     .unwrap_or_default(),
             };
-            let sent = prefix.iter().map(|u| BASE64.encode(u.tlv_encode())).collect();
+            let sent = prefix
+                .iter()
+                .map(|u| BASE64.encode(u.tlv_encode()))
+                .collect();
             (sent, tip)
         };
 

@@ -145,7 +145,7 @@ pub fn collateral_basis_at(
             ..
         } = &op
         {
-            if latest_qb.map_or(true, |(seq, _, _)| update.sequence_number >= seq) {
+            if latest_qb.is_none_or(|(seq, _, _)| update.sequence_number >= seq) {
                 latest_qb = Some((update.sequence_number, *collateral_amount, *amount));
             }
         }

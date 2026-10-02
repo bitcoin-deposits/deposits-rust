@@ -21,9 +21,9 @@ impl Node {
         additional_msats: u64,
     ) -> Option<String> {
         let ledgers = self.handler.ledgers.lock().unwrap();
-        let ledger_arc = match ledgers.get(ledger_id) {
-            Some(l) => l.clone(),
-            None => return None,
+        let ledger_arc = {
+            let l = ledgers.get(ledger_id)?;
+            l.clone()
         };
         let ledger = ledger_arc.read().unwrap();
 
@@ -74,9 +74,9 @@ impl Node {
         }
 
         let ledgers = self.handler.ledgers.lock().unwrap();
-        let ledger_arc = match ledgers.get(ledger_id) {
-            Some(l) => l.clone(),
-            None => return None,
+        let ledger_arc = {
+            let l = ledgers.get(ledger_id)?;
+            l.clone()
         };
         let ledger = ledger_arc.read().unwrap();
 

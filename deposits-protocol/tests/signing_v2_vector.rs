@@ -74,7 +74,10 @@ fn dep02_signing_v2_vector() {
     expected.extend_from_slice(&3u32.to_le_bytes());
     expected.extend_from_slice(&[0x00, 0x01, 0x2a]);
     assert_eq!(cosign_data, expected);
-    assert_eq!(CosignData::parse(&cosign_data).unwrap(), update.cosign_fields());
+    assert_eq!(
+        CosignData::parse(&cosign_data).unwrap(),
+        update.cosign_fields()
+    );
 
     // Cosignatures, sorted by cosigner pubkey.
     let mut entries: Vec<(CosignEntry, [u8; 32])> = cosigners
@@ -107,7 +110,10 @@ fn dep02_signing_v2_vector() {
         data.extend_from_slice(&e.member_ledger_hash);
         data.extend_from_slice(&e.cosign_signature);
     }
-    assert_eq!(update.content_hash, tagged_hash(b"deposits/update/v2", &data));
+    assert_eq!(
+        update.content_hash,
+        tagged_hash(b"deposits/update/v2", &data)
+    );
 
     // Operator signature
     let operator_digest = update.operator_digest();

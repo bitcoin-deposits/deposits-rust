@@ -362,7 +362,8 @@ impl Node {
 
         // A confiscation we cosign spends this vault legitimately; without
         // this, our own vault watch would accuse its signers.
-        if let Some(txid) = crate::node::vault_watch::confiscation_txid_from_params(&request.params) {
+        if let Some(txid) = crate::node::vault_watch::confiscation_txid_from_params(&request.params)
+        {
             self.known_confiscation_txids.lock().unwrap().insert(txid);
         }
 
@@ -1740,7 +1741,7 @@ impl Node {
                 participants.len()
             ));
         }
-        participants.sort_by(|a, b| a.pubkey.serialize().cmp(&b.pubkey.serialize()));
+        participants.sort_by_key(|a| a.pubkey.serialize());
 
         let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
             .iter()

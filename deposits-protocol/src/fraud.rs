@@ -1114,9 +1114,13 @@ pub fn verify_equivocation(
                 continue;
             }
             judged.push(u.previous_hash);
-            let anchor = index.by_hash.get(&u.previous_hash).copied().ok_or_else(|| {
-                "an update's predecessor is not in the history — fail closed".to_string()
-            })?;
+            let anchor = index
+                .by_hash
+                .get(&u.previous_hash)
+                .copied()
+                .ok_or_else(|| {
+                    "an update's predecessor is not in the history — fail closed".to_string()
+                })?;
             let prefix = index.chain_to_genesis(anchor, &update_a.ledger_id)?;
             let state = replay_canonical(&prefix)?;
             check_accused_operates(&state, u, &update_a.operator_id)?;
@@ -1457,9 +1461,11 @@ pub fn verify_non_conforming_update(
     if fault.sequence_number == 0 {
         let opens_this_ledger = update_opens_ledger(&fault, &fault.ledger_id);
         if !opens_this_ledger {
-            return Err("fault update at seq 0 is not a LedgerOpen of this ledger by \
+            return Err(
+                "fault update at seq 0 is not a LedgerOpen of this ledger by \
                         the accused — not bound to it, fail closed"
-                .into());
+                    .into(),
+            );
         }
         return if fault.previous_hash == [0u8; 32] {
             Err("fault update at seq 0 chains onto the zero hash and its \
@@ -1558,7 +1564,7 @@ impl<'a> OperatorIndex<'a> {
         let mut by_seq: std::collections::HashMap<u64, Vec<_>> = std::collections::HashMap::new();
         for u in history {
             if u.sequence_number < below_seq
-                && operator.map_or(true, |o| u.operator_id == *o)
+                && operator.is_none_or(|o| u.operator_id == *o)
                 && u.content_hash == u.compute_hash()
             {
                 by_hash.entry(u.chain_hash()).or_insert(u);
@@ -1636,7 +1642,10 @@ impl<'a> OperatorIndex<'a> {
 /// operation derives `ledger_id`. The operator signs the operation, so this
 /// binds a genesis to its ledger; the `ledger_id` field does not (it is
 /// covered by neither the content_hash nor the operator signature).
-pub fn update_opens_ledger(update: &crate::types::SignedLedgerUpdate, ledger_id: &[u8; 32]) -> bool {
+pub fn update_opens_ledger(
+    update: &crate::types::SignedLedgerUpdate,
+    ledger_id: &[u8; 32],
+) -> bool {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
     update.sequence_number == 0
@@ -1885,7 +1894,8 @@ fn first_rule_break<'a>(
     confirm: impl Fn(&crate::types::SignedLedgerUpdate) -> bool,
 ) -> Option<(&'a crate::types::SignedLedgerUpdate, String)> {
     let signed = |u: &&crate::types::SignedLedgerUpdate| u.verify_operator_signature().is_ok();
-    let mut tips: Vec<&crate::types::SignedLedgerUpdate> = index.by_hash.values().copied().collect();
+    let mut tips: Vec<&crate::types::SignedLedgerUpdate> =
+        index.by_hash.values().copied().collect();
     tips.sort_by_key(|u| std::cmp::Reverse(u.sequence_number));
     let chain = tips
         .into_iter()
@@ -1895,9 +1905,10 @@ fn first_rule_break<'a>(
     let mut state = replay_canonical(&chain[..1]).ok()?;
     for seq in 1..chain.len() {
         let pred_hash = chain[seq - 1].chain_hash();
-        for s in index.at_seq(seq as u64).filter(|s| {
-            s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash()
-        }) {
+        for s in index
+            .at_seq(seq as u64)
+            .filter(|s| s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash())
+        {
             if eligible(s) && signed(&s) {
                 if let Ok(Some(reason)) = fault_rejection(&state, s, authorizer) {
                     if confirm(s) {
@@ -2652,8 +2663,7 @@ fn verify_embedding_and_causal_chain(
         })?;
         let link_ok = history.iter().any(|u| {
             u.sequence_number == link.sequence
-                && u
-                    .cosignatures
+                && u.cosignatures
                     .iter()
                     .any(|c| hex::encode(c.member_ledger_hash) == link.member_ledger_hash)
         });
