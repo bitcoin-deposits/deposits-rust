@@ -324,7 +324,7 @@ impl Node {
             joined_ledger_cache_versions: Mutex::new(HashMap::new()),
             imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_confiscations: Mutex::new(HashMap::new()),
-            pending_lottery_recoveries: Mutex::new(HashMap::new()),
+            pending_subset_claims: Mutex::new(HashMap::new()),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_fork_publications: Mutex::new(std::collections::HashSet::new()),
             pending_dereliction_watches: Mutex::new(HashMap::new()),

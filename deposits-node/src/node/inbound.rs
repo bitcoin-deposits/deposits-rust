@@ -52,7 +52,7 @@ impl Node {
         let is_cross_ledger_sign = request.action == "custody_transfer_sign"
             || request.action == "confiscation_sign"
             || request.action == "forfeit_sweep_sign"
-            || request.action == "lottery_recovery_sign"
+            || request.action == "lottery_subset_attest"
             || request.action == "rotation_sign";
         // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
@@ -232,18 +232,7 @@ impl Node {
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
             "forfeit_sweep_sign" => self.process_forfeit_sweep_sign_request(&request).await,
-            "lottery_recovery_sign" => {
-                // Only a disputant (one holding its own fork of the ledger)
-                // answers, as cl-deposits does; anyone else stays silent.
-                if !self.is_disputant_of(&request.ledger_id) {
-                    tracing::info!(
-                        "DROP not_disputant: action=lottery_recovery_sign, ledger={}...",
-                        &request.ledger_id[..16.min(request.ledger_id.len())]
-                    );
-                    return;
-                }
-                self.process_lottery_recovery_sign_request(&request).await
-            }
+            "lottery_subset_attest" => self.process_lottery_subset_attest_request(&request).await,
             "rotation_sign" => self.process_rotation_sign_request(&request).await,
             "cooperative_refund_sign" => {
                 self.process_cooperative_refund_sign_request(&request).await

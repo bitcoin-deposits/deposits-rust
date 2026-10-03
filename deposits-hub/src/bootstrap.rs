@@ -2,8 +2,7 @@
 //!
 //! Stands up a self-connected cluster: N operator daemons, one ledger
 //! each, every ledger's quorum being Q=3 cosigners drawn from the other
-//! operators (so N ≥ 4 — the dispute lottery's partial-reveal leaves
-//! need at least 3 participants, see `PARTIAL_REVEAL_MIN_N`).
+//! operators (so N ≥ 4).
 //!
 //! On-chain footprint is the protocol floor: ONE funding transaction
 //! into the hub's treasury, ONE disbursement transaction paying all N
@@ -42,7 +41,7 @@ use crate::state;
 
 const TREASURY_INDEX: u32 = 999_999;
 const NODE_INDEX_BASE: u32 = 1_000_000;
-/// Cosigners per ledger. Protocol floor — see PARTIAL_REVEAL_MIN_N.
+/// Cosigners per ledger: the smallest quorum size policy allows.
 const Q: usize = 3;
 const DEFAULT_PER_LEDGER_SATS: u64 = 1_000_000; // 0.01 BTC
 /// Multiplier on the estimated disbursement fee — covers vsize rounding

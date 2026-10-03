@@ -636,9 +636,8 @@ pub struct CustodyLotteryReveal {
     /// Ledger identifier this reveal applies to.
     pub ledger_id: String,
 
-    /// The preimage bytes, hex-encoded. Length must be 17..=(16+N)
-    /// where N is the dispute's disputant count; HASH160 of these
-    /// bytes equals the `commitment_hash` from the disputant's
+    /// The preimage bytes, hex-encoded. Length must be 17..=76; HASH160
+    /// of these bytes equals the `commitment_hash` from the disputant's
     /// `DisputeArmed`.
     pub preimage_hex: String,
 

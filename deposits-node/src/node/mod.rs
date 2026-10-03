@@ -524,9 +524,9 @@ pub struct Node {
     /// Key is the ledger prefix (from custody_armed marker).
     pending_confiscations: Mutex<HashMap<String, PendingConfiscation>>,
 
-    /// Pending `lottery_recovery_sign` requests for unclaimable lotteries,
+    /// Pending `lottery_subset_attest` requests for revealer-subset claims,
     /// keyed by ledger id (see `lottery_recovery`).
-    pending_lottery_recoveries: Mutex<HashMap<String, lottery_recovery::PendingLotteryRecovery>>,
+    pending_subset_claims: Mutex<HashMap<String, lottery_recovery::PendingSubsetClaim>>,
 
     /// Joined ledger IDs detected as stale during cosign requests.
     /// Drained and re-imported in the run loop to avoid blocking request handlers.

@@ -1,268 +1,75 @@
-//! Unclaimable custody lotteries: detect them and sweep them through the
-//! lottery output's CSV-144 recovery leaf.
+//! Custody lottery claims (DEP-06 Phase 4).
 //!
-//! Armers commit their lottery preimage under `N = Q` (the recovery voters:
-//! the latest `QuorumBegin`'s members minus the operator, see
-//! [`dispute_lottery_n_from_history`]), but the claim leaf is built by
-//! [`LotteryScriptBuilder`] for the `k` members who actually armed, and its
-//! `OP_SIZE` bound is `16 + k`. With `k < Q` a revealed preimage longer than
-//! `16 + k` makes the claim leaf unsatisfiable forever; only
-//! `(k/Q)^k` of such lotteries can be claimed (cl-deposits
-//! docs/LOTTERY-N.md). The protocol is unchanged; two mitigations, the same
-//! as cl-deposits c3cd4cd:
-//!
-//! - `initiate_confiscations` does not confiscate with fewer than `Q` armed
-//!   until [`FULL_ARMING_WAIT_BLOCKS`] have passed, so in the normal case
-//!   `k = Q` and the lottery is always claimable;
-//! - a lottery that cannot be claimed is swept, once its output is
-//!   [`LOTTERY_RECOVERY_CSV`] blocks deep, through the first recovery leaf to
-//!   the original operator's P2WPKH: the destination DEP-06 names for
-//!   lottery-recovery funds, where the respectful confiscation's change
-//!   already goes. The fee is fixed so every recovery voter rebuilds the
-//!   same sweep, and a `lottery_recovery_sign` request gathers the leaf's
-//!   threshold. The sweep is byte-identical to cl-deposits'
-//!   `build-lottery-recovery`, so cl and reference voters sign each other's.
-//!
-//! [`dispute_lottery_n_from_history`]: super::dispute::dispute_lottery_n_from_history
+//! Every participant revealed: the winner claims through the full-set leaf.
+//! Past the reveal deadline (`LOTTERY_REVEAL_CSV_BLOCKS` after the
+//! confiscation) with some missing: the winner over the revealers R claims
+//! through R's subset leaf, which needs the recovery voters' attestation
+//! (`lottery_subset_attest`). A voter signs only for exactly the reveals it
+//! holds, and only a claim paying R's winner. Nobody revealing sends the
+//! output to a re-arm round (not yet orchestrated); no recovery spend to the
+//! accused operator is ever built or signed.
 
 use super::dispute::recovery_voters_from_updates;
 use super::*;
 
 use bitcoin::secp256k1::XOnlyPublicKey;
-use bitcoin::{OutPoint, ScriptBuf, Transaction, TxOut};
+use bitcoin::{OutPoint, Transaction, TxOut};
 use deposits_core::tapscript_reserves::{
-    LotteryOutput, LotteryParticipant, LotteryScriptBuilder, ReservesSpendBuilder,
+    LotteryOutput, LotteryParticipant, LotteryScriptBuilder, LOTTERY_MAX_PREIMAGE_LEN,
+    LOTTERY_REVEAL_CSV_BLOCKS,
 };
 
-/// Blocks past the point the reference would otherwise confiscate (the
-/// second arm) that a proposer waits for every recovery voter to arm
-/// before confiscating with fewer. The same 720 as the reference's own
-/// auto-dispute hold-off (`auto_dispute_expired_quorums`) and cl-deposits'
-/// `*full-arming-wait-blocks*`: a member whose daemon only auto-arms at
-/// `quorum_expiry + 720` still makes it in.
-pub(crate) const FULL_ARMING_WAIT_BLOCKS: u32 = 720;
-
-/// Fixed fee of the recovery sweep, so every voter rebuilds the same tx
-/// (cl-deposits `*lottery-recovery-fee*`).
-pub(crate) const LOTTERY_RECOVERY_FEE_SATS: u64 = 500;
-
-/// CSV of the first recovery leaf (threshold `T`), the one the sweep spends.
-pub(crate) const LOTTERY_RECOVERY_CSV: u32 = 144;
-
-/// Seconds a `lottery_recovery_sign` request is waited on before it is
+/// Seconds a `lottery_subset_attest` request is waited on before it is
 /// re-sent (as `collect_confiscation_signatures`).
-const LOTTERY_RECOVERY_REQUEST_TIMEOUT_SECS: u64 = 120;
+const LOTTERY_ATTEST_REQUEST_TIMEOUT_SECS: u64 = 120;
 
-/// Whether a lottery's claim leaf can still be satisfied, judged from the
-/// preimages revealed so far (cl-deposits `lottery-claimable`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LotteryClaimability {
-    /// Every participant revealed, each within the claim leaf's bounds.
-    Claimable,
-    /// A revealed preimage is longer than the claim leaf's `16 + k`: the
-    /// lottery can never be claimed.
-    Unclaimable { preimage_len: usize, max_len: usize },
-    /// Nothing out of bounds yet, but not every participant has revealed.
-    Unknown,
+/// How a lottery can be claimed now, from the preimages revealed so far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LotteryClaimPath {
+    /// Every participant revealed: the full-set leaf, preimages in order.
+    Full(Vec<Vec<u8>>),
+    /// Past the reveal deadline with some missing: the subset leaf of the
+    /// revealers (ascending indices) and their preimages.
+    Subset(Vec<usize>, Vec<Vec<u8>>),
+    /// Not yet: waiting for reveals or the deadline, or nobody revealed.
+    Wait(String),
 }
 
-/// `preimages` is parallel to the lottery's participants (`k` =
-/// `preimages.len()`), `None` where that participant has not revealed.
-pub(crate) fn lottery_claimability(preimages: &[Option<Vec<u8>>]) -> LotteryClaimability {
-    let max_len = 16 + preimages.len();
-    if let Some(preimage_len) = preimages
+/// `preimages` parallel the participants (`None` where unrevealed). A
+/// preimage outside 17..=76 bytes cannot satisfy any leaf and counts as
+/// unrevealed.
+pub(crate) fn lottery_claim_path(
+    preimages: &[Option<Vec<u8>>],
+    deadline_passed: bool,
+) -> LotteryClaimPath {
+    let valid: Vec<(usize, Vec<u8>)> = preimages
         .iter()
-        .flatten()
-        .map(|p| p.len())
-        .find(|len| *len > max_len)
-    {
-        return LotteryClaimability::Unclaimable {
-            preimage_len,
-            max_len,
-        };
-    }
-    if preimages.iter().all(|p| p.is_some()) {
-        LotteryClaimability::Claimable
-    } else {
-        LotteryClaimability::Unknown
-    }
-}
-
-/// The CSV-144 recovery sweep of a lottery output, unsigned, with what it
-/// takes to sign and assemble it.
-#[derive(Debug, Clone)]
-pub(crate) struct LotteryRecoverySweep {
-    /// Unsigned sweep: v2, locktime 0, one input (the lottery output,
-    /// nSequence 144), one output to the original operator's P2WPKH.
-    pub tx: Transaction,
-    /// The lottery output being spent (value, lottery scriptPubKey).
-    pub prevout: TxOut,
-    /// The CSV-144 recovery leaf.
-    pub leaf_script: ScriptBuf,
-    pub control_block: bitcoin::taproot::ControlBlock,
-    /// The lottery's output key, to check the control block against.
-    pub output_key: XOnlyPublicKey,
-    /// Recovery voters in the leaf's key order (sorted x-only).
-    pub voters: Vec<XOnlyPublicKey>,
-    /// Signatures the leaf requires.
-    pub threshold: usize,
-    /// BIP-341 script-path sighash (SIGHASH_DEFAULT) over `leaf_script`.
-    pub sighash: [u8; 32],
-}
-
-/// Build the recovery sweep of `lottery`'s output at `lottery_outpoint`
-/// (the confiscation's vout 0) to `original_operator` (the disputed
-/// ledger's LedgerOpen operator). Deterministic, so every voter rebuilds
-/// the identical tx; byte-for-byte cl-deposits' `build-lottery-recovery`.
-pub(crate) fn build_lottery_recovery_sweep(
-    lottery: &LotteryOutput,
-    lottery_outpoint: OutPoint,
-    lottery_value: u64,
-    original_operator: &bitcoin::secp256k1::PublicKey,
-) -> Result<LotteryRecoverySweep, String> {
-    use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
-    use bitcoin::taproot::{LeafVersion, TapLeafHash};
-    use bitcoin::{Amount, Sequence, TxIn, Witness};
-
-    let (_, threshold, leaf_script) = lottery
-        .recovery_leaves()
-        .into_iter()
-        .find(|(csv, _, _)| *csv == LOTTERY_RECOVERY_CSV)
-        .ok_or_else(|| "lottery has no CSV-144 recovery leaf".to_string())?;
-    let control_block = lottery
-        .recovery_control_block(&leaf_script)
-        .ok_or_else(|| "recovery leaf is not in the lottery's tree".to_string())?;
-
-    let value = lottery_value
-        .checked_sub(LOTTERY_RECOVERY_FEE_SATS)
-        .filter(|v| *v > 0)
-        .ok_or_else(|| {
-            format!(
-                "lottery output of {} sats does not cover the {} sat fee",
-                lottery_value, LOTTERY_RECOVERY_FEE_SATS
-            )
-        })?;
-    // 0x00 0x14 || HASH160(operator33): the respectful confiscation's
-    // change destination.
-    let destination =
-        ScriptBuf::new_p2wpkh(&bitcoin::CompressedPublicKey(*original_operator).wpubkey_hash());
-
-    let tx = Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: vec![TxIn {
-            previous_output: lottery_outpoint,
-            script_sig: ScriptBuf::new(),
-            sequence: Sequence::from_consensus(LOTTERY_RECOVERY_CSV),
-            witness: Witness::new(),
-        }],
-        output: vec![TxOut {
-            value: Amount::from_sat(value),
-            script_pubkey: destination,
-        }],
-    };
-    let prevout = TxOut {
-        value: Amount::from_sat(lottery_value),
-        script_pubkey: lottery.script_pubkey(),
-    };
-    let sighash = SighashCache::new(&tx)
-        .taproot_script_spend_signature_hash(
-            0,
-            &Prevouts::All(std::slice::from_ref(&prevout)),
-            TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript),
-            TapSighashType::Default,
-        )
-        .map_err(|e| format!("recovery sighash: {}", e))?;
-
-    Ok(LotteryRecoverySweep {
-        tx,
-        prevout,
-        leaf_script,
-        control_block,
-        output_key: lottery.spend_info.output_key().to_x_only_public_key(),
-        voters: lottery.recovery_voter_order(),
-        threshold,
-        sighash: *sighash.as_ref(),
-    })
-}
-
-/// The signer of a `lottery_recovery_sign` response, if its signature is a
-/// valid BIP-340 signature over the sweep's sighash by a recovery voter.
-pub(crate) fn verify_lottery_recovery_signature(
-    sweep: &LotteryRecoverySweep,
-    signer: &bitcoin::secp256k1::PublicKey,
-    signature: &[u8],
-) -> Option<XOnlyPublicKey> {
-    let xonly = signer.x_only_public_key().0;
-    if !sweep.voters.contains(&xonly) {
-        return None;
-    }
-    let sig = bitcoin::secp256k1::schnorr::Signature::from_slice(signature).ok()?;
-    let msg = bitcoin::secp256k1::Message::from_digest(sweep.sighash);
-    Secp256k1::verification_only()
-        .verify_schnorr(&sig, &msg, &xonly)
-        .ok()
-        .map(|_| xonly)
-}
-
-/// Assemble the signed sweep: signatures parallel to the sorted voter keys,
-/// reversed onto the stack for the leaf's CHECKSIGADD chain with an empty
-/// push per absent signer, then the leaf script and control block
-/// (cl-deposits `recovery-witness`). Every signature and the control block
-/// are checked first; we have no script interpreter to run the spend.
-pub(crate) fn assemble_lottery_recovery(
-    sweep: &LotteryRecoverySweep,
-    signatures: &HashMap<XOnlyPublicKey, [u8; 64]>,
-) -> Result<Transaction, String> {
-    let secp = Secp256k1::verification_only();
-    let msg = bitcoin::secp256k1::Message::from_digest(sweep.sighash);
-    let ordered: Vec<Option<[u8; 64]>> = sweep
-        .voters
-        .iter()
-        .map(|k| signatures.get(k).copied())
+        .enumerate()
+        .filter_map(|(i, p)| {
+            p.as_ref()
+                .filter(|p| (17..=LOTTERY_MAX_PREIMAGE_LEN).contains(&p.len()))
+                .map(|p| (i, p.clone()))
+        })
         .collect();
-    for (key, sig) in sweep.voters.iter().zip(&ordered) {
-        if let Some(sig) = sig {
-            let parsed = bitcoin::secp256k1::schnorr::Signature::from_slice(sig)
-                .map_err(|e| format!("signature by {}: {}", key, e))?;
-            secp.verify_schnorr(&parsed, &msg, key)
-                .map_err(|_| format!("signature by {} does not verify", key))?;
-        }
+    let k = preimages.len();
+    if k == 1 || valid.len() == k {
+        return LotteryClaimPath::Full(valid.into_iter().map(|(_, p)| p).collect());
     }
-    let present = ordered.iter().filter(|s| s.is_some()).count();
-    if present < sweep.threshold {
-        return Err(format!(
-            "only {} of {} recovery signatures",
-            present, sweep.threshold
+    if !deadline_passed {
+        return LotteryClaimPath::Wait(format!(
+            "{} of {} revealed; the reveal deadline is {} blocks after the confiscation",
+            valid.len(),
+            k,
+            LOTTERY_REVEAL_CSV_BLOCKS
         ));
     }
-    if !sweep
-        .control_block
-        .verify_taproot_commitment(&secp, sweep.output_key, &sweep.leaf_script)
-    {
-        return Err("control block does not commit to the recovery leaf".to_string());
+    if valid.is_empty() {
+        return LotteryClaimPath::Wait(
+            "nobody revealed: the output waits for a re-arm round".to_string(),
+        );
     }
-
-    let witness = if sweep.threshold == 1 {
-        // A threshold-1 leaf names only the lowest sorted key.
-        let sig = ordered[0].ok_or_else(|| {
-            "threshold-1 recovery leaf needs the lowest voter's signature".to_string()
-        })?;
-        let mut w = bitcoin::Witness::new();
-        w.push(sig);
-        w.push(sweep.leaf_script.as_bytes());
-        w.push(sweep.control_block.serialize());
-        w
-    } else {
-        ReservesSpendBuilder::create_checksigadd_witness(
-            &ordered,
-            &sweep.leaf_script,
-            &sweep.control_block,
-        )
-    };
-    let mut tx = sweep.tx.clone();
-    tx.input[0].witness = witness;
-    Ok(tx)
+    let (idx, pre) = valid.into_iter().unzip();
+    LotteryClaimPath::Subset(idx, pre)
 }
 
 /// Parse a proposed unsigned tx. cl-deposits serializes its unsigned txs
@@ -302,32 +109,6 @@ pub(crate) fn parse_unsigned_tx(bytes: &[u8]) -> Result<Transaction, String> {
         input,
         output,
     })
-}
-
-/// A recovery voter's checks before signing a proposed sweep
-/// (cl-deposits `handle-lottery-recovery-sign`): the lottery can never be
-/// claimed, its output is past the leaf's CSV, and the proposal is exactly
-/// the sweep we rebuild ourselves (same txid, same sighash).
-pub(crate) fn check_lottery_recovery_proposal(
-    claimability: LotteryClaimability,
-    lottery_confirmations: u32,
-    ours: &LotteryRecoverySweep,
-    proposed: &Transaction,
-    claimed_sighash: &[u8; 32],
-) -> Result<(), String> {
-    if !matches!(claimability, LotteryClaimability::Unclaimable { .. }) {
-        return Err("the lottery can still be claimed".to_string());
-    }
-    if lottery_confirmations < LOTTERY_RECOVERY_CSV {
-        return Err(format!(
-            "recovery leaf not open yet (CSV {}, lottery output has {} confirmations)",
-            LOTTERY_RECOVERY_CSV, lottery_confirmations
-        ));
-    }
-    if proposed.compute_txid() != ours.tx.compute_txid() || *claimed_sighash != ours.sighash {
-        return Err("not the sweep we expect".to_string());
-    }
-    Ok(())
 }
 
 /// Operation discriminants (`t` tag) a lottery is rebuilt from: LedgerOpen,
@@ -389,8 +170,6 @@ pub(crate) struct LotteryContext {
     /// Latest QuorumBegin minus the operator: what the lottery committed to.
     pub recovery_voters: Vec<XOnlyPublicKey>,
     pub recovery_threshold: usize,
-    /// The disputed ledger's LedgerOpen operator.
-    pub original_operator: bitcoin::secp256k1::PublicKey,
     /// Our own DisputeArmed, if we armed.
     pub our_armed: Option<deposits_core::SignedLedgerUpdate>,
 }
@@ -408,12 +187,11 @@ impl LotteryContext {
     }
 }
 
-/// A `lottery_recovery_sign` request awaiting signatures.
-pub(crate) struct PendingLotteryRecovery {
+/// A `lottery_subset_attest` request awaiting voter signatures.
+pub(crate) struct PendingSubsetClaim {
     request_id: String,
-    /// Txid of the sweep the request is for; a rebuilt sweep that differs
-    /// drops the request.
-    txid: bitcoin::Txid,
+    /// Sighash the request is for; a rebuilt claim that differs drops it.
+    sighash: [u8; 32],
     signatures: HashMap<XOnlyPublicKey, [u8; 64]>,
     created_at: std::time::Instant,
 }
@@ -432,12 +210,10 @@ impl Node {
         let updates = self.fetch_lottery_updates(ledger_id).await;
 
         let mut our_armed = None;
-        let mut original_operator = None;
+        let mut has_ledger_open = false;
         for update in &updates {
             match LedgerOperation::tlv_decode(&update.message) {
-                Ok(LedgerOperation::LedgerOpen { operator_id, .. }) => {
-                    original_operator = Some(operator_id);
-                }
+                Ok(LedgerOperation::LedgerOpen { .. }) => has_ledger_open = true,
                 Ok(LedgerOperation::DisputeArmed { .. }) if update.operator_id == self.node_id => {
                     our_armed = Some(update.clone());
                 }
@@ -477,15 +253,15 @@ impl Node {
                     "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
                 )
             })?;
-        let original_operator =
-            original_operator.ok_or_else(|| Error::Protocol("No LedgerOpen found".to_string()))?;
+        if !has_ledger_open {
+            return Err(Error::Protocol("No LedgerOpen found".to_string()));
+        }
 
         Ok(LotteryContext {
             participants,
             preimages,
             recovery_voters,
             recovery_threshold,
-            original_operator,
             our_armed,
         })
     }
@@ -589,7 +365,7 @@ impl Node {
         // reveal task then skips it) and never reveal, and the winner could
         // never claim. The reveal task publishes it within a periodic.
         if self.have_revealed_lottery(ledger_id).await {
-            if let Some(p) = self.own_lottery_preimage(ledger_id, updates) {
+            if let Some(p) = self.own_lottery_preimage(ledger_id) {
                 add(p, &mut revealed);
             }
         }
@@ -597,137 +373,55 @@ impl Node {
         revealed
     }
 
-    fn lottery_outpoint_file(&self, ledger_id: &str) -> PathBuf {
-        self.data_dir.join(format!(
-            "lottery_outpoint_{}.txt",
-            &ledger_id[..16.min(ledger_id.len())]
-        ))
-    }
-
-    /// The lottery output: `(outpoint, value, unspent)`. While it is
-    /// unspent we record where it is, so that once a sweep (ours or another
-    /// voter's) has spent it we can still rebuild that sweep and find it.
-    fn locate_lottery_output(
+    /// The unspent lottery output and its confirmations, if it is on chain.
+    pub(crate) fn locate_lottery_output(
         &self,
-        ledger_id: &str,
         lottery: &LotteryOutput,
-    ) -> Result<Option<(OutPoint, u64, bool)>, Error> {
-        let file = self.lottery_outpoint_file(ledger_id);
-        if let Some((outpoint, value)) =
-            self.wallet.find_utxo_for_script(&lottery.script_pubkey())?
-        {
-            if !file.exists() {
-                if let Err(e) = std::fs::write(
-                    &file,
-                    format!("{}:{}:{}", outpoint.txid, outpoint.vout, value),
-                ) {
-                    tracing::warn!("Failed to record lottery outpoint: {}", e);
-                }
-            }
-            return Ok(Some((outpoint, value, true)));
-        }
-        let recorded = std::fs::read_to_string(&file).ok().and_then(|s| {
-            let mut parts = s.trim().split(':');
-            let txid: bitcoin::Txid = parts.next()?.parse().ok()?;
-            let vout: u32 = parts.next()?.parse().ok()?;
-            let value: u64 = parts.next()?.parse().ok()?;
-            Some((OutPoint::new(txid, vout), value, false))
-        });
-        Ok(recorded)
-    }
-
-    /// Whether the (deterministic) recovery sweep is in the chain or the
-    /// mempool, whoever broadcast it.
-    fn lottery_sweep_seen(&self, sweep: &LotteryRecoverySweep) -> bool {
-        let txid = sweep.tx.compute_txid();
-        let backend = crate::chain_backend::from_env(self.wallet.electrum_url());
-        matches!(backend.is_output_unspent(&txid, 0), Ok(Some(_)))
-            || matches!(backend.get_tx(&txid), Ok(Some(_)))
-    }
-
-    /// Drive an unclaimable lottery (`try_lottery_claim_or_yield` found a
-    /// revealed preimage out of the claim leaf's bounds): wait for the
-    /// recovery leaf's CSV, gather the threshold and broadcast the sweep,
-    /// and once a sweep is on chain stand down with a DisputeYield.
-    /// `Ok(true)` when the dispute is concluded.
-    pub(crate) async fn recover_unclaimable_lottery(
-        &self,
-        ledger_id: &str,
-        ctx: &LotteryContext,
-        our_armed: &deposits_core::SignedLedgerUpdate,
-    ) -> Result<bool, Error> {
-        let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
-        let lottery = ctx.build_lottery(self.wallet.network())?;
-        let (outpoint, value, unspent) = self
-            .locate_lottery_output(ledger_id, &lottery)?
-            .ok_or_else(|| Error::Protocol("lottery output not found".to_string()))?;
-        let sweep = build_lottery_recovery_sweep(&lottery, outpoint, value, &ctx.original_operator)
-            .map_err(Error::Protocol)?;
-
-        if self.lottery_sweep_seen(&sweep) {
-            tracing::info!(
-                "Lottery for {} could not be claimed; recovered to the operator (sweep {}). \
-                 Publishing DisputeYield.",
-                ledger_prefix,
-                sweep.tx.compute_txid()
-            );
-            self.pending_lottery_recoveries
-                .lock()
-                .unwrap()
-                .remove(ledger_id);
-            self.publish_custody_yield(ledger_id, our_armed).await?;
-            let _ = std::fs::remove_file(self.lottery_outpoint_file(ledger_id));
-            return Ok(true);
-        }
-        if !unspent {
-            return Err(Error::Protocol(
-                "lottery output spent, but not by the recovery sweep".to_string(),
-            ));
-        }
-
+    ) -> Result<Option<(OutPoint, u64, u32)>, Error> {
+        let Some((outpoint, value)) = self.wallet.find_utxo_for_script(&lottery.script_pubkey())?
+        else {
+            return Ok(None);
+        };
         let confirmations = self
             .wallet
             .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)?
             .map(|(_, c)| c)
             .unwrap_or(0);
-        if confirmations < LOTTERY_RECOVERY_CSV {
-            return Err(Error::Protocol(format!(
-                "lottery cannot be claimed (a preimage is out of the claim leaf's bounds); \
-                 its recovery leaf opens after {} confirmations ({} now)",
-                LOTTERY_RECOVERY_CSV, confirmations
-            )));
-        }
-
-        self.propose_lottery_recovery(ledger_id, &sweep).await?;
-        Ok(false)
+        Ok(Some((outpoint, value, confirmations)))
     }
 
-    /// Our signature plus `lottery_recovery_sign` requests until the leaf's
-    /// threshold is met, then assemble and broadcast. Non-blocking like
-    /// `initiate_confiscations`: a request is sent once, and the responses
-    /// are collected on the following periodic passes.
-    async fn propose_lottery_recovery(
+    /// The recovery voters' attestations of a subset claim, parallel to
+    /// `lottery.recovery_voter_order()`: ours if we are a voter, then a
+    /// `lottery_subset_attest` request, collected over the following
+    /// periodic passes (non-blocking, as `initiate_confiscations`). `None`
+    /// while the threshold is not yet met.
+    pub(crate) async fn subset_attestations(
         &self,
         ledger_id: &str,
-        sweep: &LotteryRecoverySweep,
-    ) -> Result<(), Error> {
+        lottery: &LotteryOutput,
+        indices: &[usize],
+        tx: &Transaction,
+        prevouts: &[TxOut],
+        sighash: [u8; 32],
+    ) -> Result<Option<Vec<Option<[u8; 64]>>>, Error> {
         use deposits_signer_api::{SigPurpose, SignContext};
-
         let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
-        let txid = sweep.tx.compute_txid();
-        let our_xonly = self.node_id.x_only_public_key().0;
-        if !sweep.voters.contains(&our_xonly) {
-            return Err(Error::Protocol("not a recovery voter".to_string()));
-        }
+        let order = lottery.recovery_voter_order();
+        let threshold = lottery.recovery_threshold;
+        let finish = |sigs: &HashMap<XOnlyPublicKey, [u8; 64]>| {
+            order
+                .iter()
+                .map(|v| sigs.get(v).copied())
+                .collect::<Vec<_>>()
+        };
 
-        // A request in flight for this sweep: collect what has come back.
         let in_flight = {
-            let mut pending = self.pending_lottery_recoveries.lock().unwrap();
+            let mut pending = self.pending_subset_claims.lock().unwrap();
             match pending.get(ledger_id) {
                 Some(p)
-                    if p.txid == txid
+                    if p.sighash == sighash
                         && p.created_at.elapsed().as_secs()
-                            < LOTTERY_RECOVERY_REQUEST_TIMEOUT_SECS =>
+                            < LOTTERY_ATTEST_REQUEST_TIMEOUT_SECS =>
                 {
                     Some(p.request_id.clone())
                 }
@@ -738,119 +432,92 @@ impl Node {
                 None => None,
             }
         };
-
         if let Some(request_id) = in_flight {
             let responses = self.fetch_sign_responses(&request_id).await;
-            let signatures = {
-                let mut pending = self.pending_lottery_recoveries.lock().unwrap();
-                let p = match pending.get_mut(ledger_id) {
-                    Some(p) => p,
-                    None => return Ok(()),
-                };
-                for (signer, sig) in responses {
-                    match verify_lottery_recovery_signature(sweep, &signer, &sig) {
-                        Some(xonly) if !p.signatures.contains_key(&xonly) => {
-                            let mut arr = [0u8; 64];
-                            arr.copy_from_slice(&sig);
-                            p.signatures.insert(xonly, arr);
-                            tracing::info!(
-                                "Lottery recovery {}: signature from {}... ({}/{})",
-                                ledger_prefix,
-                                &signer.to_string()[..16],
-                                p.signatures.len(),
-                                sweep.threshold
-                            );
-                        }
-                        Some(_) => {}
-                        None => tracing::warn!(
-                            "Lottery recovery {}: ignoring a signature from {}... that does not \
-                             verify for a recovery voter",
-                            ledger_prefix,
-                            &signer.to_string()[..16]
-                        ),
-                    }
-                }
-                if p.signatures.len() < sweep.threshold {
-                    return Ok(());
-                }
-                pending.remove(ledger_id).map(|p| p.signatures)
+            let mut pending = self.pending_subset_claims.lock().unwrap();
+            let Some(p) = pending.get_mut(ledger_id) else {
+                return Ok(None);
             };
-            if let Some(signatures) = signatures {
-                self.broadcast_lottery_recovery(ledger_prefix, sweep, &signatures);
+            let msg = bitcoin::secp256k1::Message::from_digest(sighash);
+            let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+            for (signer, sig) in responses {
+                let xonly = signer.x_only_public_key().0;
+                let ok = order.contains(&xonly)
+                    && bitcoin::secp256k1::schnorr::Signature::from_slice(&sig)
+                        .map(|s| secp.verify_schnorr(&s, &msg, &xonly).is_ok())
+                        .unwrap_or(false);
+                if ok && !p.signatures.contains_key(&xonly) {
+                    let mut arr = [0u8; 64];
+                    arr.copy_from_slice(&sig);
+                    p.signatures.insert(xonly, arr);
+                    tracing::info!(
+                        "Lottery {}: subset attestation from {}... ({}/{})",
+                        ledger_prefix,
+                        &signer.to_string()[..16],
+                        p.signatures.len(),
+                        threshold
+                    );
+                }
             }
-            return Ok(());
+            if p.signatures.len() < threshold {
+                return Ok(None);
+            }
+            let sigs = pending
+                .remove(ledger_id)
+                .map(|p| p.signatures)
+                .unwrap_or_default();
+            return Ok(Some(finish(&sigs)));
         }
 
-        let our_sig = self
-            .handler
-            .signer
-            .bip340_sign(
-                &SignContext::no_ledger(SigPurpose::OnchainSighash),
-                &sweep.sighash,
-            )
-            .map_err(|e| Error::Protocol(format!("lottery recovery sighash sign: {}", e)))?;
         let mut signatures = HashMap::new();
-        signatures.insert(our_xonly, our_sig);
-        if signatures.len() >= sweep.threshold {
-            self.broadcast_lottery_recovery(ledger_prefix, sweep, &signatures);
-            return Ok(());
+        let our_xonly = self.node_id.x_only_public_key().0;
+        if order.contains(&our_xonly) {
+            let our_sig = self
+                .handler
+                .signer
+                .bip340_sign(
+                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                    &sighash,
+                )
+                .map_err(|e| Error::Protocol(format!("subset attestation sign: {}", e)))?;
+            signatures.insert(our_xonly, our_sig);
         }
-
+        if signatures.len() >= threshold {
+            return Ok(Some(finish(&signatures)));
+        }
+        let subset: Vec<String> = indices
+            .iter()
+            .map(|&i| hex::encode(lottery.participants[i].pubkey.serialize()))
+            .collect();
         let params = serde_json::json!({
-            "sighash": hex::encode(sweep.sighash),
-            "unsigned_tx": hex::encode(bitcoin::consensus::encode::serialize(&sweep.tx)),
+            "unsigned_tx": hex::encode(bitcoin::consensus::encode::serialize(tx)),
+            "sighash": hex::encode(sighash),
+            "subset": subset,
+            "prevout_amounts": prevouts.iter().map(|p| p.value.to_sat()).collect::<Vec<_>>(),
+            "prevout_spks": prevouts.iter().map(|p| hex::encode(p.script_pubkey.as_bytes())).collect::<Vec<_>>(),
         });
         let request_id = self
             .nostr
-            .send_ledger_request(ledger_id, "lottery_recovery_sign", params)
+            .send_ledger_request(ledger_id, "lottery_subset_attest", params)
             .await
-            .map_err(|e| Error::Protocol(format!("send lottery_recovery_sign: {:?}", e)))?;
+            .map_err(|e| Error::Protocol(format!("send lottery_subset_attest: {:?}", e)))?;
         self.track_sent_event(&request_id);
         tracing::info!(
-            "Lottery for {} cannot be claimed; requested recovery signatures ({} needed) for \
-             sweep {} of {} sats to the operator",
+            "Lottery {}: requested attestations of revealer subset {:?} ({} needed)",
             ledger_prefix,
-            sweep.threshold,
-            txid,
-            sweep.tx.output[0].value.to_sat()
+            indices,
+            threshold
         );
-        self.pending_lottery_recoveries.lock().unwrap().insert(
+        self.pending_subset_claims.lock().unwrap().insert(
             ledger_id.to_string(),
-            PendingLotteryRecovery {
+            PendingSubsetClaim {
                 request_id,
-                txid,
+                sighash,
                 signatures,
                 created_at: std::time::Instant::now(),
             },
         );
-        Ok(())
-    }
-
-    fn broadcast_lottery_recovery(
-        &self,
-        ledger_prefix: &str,
-        sweep: &LotteryRecoverySweep,
-        signatures: &HashMap<XOnlyPublicKey, [u8; 64]>,
-    ) {
-        let signed = match assemble_lottery_recovery(sweep, signatures) {
-            Ok(tx) => tx,
-            Err(e) => {
-                tracing::error!("Lottery recovery {}: assembly failed: {}", ledger_prefix, e);
-                return;
-            }
-        };
-        match self.wallet.broadcast(&signed) {
-            Ok(txid) => tracing::info!(
-                "Lottery for {} could not be claimed; swept to the operator ({})",
-                ledger_prefix,
-                txid
-            ),
-            Err(e) => tracing::error!(
-                "Lottery recovery {}: broadcast failed: {}",
-                ledger_prefix,
-                e
-            ),
-        }
+        Ok(None)
     }
 
     /// `(signer, signature)` pairs from successful responses to
@@ -863,7 +530,7 @@ impl Node {
 
         let filter = Filter::new()
             .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
-            .since(nostr_sdk::Timestamp::now() - LOTTERY_RECOVERY_REQUEST_TIMEOUT_SECS);
+            .since(nostr_sdk::Timestamp::now() - LOTTERY_ATTEST_REQUEST_TIMEOUT_SECS);
         let events = match self
             .nostr
             .client()
@@ -887,7 +554,7 @@ impl Node {
                     Ok(r) if r.success => r,
                     Ok(r) => {
                         tracing::info!(
-                            "lottery_recovery_sign refused: {}",
+                            "lottery_subset_attest refused: {}",
                             r.error.unwrap_or_default()
                         );
                         continue;
@@ -914,26 +581,16 @@ impl Node {
         out
     }
 
-    /// Whether we are a disputant of `ledger_id`: we hold our own fork of it.
-    pub(crate) fn is_disputant_of(&self, ledger_id: &str) -> bool {
-        let ledgers = self.handler.ledgers.lock().unwrap();
-        ledgers.iter().any(|(key, arc)| {
-            key.len() > 64
-                && key.starts_with(ledger_id)
-                && arc.read().unwrap().state.parent_pubkey == self.node_id
-        })
-    }
-
-    /// Sign another voter's recovery sweep (cl-deposits
-    /// `handle-lottery-recovery-sign`): only of a lottery we also find
-    /// unclaimable, once its CSV has passed, and only the exact sweep we
-    /// rebuild ourselves. The caller answers only if we are a disputant.
-    pub(crate) async fn process_lottery_recovery_sign_request(
+    /// A recovery voter (cl-deposits `handle-lottery-subset-attest`): sign a
+    /// revealer-subset claim only past the reveal deadline, only for exactly
+    /// the reveals we hold, only for that subset's winner, and only a claim
+    /// of the lottery output paying the winner's declared target.
+    pub(crate) async fn process_lottery_subset_attest_request(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
         let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
-        match self.check_lottery_recovery_request(request).await {
+        match self.check_lottery_subset_attest(request).await {
             Ok(sighash) => {
                 use deposits_signer_api::{SigPurpose, SignContext};
                 let signature = match self.handler.signer.bip340_sign(
@@ -942,14 +599,10 @@ impl Node {
                 ) {
                     Ok(s) => s,
                     Err(e) => {
-                        return (
-                            false,
-                            None,
-                            Some(format!("lottery recovery sighash sign: {}", e)),
-                        )
+                        return (false, None, Some(format!("subset attestation sign: {}", e)))
                     }
                 };
-                tracing::info!("Signed lottery recovery of {}", ledger_prefix);
+                tracing::info!("Attested a lottery subset claim for {}", ledger_prefix);
                 let result = serde_json::json!({
                     "signer": self.node_id_hex.clone(),
                     "signature": hex::encode(signature),
@@ -958,7 +611,7 @@ impl Node {
             }
             Err(reason) => {
                 tracing::info!(
-                    "Refused lottery_recovery_sign for {}: {}",
+                    "Refused lottery_subset_attest for {}: {}",
                     ledger_prefix,
                     reason
                 );
@@ -967,67 +620,148 @@ impl Node {
         }
     }
 
-    /// The sighash to sign, if the request passes every check.
-    async fn check_lottery_recovery_request(
+    async fn check_lottery_subset_attest(
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> Result<[u8; 32], String> {
-        let claimed_sighash: [u8; 32] = request
-            .params
+        use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+        use bitcoin::taproot::{LeafVersion, TapLeafHash};
+        let p = &request.params;
+        let claimed_sighash: [u8; 32] = p
             .get("sighash")
             .and_then(|v| v.as_str())
             .and_then(|h| hex::decode(h).ok())
             .and_then(|b| b.try_into().ok())
-            .ok_or_else(|| "missing or invalid sighash".to_string())?;
-        let proposed = request
-            .params
+            .ok_or("missing or invalid sighash")?;
+        let proposed = p
             .get("unsigned_tx")
             .and_then(|v| v.as_str())
             .and_then(|h| hex::decode(h).ok())
             .ok_or_else(|| "missing or invalid unsigned_tx".to_string())
             .and_then(|b| parse_unsigned_tx(&b))?;
+        let asked: Vec<XOnlyPublicKey> = p
+            .get("subset")
+            .and_then(|v| v.as_array())
+            .ok_or("missing subset")?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .and_then(|h| hex::decode(h).ok())
+                    .and_then(|b| XOnlyPublicKey::from_slice(&b).ok())
+                    .ok_or_else(|| "bad subset key".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        let amounts: Vec<u64> = p
+            .get("prevout_amounts")
+            .and_then(|v| v.as_array())
+            .ok_or("missing prevout_amounts")?
+            .iter()
+            .map(|v| v.as_u64().ok_or_else(|| "bad prevout amount".to_string()))
+            .collect::<Result<_, _>>()?;
+        let spks: Vec<bitcoin::ScriptBuf> = p
+            .get("prevout_spks")
+            .and_then(|v| v.as_array())
+            .ok_or("missing prevout_spks")?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .and_then(|h| hex::decode(h).ok())
+                    .map(bitcoin::ScriptBuf::from_bytes)
+                    .ok_or_else(|| "bad prevout spk".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        if amounts.len() != spks.len() || amounts.len() != proposed.input.len() {
+            return Err("prevouts do not match the claim's inputs".to_string());
+        }
 
         let ctx = self
             .lottery_context(&request.ledger_id)
             .await
             .map_err(|e| e.to_string())?;
-        let claimability = lottery_claimability(&ctx.preimages);
-        if !matches!(claimability, LotteryClaimability::Unclaimable { .. }) {
-            return Err("the lottery can still be claimed".to_string());
+        let our_xonly = self.node_id.x_only_public_key().0;
+        if !ctx.recovery_voters.contains(&our_xonly) {
+            return Err("not a recovery voter".to_string());
         }
         let lottery = ctx
             .build_lottery(self.wallet.network())
             .map_err(|e| e.to_string())?;
-        let (outpoint, value, unspent) = self
-            .locate_lottery_output(&request.ledger_id, &lottery)
+        let (outpoint, value, confirmations) = self
+            .locate_lottery_output(&lottery)
             .map_err(|e| e.to_string())?
-            .ok_or_else(|| "no lottery output on chain".to_string())?;
-        if !unspent {
-            return Err("no pending lottery on chain".to_string());
+            .ok_or("no pending lottery on chain")?;
+        let path = lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS);
+        let (idx, pre) = match path {
+            LotteryClaimPath::Subset(idx, pre) => (idx, pre),
+            LotteryClaimPath::Full(_) => {
+                return Err("everyone revealed: the full-set leaf needs no attestation".to_string())
+            }
+            LotteryClaimPath::Wait(why) => return Err(why),
+        };
+        let mut asked_idx: Vec<usize> = asked
+            .iter()
+            .map(|k| {
+                lottery
+                    .participants
+                    .iter()
+                    .position(|p| p.pubkey == *k)
+                    .ok_or_else(|| "a subset key is not a participant".to_string())
+            })
+            .collect::<Result<_, _>>()?;
+        asked_idx.sort_unstable();
+        if asked_idx != idx {
+            return Err(format!(
+                "subset {:?} is not the reveals we hold {:?}",
+                asked_idx, idx
+            ));
         }
-        let confirmations = self
-            .wallet
-            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)
-            .map_err(|e| e.to_string())?
-            .map(|(_, c)| c)
-            .unwrap_or(0);
-        let ours = build_lottery_recovery_sweep(&lottery, outpoint, value, &ctx.original_operator)?;
-        check_lottery_recovery_proposal(
-            claimability,
-            confirmations,
-            &ours,
-            &proposed,
-            &claimed_sighash,
-        )?;
-        Ok(ours.sighash)
+        let winner = LotteryOutput::subset_winner(&idx, &pre).map_err(|e| format!("{:?}", e))?;
+        let target: bitcoin::Address<bitcoin::address::NetworkUnchecked> = lottery.participants
+            [winner]
+            .target_reserves
+            .parse()
+            .map_err(|e| format!("winner target: {}", e))?;
+        let target = target
+            .require_network(self.wallet.network())
+            .map_err(|e| format!("winner target network: {}", e))?;
+        if proposed.input.first().map(|i| i.previous_output) != Some(outpoint) {
+            return Err("the claim does not spend the lottery output".to_string());
+        }
+        if proposed.output.len() != 1 || proposed.output[0].script_pubkey != target.script_pubkey()
+        {
+            return Err("the claim does not pay the winner's target".to_string());
+        }
+        if spks[0] != lottery.script_pubkey() || amounts[0] != value {
+            return Err("prevout 0 is not the lottery output".to_string());
+        }
+        let prevouts: Vec<TxOut> = amounts
+            .iter()
+            .zip(spks)
+            .map(|(a, s)| TxOut {
+                value: bitcoin::Amount::from_sat(*a),
+                script_pubkey: s,
+            })
+            .collect();
+        let leaf = lottery.subset_leaf(&idx).ok_or("no leaf for the subset")?;
+        let sighash = SighashCache::new(&proposed)
+            .taproot_script_spend_signature_hash(
+                0,
+                &Prevouts::All(&prevouts),
+                TapLeafHash::from_script(leaf, LeafVersion::TapScript),
+                TapSighashType::Default,
+            )
+            .map_err(|e| format!("sighash: {}", e))?;
+        let sighash: [u8; 32] = *sighash.as_ref();
+        if sighash != claimed_sighash {
+            return Err("sighash mismatch".to_string());
+        }
+        Ok(sighash)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bitcoin::secp256k1::{Keypair, SecretKey};
-    use bitcoin::Network;
+    use bitcoin::secp256k1::{Secp256k1, SecretKey};
 
     fn secret(seed: u8) -> SecretKey {
         SecretKey::from_slice(&[seed; 32]).unwrap()
@@ -1035,286 +769,35 @@ mod tests {
     fn pubkey(seed: u8) -> bitcoin::secp256k1::PublicKey {
         bitcoin::secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &secret(seed))
     }
-    fn xonly(seed: u8) -> XOnlyPublicKey {
-        pubkey(seed).x_only_public_key().0
-    }
-
-    /// Fixed inputs shared with the cl-deposits vector below: operator
-    /// seed 0x11, recovery voters seeds 21..23 (T = 2), participants seeds
-    /// 1 and 2 with commitments [i; 20], signet.
-    fn fixture_lottery() -> LotteryOutput {
-        let mut participants: Vec<LotteryParticipant> = (1..=2u8)
-            .map(|i| LotteryParticipant::new(xonly(i), [i; 20], format!("tb1p{}", i)))
-            .collect();
-        participants.sort_by_key(|a| a.pubkey.serialize());
-        LotteryScriptBuilder::new(
-            participants,
-            vec![xonly(21), xonly(22), xonly(23)],
-            2,
-            Network::Signet,
-        )
-        .build()
-        .unwrap()
-    }
-    fn fixture_outpoint() -> OutPoint {
-        let mut bytes = [0u8; 32];
-        for (i, b) in bytes.iter_mut().enumerate() {
-            *b = i as u8;
-        }
-        OutPoint::new(bitcoin::Txid::from_byte_array(bytes), 0)
-    }
-    fn fixture_sweep() -> LotteryRecoverySweep {
-        build_lottery_recovery_sweep(
-            &fixture_lottery(),
-            fixture_outpoint(),
-            478_907,
-            &pubkey(0x11),
-        )
-        .unwrap()
-    }
-    fn sign(seed: u8, sighash: [u8; 32]) -> [u8; 64] {
-        let kp = Keypair::from_secret_key(&Secp256k1::new(), &secret(seed));
-        Secp256k1::new()
-            .sign_schnorr_no_aux_rand(&bitcoin::secp256k1::Message::from_digest(sighash), &kp)
-            .serialize()
-    }
 
     #[test]
-    fn claimability_bounds_on_k_not_q() {
-        use LotteryClaimability::*;
-        // k = 2 participants: the claim leaf accepts 17..=18 bytes.
+    fn claim_path_full_subset_or_wait() {
+        let p = |n: usize| Some(vec![0u8; n]);
         assert_eq!(
-            lottery_claimability(&[Some(vec![0; 18]), Some(vec![0; 17])]),
-            Claimable
+            lottery_claim_path(&[p(20), p(30)], false),
+            LotteryClaimPath::Full(vec![vec![0u8; 20], vec![0u8; 30]])
         );
-        assert_eq!(lottery_claimability(&[Some(vec![0; 18]), None]), Unknown);
-        // A 19-byte preimage (committed under Q = 3) can never be claimed,
-        // even before the other participant reveals (ledger F on the devnet).
+        assert!(matches!(
+            lottery_claim_path(&[p(20), None, p(30)], false),
+            LotteryClaimPath::Wait(_)
+        ));
         assert_eq!(
-            lottery_claimability(&[Some(vec![0; 19]), None]),
-            Unclaimable {
-                preimage_len: 19,
-                max_len: 18
-            }
+            lottery_claim_path(&[p(20), None, p(30)], true),
+            LotteryClaimPath::Subset(vec![0, 2], vec![vec![0u8; 20], vec![0u8; 30]])
         );
+        // An out-of-range preimage satisfies no leaf: it counts as unrevealed.
         assert_eq!(
-            lottery_claimability(&[Some(vec![0; 18]), Some(vec![0; 19])]),
-            Unclaimable {
-                preimage_len: 19,
-                max_len: 18
-            }
+            lottery_claim_path(&[p(77), p(40)], true),
+            LotteryClaimPath::Subset(vec![1], vec![vec![0u8; 40]])
         );
-        // k = 3: 19 bytes is within bounds.
+        assert!(matches!(
+            lottery_claim_path(&[None, None], true),
+            LotteryClaimPath::Wait(_)
+        ));
+        // A sole participant needs no preimage at all.
         assert_eq!(
-            lottery_claimability(&[Some(vec![0; 19]), Some(vec![0; 17]), Some(vec![0; 18])]),
-            Claimable
-        );
-    }
-
-    #[test]
-    fn sweep_has_the_exact_fields() {
-        let lottery = fixture_lottery();
-        let sweep = fixture_sweep();
-        let tx = &sweep.tx;
-        assert_eq!(tx.version, bitcoin::transaction::Version::TWO);
-        assert_eq!(tx.lock_time, bitcoin::absolute::LockTime::ZERO);
-        assert_eq!(tx.input.len(), 1);
-        assert_eq!(tx.input[0].previous_output, fixture_outpoint());
-        assert_eq!(tx.input[0].sequence.to_consensus_u32(), 144);
-        assert!(tx.input[0].script_sig.is_empty());
-        assert_eq!(tx.output.len(), 1);
-        assert_eq!(tx.output[0].value.to_sat(), 478_907 - 500);
-        let mut spk = vec![0x00, 0x14];
-        spk.extend_from_slice(
-            &bitcoin::hashes::hash160::Hash::hash(&pubkey(0x11).serialize()).to_byte_array(),
-        );
-        assert_eq!(tx.output[0].script_pubkey.as_bytes(), &spk[..]);
-        // The first recovery leaf: after the claim leaf (no partial-reveal
-        // leaves at k = 2), CSV 144 with threshold T.
-        assert_eq!(sweep.leaf_script, lottery.recovery_leaves()[0].2);
-        assert_eq!(sweep.threshold, 2);
-        assert_eq!(sweep.prevout.value.to_sat(), 478_907);
-        assert_eq!(sweep.prevout.script_pubkey, lottery.script_pubkey());
-        assert_eq!(sweep.voters, lottery.recovery_voter_order());
-        // Too small to pay the fee.
-        assert!(
-            build_lottery_recovery_sweep(&lottery, fixture_outpoint(), 500, &pubkey(0x11)).is_err()
-        );
-    }
-
-    /// Cross-implementation vector: the same inputs through cl-deposits
-    /// (`lot:build-lottery`, the tx `build-lottery-recovery` makes,
-    /// `rot:tier-sighash`, `lot:recovery-witness`), printed by a script
-    /// run against cl-deposits 403d451.
-    #[test]
-    fn sweep_matches_cl_deposits() {
-        let sweep = fixture_sweep();
-        assert_eq!(
-            hex::encode(pubkey(0x11).serialize()),
-            "034f355bdcb7cc0af728ef3cceb9615d90684bb5b2ca5f859ab0f0b704075871aa"
-        );
-        assert_eq!(
-            hex::encode(sweep.prevout.script_pubkey.as_bytes()),
-            "512044ded9ce0ee8379eb1250ee49adc8244afca3fd827dd332f2fc0f151866f2f38"
-        );
-        // Legacy (txid) serialization.
-        assert_eq!(
-            hex::encode(bitcoin::consensus::encode::serialize(&sweep.tx)),
-            "0200000001000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00000000\
-             009000000001c74c070000000000160014fc7250a211deddc70ee5a2738de5f07817351cef00000000"
-        );
-        assert_eq!(
-            sweep.tx.compute_txid().to_string(),
-            "ec81d43a32d4732a10e8059e9ee342034f2a7f5113656e8a92d10e8c0a56c8f4"
-        );
-        assert_eq!(
-            hex::encode(sweep.sighash),
-            "917d9df1e89714775932177886a560e18ac535f8d777ab657e7ad82d0551a0f1"
-        );
-        assert_eq!(
-            hex::encode(sweep.leaf_script.as_bytes()),
-            "029000b2752057eb3638f51f4dc5c8d5a7324b47df99e816cfcc5b5eb1245bc8c98029f9e674ac20a8\
-             397a935f0dfceba6ba9618f6451ef4d80637abf4e6af2669fbc9de6a8fd2acba20d793631af7aa0e70\
-             9439dd47fc001acd0b0727670b6670ea528ac83cb0127f4aba52a2"
-        );
-        assert_eq!(
-            hex::encode(sweep.control_block.serialize()),
-            "c050929b74c1a04954b78b4b6035e97a5e078a5a0f28ec96d547bfee9ace803ac0ae8c2bdd99e3f908\
-             e401e8f15b81d98ad8b16adbdfb149d36384272edb469b860df5c8f42aceda9d55e9de18e48d196679\
-             2527cd396fae3a647a87f19330fa0aade24b3a859986ba2a2fdc0e68b4cbe2a5f09d885e445fb9ad2c\
-             72d8858c31aa"
-        );
-        // cl's wire form of the unsigned tx: segwit marker with an empty
-        // witness. It must parse, to the same tx.
-        let cl_wire = hex::decode(
-            "02000000000101000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f00\
-             000000009000000001c74c070000000000160014fc7250a211deddc70ee5a2738de5f07817351cef\
-             0000000000",
-        )
-        .unwrap();
-        assert!(bitcoin::consensus::encode::deserialize::<Transaction>(&cl_wire).is_err());
-        assert_eq!(parse_unsigned_tx(&cl_wire).unwrap(), sweep.tx);
-        assert_eq!(
-            parse_unsigned_tx(&bitcoin::consensus::encode::serialize(&sweep.tx)).unwrap(),
-            sweep.tx
-        );
-
-        // Witness layout, with stand-in signatures for the first and third
-        // sorted voters and none for the second (cl `recovery-witness`
-        // with (aa.. nil cc..)): the check is layout only, so bypass the
-        // signature verification by building through the same helper.
-        let ordered = vec![Some([0xaa; 64]), None, Some([0xcc; 64])];
-        let witness = ReservesSpendBuilder::create_checksigadd_witness(
-            &ordered,
-            &sweep.leaf_script,
-            &sweep.control_block,
-        );
-        let items: Vec<String> = witness.iter().map(hex::encode).collect();
-        assert_eq!(items[0], "cc".repeat(64));
-        assert_eq!(items[1], "");
-        assert_eq!(items[2], "aa".repeat(64));
-        assert_eq!(items[3], hex::encode(sweep.leaf_script.as_bytes()));
-        assert_eq!(items[4], hex::encode(sweep.control_block.serialize()));
-        assert_eq!(items.len(), 5);
-    }
-
-    #[test]
-    fn assembly_verifies_signatures_and_threshold() {
-        let sweep = fixture_sweep();
-        let mut sigs = HashMap::new();
-        sigs.insert(xonly(21), sign(21, sweep.sighash));
-        assert!(assemble_lottery_recovery(&sweep, &sigs)
-            .unwrap_err()
-            .contains("only 1 of 2"));
-        sigs.insert(xonly(23), sign(23, sweep.sighash));
-        let tx = assemble_lottery_recovery(&sweep, &sigs).unwrap();
-        assert_eq!(tx.compute_txid(), sweep.tx.compute_txid());
-        let w: Vec<&[u8]> = tx.input[0].witness.iter().collect();
-        assert_eq!(w.len(), 5);
-        // Parallel to the sorted keys, reversed onto the stack.
-        let order = &sweep.voters;
-        for (slot, key) in order.iter().rev().enumerate() {
-            match sigs.get(key) {
-                Some(s) => assert_eq!(w[slot], &s[..]),
-                None => assert!(w[slot].is_empty()),
-            }
-        }
-        // A bad signature is refused, not broadcast.
-        sigs.insert(xonly(22), [7u8; 64]);
-        assert!(assemble_lottery_recovery(&sweep, &sigs).is_err());
-
-        // Response verification: a voter's real signature, a non-voter's,
-        // and a voter's over the wrong message.
-        assert_eq!(
-            verify_lottery_recovery_signature(&sweep, &pubkey(22), &sign(22, sweep.sighash)),
-            Some(xonly(22))
-        );
-        assert_eq!(
-            verify_lottery_recovery_signature(&sweep, &pubkey(9), &sign(9, sweep.sighash)),
-            None
-        );
-        assert_eq!(
-            verify_lottery_recovery_signature(&sweep, &pubkey(22), &sign(22, [0u8; 32])),
-            None
-        );
-    }
-
-    #[test]
-    fn signer_refuses_claimable_early_or_foreign_sweeps() {
-        let sweep = fixture_sweep();
-        let unclaimable = LotteryClaimability::Unclaimable {
-            preimage_len: 19,
-            max_len: 18,
-        };
-        // The sweep we rebuild, past the CSV: signed.
-        assert!(check_lottery_recovery_proposal(
-            unclaimable,
-            144,
-            &sweep,
-            &sweep.tx,
-            &sweep.sighash
-        )
-        .is_ok());
-        // A lottery that can still be claimed (or may yet be).
-        for c in [LotteryClaimability::Claimable, LotteryClaimability::Unknown] {
-            assert!(
-                check_lottery_recovery_proposal(c, 500, &sweep, &sweep.tx, &sweep.sighash)
-                    .unwrap_err()
-                    .contains("can still be claimed")
-            );
-        }
-        // Before the CSV.
-        assert!(check_lottery_recovery_proposal(
-            unclaimable,
-            143,
-            &sweep,
-            &sweep.tx,
-            &sweep.sighash
-        )
-        .unwrap_err()
-        .contains("not open yet"));
-        // A tx that differs from our rebuild: another destination, and a
-        // different fee.
-        let mut elsewhere = sweep.tx.clone();
-        elsewhere.output[0].script_pubkey =
-            ScriptBuf::new_p2wpkh(&bitcoin::CompressedPublicKey(pubkey(9)).wpubkey_hash());
-        let mut richer = sweep.tx.clone();
-        richer.output[0].value = bitcoin::Amount::from_sat(478_907 - 200);
-        for proposed in [elsewhere, richer] {
-            assert!(check_lottery_recovery_proposal(
-                unclaimable,
-                200,
-                &sweep,
-                &proposed,
-                &sweep.sighash
-            )
-            .unwrap_err()
-            .contains("not the sweep we expect"));
-        }
-        // Our tx, but a sighash that is not ours.
-        assert!(
-            check_lottery_recovery_proposal(unclaimable, 200, &sweep, &sweep.tx, &[1u8; 32])
-                .is_err()
+            lottery_claim_path(&[None], false),
+            LotteryClaimPath::Full(vec![])
         );
     }
 
@@ -1365,25 +848,23 @@ mod tests {
     fn two_durable_reveals_and_our_own_make_the_lottery_claimable() {
         let (participants, [cld3, cld4, ours]) = devnet_c_lottery();
         // Before: nothing came back from the relay.
-        assert_eq!(
-            lottery_claimability(&match_revealed_preimages(&participants, &[])),
-            LotteryClaimability::Unknown
-        );
-        // The two Kind 9106 reveals alone are not enough...
+        assert!(matches!(
+            lottery_claim_path(&match_revealed_preimages(&participants, &[]), false),
+            LotteryClaimPath::Wait(_)
+        ));
+        // The two Kind 9106 reveals alone are not enough before the deadline...
         let from_9106 = vec![cld4.clone(), cld3.clone()];
-        assert_eq!(
-            lottery_claimability(&match_revealed_preimages(&participants, &from_9106)),
-            LotteryClaimability::Unknown
-        );
-        // ...with our own (derived) preimage the lottery is claimable, and
+        assert!(matches!(
+            lottery_claim_path(&match_revealed_preimages(&participants, &from_9106), false),
+            LotteryClaimPath::Wait(_)
+        ));
+        // ...with our own (derived) preimage the full set is claimable, and
         // we (index 2) win: (2 + 1 + 2) mod 3.
         let revealed = vec![cld4, cld3, ours.clone()];
         let matched = match_revealed_preimages(&participants, &revealed);
-        assert_eq!(
-            lottery_claimability(&matched),
-            LotteryClaimability::Claimable
-        );
-        let ordered: Vec<Vec<u8>> = matched.into_iter().flatten().collect();
+        let LotteryClaimPath::Full(ordered) = lottery_claim_path(&matched, false) else {
+            panic!("expected the full set");
+        };
         assert_eq!(ordered[2], ours);
         assert_eq!(LotteryOutput::calculate_winner(&ordered).unwrap(), 2);
     }

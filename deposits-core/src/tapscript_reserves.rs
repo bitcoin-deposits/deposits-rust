@@ -786,28 +786,22 @@ impl LotteryParticipant {
 /// nobody has a reason to claim, leaving the output stuck.
 pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
 
-/// Smallest N at which we add partial-reveal claim leaves to the lottery
-/// Taproot output. The technical floor is `N = 3` — a single-non-revealer
-/// sub-lottery needs `N - 1 >= 2` participants, which the lottery script
-/// itself requires. Below the floor, the single-non-revealer case collapses
-/// straight to the CSV-144 quorum-recovery cascade.
-///
-/// Historically this was `11`, on the reasoning that `P(all reveal)` was
-/// high enough at small N that the recovery long-tail covered the rare
-/// stall. Under the production policy cap `MAX_QUORUM_SIZE_POLICY = 7`
-/// (see `constants.rs`) that left every deployable Q ∈ {3, 5, 7} with
-/// *no* partial-reveal path at all — `K = 1` non-revealers (the dominant
-/// failure mode per `CUSTODY_LOTTERY.md`) had no fast claim, so a single
-/// withholding loser forced the entire quorum onto the CSV-144 cascade.
-/// Dropping the floor to `3` makes the partial-reveal path available at
-/// every supported Q.
-pub const PARTIAL_REVEAL_MIN_N: usize = 3;
+/// Contributions are `LEN(preimage) - 16` in `1..=60`: uniform mod every
+/// `m` in `1..=6` (60 = lcm(1..6)); for `m = 7` residues 1-4 occur 9/60 and
+/// the rest 8/60 (DEP-06 §"Influence and bias").
+pub const LOTTERY_CONTRIBUTION_RANGE: usize = 60;
 
-/// CSV block delay before the partial-reveal claim leaves become
-/// spendable. Short enough to give honest revealers a faster path than
-/// the CSV-144 recovery, but long enough that genuine reveals have time
-/// to all land on chain first.
-pub const PARTIAL_REVEAL_CSV_BLOCKS: u32 = 72;
+/// Longest preimage a claim leaf accepts: 76 bytes, within the 80-byte
+/// standard tapscript stack item.
+pub const LOTTERY_MAX_PREIMAGE_LEN: usize = 16 + LOTTERY_CONTRIBUTION_RANGE;
+
+/// The reveal deadline: revealer-subset claim leaves open this many blocks
+/// after the confiscation confirms (DEP-06 Phase 3).
+pub const LOTTERY_REVEAL_CSV_BLOCKS: u32 = 72;
+
+/// Most participants a lottery output supports: the subset tree has
+/// `2^k - 1` claim leaves.
+pub const MAX_LOTTERY_PARTICIPANTS: usize = 7;
 
 /// CSV block delay before an armer's slashing-share output can be
 /// swept by the recovery quorum as forfeited (because the armer never
@@ -897,19 +891,14 @@ pub fn check_bond_ratio_precondition(
     Ok(())
 }
 
-/// Builder for lottery Tapscript outputs used in custody dispute resolution.
+/// Builder for lottery Tapscript outputs used in custody dispute resolution
+/// (DEP-06 Phase 2).
 ///
-/// The lottery mechanism uses preimage-size entropy:
-/// 1. Each participant commits HASH160(preimage) where preimage is `17..=16+N` bytes.
-/// 2. When revealing, the SIZE of each preimage contributes entropy
-///    (`size - 16` yields a value in `1..=N`).
-/// 3. Sum of all contributions mod N determines the winner.
-/// 4. Only the winner can spend with their signature + all preimages.
-///
-/// The script verifies all preimages, enforces `LEN(preimage) ∈ [17, 16+N]`
-/// per-participant (so a committer who chose an out-of-range preimage cannot
-/// poison the sum-mod-N draw for the rest of the quorum), and checks the
-/// signer is the entropy-selected winner.
+/// Leaves, in tree order: the full-set claim (every preimage, winner =
+/// `sum mod k`); one leaf per nonempty proper subset S of the participants,
+/// behind CSV 72, in which a threshold of recovery voters attests S before
+/// the draw over S (winner = `sum_S mod |S|`); then the recovery cascade.
+/// A sole participant (`k = 1`) gets a plain signature leaf instead.
 pub struct LotteryScriptBuilder {
     participants: Vec<LotteryParticipant>,
     network: Network,
@@ -917,6 +906,97 @@ pub struct LotteryScriptBuilder {
     recovery_voters: Vec<XOnlyPublicKey>,
     /// Recovery threshold
     recovery_threshold: usize,
+}
+
+/// Nonempty proper subsets of `0..k`, by decreasing size, then in
+/// lexicographic order (the order `combinations(range(k), m)` yields).
+pub fn lottery_subset_indices(k: usize) -> Vec<Vec<usize>> {
+    fn combos(start: usize, k: usize, m: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if m == 0 {
+            out.push(cur.clone());
+            return;
+        }
+        for i in start..=(k - m) {
+            cur.push(i);
+            combos(i + 1, k, m - 1, cur, out);
+            cur.pop();
+        }
+    }
+    let mut out = Vec::new();
+    for m in (1..k).rev() {
+        combos(0, k, m, &mut Vec::new(), &mut out);
+    }
+    out
+}
+
+/// The claim body for `members` in canonical order: verify each preimage
+/// (hash, `17..=76` bytes), sum the contributions, and let only member
+/// `sum mod m` spend.
+pub fn build_claim_body(members: &[LotteryParticipant]) -> ScriptBuf {
+    let m = members.len();
+    let mut builder = Builder::new();
+    for (i, p) in members.iter().enumerate() {
+        builder = builder
+            .push_opcode(OP_DUP)
+            .push_opcode(OP_HASH160)
+            .push_slice(p.commitment_hash)
+            .push_opcode(OP_EQUALVERIFY)
+            .push_opcode(OP_SIZE)
+            .push_opcode(OP_DUP)
+            .push_int(17)
+            .push_opcode(OP_GREATERTHANOREQUAL)
+            .push_opcode(OP_VERIFY)
+            .push_opcode(OP_DUP)
+            .push_int(LOTTERY_MAX_PREIMAGE_LEN as i64)
+            .push_opcode(OP_LESSTHANOREQUAL)
+            .push_opcode(OP_VERIFY)
+            .push_opcode(OP_SWAP)
+            .push_opcode(OP_DROP)
+            .push_int(16)
+            .push_opcode(OP_SUB);
+        if i + 1 < m {
+            builder = builder.push_opcode(OP_TOALTSTACK);
+        }
+    }
+    for _ in 1..m {
+        builder = builder.push_opcode(OP_FROMALTSTACK).push_opcode(OP_ADD);
+    }
+    if m == 1 {
+        return builder
+            .push_opcode(OP_DROP)
+            .push_x_only_key(&members[0].pubkey)
+            .push_opcode(OP_CHECKSIG)
+            .into_script();
+    }
+    // The sum is below 64m: six conditional subtractions of m*2^b reduce it
+    // mod m (OP_MOD is OP_SUCCESS in tapscript).
+    for b in (0..=5).rev() {
+        let x = (m << b) as i64;
+        builder = builder
+            .push_opcode(OP_DUP)
+            .push_int(x)
+            .push_opcode(OP_GREATERTHANOREQUAL)
+            .push_opcode(OP_IF)
+            .push_int(x)
+            .push_opcode(OP_SUB)
+            .push_opcode(OP_ENDIF);
+    }
+    for (i, p) in members.iter().enumerate() {
+        builder = builder
+            .push_opcode(OP_DUP)
+            .push_int(i as i64)
+            .push_opcode(OP_EQUAL)
+            .push_opcode(OP_IF)
+            .push_opcode(OP_DROP)
+            .push_x_only_key(&p.pubkey)
+            .push_opcode(OP_CHECKSIG)
+            .push_opcode(OP_ELSE);
+    }
+    builder = builder.push_opcode(OP_DROP).push_opcode(OP_PUSHBYTES_0);
+    for _ in 0..m {
+        builder = builder.push_opcode(OP_ENDIF);
+    }
+    builder.into_script()
 }
 
 impl LotteryScriptBuilder {
@@ -934,279 +1014,72 @@ impl LotteryScriptBuilder {
         }
     }
 
-    /// Build the lottery claim script.
-    ///
-    /// Witness stack (bottom to top): <sig> <preimage_n> ... <preimage_1>
-    ///
-    /// Script logic:
-    /// 1. Verify each preimage: HASH160(preimage) == committed_hash
-    /// 2. Enforce per-preimage size bounds: `17 <= LEN(preimage) <= 16+N`
-    ///    (rejects out-of-range commitments that would skew sum-mod-N)
-    /// 3. Extract size contribution: `LEN - 16` (yields a value in `1..=N`)
-    /// 4. Sum all contributions
-    /// 5. Calculate winner index: `sum mod N`
-    /// 6. Branch to winner's pubkey and verify signature
+    /// The full-set claim leaf. Witness (bottom to top):
+    /// `<sig> <preimage_{k-1}> ... <preimage_0>`. A sole participant's leaf
+    /// is a plain signature check (DEP-03: no draw, no preimage).
     pub fn build_lottery_script(&self) -> DepositsResult<ScriptBuf> {
-        let n = self.participants.len();
-        self.build_lottery_script_with_bounds_n(n)
-    }
-
-    /// Build the lottery claim script with explicit preimage-length
-    /// bounds. The bounds are `17..=16+bounds_n`. Primary lotteries pass
-    /// `bounds_n = participants.len()`; partial-reveal sub-lotteries pass
-    /// the *parent* `N` so commitments that are valid under the parent
-    /// contract continue to spend the sub-leaf.
-    fn build_lottery_script_with_bounds_n(&self, bounds_n: usize) -> DepositsResult<ScriptBuf> {
-        let n = self.participants.len();
-        if n == 0 {
-            return Err(DepositsError::InvalidState(
-                "Lottery requires at least 1 participant".to_string(),
-            ));
+        let k = self.participants.len();
+        if k == 0 || k > MAX_LOTTERY_PARTICIPANTS {
+            return Err(DepositsError::InvalidState(format!(
+                "Lottery requires 1..={} participants (got {})",
+                MAX_LOTTERY_PARTICIPANTS, k
+            )));
         }
-        // DEP-03: a sole eligible armer takes custody without a draw. Its
-        // claim leaf is a plain signature check; no preimage is revealed.
-        if n == 1 {
+        if k == 1 {
             return Ok(Builder::new()
                 .push_x_only_key(&self.participants[0].pubkey)
                 .push_opcode(OP_CHECKSIG)
                 .into_script());
         }
-        if n > crate::constants::MAX_DISPUTANTS {
-            return Err(DepositsError::InvalidState(format!(
-                "Lottery dispatch supports at most {} participants \
-                 (MAX_DISPUTANTS); the protocol's hard cap",
-                crate::constants::MAX_DISPUTANTS
-            )));
-        }
-        if bounds_n < n || bounds_n > crate::constants::MAX_DISPUTANTS {
-            return Err(DepositsError::InvalidState(format!(
-                "bounds_n {} must satisfy participants.len() ({}) \
-                 <= bounds_n <= MAX_DISPUTANTS ({})",
-                bounds_n,
-                n,
-                crate::constants::MAX_DISPUTANTS
-            )));
-        }
-
-        let mut builder = Builder::new();
-
-        // Process each preimage and accumulate size contributions
-        // Stack starts with: <sig> <preimage_n> ... <preimage_1>
-        // After processing preimage_1: altstack has contribution_1
-
-        // Per-participant bounds for the revealed preimage. The committer
-        // chose `commitment_hash = HASH160(preimage)` at arming time; the
-        // hash check below pins which preimage they must reveal, but it
-        // does NOT constrain how long that preimage is — the committer
-        // could have hashed a 1-byte or 10_000-byte string and the hash
-        // check would still pass at reveal. We use `LEN(preimage) - 16`
-        // as the per-participant contribution to the winner-selection
-        // sum, so an out-of-range LEN poisons the lottery for the entire
-        // quorum (the attacker shifts `sum mod N` to a winner of their
-        // choosing). Force `LEN(preimage) ∈ [17, 16+N]` in script so the
-        // reveal fails on the attacker's leaf rather than corrupting the
-        // shared draw.
-        let max_len: i64 = 16 + (bounds_n as i64);
-        for (i, participant) in self.participants.iter().enumerate() {
-            // Stack: ... <preimage_i>
-            // Duplicate for hash check
-            builder = builder.push_opcode(OP_DUP);
-            // Hash the preimage
-            builder = builder.push_opcode(OP_HASH160);
-            // Push expected hash and verify
-            builder = builder.push_slice(participant.commitment_hash);
-            builder = builder.push_opcode(OP_EQUALVERIFY);
-            // Now stack has: ... <preimage_i>
-            // Get size
-            builder = builder.push_opcode(OP_SIZE);
-            // Stack: ... <preimage_i> <size>
-            // Bounds: size >= 17 (so contribution >= 1)
-            builder = builder.push_opcode(OP_DUP);
-            builder = builder.push_int(17);
-            builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-            builder = builder.push_opcode(OP_VERIFY);
-            // Bounds: size <= 16+N (so contribution <= N)
-            builder = builder.push_opcode(OP_DUP);
-            builder = builder.push_int(max_len);
-            builder = builder.push_opcode(OP_LESSTHANOREQUAL);
-            builder = builder.push_opcode(OP_VERIFY);
-            // Stack: ... <preimage_i> <size>
-            // Swap and drop the preimage (we only need the size)
-            builder = builder.push_opcode(OP_SWAP);
-            builder = builder.push_opcode(OP_DROP);
-            // Stack: ... <size>
-            // Subtract 16 to get contribution (1..=N)
-            builder = builder.push_int(16);
-            builder = builder.push_opcode(OP_SUB);
-            // Stack: ... <contribution_i>
-
-            if i < n - 1 {
-                // Not the last one - save to altstack
-                builder = builder.push_opcode(OP_TOALTSTACK);
-            }
-            // Last contribution stays on main stack
-        }
-
-        // Now main stack has: <sig> <contribution_n>
-        // Altstack has: <contribution_1> ... <contribution_n-1>
-
-        // Sum all contributions
-        for _ in 0..(n - 1) {
-            builder = builder.push_opcode(OP_FROMALTSTACK);
-            builder = builder.push_opcode(OP_ADD);
-        }
-        // Stack: <sig> <total_sum>
-
-        // Two dispatch strategies, both starting from stack `<sig> <total_sum>`.
-        //
-        // Linear (N in 2..=5 and 11..=15): compute `sum mod N` via repeated
-        // conditional subtraction (OP_MOD is OP_SUCCESS in Tapscript), then
-        // dispatch on the resulting index 0..N-1. O(N) for both the modulo
-        // and the dispatch — total ~1.2 KB at N=15. The original design
-        // specified a BinaryTree for N=11..=15; we deviated because Linear
-        // is structurally simpler (shared with Regime A) and the dispatch
-        // tree's structural bytes outweigh the savings from a smaller index
-        // dispatch at this N.
-        //
-        // CombinedTable (N in 6..=10): skip the modulo entirely; emit one
-        // arm per integer sum in `[N, N²]`, each routing directly to
-        // `pubkey_(s mod N)`. Larger than Linear at every N (the O(N²-N+1)
-        // dispatch dominates), but kept here as a deliberate structural
-        // demonstration of the regime in the design doc; past N=10 even the
-        // demonstration becomes impractical (211 arms ≈ 8.7 KB at N=15) so
-        // Linear takes over again.
-        if !(6..=10).contains(&n) {
-            // Stack: <sig> <total_sum>
-            //
-            // Compute `sum mod N` by repeatedly subtracting N while sum >= N.
-            // Max sum is N² so we need at most N subtractions.
-            let n_int = n as i64;
-            for _ in 0..n {
-                builder = builder.push_opcode(OP_DUP);
-                builder = builder.push_int(n_int);
-                builder = builder.push_opcode(OP_GREATERTHANOREQUAL);
-                builder = builder.push_opcode(OP_IF);
-                builder = builder.push_int(n_int);
-                builder = builder.push_opcode(OP_SUB);
-                builder = builder.push_opcode(OP_ENDIF);
-            }
-            // Stack: <sig> <winner_index> where winner_index ∈ 0..N
-
-            // Linear dispatch on winner_index.
-            for (i, participant) in self.participants.iter().enumerate() {
-                builder = builder.push_opcode(OP_DUP);
-                builder = builder.push_int(i as i64);
-                builder = builder.push_opcode(OP_EQUAL);
-                builder = builder.push_opcode(OP_IF);
-                builder = builder.push_opcode(OP_DROP);
-                builder = builder.push_x_only_key(&participant.pubkey);
-                builder = builder.push_opcode(OP_CHECKSIG);
-                builder = builder.push_opcode(OP_ELSE);
-            }
-            builder = builder.push_opcode(OP_DROP);
-            builder = builder.push_opcode(OP_PUSHBYTES_0);
-            for _ in 0..n {
-                builder = builder.push_opcode(OP_ENDIF);
-            }
-        } else {
-            // Stack: <sig> <total_sum>, where total_sum ∈ [N, N²].
-            //
-            // Combined-table dispatch: one arm per integer sum value, each
-            // routing to `pubkey_(s mod N)`. We emit `N² - N + 1` arms in
-            // ascending order; structurally identical to the linear case but
-            // keyed on sum rather than index.
-            let sum_min = n;
-            let sum_max = n * n;
-            let arm_count = sum_max - sum_min + 1;
-
-            for s in sum_min..=sum_max {
-                let winner = s % n;
-                let participant = &self.participants[winner];
-                builder = builder.push_opcode(OP_DUP);
-                builder = builder.push_int(s as i64);
-                builder = builder.push_opcode(OP_EQUAL);
-                builder = builder.push_opcode(OP_IF);
-                builder = builder.push_opcode(OP_DROP);
-                builder = builder.push_x_only_key(&participant.pubkey);
-                builder = builder.push_opcode(OP_CHECKSIG);
-                builder = builder.push_opcode(OP_ELSE);
-            }
-            builder = builder.push_opcode(OP_DROP);
-            builder = builder.push_opcode(OP_PUSHBYTES_0);
-            for _ in 0..arm_count {
-                builder = builder.push_opcode(OP_ENDIF);
-            }
-        }
-
-        Ok(builder.into_script())
+        Ok(build_claim_body(&self.participants))
     }
 
-    /// Build the partial-reveal claim leaves for a single missing
-    /// disputant (K=1 coverage).
-    ///
-    /// Returns one leaf per disputant index `j` in `0..N`, each prefixed
-    /// with `<PARTIAL_REVEAL_CSV_BLOCKS> OP_CSV OP_DROP` and followed by
-    /// a regular lottery script over the `N-1` revealers excluding `j`.
-    /// Empty `Vec` for `N < PARTIAL_REVEAL_MIN_N` (= 3) — the sub-lottery
-    /// needs at least 2 participants to dispatch.
-    ///
-    /// This covers the dominant partial-reveal failure mode (one
-    /// disputant fails to reveal) while preserving lottery randomness.
-    /// Cases with two or more non-revealers fall back to the CSV-144
-    /// quorum recovery long-tail. K≥2 coverage is a pure
-    /// construction-time extension if production reliability data
-    /// warrants it; no protocol or message changes needed.
-    ///
-    /// Note that the sub-lottery's regime is determined by `N-1`, not N:
-    /// at N=3..=6 the partial leaves are 2..=5-disputant Linear; at
-    /// N=7..=11 they are 6..=10-disputant CombinedTable; at N=12..=15
-    /// they are 11..=14-disputant Linear-after-mod.
-    pub fn build_partial_reveal_leaves(&self) -> DepositsResult<Vec<ScriptBuf>> {
-        let n = self.participants.len();
-        if n < PARTIAL_REVEAL_MIN_N {
+    /// The voters' attestation prefix of a subset leaf: CSV 72, then every
+    /// recovery voter (sorted) in a CHECKSIGADD threshold, verified.
+    fn build_attest_prefix(&self) -> DepositsResult<ScriptBuf> {
+        if self.recovery_voters.len() < self.recovery_threshold || self.recovery_voters.is_empty() {
+            return Err(DepositsError::InvalidState(format!(
+                "Not enough recovery voters ({}) for threshold ({})",
+                self.recovery_voters.len(),
+                self.recovery_threshold
+            )));
+        }
+        let mut sorted_keys = self.recovery_voters.clone();
+        sorted_keys.sort_by_key(|a| a.serialize());
+        let mut builder = Builder::new()
+            .push_int(LOTTERY_REVEAL_CSV_BLOCKS as i64)
+            .push_opcode(OP_CSV)
+            .push_opcode(OP_DROP)
+            .push_x_only_key(&sorted_keys[0])
+            .push_opcode(OP_CHECKSIG);
+        for key in sorted_keys.iter().skip(1) {
+            builder = builder.push_x_only_key(key).push_opcode(OP_CHECKSIGADD);
+        }
+        Ok(builder
+            .push_int(self.recovery_threshold as i64)
+            .push_opcode(OP_GREATERTHANOREQUAL)
+            .push_opcode(OP_VERIFY)
+            .into_script())
+    }
+
+    /// `(indices, leaf)` for every nonempty proper subset of the
+    /// participants, in tree order; empty for `k < 2`.
+    pub fn build_subset_leaves(&self) -> DepositsResult<Vec<(Vec<usize>, ScriptBuf)>> {
+        let k = self.participants.len();
+        if k < 2 {
             return Ok(vec![]);
         }
-
-        let mut leaves = Vec::with_capacity(n);
-        for missing_idx in 0..n {
-            let revealers: Vec<LotteryParticipant> = self
-                .participants
-                .iter()
-                .enumerate()
-                .filter_map(|(j, p)| {
-                    if j == missing_idx {
-                        None
-                    } else {
-                        Some(p.clone())
-                    }
-                })
-                .collect();
-
-            let sub_builder = LotteryScriptBuilder::new(
-                revealers,
-                self.recovery_voters.clone(),
-                self.recovery_threshold,
-                self.network,
-            );
-            // Use the parent `N` for size bounds: each surviving
-            // participant's commitment was chosen under the parent-N
-            // contract (preimage length in `17..=16+N`), so the
-            // sub-lottery must accept the same range even though its own
-            // participant count is `N-1`.
-            let inner = sub_builder.build_lottery_script_with_bounds_n(n)?;
-
-            let prefix = Builder::new()
-                .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
-                .push_opcode(OP_CSV)
-                .push_opcode(OP_DROP)
-                .into_script();
-
-            let mut bytes = prefix.into_bytes();
-            bytes.extend_from_slice(inner.as_bytes());
-            leaves.push(ScriptBuf::from(bytes));
-        }
-
-        Ok(leaves)
+        let prefix = self.build_attest_prefix()?;
+        Ok(lottery_subset_indices(k)
+            .into_iter()
+            .map(|idx| {
+                let members: Vec<LotteryParticipant> =
+                    idx.iter().map(|&i| self.participants[i].clone()).collect();
+                let mut bytes = prefix.clone().into_bytes();
+                bytes.extend_from_slice(build_claim_body(&members).as_bytes());
+                (idx, ScriptBuf::from(bytes))
+            })
+            .collect())
     }
 
     /// Build a recovery script for when revelation stalls.
@@ -1259,39 +1132,16 @@ impl LotteryScriptBuilder {
         Ok(builder.into_script())
     }
 
-    /// Build the complete Taproot lottery output.
-    ///
-    /// Leaf order (also the order they appear in the Taproot tree, which
-    /// matters only for control-block determinism — the spender picks any
-    /// leaf):
-    /// - Leaf 0: Lottery claim script (preimage reveal + winner sig)
-    /// - Leaves 1..=N (when `N >= PARTIAL_REVEAL_MIN_N`): partial-reveal
-    ///   claim, one per missing disputant index `j`, CSV 72
-    /// - Recovery long-tail:
-    ///   - CSV 144,  threshold T
-    ///   - CSV 1008, threshold T-1
-    ///   - CSV 4032, threshold T-2
-    /// - Timeout recovery: CSV 8064, threshold 1 (escape hatch for
-    ///   retry-depth exhaustion or total operator absence)
-    ///
-    /// Total leaves: 5 for `N = 2` (below `PARTIAL_REVEAL_MIN_N = 3`),
-    /// `5 + N` otherwise. At N=15 that's 20 leaves → Merkle depth
-    /// `⌈log₂ 20⌉ = 5`.
+    /// Build the complete Taproot lottery output: the full-set leaf, the
+    /// subset leaves, then the recovery cascade (CSV 144 / 1008 / 4032 with
+    /// thresholds T / T-1 / T-2) and the CSV-8064 single-voter escape hatch.
+    /// Depths follow the balanced layout (DEP-03).
     pub fn build(&self) -> DepositsResult<LotteryOutput> {
         let secp = Secp256k1::new();
 
-        // Build lottery claim script
         let lottery_script = self.build_lottery_script()?;
+        let subset_scripts = self.build_subset_leaves()?;
 
-        // Build partial-reveal claim leaves (empty for N < 11)
-        let partial_reveal_scripts = self.build_partial_reveal_leaves()?;
-
-        // Build recovery scripts with degrading thresholds, plus a final
-        // CSV-8064 timeout-recovery leaf with threshold 1. The latter is
-        // the escape hatch for retry-depth exhaustion: if `⌊N/2⌋` lottery
-        // rounds have failed in cascading defection-and-re-dispute, the
-        // dispute is declared void at the orchestration layer and any
-        // single recovery voter can spend through this leaf.
         let recovery_specs = [
             (144u32, self.recovery_threshold), // ~1 day, T
             (1008, self.recovery_threshold.saturating_sub(1).max(1)), // ~1 week, T-1
@@ -1300,9 +1150,9 @@ impl LotteryScriptBuilder {
         ];
 
         let mut leaves: Vec<ScriptBuf> =
-            Vec::with_capacity(1 + partial_reveal_scripts.len() + recovery_specs.len());
+            Vec::with_capacity(1 + subset_scripts.len() + recovery_specs.len());
         leaves.push(lottery_script.clone());
-        leaves.extend(partial_reveal_scripts.iter().cloned());
+        leaves.extend(subset_scripts.iter().map(|(_, s)| s.clone()));
         for (csv, threshold) in recovery_specs {
             let builder = LotteryScriptBuilder::new(
                 self.participants.clone(),
@@ -1314,7 +1164,6 @@ impl LotteryScriptBuilder {
         }
 
         // Use NUMS point as internal key (unspendable key path)
-        // NUMS = "Nothing Up My Sleeve" - provably unspendable
         let nums_point = XOnlyPublicKey::from_slice(&[
             0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9,
             0x7a, 0x5e, 0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a,
@@ -1322,12 +1171,9 @@ impl LotteryScriptBuilder {
         ])
         .map_err(|_| DepositsError::InvalidState("Invalid NUMS point".to_string()))?;
 
-        // Build a Taproot tree with depths that match a balanced layout
-        // for the given leaf count. For `m` leaves where `2^(d-1) < m <=
-        // 2^d`, we put `2*(m - 2^(d-1))` leaves at depth `d` and the
-        // remaining `2^d - m` at depth `d-1`. Power-of-2 m collapses to
-        // all leaves at depth d. The TaprootBuilder fills slots in
-        // call order, so we add the deeper leaves first.
+        // For `m` leaves where `2^(d-1) < m <= 2^d`, `2*(m - 2^(d-1))` leaves
+        // at depth `d` and the remaining `2^d - m` at depth `d-1`, deeper ones
+        // first (the TaprootBuilder fills slots in call order).
         let m = leaves.len();
         let builder = if m == 1 {
             TaprootBuilder::new().add_leaf(0, leaves[0].clone())
@@ -1368,7 +1214,7 @@ impl LotteryScriptBuilder {
             spend_info,
             participants: self.participants.clone(),
             lottery_script,
-            partial_reveal_scripts,
+            subset_scripts,
             recovery_voters: self.recovery_voters.clone(),
             recovery_threshold: self.recovery_threshold,
             network: self.network,
@@ -1383,14 +1229,13 @@ pub struct LotteryOutput {
     pub address: Address,
     /// Taproot spend info (needed for spending)
     pub spend_info: TaprootSpendInfo,
-    /// Lottery participants
+    /// Lottery participants, in canonical order
     pub participants: Vec<LotteryParticipant>,
-    /// The lottery claim script
+    /// The full-set claim script
     pub lottery_script: ScriptBuf,
-    /// Partial-reveal claim scripts, indexed by the missing disputant.
-    /// Empty for `N < PARTIAL_REVEAL_MIN_N` (= 3). `partial_reveal_scripts[j]`
-    /// is the leaf used when disputant `j` failed to reveal.
-    pub partial_reveal_scripts: Vec<ScriptBuf>,
+    /// `(participant indices, leaf)` for every nonempty proper subset, in
+    /// tree order. Empty for a sole participant.
+    pub subset_scripts: Vec<(Vec<usize>, ScriptBuf)>,
     /// Recovery voters (quorum minus disputed operator)
     pub recovery_voters: Vec<XOnlyPublicKey>,
     /// Recovery threshold
@@ -1413,21 +1258,27 @@ impl LotteryOutput {
         }
     }
 
-    /// Get the control block for the lottery claim script
+    /// Get the control block for the full-set claim script
     pub fn lottery_control_block(&self) -> Option<bitcoin::taproot::ControlBlock> {
         self.spend_info
             .control_block(&(self.lottery_script.clone(), LeafVersion::TapScript))
     }
 
-    /// Get the control block for the partial-reveal leaf at index
-    /// `missing_idx`. Returns `None` if N < `PARTIAL_REVEAL_MIN_N` (no
-    /// partial-reveal leaves exist) or if `missing_idx` is out of
-    /// range.
-    pub fn partial_reveal_control_block(
+    /// The claim leaf of the revealer subset `indices` (ascending participant
+    /// indices), if it is a proper subset.
+    pub fn subset_leaf(&self, indices: &[usize]) -> Option<&ScriptBuf> {
+        self.subset_scripts
+            .iter()
+            .find(|(idx, _)| idx.as_slice() == indices)
+            .map(|(_, s)| s)
+    }
+
+    /// Control block for the revealer subset `indices`.
+    pub fn subset_control_block(
         &self,
-        missing_idx: usize,
+        indices: &[usize],
     ) -> Option<bitcoin::taproot::ControlBlock> {
-        let leaf = self.partial_reveal_scripts.get(missing_idx)?.clone();
+        let leaf = self.subset_leaf(indices)?.clone();
         self.spend_info
             .control_block(&(leaf, LeafVersion::TapScript))
     }
@@ -1439,11 +1290,8 @@ impl LotteryOutput {
     ///   - `(4032, T-2)`   ~4 weeks
     ///   - `(8064, 1)`     ~8 weeks, the timeout-recovery escape hatch
     ///
-    /// `T` is `self.recovery_threshold`. The lower thresholds clamp at 1 via
-    /// `saturating_sub(N).max(1)`, mirroring `build`'s `recovery_specs`.
-    ///
-    /// Spenders pick whichever leaf they can satisfy: an honest sweep takes
-    /// the lowest CSV that their available signer set meets the threshold for.
+    /// Honest voters spend these only into a re-arm round's lottery output
+    /// (DEP-06 Phase 4), never to the accused operator.
     pub fn recovery_leaves(&self) -> Vec<(u32, usize, ScriptBuf)> {
         let specs: [(u32, usize); 4] = [
             (144, self.recovery_threshold),
@@ -1479,271 +1327,155 @@ impl LotteryOutput {
             .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
     }
 
-    /// The x-only recovery voter keys in the sorted order the recovery leaf
-    /// script consumes them (script encodes the first key with CHECKSIG, then
-    /// the rest with CHECKSIGADD; both `build_recovery_script` and this helper
-    /// sort by `.serialize()`). Use this to build the `signatures: &[Option<
-    /// [u8; 64]>]` arg to `ReservesSpendBuilder::create_checksigadd_witness`
-    /// — index `i` of that arg corresponds to the key at `recovery_voter_order()[i]`.
+    /// The x-only recovery voter keys in the sorted order the recovery and
+    /// attestation scripts consume them. Index `i` of a `voter_signatures`
+    /// argument corresponds to `recovery_voter_order()[i]`.
     pub fn recovery_voter_order(&self) -> Vec<XOnlyPublicKey> {
         let mut sorted = self.recovery_voters.clone();
         sorted.sort_by_key(|k| k.serialize());
         sorted
     }
 
-    /// Create a witness for spending through the partial-reveal leaf
-    /// when disputant `missing_idx` failed to reveal.
-    ///
-    /// Caller responsibilities:
-    /// - The spending tx's input must have `nSequence >= PARTIAL_REVEAL_CSV_BLOCKS`,
-    ///   otherwise the OP_CSV at the leaf's prefix will reject.
-    /// - `winner_signature` must be a valid Schnorr sig over the tx
-    ///   sighash by the (sum mod (N-1))-th revealer (in disputant order
-    ///   excluding `missing_idx`).
-    /// - `preimages` must contain exactly `N-1` items in the order of
-    ///   the remaining disputants (i.e., disputant indices
-    ///   `0..N` with `missing_idx` removed). Each preimage must hash
-    ///   under HASH160 to the corresponding committed hash.
-    ///
-    /// Witness layout (matches `create_claim_witness`):
-    /// `[sig, preimage_{N-2}, ..., preimage_0, leaf_script, control_block]`
-    /// — sig at the bottom of the stack, preimage of the first
-    /// remaining disputant on top.
-    pub fn create_partial_reveal_witness(
-        &self,
-        missing_idx: usize,
-        winner_signature: &[u8; 64],
-        preimages: &[Vec<u8>],
-    ) -> DepositsResult<Witness> {
-        let n = self.participants.len();
-        if n < PARTIAL_REVEAL_MIN_N {
-            return Err(DepositsError::InvalidState(format!(
-                "Partial-reveal claim leaves only exist for N >= {}; this output has N={}",
-                PARTIAL_REVEAL_MIN_N, n
-            )));
-        }
-        if missing_idx >= n {
-            return Err(DepositsError::InvalidState(format!(
-                "missing_idx {} out of range for N={}",
-                missing_idx, n
-            )));
-        }
-        if preimages.len() != n - 1 {
-            return Err(DepositsError::InvalidState(format!(
-                "Expected {} preimages (N-1) for partial-reveal at missing_idx={}; got {}",
-                n - 1,
-                missing_idx,
-                preimages.len()
-            )));
-        }
-
-        let leaf_script = self
-            .partial_reveal_scripts
-            .get(missing_idx)
-            .ok_or_else(|| {
-                DepositsError::InvalidState(format!(
-                    "Partial-reveal leaf {} not present in this output",
-                    missing_idx
-                ))
-            })?
-            .clone();
-
-        let control_block = self
-            .partial_reveal_control_block(missing_idx)
-            .ok_or_else(|| {
-                DepositsError::InvalidState(format!(
-                    "Partial-reveal control block {} not present in spend_info",
-                    missing_idx
-                ))
-            })?;
-
-        let mut witness = Witness::new();
-        witness.push(&winner_signature[..]);
-        for preimage in preimages.iter().rev() {
-            witness.push(preimage);
-        }
-        witness.push(leaf_script.as_bytes());
-        witness.push(control_block.serialize());
-
-        Ok(witness)
-    }
-
-    /// Calculate the winner given revealed preimages.
-    ///
-    /// Each preimage must be 17 to (16+N) bytes — the contribution
-    /// `LEN(preimage) - 16` is in `1..=N` so that one byte length
-    /// uniformly chosen from `1..=N` produces a uniform `sum mod N`
-    /// (the commit-reveal randomness extraction property only holds
-    /// when each contribution covers a full residue class). Returns
-    /// the winning participant's index.
+    /// The winner's index among `preimages` (in member order): the sum of
+    /// `LEN - 16` mod their count. Each preimage must be `17..=76` bytes.
     pub fn calculate_winner(preimages: &[Vec<u8>]) -> DepositsResult<usize> {
         let n = preimages.len();
-        if n == 1 {
-            return Ok(0); // a sole participant (DEP-03): no draw
-        }
-        if n < 2 {
+        if n == 0 {
             return Err(DepositsError::InvalidState(
                 "Need at least 1 preimage".to_string(),
             ));
         }
-
-        let max_len = 16 + n;
         let mut sum: usize = 0;
         for (i, preimage) in preimages.iter().enumerate() {
             let len = preimage.len();
-            if !(17..=max_len).contains(&len) {
+            if !(17..=LOTTERY_MAX_PREIMAGE_LEN).contains(&len) {
                 return Err(DepositsError::InvalidState(format!(
                     "Preimage {} has invalid length {} (must be 17..={})",
-                    i, len, max_len
+                    i, len, LOTTERY_MAX_PREIMAGE_LEN
                 )));
             }
-            sum += len - 16; // contribution in 1..=N
+            sum += len - 16;
         }
-
         Ok(sum % n)
     }
 
-    /// Derive a dispute-lottery preimage of the correct length from a
-    /// 256-bit entropy seed and the disputant count `n`.
-    ///
-    /// # Why this exists
-    ///
-    /// The lottery selects the winner from the *byte lengths* of the
-    /// revealed preimages: `contribution_i = LEN(preimage_i) - 16`, and
-    /// `winner = (Σ contribution_i) mod n`. For the commit-reveal
-    /// randomness-extraction property to hold, an honest disputant must
-    /// choose its length uniformly from `[17, 16+n]` — equivalently its
-    /// contribution uniformly from the complete residue system
-    /// `{1, .., n}` mod `n`. See `CUSTODY_LOTTERY.md` §"Why this is fair".
-    ///
-    /// A prior implementation returned the raw 32-byte HMAC directly as
-    /// the preimage. Length 32 is out of range for every realistic `n`
-    /// (the on-chain claim leaf enforces `LEN ∈ [17, 16+n]` via `OP_SIZE`
-    /// and [`calculate_winner`] rejects it), so the fast lottery-claim
-    /// leaf was unspendable. This helper fixes that: same seed → same
-    /// length → same bytes → same `HASH160`, at both arm-time (commitment)
-    /// and reveal-time.
-    ///
-    /// # Length derivation (uniform over `[17, 16+n]`)
-    ///
-    /// The 256-bit seed is reduced mod `n` to pick the contribution:
-    ///
-    /// ```text
-    /// contribution = (seed mod n) + 1     // uniform-ish in [1, n]
-    /// length       = 16 + contribution    // in [17, 16+n]
-    /// ```
-    ///
-    /// With a 256-bit uniform seed and `n <= MAX_DISPUTANTS = 15`, the
-    /// modulo bias away from perfectly-uniform is at most
-    /// `n / 2^256 < 2^-252`, i.e. cryptographically negligible: no
-    /// residue class is favoured in any way an adversary could exploit.
-    ///
-    /// # Preimage bytes (anti-grinding)
-    ///
-    /// The preimage's *content* must (a) be a deterministic function of
-    /// the seed so arm and reveal agree byte-for-byte, and (b) carry
-    /// enough entropy that an adversary cannot, after seeing the target
-    /// length, grind a *different* preimage of a *different* length with
-    /// the same `HASH160` (a length swap would move the sum). The bytes
-    /// are the first `length` bytes of `SHA256("deposits/lottery/preimage/v1"
-    /// || seed || n)`, re-expanded by re-hashing if `length` ever exceeds
-    /// 32 (it never does for `n <= 15`, where `length <= 31`, but the
-    /// expansion keeps the helper total-correct for the full domain).
-    /// Because `length >= 17`, the preimage carries at least 136 bits of
-    /// entropy — HASH160's 160-bit output means a second-preimage of a
-    /// different length costs ~2^80 work, far beyond any disputant.
-    ///
-    /// `n` must be in `2..=MAX_DISPUTANTS`; the returned preimage always
-    /// satisfies `calculate_winner`'s per-preimage bound for that `n` and
-    /// the on-chain leaf built with the same `bounds_n = n`.
-    pub fn derive_lottery_preimage(seed: &[u8; 32], n: usize) -> DepositsResult<Vec<u8>> {
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
-        if !(2..=crate::constants::MAX_DISPUTANTS).contains(&n) {
-            return Err(DepositsError::InvalidState(format!(
-                "lottery preimage derivation needs 2 <= n <= {} (got {})",
-                crate::constants::MAX_DISPUTANTS,
-                n
-            )));
+    /// The winning participant index (into the full canonical order) of the
+    /// draw over `indices`, given `preimages` parallel to `indices`.
+    pub fn subset_winner(indices: &[usize], preimages: &[Vec<u8>]) -> DepositsResult<usize> {
+        if indices.len() != preimages.len() {
+            return Err(DepositsError::InvalidState(
+                "subset and preimages differ in length".to_string(),
+            ));
         }
+        Ok(indices[Self::calculate_winner(preimages)?])
+    }
 
-        // Reduce the 256-bit seed mod n via Horner's method over bytes,
-        // most-significant first: seed mod n = (((b0)*256 + b1)*256 + ...) mod n.
-        // This is exact for the full 256-bit value without bignum types.
+    /// Derive a dispute-lottery preimage from a 256-bit seed, independent of
+    /// how many arm: length `17 + (seed mod 60)`, bytes the first `length`
+    /// bytes of `SHA256("deposits/lottery/preimage/v2" || seed || counter_le32)`
+    /// for counter = 0, 1, ... The length (the contribution) is uniform over
+    /// `1..=60` up to a `60 / 2^256` bias; at least 17 bytes keeps a
+    /// second preimage of another length out of reach (~2^80 under HASH160).
+    pub fn derive_lottery_preimage(seed: &[u8; 32]) -> Vec<u8> {
+        use bitcoin::hashes::{sha256, Hash, HashEngine};
         let mut residue: u64 = 0;
         for &byte in seed.iter() {
-            residue = (residue * 256 + byte as u64) % (n as u64);
+            residue = (residue * 256 + byte as u64) % (LOTTERY_CONTRIBUTION_RANGE as u64);
         }
-        let contribution = (residue as usize) + 1; // in [1, n]
-        let length = 16 + contribution; // in [17, 16+n]
-
-        // Deterministic preimage bytes: SHA256(domain || seed || n_le),
-        // expanded by counter re-hashing if length > 32 (unreachable for
-        // n <= 15, kept for total correctness).
+        let length = 17 + residue as usize;
         let mut out = Vec::with_capacity(length);
         let mut counter: u32 = 0;
         while out.len() < length {
             let mut eng = sha256::Hash::engine();
-            eng.input(b"deposits/lottery/preimage/v1");
+            eng.input(b"deposits/lottery/preimage/v2");
             eng.input(seed);
-            eng.input(&(n as u64).to_le_bytes());
             eng.input(&counter.to_le_bytes());
             let block = sha256::Hash::from_engine(eng).to_byte_array();
             let take = (length - out.len()).min(block.len());
             out.extend_from_slice(&block[..take]);
             counter += 1;
         }
-        debug_assert_eq!(out.len(), length);
-        Ok(out)
+        out
     }
 
-    /// Create a witness for claiming the lottery output.
-    ///
-    /// The winner must provide their signature and all participants' preimages.
-    /// Preimages must be in the same order as participants.
+    /// Witness for the full-set claim leaf:
+    /// `[sig, preimage_{k-1}, ..., preimage_0, leaf, control]` (a sole
+    /// participant's leaf takes only the signature).
     pub fn create_claim_witness(
         &self,
         winner_signature: &[u8; 64],
         preimages: &[Vec<u8>],
     ) -> DepositsResult<Witness> {
-        if preimages.len() != self.participants.len() {
+        if self.participants.len() > 1 && preimages.len() != self.participants.len() {
             return Err(DepositsError::InvalidState(format!(
                 "Expected {} preimages, got {}",
                 self.participants.len(),
                 preimages.len()
             )));
         }
-
         let control_block = self
             .lottery_control_block()
             .ok_or_else(|| DepositsError::InvalidState("No control block".to_string()))?;
-
         let mut witness = Witness::new();
-
-        // Witness stack order (top to bottom after Tapscript setup):
-        //   preimage_0 (top) - processed first by script
-        //   preimage_1
-        //   ...
-        //   preimage_n-1
-        //   signature (bottom) - used by CHECKSIG at script end
-        //
-        // Witness array maps to stack: witness[0] -> bottom, witness[n-1] -> top
-        // So push: signature first, then preimages in reverse order
-
         witness.push(&winner_signature[..]);
-
-        // A sole participant's leaf checks only the signature (DEP-03).
         if self.participants.len() > 1 {
             for preimage in preimages.iter().rev() {
                 witness.push(preimage);
             }
         }
-
-        // Push the lottery script
         witness.push(self.lottery_script.as_bytes());
-
-        // Push the control block
         witness.push(control_block.serialize());
+        Ok(witness)
+    }
 
+    /// Witness for the revealer-subset leaf `indices`:
+    /// `[sig, preimage_{s_{m-1}}, ..., preimage_{s_0}, vsig_{r-1}, ..., vsig_0,
+    /// leaf, control]`. `preimages` parallel `indices`; `voter_signatures`
+    /// parallel `recovery_voter_order()`, `None` pushing empty. The input's
+    /// `nSequence` must be at least `LOTTERY_REVEAL_CSV_BLOCKS`.
+    pub fn create_subset_claim_witness(
+        &self,
+        indices: &[usize],
+        winner_signature: &[u8; 64],
+        preimages: &[Vec<u8>],
+        voter_signatures: &[Option<[u8; 64]>],
+    ) -> DepositsResult<Witness> {
+        if preimages.len() != indices.len() {
+            return Err(DepositsError::InvalidState(format!(
+                "Expected {} preimages for the subset, got {}",
+                indices.len(),
+                preimages.len()
+            )));
+        }
+        if voter_signatures.len() != self.recovery_voters.len() {
+            return Err(DepositsError::InvalidState(format!(
+                "Expected {} voter signature slots, got {}",
+                self.recovery_voters.len(),
+                voter_signatures.len()
+            )));
+        }
+        let leaf = self
+            .subset_leaf(indices)
+            .ok_or_else(|| {
+                DepositsError::InvalidState(format!("No claim leaf for subset {:?}", indices))
+            })?
+            .clone();
+        let control_block = self.subset_control_block(indices).ok_or_else(|| {
+            DepositsError::InvalidState(format!("No control block for subset {:?}", indices))
+        })?;
+        let mut witness = Witness::new();
+        witness.push(&winner_signature[..]);
+        for preimage in preimages.iter().rev() {
+            witness.push(preimage);
+        }
+        for sig in voter_signatures.iter().rev() {
+            match sig {
+                Some(s) => witness.push(&s[..]),
+                None => witness.push([]),
+            }
+        }
+        witness.push(leaf.as_bytes());
+        witness.push(control_block.serialize());
         Ok(witness)
     }
 }
@@ -1941,8 +1673,8 @@ pub fn build_armer_share_output(
 
 /// Identify the revealer set from a lottery output's claim TX witness.
 ///
-/// Both the primary-lottery claim and the partial-reveal claims expose every
-/// participating armer's preimage in the witness stack. Walk the stack,
+/// The full-set and revealer-subset claims expose every revealing
+/// armer's preimage in the witness stack. Walk the stack,
 /// HASH160 each item that could be a preimage, and match against the
 /// known `armers` list (by commitment_hash). Return the matched armer
 /// pubkeys, sorted by xonly bytes for determinism — every honest sweeper
@@ -1962,11 +1694,9 @@ pub fn revealers_from_claim_witness(
 
     let mut revealers: Vec<XOnlyPublicKey> = Vec::new();
     for item in claim_witness.iter() {
-        // The legal preimage length range is `17..=16+N` per CUSTODY_LOTTERY.md.
-        // N is at most MAX_DISPUTANTS = 15, so the upper bound is 31. Skip items
-        // outside this range to avoid hashing the signature (64), leaf script
-        // (variable larger), or control block (33+).
-        if item.len() < 17 || item.len() > 16 + crate::constants::MAX_DISPUTANTS {
+        // Preimages are 17..=76 bytes. Other items in that range (64-byte
+        // signatures) hash to no commitment and are skipped below.
+        if item.len() < 17 || item.len() > LOTTERY_MAX_PREIMAGE_LEN {
             continue;
         }
         let h = hash160::Hash::hash(item).to_byte_array();
@@ -1996,18 +1726,13 @@ pub fn revealers_from_claim_witness(
 /// - **N outputs** for `N = revealers.len()` revealers: each gets
 ///   `(slice_value - fee) / N` to a P2TR keyed by `armer.pubkey` (the
 ///   `XOnlyPublicKey`). Recipients are sorted by xonly bytes for determinism.
-/// - **Edge case `N == 0`**: a single output for `slice_value - fee` to
-///   `fallback_recipient` (typically the original operator's xonly key, mirroring
-///   the respectful-confiscation change output). If `fallback_recipient` is None,
-///   returns an error rather than producing an output the script couldn't agree
-///   on. The lottery already failed if no one revealed, so this branch is
-///   degenerate-but-defined.
+/// - **Edge case `N == 0`**: an error. Nobody revealed, so the slice belongs to
+///   the re-arm round (DEP-06 Phase 4), never to the accused operator.
 pub fn build_forfeit_sweep_tx(
     armer_share_outpoint: bitcoin::OutPoint,
     slice_value_sats: u64,
     revealers: &[XOnlyPublicKey],
     fee_sats: u64,
-    fallback_recipient: Option<&XOnlyPublicKey>,
     network: Network,
 ) -> DepositsResult<bitcoin::Transaction> {
     use bitcoin::{Amount, Sequence, Transaction, TxIn, TxOut, Witness};
@@ -2023,33 +1748,23 @@ pub fn build_forfeit_sweep_tx(
     let mut outs: Vec<TxOut> = Vec::new();
     let secp = Secp256k1::new();
     if revealers.is_empty() {
-        let dest = fallback_recipient.ok_or_else(|| {
-            DepositsError::InvalidState(
-                "No revealers and no fallback recipient — refusing to construct \
-                 a sweep TX with no honest payee. Pass the original operator's \
-                 xonly key as fallback per DEP-06."
-                    .to_string(),
-            )
-        })?;
-        let addr = bitcoin::Address::p2tr(&secp, *dest, None, network);
+        return Err(DepositsError::InvalidState(
+            "No revealers: the slice goes to the re-arm round (DEP-06), never the operator"
+                .to_string(),
+        ));
+    }
+    let n = revealers.len() as u64;
+    let per_revealer = spendable / n;
+    // Dust (spendable % n) is silently absorbed into the miner fee, same
+    // convention the punitive-split confiscation TX uses.
+    let mut sorted = revealers.to_vec();
+    sorted.sort_by_key(|k| k.serialize());
+    for r in &sorted {
+        let addr = bitcoin::Address::p2tr(&secp, *r, None, network);
         outs.push(TxOut {
-            value: Amount::from_sat(spendable),
+            value: Amount::from_sat(per_revealer),
             script_pubkey: addr.script_pubkey(),
         });
-    } else {
-        let n = revealers.len() as u64;
-        let per_revealer = spendable / n;
-        // Dust (spendable % n) is silently absorbed into the miner fee, same
-        // convention the punitive-split confiscation TX uses.
-        let mut sorted = revealers.to_vec();
-        sorted.sort_by_key(|k| k.serialize());
-        for r in &sorted {
-            let addr = bitcoin::Address::p2tr(&secp, *r, None, network);
-            outs.push(TxOut {
-                value: Amount::from_sat(per_revealer),
-                script_pubkey: addr.script_pubkey(),
-            });
-        }
     }
 
     Ok(Transaction {
@@ -2192,910 +1907,127 @@ mod tests {
         generate_test_pubkey(seed).x_only_public_key().0
     }
 
-    /// Count occurrences of `opcode` in `script`, walking via the proper
-    /// `Instructions` iterator so push-data bytes that happen to equal the
-    /// opcode's byte don't get miscounted.
-    fn count_opcode(script: &bitcoin::ScriptBuf, opcode: bitcoin::opcodes::Opcode) -> usize {
-        script
-            .instructions()
-            .filter_map(|inst| inst.ok())
-            .filter(|inst| {
-                matches!(
-                    inst,
-                    bitcoin::script::Instruction::Op(op) if *op == opcode
-                )
-            })
-            .count()
-    }
-
     fn test_commitment_hash(seed: u8) -> [u8; 20] {
         let mut hash = [0u8; 20];
         hash[0] = seed;
         hash
     }
 
-    #[test]
-    fn test_lottery_winner_calculation() {
-        // Test with 2 participants
-        // Preimage lengths 17 and 18 -> contributions 1 and 2 -> sum 3 -> 3 % 2 = 1
-        let preimages = vec![
-            vec![0u8; 17], // contribution 1
-            vec![0u8; 18], // contribution 2
-        ];
-        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
-        assert_eq!(winner, 1); // (1 + 2) % 2 = 1
-
-        // Preimage lengths 17 and 17 -> contributions 1 and 1 -> sum 2 -> 2 % 2 = 0
-        let preimages = vec![
-            vec![0u8; 17], // contribution 1
-            vec![0u8; 17], // contribution 1
-        ];
-        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
-        assert_eq!(winner, 0); // (1 + 1) % 2 = 0
+    fn lottery_fixture(k: usize, voters: usize, threshold: usize) -> LotteryOutput {
+        let participants: Vec<LotteryParticipant> = (1..=k as u8)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    format!("tb1p{}", i),
+                )
+            })
+            .collect();
+        let recovery: Vec<XOnlyPublicKey> = (0..voters as u8)
+            .map(|i| generate_x_only_pubkey(100 + i))
+            .collect();
+        LotteryScriptBuilder::new(participants, recovery, threshold, Network::Signet)
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn derive_lottery_preimage_length_in_range_and_deterministic() {
-        // For every supported n, the derived preimage must land in
-        // [17, 16+n] and be stable across calls (arm == reveal).
-        for n in 2..=crate::constants::MAX_DISPUTANTS {
-            for s in 0u8..32u8 {
-                let seed = [s; 32];
-                let p1 = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
-                let p2 = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
-                assert_eq!(p1, p2, "same seed+n must yield identical bytes");
-                assert!(
-                    (17..=16 + n).contains(&p1.len()),
-                    "n={} seed={} len={} out of [17,{}]",
-                    n,
-                    s,
-                    p1.len(),
-                    16 + n
-                );
-                // A single derived preimage must satisfy calculate_winner's
-                // per-preimage bound when placed among n preimages.
-                let batch: Vec<Vec<u8>> = (0..n)
-                    .map(|i| {
-                        LotteryOutput::derive_lottery_preimage(&[s.wrapping_add(i as u8); 32], n)
-                            .unwrap()
-                    })
-                    .collect();
-                LotteryOutput::calculate_winner(&batch)
-                    .expect("derived batch must be a valid winner input");
-            }
-        }
-    }
-
-    #[test]
-    fn derive_lottery_preimage_length_is_uniform() {
-        // The contribution (len-16) must be ~uniform over [1,n]. Drive
-        // the derivation with many distinct random-ish seeds and assert
-        // every residue class 1..=n is hit and the distribution is close
-        // to flat (chi-square-free sanity: no class < half or > double
-        // the expected count over a large sample).
-        use bitcoin::hashes::{sha256, Hash, HashEngine};
-        for &n in &[2usize, 3, 5, 7, 15] {
-            let trials = 20_000usize;
-            let mut counts = vec![0usize; n + 1]; // index by contribution 1..=n
-            for i in 0..trials {
-                let mut eng = sha256::Hash::engine();
-                eng.input(b"uniformity-test");
-                eng.input(&(i as u64).to_le_bytes());
-                let seed = sha256::Hash::from_engine(eng).to_byte_array();
-                let p = LotteryOutput::derive_lottery_preimage(&seed, n).unwrap();
-                let contribution = p.len() - 16;
-                counts[contribution] += 1;
-            }
-            let expected = trials / n;
-            for c in 1..=n {
-                assert!(counts[c] > 0, "n={} residue class {} never hit", n, c);
-                assert!(
-                    counts[c] > expected / 2 && counts[c] < expected * 2,
-                    "n={} class {} count {} far from expected {}",
-                    n,
-                    c,
-                    counts[c],
-                    expected
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn derive_lottery_preimage_rejects_bad_n() {
-        let seed = [1u8; 32];
-        assert!(LotteryOutput::derive_lottery_preimage(&seed, 1).is_err());
-        assert!(LotteryOutput::derive_lottery_preimage(
-            &seed,
-            crate::constants::MAX_DISPUTANTS + 1
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn test_lottery_winner_four_participants() {
-        // Test with 4 participants
-        // Lengths: 17, 18, 19, 20 -> contributions: 1, 2, 3, 4 -> sum 10 -> 10 % 4 = 2
-        let preimages = vec![vec![0u8; 17], vec![0u8; 18], vec![0u8; 19], vec![0u8; 20]];
-        let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
-        assert_eq!(winner, 2); // (1 + 2 + 3 + 4) % 4 = 2
-    }
-
-    #[test]
-    fn test_lottery_script_build() {
-        let participants = vec![
-            LotteryParticipant::new(
-                generate_x_only_pubkey(1),
-                test_commitment_hash(1),
-                "bcrt1p...".to_string(),
-            ),
-            LotteryParticipant::new(
-                generate_x_only_pubkey(2),
-                test_commitment_hash(2),
-                "bcrt1p...".to_string(),
-            ),
-        ];
-
-        let recovery_voters = vec![
-            generate_x_only_pubkey(10),
-            generate_x_only_pubkey(11),
-            generate_x_only_pubkey(12),
-        ];
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            recovery_voters,
-            2, // 2-of-3 recovery
-            Network::Regtest,
+    fn calculate_winner_is_sum_mod_count_over_17_to_76() {
+        let p = |len: usize| vec![0u8; len];
+        assert_eq!(
+            LotteryOutput::calculate_winner(&[p(18), p(19), p(17)]).unwrap(),
+            0
         );
-
-        let script = builder
-            .build_lottery_script()
-            .expect("Should build lottery script");
-        // Basic sanity check - script should be non-empty
-        assert!(!script.is_empty());
-    }
-
-    #[test]
-    fn test_lottery_output_build() {
-        let participants = vec![
-            LotteryParticipant::new(
-                generate_x_only_pubkey(1),
-                test_commitment_hash(1),
-                "bcrt1p...".to_string(),
-            ),
-            LotteryParticipant::new(
-                generate_x_only_pubkey(2),
-                test_commitment_hash(2),
-                "bcrt1p...".to_string(),
-            ),
-            LotteryParticipant::new(
-                generate_x_only_pubkey(3),
-                test_commitment_hash(3),
-                "bcrt1p...".to_string(),
-            ),
-        ];
-
-        let recovery_voters = vec![generate_x_only_pubkey(10), generate_x_only_pubkey(11)];
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            recovery_voters,
-            2, // 2-of-2 recovery
-            Network::Regtest,
+        assert_eq!(
+            LotteryOutput::calculate_winner(&[p(76), p(17)]).unwrap(),
+            61 % 2
         );
-
-        let output = builder.build().expect("Should build lottery output");
-
-        // Verify we got a valid P2TR address
-        assert!(output.script_pubkey().is_p2tr());
-
-        // Verify control block exists
-        assert!(output.lottery_control_block().is_some());
+        assert!(LotteryOutput::calculate_winner(&[p(16), p(17)]).is_err());
+        assert!(LotteryOutput::calculate_winner(&[p(77), p(17)]).is_err());
+        assert_eq!(LotteryOutput::calculate_winner(&[p(40)]).unwrap(), 0);
+        assert_eq!(
+            LotteryOutput::subset_winner(&[1, 3, 4], &[p(17), p(17), p(17)]).unwrap(),
+            1
+        );
     }
 
     #[test]
-    fn test_lottery_reject_invalid_participant_count() {
-        // Too few participants (one is a sole-participant leaf, DEP-03; zero is invalid)
-        let participants: Vec<LotteryParticipant> = vec![];
+    fn derived_preimages_cover_all_sixty_lengths_deterministically() {
+        use bitcoin::hashes::{sha256, Hash};
+        let mut lengths = std::collections::BTreeSet::new();
+        for i in 0u32..2000 {
+            let seed = sha256::Hash::hash(&i.to_be_bytes()).to_byte_array();
+            let p = LotteryOutput::derive_lottery_preimage(&seed);
+            assert!((17..=LOTTERY_MAX_PREIMAGE_LEN).contains(&p.len()));
+            assert_eq!(p, LotteryOutput::derive_lottery_preimage(&seed));
+            lengths.insert(p.len());
+        }
+        assert_eq!(lengths.len(), LOTTERY_CONTRIBUTION_RANGE);
+    }
 
-        let builder = LotteryScriptBuilder::new(
+    #[test]
+    fn subset_indices_by_size_then_lexicographic() {
+        assert_eq!(
+            lottery_subset_indices(3),
+            vec![
+                vec![0, 1],
+                vec![0, 2],
+                vec![1, 2],
+                vec![0],
+                vec![1],
+                vec![2]
+            ]
+        );
+        assert_eq!(lottery_subset_indices(7).len(), 126);
+        assert!(lottery_subset_indices(1).is_empty());
+    }
+
+    #[test]
+    fn lottery_has_full_set_every_proper_subset_and_four_recovery_leaves() {
+        for k in 2..=MAX_LOTTERY_PARTICIPANTS {
+            let out = lottery_fixture(k, 3, 2);
+            assert_eq!(out.subset_scripts.len(), (1 << k) - 2, "k={}", k);
+            assert!(out.lottery_control_block().is_some());
+            for (idx, leaf) in &out.subset_scripts {
+                assert!(out.subset_control_block(idx).is_some());
+                // CSV 72 prefix, then the voters' CHECKSIGADD attestation.
+                assert!(leaf.as_bytes().starts_with(&[0x01, 0x48, 0xb2, 0x75, 0x20]));
+            }
+            assert_eq!(out.recovery_leaves().len(), 4);
+        }
+        // k = 7: 131 leaves, depth 8, a 289-byte control block.
+        let out = lottery_fixture(7, 7, 4);
+        assert_eq!(
+            out.lottery_control_block().unwrap().serialize().len(),
+            33 + 32 * 8
+        );
+    }
+
+    #[test]
+    fn sole_participant_gets_a_plain_signature_leaf() {
+        let out = lottery_fixture(1, 3, 2);
+        assert!(out.subset_scripts.is_empty());
+        assert_eq!(out.lottery_script.len(), 34);
+    }
+
+    #[test]
+    fn too_many_participants_rejected() {
+        let participants: Vec<LotteryParticipant> = (1..=8u8)
+            .map(|i| {
+                LotteryParticipant::new(
+                    generate_x_only_pubkey(i),
+                    test_commitment_hash(i),
+                    "t".into(),
+                )
+            })
+            .collect();
+        let b = LotteryScriptBuilder::new(
             participants,
-            vec![generate_x_only_pubkey(10)],
+            vec![generate_x_only_pubkey(100)],
             1,
-            Network::Regtest,
+            Network::Signet,
         );
-
-        assert!(builder.build_lottery_script().is_err());
-    }
-
-    #[test]
-    fn test_lottery_winner_five_participants() {
-        // Sweep all 5^5 = 3125 length combinations; verify winner index is
-        // sum_of_contributions mod 5 in every case. Catches off-by-one in
-        // the contribution = LEN - 16 calc and the mod 5 reduction.
-        for a in 1..=5 {
-            for b in 1..=5 {
-                for c in 1..=5 {
-                    for d in 1..=5 {
-                        for e in 1..=5 {
-                            let preimages = vec![
-                                vec![0u8; 16 + a],
-                                vec![0u8; 16 + b],
-                                vec![0u8; 16 + c],
-                                vec![0u8; 16 + d],
-                                vec![0u8; 16 + e],
-                            ];
-                            let winner = LotteryOutput::calculate_winner(&preimages).unwrap();
-                            let expected = (a + b + c + d + e) % 5;
-                            assert_eq!(winner, expected, "lengths={:?}", (a, b, c, d, e));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn test_lottery_script_build_five() {
-        // N=5 must build without the "at most 4 participants" error.
-        let participants: Vec<LotteryParticipant> = (1..=5)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let recovery_voters = vec![
-            generate_x_only_pubkey(20),
-            generate_x_only_pubkey(21),
-            generate_x_only_pubkey(22),
-        ];
-
-        let builder = LotteryScriptBuilder::new(participants, recovery_voters, 2, Network::Regtest);
-
-        let script = builder
-            .build_lottery_script()
-            .expect("N=5 lottery script should build");
-        assert!(!script.is_empty());
-
-        // The N=5 script is meaningfully larger than N=4 (extra hash-
-        // verify block + an extra mod-subtract iteration + an extra
-        // dispatch arm). Lower bound is loose — the script size grows
-        // linearly with N — but catches accidental no-op changes.
-        assert!(
-            script.len() > 200,
-            "N=5 script unexpectedly small: {} bytes",
-            script.len()
-        );
-    }
-
-    #[test]
-    fn test_max_disputants_constant_matches_script_cap() {
-        // Phase 4c: the script's hard cap should be sourced from the
-        // protocol's MAX_DISPUTANTS constant. Both the constant and the
-        // cap are 15 by design — see CUSTODY_LOTTERY.md "Why N = 15 Is
-        // the Cap". The script must accept exactly MAX_DISPUTANTS and
-        // reject MAX_DISPUTANTS + 1.
-        assert_eq!(crate::constants::MAX_DISPUTANTS, 15);
-
-        let max_builder = make_lottery_builder(crate::constants::MAX_DISPUTANTS);
-        assert!(
-            max_builder.build_lottery_script().is_ok(),
-            "exactly MAX_DISPUTANTS should be accepted"
-        );
-
-        let too_many = make_lottery_builder(crate::constants::MAX_DISPUTANTS + 1);
-        assert!(
-            too_many.build_lottery_script().is_err(),
-            "MAX_DISPUTANTS + 1 should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_lottery_reject_sixteen_participants() {
-        // N=16 exceeds the protocol's MAX_DISPUTANTS=15 cap. The builder
-        // must refuse so we never silently mint a lottery output for a
-        // dispute size the rest of the protocol won't honour.
-        let participants: Vec<LotteryParticipant> = (1..=16)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            vec![generate_x_only_pubkey(20), generate_x_only_pubkey(21)],
-            2,
-            Network::Regtest,
-        );
-
-        let err = builder
-            .build_lottery_script()
-            .expect_err("N=16 exceeds MAX_DISPUTANTS=15");
-        let msg = format!("{}", err);
-        assert!(
-            msg.contains("at most 15") || msg.contains("MAX_DISPUTANTS"),
-            "error message should point to the protocol cap; got: {}",
-            msg
-        );
-    }
-
-    #[test]
-    fn test_lottery_script_build_eleven() {
-        let participants: Vec<LotteryParticipant> = (1..=11)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            vec![
-                generate_x_only_pubkey(20),
-                generate_x_only_pubkey(21),
-                generate_x_only_pubkey(22),
-            ],
-            2,
-            Network::Regtest,
-        );
-
-        let script = builder
-            .build_lottery_script()
-            .expect("N=11 should build via Linear-after-mod");
-
-        // Linear dispatch emits N arms (11 here) plus the modulo
-        // subroutine's N iterations of OP_IF/OP_ENDIF.
-        // Total OP_ENDIFs: N (mod) + N (dispatch) = 2N = 22 for N=11.
-        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
-        assert_eq!(
-            endif_count, 22,
-            "expected 11 mod ENDIFs + 11 dispatch ENDIFs at N=11"
-        );
-
-        // Measured: 879 B at this revision. Less than half the original
-        // BinaryTree estimate (1.6 KB) — Linear-after-mod is the right
-        // tool here despite the design's initial preference.
-        assert!(
-            (750..=1050).contains(&script.len()),
-            "N=11 script length {} should fall within expected envelope",
-            script.len()
-        );
-    }
-
-    #[test]
-    fn test_lottery_script_build_fifteen() {
-        let participants: Vec<LotteryParticipant> = (1..=15)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            vec![
-                generate_x_only_pubkey(20),
-                generate_x_only_pubkey(21),
-                generate_x_only_pubkey(22),
-                generate_x_only_pubkey(23),
-            ],
-            3,
-            Network::Regtest,
-        );
-
-        let script = builder
-            .build_lottery_script()
-            .expect("N=15 should build via Linear-after-mod");
-
-        // 2N = 30 ENDIFs at N=15.
-        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
-        assert_eq!(endif_count, 30, "expected 30 ENDIFs at N=15");
-
-        // Measured: 1199 B at this revision. The original BinaryTree
-        // estimate of 2.0 KB overcounted; Linear-after-mod fits in 1.2 KB.
-        assert!(
-            (1050..=1400).contains(&script.len()),
-            "N=15 script length {} should fall within expected envelope",
-            script.len()
-        );
-    }
-
-    // ========================================================================
-    // PARTIAL-REVEAL TESTS (Phase 4b)
-    // ========================================================================
-
-    fn make_lottery_builder(n: usize) -> LotteryScriptBuilder {
-        let participants: Vec<LotteryParticipant> = (1..=n as u8)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-        let recovery_voters = vec![
-            generate_x_only_pubkey(50),
-            generate_x_only_pubkey(51),
-            generate_x_only_pubkey(52),
-            generate_x_only_pubkey(53),
-        ];
-        LotteryScriptBuilder::new(participants, recovery_voters, 3, Network::Regtest)
-    }
-
-    #[test]
-    fn test_partial_reveal_leaves_skipped_below_threshold() {
-        // PARTIAL_REVEAL_MIN_N is 3 (the sub-lottery needs `N-1 >= 2`
-        // participants). At N=2 the partial-reveal builder must return
-        // empty; the output still builds with the bare 4-leaf shape.
-        let builder = make_lottery_builder(2);
-        let leaves = builder
-            .build_partial_reveal_leaves()
-            .expect("partial-reveal builder should not error at N=2");
-        assert!(
-            leaves.is_empty(),
-            "expected no partial-reveal leaves at N=2, got {}",
-            leaves.len()
-        );
-
-        let output = builder.build().expect("N=2 lottery output should build");
-        assert!(
-            output.partial_reveal_scripts.is_empty(),
-            "LotteryOutput should expose empty partial_reveal_scripts at N=2"
-        );
-    }
-
-    #[test]
-    fn test_partial_reveal_leaf_count_matches_n() {
-        // For every N >= PARTIAL_REVEAL_MIN_N (=3), expect `N` partial-
-        // reveal leaves — one per missing-disputant index.
-        for n in PARTIAL_REVEAL_MIN_N..=15 {
-            let builder = make_lottery_builder(n);
-            let leaves = builder
-                .build_partial_reveal_leaves()
-                .unwrap_or_else(|e| panic!("partial-reveal failed at N={}: {:?}", n, e));
-            assert_eq!(leaves.len(), n, "expected {} partial leaves at N={}", n, n);
-
-            let output = builder
-                .build()
-                .unwrap_or_else(|e| panic!("output build failed at N={}: {:?}", n, e));
-            assert_eq!(output.partial_reveal_scripts.len(), n);
-        }
-    }
-
-    #[test]
-    fn test_partial_reveal_excludes_missing_disputant() {
-        // Each partial leaf at index j must correspond to a sub-lottery
-        // that excludes participant j. Verify by reconstructing the
-        // expected sub-script for each j and asserting byte equality.
-        let n = 11;
-        let builder = make_lottery_builder(n);
-        let leaves = builder.build_partial_reveal_leaves().unwrap();
-
-        for missing_idx in 0..n {
-            let revealers: Vec<LotteryParticipant> = builder
-                .participants
-                .iter()
-                .enumerate()
-                .filter(|(j, _)| *j != missing_idx)
-                .map(|(_, p)| p.clone())
-                .collect();
-            let sub_builder = LotteryScriptBuilder::new(
-                revealers,
-                builder.recovery_voters.clone(),
-                builder.recovery_threshold,
-                builder.network,
-            );
-            // Mirror build_partial_reveal_leaves: bounds_n is the
-            // *parent* N (commitments were chosen under the parent
-            // contract), not the sub-lottery's participant count.
-            let inner = sub_builder.build_lottery_script_with_bounds_n(n).unwrap();
-
-            let prefix = Builder::new()
-                .push_int(PARTIAL_REVEAL_CSV_BLOCKS as i64)
-                .push_opcode(OP_CSV)
-                .push_opcode(OP_DROP)
-                .into_script();
-            let mut expected = prefix.into_bytes();
-            expected.extend_from_slice(inner.as_bytes());
-
-            assert_eq!(
-                leaves[missing_idx].as_bytes(),
-                &expected[..],
-                "partial leaf {} should be CSV-72-prefixed sub-lottery for the 10 remaining disputants",
-                missing_idx
-            );
-        }
-    }
-
-    #[test]
-    fn test_partial_reveal_csv_prefix_present() {
-        // Every partial-reveal leaf must start with `<72> OP_CSV OP_DROP`
-        // — without the CSV the leaf would be spendable immediately,
-        // racing the primary lottery claim.
-        let builder = make_lottery_builder(13);
-        let leaves = builder.build_partial_reveal_leaves().unwrap();
-
-        for (j, leaf) in leaves.iter().enumerate() {
-            let bytes = leaf.as_bytes();
-            // OP_PUSHNUM_8 + OP_PUSHBYTES_1 0x48 (72) — actually 72 fits
-            // in the 1-byte form via OP_PUSHBYTES_1. The Builder uses
-            // push_int which picks the most compact form. 72 is encoded
-            // as `0x01 0x48` (length 1 followed by byte 0x48).
-            assert_eq!(
-                bytes[0], 0x01,
-                "leaf {} should start with OP_PUSHBYTES_1; got 0x{:02x}",
-                j, bytes[0]
-            );
-            assert_eq!(
-                bytes[1], 72,
-                "leaf {} should push 72 (CSV blocks); got {}",
-                j, bytes[1]
-            );
-            assert_eq!(
-                bytes[2],
-                OP_CSV.to_u8(),
-                "leaf {} byte 2 should be OP_CSV (0x{:02x}); got 0x{:02x}",
-                j,
-                OP_CSV.to_u8(),
-                bytes[2]
-            );
-            assert_eq!(
-                bytes[3],
-                bitcoin::opcodes::all::OP_DROP.to_u8(),
-                "leaf {} byte 3 should be OP_DROP",
-                j
-            );
-        }
-    }
-
-    #[test]
-    fn test_partial_reveal_uses_combined_table_at_n11() {
-        // At N=11, partial leaves are 10-disputant sub-lotteries — that
-        // falls in Regime B (CombinedTable). Each leaf should contain
-        // the CombinedTable's 91 ENDIF dispatch arms (10²-10+1 = 91).
-        let builder = make_lottery_builder(11);
-        let leaves = builder.build_partial_reveal_leaves().unwrap();
-
-        for (j, leaf) in leaves.iter().enumerate() {
-            let endif_count = count_opcode(leaf, bitcoin::opcodes::all::OP_ENDIF);
-            assert_eq!(
-                endif_count, 91,
-                "partial leaf {} at N=11 should be CombinedTable (91 arms); got {} ENDIFs",
-                j, endif_count
-            );
-        }
-    }
-
-    #[test]
-    fn test_partial_reveal_uses_linear_at_n15() {
-        // At N=15, partial leaves are 14-disputant sub-lotteries — that
-        // falls in Regime C (Linear-after-mod). Each leaf should have
-        // 2*14 = 28 ENDIFs (mod + dispatch cascades, both length N-1=14).
-        let builder = make_lottery_builder(15);
-        let leaves = builder.build_partial_reveal_leaves().unwrap();
-
-        for (j, leaf) in leaves.iter().enumerate() {
-            let endif_count = count_opcode(leaf, bitcoin::opcodes::all::OP_ENDIF);
-            assert_eq!(
-                endif_count, 28,
-                "partial leaf {} at N=15 should be Linear-after-mod (28 ENDIFs); got {}",
-                j, endif_count
-            );
-        }
-    }
-
-    #[test]
-    fn test_partial_reveal_regime_transition_n11_to_n12() {
-        // The N → N-1 regime transition for partial leaves is at
-        // N=11 (sub-N=10, CombinedTable) → N=12 (sub-N=11, Linear).
-        // Verify by ENDIF count: 91 at N=11, 22 at N=12.
-        let endifs_11 = make_lottery_builder(11)
-            .build_partial_reveal_leaves()
-            .unwrap()
-            .iter()
-            .map(|s| count_opcode(s, bitcoin::opcodes::all::OP_ENDIF))
-            .next()
-            .unwrap();
-        let endifs_12 = make_lottery_builder(12)
-            .build_partial_reveal_leaves()
-            .unwrap()
-            .iter()
-            .map(|s| count_opcode(s, bitcoin::opcodes::all::OP_ENDIF))
-            .next()
-            .unwrap();
-        assert_eq!(endifs_11, 91, "N=11 partial leaves are CombinedTable");
-        assert_eq!(endifs_12, 22, "N=12 partial leaves are Linear-after-mod");
-    }
-
-    #[test]
-    fn test_lottery_output_taproot_depth_at_n15() {
-        // At N=15: 1 lottery + 15 partial + 3 recovery = 19 leaves.
-        // Merkle depth ⌈log₂ 19⌉ = 5. Verify the spend_info exposes a
-        // valid control block for at least the primary lottery leaf and
-        // that its merkle proof is the expected length.
-        let output = make_lottery_builder(15)
-            .build()
-            .expect("N=15 lottery output should build");
-
-        assert_eq!(output.partial_reveal_scripts.len(), 15);
-
-        let cb = output
-            .spend_info
-            .control_block(&(
-                output.lottery_script.clone(),
-                bitcoin::taproot::LeafVersion::TapScript,
-            ))
-            .expect("primary lottery leaf must have a control block");
-
-        // Each merkle-proof step is 32 bytes. Depth 5 → 5 hashes →
-        // 32*5 = 160 bytes of proof. Plus 33 bytes for control-block
-        // header (1 leaf-version+parity byte + 32-byte internal key) =
-        // 193 bytes total. Some leaves may be at depth 4 → 161 bytes;
-        // bound the assertion accordingly.
-        let cb_bytes = cb.serialize();
-        assert!(
-            cb_bytes.len() == 33 + 32 * 4 || cb_bytes.len() == 33 + 32 * 5,
-            "control block size {} should imply depth 4 or 5",
-            cb_bytes.len()
-        );
-    }
-
-    #[test]
-    fn test_lottery_output_shape_at_n5() {
-        // At N=5 we expect 10 leaves total: 1 primary lottery + 5 partial-
-        // reveal (one per missing-disputant index) + 3 long-tail recovery
-        // + 1 timeout-recovery (CSV 8064, threshold 1). Tree depth
-        // ⌈log₂ 10⌉ = 4.
-        let output = make_lottery_builder(5)
-            .build()
-            .expect("N=5 lottery output should build");
-        assert_eq!(
-            output.partial_reveal_scripts.len(),
-            5,
-            "expected one partial-reveal leaf per disputant at N=5"
-        );
-
-        let cb = output
-            .spend_info
-            .control_block(&(
-                output.lottery_script.clone(),
-                bitcoin::taproot::LeafVersion::TapScript,
-            ))
-            .expect("primary lottery leaf must have a control block");
-
-        let cb_len = cb.serialize().len();
-        assert!(
-            cb_len == 33 + 32 * 3 || cb_len == 33 + 32 * 4,
-            "N=5 primary lottery leaf should land at depth 3 or 4 in the 10-leaf tree, got control-block len {}",
-            cb_len
-        );
-    }
-
-    #[test]
-    fn test_lottery_output_includes_timeout_recovery_leaf() {
-        // The timeout-recovery leaf (CSV 8064, threshold 1) must always
-        // be included regardless of N. Reconstruct the expected script
-        // and assert it can be located in the spend_info script_map.
-        let output = make_lottery_builder(5)
-            .build()
-            .expect("N=5 lottery output should build");
-
-        let timeout_script = LotteryScriptBuilder::new(
-            output.participants.clone(),
-            output.recovery_voters.clone(),
-            1, // threshold = 1 for timeout-recovery
-            output.network,
-        )
-        .build_recovery_script(crate::constants::TIMEOUT_RECOVERY_CSV_BLOCKS)
-        .expect("timeout-recovery script should build");
-
-        let cb = output.spend_info.control_block(&(
-            timeout_script.clone(),
-            bitcoin::taproot::LeafVersion::TapScript,
-        ));
-        assert!(
-            cb.is_some(),
-            "timeout-recovery leaf (CSV 8064, threshold 1) must be in the Taproot tree"
-        );
-    }
-
-    /// Random-sample winner-correctness test for N=11..=15. Exhaustive
-    /// sweep would be 11^11 = 285M up to 15^15 = 437T cases — infeasible.
-    /// 5,000 deterministic samples per N exercise dispatch and modulo
-    /// across the full sum range.
-    #[test]
-    fn test_lottery_winner_high_n_random_sample() {
-        let mut rng_state: u64 = 0xab8e1cd9f0a32b41;
-        let mut next_u64 = || {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            rng_state
-        };
-
-        for n in 11usize..=15 {
-            for _ in 0..5_000 {
-                let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(n);
-                let mut sum = 0usize;
-                for _ in 0..n {
-                    let c = (next_u64() as usize % n) + 1; // 1..=N
-                    sum += c;
-                    preimages.push(vec![0u8; 16 + c]);
-                }
-                let expected = sum % n;
-                let got = LotteryOutput::calculate_winner(&preimages).unwrap();
-                assert_eq!(got, expected, "winner mismatch at N={} sum={}", n, sum);
-            }
-        }
-    }
-
-    /// N=6 (CombinedTable boundary): exhaustively verify every reachable sum
-    /// in [N, N²] = [6, 36] dispatches to the correct participant via
-    /// `calculate_winner`'s round-trip semantics. The script's dispatch
-    /// table is keyed on the sum and each arm directly routes to
-    /// `pubkey_(s mod N)` — `calculate_winner` is the off-chain authority
-    /// for the same mapping, so any divergence between regime A and regime B
-    /// would surface here.
-    #[test]
-    fn test_lottery_winner_six_participants_combined_table() {
-        // Each participant contributes (preimage_len - 16) ∈ 1..=N. Sweep
-        // every (c1..c6) ∈ {1..=6}^6 — 46,656 cases — and assert that
-        // calculate_winner's `sum mod N` matches the dispatch the script
-        // would evaluate at sum.
-        let n = 6;
-        let mut tested = 0usize;
-        for c1 in 1..=n {
-            for c2 in 1..=n {
-                for c3 in 1..=n {
-                    for c4 in 1..=n {
-                        for c5 in 1..=n {
-                            for c6 in 1..=n {
-                                let preimages: Vec<Vec<u8>> = vec![
-                                    vec![0u8; 16 + c1],
-                                    vec![0u8; 16 + c2],
-                                    vec![0u8; 16 + c3],
-                                    vec![0u8; 16 + c4],
-                                    vec![0u8; 16 + c5],
-                                    vec![0u8; 16 + c6],
-                                ];
-                                let sum = c1 + c2 + c3 + c4 + c5 + c6;
-                                let expected = sum % n;
-                                let got = LotteryOutput::calculate_winner(&preimages).unwrap();
-                                assert_eq!(
-                                    got, expected,
-                                    "winner mismatch for sum={} (cs={:?})",
-                                    sum, preimages
-                                );
-                                tested += 1;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(tested, n.pow(6));
-    }
-
-    #[test]
-    fn test_lottery_script_build_six() {
-        let participants: Vec<LotteryParticipant> = (1..=6)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            vec![generate_x_only_pubkey(20), generate_x_only_pubkey(21)],
-            2,
-            Network::Regtest,
-        );
-
-        let script = builder
-            .build_lottery_script()
-            .expect("N=6 should build via CombinedTable");
-
-        // The dispatch table emits N²-N+1 = 31 arms.
-        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
-        assert_eq!(endif_count, 31, "expected 31 dispatch arms for N=6");
-
-        // Measured: 1482 B at this revision. Bound to ±15% to catch
-        // unexpected drift without forcing a test churn for benign edits.
-        assert!(
-            (1260..=1700).contains(&script.len()),
-            "N=6 script length {} should fall within expected envelope",
-            script.len()
-        );
-    }
-
-    #[test]
-    fn test_lottery_script_build_ten() {
-        let participants: Vec<LotteryParticipant> = (1..=10)
-            .map(|i| {
-                LotteryParticipant::new(
-                    generate_x_only_pubkey(i),
-                    test_commitment_hash(i),
-                    "bcrt1p...".to_string(),
-                )
-            })
-            .collect();
-
-        let builder = LotteryScriptBuilder::new(
-            participants,
-            vec![
-                generate_x_only_pubkey(20),
-                generate_x_only_pubkey(21),
-                generate_x_only_pubkey(22),
-            ],
-            2,
-            Network::Regtest,
-        );
-
-        let script = builder
-            .build_lottery_script()
-            .expect("N=10 should build via CombinedTable");
-
-        // N²-N+1 = 91 dispatch arms.
-        let endif_count = count_opcode(&script, bitcoin::opcodes::all::OP_ENDIF);
-        assert_eq!(endif_count, 91, "expected 91 dispatch arms for N=10");
-
-        // Measured: 4134 B at this revision. Comfortably under the 10 KB
-        // Tapscript per-stack-item limit; CombinedTable past N=10 would
-        // start crowding it, which is why the regime hands off to Linear.
-        assert!(
-            (3500..=4800).contains(&script.len()),
-            "N=10 script length {} should fall within expected envelope",
-            script.len()
-        );
-    }
-
-    /// Pseudo-random sample of N=10 winner correctness (exhaustive sweep
-    /// would be 10^10 cases). 10,000 random preimage tuples — enough to
-    /// exercise dispatch arms across the full sum range.
-    #[test]
-    fn test_lottery_winner_ten_random_sample() {
-        let n = 10usize;
-        // Deterministic xorshift so failures reproduce.
-        let mut rng_state: u64 = 0xdeadbeefcafef00d;
-        let mut next_u64 = || {
-            rng_state ^= rng_state << 13;
-            rng_state ^= rng_state >> 7;
-            rng_state ^= rng_state << 17;
-            rng_state
-        };
-
-        for _ in 0..10_000 {
-            let mut preimages: Vec<Vec<u8>> = Vec::with_capacity(n);
-            let mut sum = 0usize;
-            for _ in 0..n {
-                let c = (next_u64() as usize % n) + 1; // 1..=N
-                sum += c;
-                preimages.push(vec![0u8; 16 + c]);
-            }
-            let expected = sum % n;
-            let got = LotteryOutput::calculate_winner(&preimages).unwrap();
-            assert_eq!(got, expected, "winner mismatch for sum={}", sum);
-        }
+        assert!(b.build().is_err());
     }
 
     #[test]
@@ -3204,7 +2136,7 @@ mod tests {
             generate_x_only_pubkey(22),
             generate_x_only_pubkey(23),
         ];
-        let tx = build_forfeit_sweep_tx(outpoint, 30_000, &revealers, 500, None, Network::Regtest)
+        let tx = build_forfeit_sweep_tx(outpoint, 30_000, &revealers, 500, Network::Regtest)
             .expect("sweep tx builds");
 
         assert_eq!(tx.version, bitcoin::transaction::Version::TWO);
@@ -3229,7 +2161,7 @@ mod tests {
         // order produce byte-identical TXs (outputs sorted by xonly key).
         let mut shuffled = revealers.clone();
         shuffled.reverse();
-        let tx2 = build_forfeit_sweep_tx(outpoint, 30_000, &shuffled, 500, None, Network::Regtest)
+        let tx2 = build_forfeit_sweep_tx(outpoint, 30_000, &shuffled, 500, Network::Regtest)
             .expect("sweep tx builds");
         assert_eq!(
             bitcoin::consensus::encode::serialize(&tx),
@@ -3239,7 +2171,7 @@ mod tests {
     }
 
     #[test]
-    fn test_forfeit_sweep_tx_zero_revealers_requires_fallback() {
+    fn test_forfeit_sweep_tx_zero_revealers_refused() {
         let outpoint = bitcoin::OutPoint {
             txid: bitcoin::Txid::from_raw_hash(
                 <bitcoin::hashes::sha256d::Hash as bitcoin::hashes::Hash>::from_byte_array(
@@ -3248,28 +2180,7 @@ mod tests {
             ),
             vout: 2,
         };
-        // No revealers, no fallback → refuse.
-        assert!(
-            build_forfeit_sweep_tx(outpoint, 30_000, &[], 500, None, Network::Regtest).is_err()
-        );
-        // No revealers + fallback → single output of slice - fee to the
-        // fallback's key-path P2TR, CSV sequence still set.
-        let fallback = generate_x_only_pubkey(31);
-        let tx = build_forfeit_sweep_tx(
-            outpoint,
-            30_000,
-            &[],
-            500,
-            Some(&fallback),
-            Network::Regtest,
-        )
-        .expect("fallback sweep builds");
-        assert_eq!(tx.output.len(), 1);
-        assert_eq!(tx.output[0].value.to_sat(), 29_500);
-        assert_eq!(
-            tx.input[0].sequence,
-            bitcoin::Sequence::from_height(ARMER_SHARE_SWEEP_CSV_BLOCKS as u16)
-        );
+        assert!(build_forfeit_sweep_tx(outpoint, 30_000, &[], 500, Network::Regtest).is_err());
     }
 }
 
@@ -3425,7 +2336,7 @@ mod sole_participant_tests {
         expect.extend_from_slice(&xonly(1).serialize());
         expect.push(0xac);
         assert_eq!(out.lottery_script.as_bytes(), &expect[..]);
-        assert!(out.partial_reveal_scripts.is_empty());
+        assert!(out.subset_scripts.is_empty());
         assert_eq!(
             LotteryOutput::calculate_winner(&[vec![7u8; 25]]).unwrap(),
             0

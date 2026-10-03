@@ -78,7 +78,7 @@ pub fn build_expected_confiscation_outputs(
 /// The confiscation TX that `initiate_confiscations` broadcasts pays a
 /// Taproot lottery output whose address is a function of BOTH the
 /// DisputeArmed participants AND the recovery-voter set (the recovery
-/// leaves + partial-reveal leaves are committed into the tree — see
+/// and attestation leaves are committed into the tree — see
 /// `LotteryScriptBuilder::build`). If any later step reconstructs that
 /// address with a *different* recovery-voter set, `find_utxo_for_script`
 /// returns `None` and the reveal→claim→DisputeAcquire chain silently
@@ -132,34 +132,6 @@ pub(crate) fn recovery_voters_from_updates(
         .collect();
     let recovery_threshold = (recovery_voters.len() / 2) + 1;
     Some((recovery_voters, recovery_threshold))
-}
-
-/// Disputant count `N` for this dispute's lottery, derived from a
-/// ledger/fork history.
-///
-/// `N` fixes both the on-chain claim leaf's per-preimage length bound
-/// `[17, 16+N]` and the winner arithmetic `sum mod N`, so the preimage
-/// length chosen at arm-time must target the *same* `N` used at
-/// confiscation-build and reveal/claim time. By the protocol invariant
-/// "disputants = Q exactly" (operator barred from disputing own ledger),
-/// `N = Q = |quorum_members \ {operator}|` from the latest `QuorumBegin`
-/// — the same set [`recovery_voters_from_updates`] returns. That value is
-/// immutable once `QuorumBegin` is on the fork, so every party and every
-/// phase computes the identical `N`.
-///
-/// Returns `None` when no `QuorumBegin`/`LedgerOpen` is present or when
-/// the resulting count falls outside the script's supported band
-/// `2..=MAX_DISPUTANTS`.
-pub(crate) fn dispute_lottery_n_from_history(
-    history: &[deposits_core::SignedLedgerUpdate],
-) -> Option<usize> {
-    let (voters, _threshold) = recovery_voters_from_updates(history)?;
-    let n = voters.len();
-    if (2..=deposits_core::MAX_DISPUTANTS).contains(&n) {
-        Some(n)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -995,36 +967,6 @@ impl Node {
             }
         }
 
-        // Determine the lottery's disputant count `N` (= Q) BEFORE taking
-        // the fork write-lock (this is an async relay fetch and must not
-        // straddle a held lock). We derive `N` from the ledger's canonical
-        // chain fetched from the relay — the SAME source
-        // `initiate_confiscations` uses to build the on-chain claim leaf's
-        // `OP_SIZE` bounds — rather than the local fork history, which for
-        // a disputing cosigner can be sparse (e.g. missing `QuorumBegin`).
-        // Deriving both `N`s from the identical canonical source is what
-        // guarantees the committed preimage length lands in the leaf's
-        // `[17, 16+N]` band. Falls back to the local fork history if the
-        // relay fetch yields nothing (offline / relay hiccup).
-        let arm_n: usize = {
-            let fetched = self.fetch_all_ledger_updates_paginated(ledger_id).await;
-            let from_relay = dispute_lottery_n_from_history(&fetched);
-            match from_relay {
-                Some(n) => n,
-                None => {
-                    let local = fork_arc.read().unwrap();
-                    dispute_lottery_n_from_history(&local.history).ok_or_else(|| {
-                        Error::Protocol(
-                            "cannot determine lottery N (Q) for dispute preimage \
-                             length at arm time (no QuorumBegin on relay or local \
-                             fork history)"
-                                .to_string(),
-                        )
-                    })?
-                }
-            }
-        };
-
         // 3. Publish DisputeArmed with preimage commitment on the fork.
         //
         // 3a. Under a read lock: is there a prior arm, and what floor must
@@ -1189,16 +1131,10 @@ impl Node {
                     } else {
                         // First arm: derive the preimage from the
                         // signer's identity secret. The signer returns a
-                        // fixed 32-byte HMAC *seed*; we shape it into a
-                        // preimage whose *length* carries the lottery
-                        // entropy and lands in `[17, 16+N]` for this
-                        // dispute's disputant count `N` (= Q, from the
-                        // fork's QuorumBegin — see `dispute_lottery_n`).
-                        // The same seed + same `N` at reveal time
-                        // reproduces the identical bytes, so we never
-                        // persist it to disk and a disk-full event can't
-                        // lose the dispute, while `HASH160(preimage)`
-                        // stays consistent between commit and reveal.
+                        // 32-byte HMAC *seed*, shaped into a preimage whose
+                        // *length* (17..=76) carries the lottery entropy.
+                        // The same seed reproduces the identical bytes at
+                        // reveal time, so nothing is persisted to disk.
                         let seed = self
                             .handler
                             .signer
@@ -1206,14 +1142,10 @@ impl Node {
                             .map_err(|e| {
                                 Error::Protocol(format!("derive lottery preimage: {}", e))
                             })?;
-                        // `N` (= Q) was resolved above from the canonical
-                        // relay chain, before this write-lock was taken.
-                        let n = arm_n;
                         let preimage =
                         deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(
-                            &seed, n,
-                        )
-                        .map_err(|e| Error::Protocol(format!("shape lottery preimage: {}", e)))?;
+                            &seed,
+                        );
                         let h: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
                         (h, true)
                     };
@@ -1299,31 +1231,12 @@ impl Node {
         }
     }
 
-    /// Look up our lottery preimage for `ledger_id`. Tries the legacy
-    /// on-disk file first (random preimages from pre-derivation arms
-    /// that still need to resolve), then falls back to deriving from
-    /// the signer using the fork's `last_valid_seq` parsed from the
-    /// fork tracking key. Returns `None` if we have no fork for this
-    /// ledger.
-    async fn lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
-        // `N` (= Q) comes from the ledger's latest QuorumBegin on the relay,
-        // the SAME source the confiscation build uses for the on-chain
-        // `OP_SIZE` bounds; only the lottery's ops are fetched.
-        let fetched = self.fetch_lottery_updates(ledger_id).await;
-        self.own_lottery_preimage(ledger_id, &fetched)
-    }
-
-    /// Our lottery preimage for `ledger_id`, with `N` taken from `updates`
-    /// (falling back to the local fork history). Tries the legacy on-disk
-    /// file first (random preimages from pre-derivation arms that still need
-    /// to resolve), then derives from the signer using the fork's
+    /// Our lottery preimage for `ledger_id`. Tries the legacy on-disk file
+    /// first (random preimages from pre-derivation arms that still need to
+    /// resolve), then derives from the signer using the fork's
     /// `last_valid_seq` parsed from the fork tracking key. `None` if we have
     /// no fork for this ledger.
-    pub(crate) fn own_lottery_preimage(
-        &self,
-        ledger_id: &str,
-        updates: &[deposits_core::SignedLedgerUpdate],
-    ) -> Option<Vec<u8>> {
+    pub(crate) fn own_lottery_preimage(&self, ledger_id: &str) -> Option<Vec<u8>> {
         let preimage_file = self.data_dir.join(format!(
             "lottery_preimage_{}.hex",
             &ledger_id[..16.min(ledger_id.len())]
@@ -1337,42 +1250,12 @@ impl Node {
         }
         let fork_key = self.handler.find_our_fork(ledger_id)?;
         let last_valid_seq = super::fork_publish::fork_key_last_valid_seq(&fork_key)?;
-        // The signer returns a fixed 32-byte HMAC *seed*; the on-chain
-        // lottery selects the winner from the preimage *length*, so we
-        // shape the seed into a preimage whose length lands in the valid
-        // range `[17, 16+N]` for this dispute's disputant count `N`, the
-        // same `N` at arm time and reveal time so `HASH160(preimage)`
-        // matches the commitment.
         let seed = self
             .handler
             .signer
             .derive_dispute_lottery_preimage(ledger_id, last_valid_seq)
             .ok()?;
-        let n = dispute_lottery_n_from_history(updates)
-            .or_else(|| self.dispute_lottery_n(&fork_key))?;
-        deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(&seed, n).ok()
-    }
-
-    /// Number of disputants `N` this dispute's lottery is built for.
-    ///
-    /// The on-chain claim leaf bounds every preimage to `[17, 16+N]` and
-    /// [`LotteryOutput::calculate_winner`] computes `sum mod N`, both with
-    /// `N = participants.len()` at confiscation-build time. By the
-    /// protocol invariant "disputants = Q exactly" (the operator is barred
-    /// from disputing their own ledger and every cosigner disputes a
-    /// forked operator — see DEP-06 §"The Lottery"), that count equals the
-    /// quorum size `Q = |quorum_members \ {operator}|` from the fork's
-    /// latest `QuorumBegin`. That value is fixed at `QuorumBegin` and so is
-    /// identical whether computed at arm-time or reveal-time, which is what
-    /// keeps the committed `HASH160(preimage)` consistent with the revealed
-    /// preimage's length.
-    ///
-    /// Returns `None` if the fork or its `QuorumBegin` cannot be found.
-    fn dispute_lottery_n(&self, fork_key: &str) -> Option<usize> {
-        let ledgers = self.handler.ledgers.lock().unwrap();
-        let fork_arc = ledgers.get(fork_key)?;
-        let fork = fork_arc.read().unwrap();
-        dispute_lottery_n_from_history(&fork.history)
+        Some(deposits_core::tapscript_reserves::LotteryOutput::derive_lottery_preimage(&seed))
     }
 
     /// Idempotency check for "have we published our lottery reveal for
@@ -1449,7 +1332,7 @@ impl Node {
             return;
         }
 
-        let preimage = match self.lottery_preimage(ledger_id).await {
+        let preimage = match self.own_lottery_preimage(ledger_id) {
             Some(p) => p,
             None => {
                 tracing::debug!("No preimage available for ledger {}", &ledger_id[..16]);
@@ -1602,89 +1485,72 @@ impl Node {
     /// Try to claim or yield for a specific ledger
     /// Returns Ok(true) if completed, Ok(false) if not ready, Err if failed
     pub(crate) async fn try_lottery_claim_or_yield(&self, ledger_id: &str) -> Result<bool, Error> {
-        use super::lottery_recovery::{lottery_claimability, LotteryClaimability};
-        use deposits_core::tapscript_reserves::LotteryOutput;
+        use super::lottery_recovery::{lottery_claim_path, LotteryClaimPath};
+        use deposits_core::tapscript_reserves::{LotteryOutput, LOTTERY_REVEAL_CSV_BLOCKS};
 
         let our_pubkey = self.node_id;
 
-        // Participants (DisputeArmed, sorted by x-only key), the preimages
-        // revealed so far (matched by commitment hash), and the recovery
-        // voters from the latest QuorumBegin — the set
+        // Participants (the DEP-03 eligibility cut, sorted by x-only key),
+        // the preimages revealed so far (matched by commitment hash), and
+        // the recovery voters from the latest QuorumBegin: the set
         // `initiate_confiscations` committed to when it paid the lottery
-        // UTXO. Any other set yields a different Taproot address and the
-        // claim finds no UTXO to spend.
+        // output.
         let ctx = self.lottery_context(ledger_id).await?;
         let our_armed = ctx
             .our_armed
             .clone()
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
+        let lottery = ctx.build_lottery(self.wallet.network())?;
+        let confirmations = self
+            .locate_lottery_output(&lottery)?
+            .map(|(_, _, c)| c)
+            .unwrap_or(0);
 
-        let ordered_preimages: Vec<Vec<u8>> = match lottery_claimability(&ctx.preimages) {
-            LotteryClaimability::Claimable => ctx.preimages.iter().flatten().cloned().collect(),
-            // Not all commitments revealed yet — not an error, just wait
-            // for the remaining reveal(s). Said at info: a claim that
-            // waits forever on reveals it cannot see must show in the log.
-            LotteryClaimability::Unknown => {
-                tracing::info!(
-                    "Lottery for {}: {} of {} preimages revealed, waiting",
-                    &ledger_id[..16],
-                    ctx.preimages.iter().filter(|p| p.is_some()).count(),
-                    ctx.preimages.len()
-                );
-                return Ok(false);
-            }
-            // Preimages committed under N = Q, claim leaf built for the k
-            // who armed: this one can never be claimed. Recover it through
-            // the CSV-144 leaf instead of waiting on a claim that cannot
-            // verify (see `lottery_recovery`).
-            LotteryClaimability::Unclaimable {
-                preimage_len,
-                max_len,
-            } => {
-                tracing::debug!(
-                    "Lottery for {} cannot be claimed: preimage length {} out of 17..{}",
-                    &ledger_id[..16],
-                    preimage_len,
-                    max_len
-                );
-                return self
-                    .recover_unclaimable_lottery(ledger_id, &ctx, &our_armed)
-                    .await;
-            }
-        };
-        let participants = ctx.participants.clone();
-        let (recovery_voters, recovery_threshold) =
-            (ctx.recovery_voters.clone(), ctx.recovery_threshold);
+        let (subset, ordered_preimages, winner_index) =
+            match lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS) {
+                LotteryClaimPath::Full(pre) => {
+                    let w = if ctx.participants.len() == 1 {
+                        0
+                    } else {
+                        LotteryOutput::calculate_winner(&pre).map_err(|e| {
+                            Error::Protocol(format!("Failed to calculate winner: {:?}", e))
+                        })?
+                    };
+                    (None, pre, w)
+                }
+                LotteryClaimPath::Subset(idx, pre) => {
+                    let w = LotteryOutput::subset_winner(&idx, &pre).map_err(|e| {
+                        Error::Protocol(format!("Failed to calculate winner: {:?}", e))
+                    })?;
+                    (Some(idx), pre, w)
+                }
+                LotteryClaimPath::Wait(why) => {
+                    tracing::info!("Lottery for {}: {}", &ledger_id[..16], why);
+                    return Ok(false);
+                }
+            };
 
-        // Determine winner
-        let winner_index = LotteryOutput::calculate_winner(&ordered_preimages)
-            .map_err(|e| Error::Protocol(format!("Failed to calculate winner: {:?}", e)))?;
-
-        let (winner_pubkey, _winner_participant) = &participants[winner_index];
-
-        if *winner_pubkey == our_pubkey {
-            // WE WON - claim the lottery
-            tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
-            self.claim_lottery(
-                ledger_id,
-                &participants,
-                &ordered_preimages,
-                winner_index,
-                &our_armed,
-                recovery_voters,
-                recovery_threshold,
-            )
-            .await?;
-        } else {
-            // We lost - yield
+        let (winner_pubkey, _) = &ctx.participants[winner_index];
+        if *winner_pubkey != our_pubkey {
             tracing::info!(
                 "We lost the lottery for ledger {}. Publishing DisputeYield.",
                 &ledger_id[..16]
             );
             self.publish_custody_yield(ledger_id, &our_armed).await?;
+            return Ok(true);
         }
-
-        Ok(true)
+        tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
+        self.claim_lottery(
+            ledger_id,
+            &ctx.participants,
+            &ordered_preimages,
+            winner_index,
+            subset.as_deref(),
+            &our_armed,
+            ctx.recovery_voters.clone(),
+            ctx.recovery_threshold,
+        )
+        .await
     }
 
     /// Claim the lottery output as the winner
@@ -1697,10 +1563,11 @@ impl Node {
         )],
         ordered_preimages: &[Vec<u8>],
         winner_index: usize,
+        subset: Option<&[usize]>,
         our_armed: &deposits_core::SignedLedgerUpdate,
         recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey>,
         recovery_threshold: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use bitcoin::taproot::TapLeafHash;
@@ -1775,7 +1642,14 @@ impl Node {
             input: vec![TxIn {
                 previous_output: lottery_outpoint,
                 script_sig: ScriptBuf::new(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                // A subset leaf opens LOTTERY_REVEAL_CSV_BLOCKS after the confiscation.
+                sequence: if subset.is_some() {
+                    bitcoin::Sequence::from_height(
+                        deposits_core::tapscript_reserves::LOTTERY_REVEAL_CSV_BLOCKS as u16,
+                    )
+                } else {
+                    bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME
+                },
                 witness: Witness::new(),
             }],
             output: vec![TxOut {
@@ -1790,10 +1664,14 @@ impl Node {
             script_pubkey: lottery_script.clone(),
         }];
 
-        let leaf_hash = TapLeafHash::from_script(
-            &lottery_output.lottery_script,
-            bitcoin::taproot::LeafVersion::TapScript,
-        );
+        let leaf = match subset {
+            Some(idx) => lottery_output
+                .subset_leaf(idx)
+                .ok_or_else(|| Error::Protocol(format!("No claim leaf for subset {:?}", idx)))?
+                .clone(),
+            None => lottery_output.lottery_script.clone(),
+        };
+        let leaf_hash = TapLeafHash::from_script(&leaf, bitcoin::taproot::LeafVersion::TapScript);
 
         let mut sighash_cache = SighashCache::new(&claim_tx);
         let sighash = sighash_cache
@@ -1815,10 +1693,31 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("lottery sighash sign: {}", e)))?;
 
-        // Create witness
-        let witness = lottery_output
-            .create_claim_witness(&sig_bytes, ordered_preimages)
-            .map_err(|e| Error::Protocol(format!("Failed to create witness: {:?}", e)))?;
+        // Create witness: a subset claim also needs the voters' attestations.
+        let witness = match subset {
+            Some(idx) => {
+                let sighash_bytes: [u8; 32] = *sighash.as_ref();
+                let Some(voter_sigs) = self
+                    .subset_attestations(
+                        ledger_id,
+                        &lottery_output,
+                        idx,
+                        &claim_tx,
+                        &prevouts,
+                        sighash_bytes,
+                    )
+                    .await?
+                else {
+                    return Ok(false);
+                };
+                lottery_output
+                    .create_subset_claim_witness(idx, &sig_bytes, ordered_preimages, &voter_sigs)
+                    .map_err(|e| Error::Protocol(format!("Failed to create witness: {:?}", e)))?
+            }
+            None => lottery_output
+                .create_claim_witness(&sig_bytes, ordered_preimages)
+                .map_err(|e| Error::Protocol(format!("Failed to create witness: {:?}", e)))?,
+        };
 
         let mut claim_tx = claim_tx;
         claim_tx.input[0].witness = witness;
@@ -1947,7 +1846,7 @@ impl Node {
             );
         }
 
-        Ok(())
+        Ok(true)
     }
 
     /// Withdraw our armed dispute on `fork_key`: append `DisputeYield` to the
@@ -2802,51 +2701,6 @@ impl Node {
             // Filter out original operator from quorum_members (VoterSet adds operator as tie_breaker)
             quorum_members.retain(|pk| *pk != original_operator);
 
-            // Wait for full arming. Every armer committed its lottery
-            // preimage under N = Q (the recovery voters, `arm_n`), but the
-            // claim leaf is built below for the k = participants.len() who
-            // armed, with an OP_SIZE bound of 16 + k: with k < Q only
-            // (k/Q)^k of lotteries can ever be claimed, and the rest wait
-            // for the recovery leaves (`lottery_recovery`). So give the
-            // others FULL_ARMING_WAIT_BLOCKS before confiscating without
-            // them. The reference has no arm window (it never sets
-            // dispute_arm_blocks) and would confiscate as soon as a second
-            // member armed, so the wait runs from the second arm's height:
-            // the point where it would otherwise confiscate. cl-deposits
-            // waits the same 720 blocks past its arm window.
-            let (q, k) = (quorum_members.len(), armed_heights.len());
-            if k < q {
-                let mut heights: Vec<u32> = armed_heights.values().copied().collect();
-                heights.sort_unstable();
-                let deadline = heights
-                    .get(1)
-                    .or(heights.first())
-                    .copied()
-                    .unwrap_or(0)
-                    .saturating_add(super::lottery_recovery::FULL_ARMING_WAIT_BLOCKS);
-                let height = self.wallet.get_block_height().ok().unwrap_or(0);
-                if height < deadline {
-                    tracing::debug!(
-                        "{} of {} armed for ledger {}; waiting for the rest until block {} \
-                         (now {})",
-                        k,
-                        q,
-                        ledger_prefix,
-                        deadline,
-                        height
-                    );
-                    continue;
-                }
-                tracing::warn!(
-                    "Confiscating ledger {} with {} of {} armed (full-arming wait ended at \
-                     block {}): its lottery may not be claimable",
-                    ledger_prefix,
-                    k,
-                    q,
-                    deadline
-                );
-            }
-
             // DEP-03 eligibility cut: armers whose replacement collateral
             // fails are excluded from the lottery rather than stalling it.
             let participants: Vec<LotteryParticipant> = match super::armers::eligible_armers(
@@ -2859,7 +2713,7 @@ impl Node {
                     tracing::info!(
                         "Only {} of {} armers of ledger {} are lottery participants; waiting",
                         set.participants.len(),
-                        k,
+                        armed_heights.len(),
                         ledger_prefix
                     );
                     continue;
@@ -2870,7 +2724,7 @@ impl Node {
                 }
             };
             tracing::info!("{} of {} armers are lottery participants for ledger {}..., initiating confiscation ({} quorum members)",
-                participants.len(), k, ledger_prefix, quorum_members.len());
+                participants.len(), armed_heights.len(), ledger_prefix, quorum_members.len());
 
             // Build recovery voters (quorum minus original operator)
             let recovery_voters: Vec<XOnlyPublicKey> = quorum_members

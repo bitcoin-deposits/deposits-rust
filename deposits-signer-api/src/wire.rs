@@ -248,9 +248,8 @@ pub enum SignResult {
     },
     /// Result of `DeriveLotteryPreimage`: a 32-byte entropy *seed*. The
     /// caller (node) shapes this into the length-carrying lottery preimage
-    /// via `LotteryOutput::derive_lottery_preimage(seed, N)` — the winner
-    /// is selected from preimage *lengths*, so the length must land in
-    /// `[17, 16+N]` for the dispute's disputant count `N`. The node then
+    /// via `LotteryOutput::derive_lottery_preimage(seed)` — the winner
+    /// is selected from preimage *lengths*, which land in `[17, 76]`. The node then
     /// computes `HASH160(preimage)` as the dispute commitment. Kept as a
     /// bare seed (not the final preimage) so the signer stays oblivious to
     /// `N` and the length policy lives in one place.

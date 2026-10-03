@@ -518,17 +518,6 @@ impl Node {
                 }
                 None => return (false, None, Some("Missing revealers".to_string())),
             };
-        let fallback_recipient: Option<XOnlyPublicKey> = match request
-            .params
-            .get("fallback_recipient")
-            .and_then(|v| v.as_str())
-        {
-            Some(s) => match s.parse() {
-                Ok(pk) => Some(pk),
-                Err(_) => return (false, None, Some("Invalid fallback_recipient".to_string())),
-            },
-            None => None,
-        };
 
         // -- 1. Local dispute-state gate -----------------------------------
         // Our fork's dispute_state is authoritative when we armed. A
@@ -763,7 +752,6 @@ impl Node {
             share_value_sats,
             &claimed_revealers,
             fee_sats,
-            fallback_recipient.as_ref(),
             self.wallet.network(),
         ) {
             Ok(t) => t,
@@ -826,28 +814,14 @@ impl Node {
                 }
             }
             Ok(None) => {
-                if claimed_revealers.is_empty() {
-                    // Zero-revealer fallback sweep: nothing on-chain to
-                    // cross-check the (degenerate) recipient against.
-                    // Step 4 pinned the TX to pay exactly the declared
-                    // fallback; flag it for the operator log.
-                    tracing::warn!(
-                        "forfeit_sweep_sign {}: ZERO revealers — entire slice \
-                         pays the requester-declared fallback {:?}. Signing on \
-                         structural check only.",
-                        ledger_prefix,
-                        fallback_recipient.map(|f| f.to_string())
-                    );
-                } else {
-                    tracing::warn!(
-                        "forfeit_sweep_sign {}: could not locate the lottery \
+                tracing::warn!(
+                    "forfeit_sweep_sign {}: could not locate the lottery \
                          claim tx to verify the revealer set; signing on the \
                          structural check (outputs pay only the {} claimed \
                          revealers, pro-rata).",
-                        ledger_prefix,
-                        claimed_revealers.len()
-                    );
-                }
+                    ledger_prefix,
+                    claimed_revealers.len()
+                );
             }
             Err(e) => {
                 tracing::warn!(

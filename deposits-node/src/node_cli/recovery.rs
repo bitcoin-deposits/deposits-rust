@@ -3194,15 +3194,13 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
         .into());
     }
 
-    // Phase 4c precondition: protocol-level disputant cap. The lottery
-    // builder also enforces this via `n > MAX_DISPUTANTS`, but failing
-    // here gives a clearer error and avoids spending CPU on the build.
-    if participants.len() > deposits_core::MAX_DISPUTANTS {
+    // The lottery's subset tree has 2^k - 1 claim leaves (DEP-06), which
+    // caps participants; the builder enforces it too.
+    if participants.len() > deposits_core::tapscript_reserves::MAX_LOTTERY_PARTICIPANTS {
         return Err(format!(
-            "Too many disputants: {} found, MAX_DISPUTANTS = {}. \
-             The lottery construction's hard cap is N=15 — see CUSTODY_LOTTERY.md.",
+            "Too many disputants: {} found, MAX_LOTTERY_PARTICIPANTS = {}",
             participants.len(),
-            deposits_core::MAX_DISPUTANTS
+            deposits_core::tapscript_reserves::MAX_LOTTERY_PARTICIPANTS
         )
         .into());
     }
@@ -3216,12 +3214,9 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     if participants.len() > deposits_core::MAX_QUORUM_SIZE_POLICY {
         return Err(format!(
             "Disputants {} exceeds the pre-release policy cap of {} \
-             (= MAX_QUORUM_SIZE_POLICY). The lottery script supports \
-             up to {}, but Q is policy-capped until production reliability \
-             data justifies lifting it.",
+             (= MAX_QUORUM_SIZE_POLICY).",
             participants.len(),
             deposits_core::MAX_QUORUM_SIZE_POLICY,
-            deposits_core::MAX_DISPUTANTS,
         )
         .into());
     }
@@ -4092,27 +4087,14 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
         }
     };
 
-    // Zero revealers is degenerate-but-defined: the slice has no honest
-    // pro-rata recipient, so `build_forfeit_sweep_tx` pays its fallback.
-    // We use OUR operator xonly key and say so loudly — cosigners will
-    // see the fallback in the request and apply their own judgment.
-    let fallback: Option<XOnlyPublicKey> = if revealers.is_empty() {
-        eprintln!();
-        eprintln!(
-            "WARNING: ZERO revealers found. The sweep normally pays the armers \
-             who revealed their lottery preimage; with none, the entire slice \
-             (minus fee) goes to the FALLBACK RECIPIENT — this node's operator \
-             key ({}). Cosigners are told this explicitly in the sign request.",
-            our_xonly
-        );
-        eprintln!();
-        Some(our_xonly)
-    } else {
-        for r in &revealers {
-            println!("    revealer: {}", r);
-        }
-        None
-    };
+    // Zero revealers: the slice belongs to the re-arm round (DEP-06), never
+    // to us or the accused operator, so there is nothing to sweep.
+    if revealers.is_empty() {
+        return Err("no revealers: the armer shares wait for the re-arm round (DEP-06)".into());
+    }
+    for r in &revealers {
+        println!("    revealer: {}", r);
+    }
 
     // ------------------------------------------------------------------
     // 4. Per-share scan: rebuild each armer's share output, verify it
@@ -4232,7 +4214,6 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
             entry.value_sats,
             &revealers,
             fee_sats,
-            fallback.as_ref(),
             config.network,
         )
         .map_err(|e| format!("Failed to build sweep tx: {:?}", e))?;
@@ -4262,12 +4243,8 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
             println!("  [dry-run] unsigned tx: {}", unsigned_tx_hex);
             println!("  [dry-run] sighash:     {}", hex::encode(sighash_bytes));
             println!(
-                "  [dry-run] recipients:  {}",
-                if revealers.is_empty() {
-                    format!("fallback {}", our_xonly)
-                } else {
-                    format!("{} revealers pro-rata", revealers.len())
-                }
+                "  [dry-run] recipients:  {} revealers pro-rata",
+                revealers.len()
             );
             continue;
         }
@@ -4299,7 +4276,6 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
                 "unsigned_tx": unsigned_tx_hex,
                 "revealers": revealers.iter().map(|r| r.to_string()).collect::<Vec<_>>(),
                 "fee_sats": fee_sats,
-                "fallback_recipient": fallback.map(|f| f.to_string()),
             });
 
             let request_id = publish_transport
