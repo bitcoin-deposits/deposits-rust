@@ -1028,14 +1028,26 @@ impl Node {
                 replacement_collateral: Some(rc),
                 ..
             }) if arms_so_far < super::armers::MAX_ARMS => {
+                // Blocking chain calls (each with a 60 s HTTP timeout) on the blocking
+                // pool, bounded: this runs inside handle_dispute on the run loop, where a
+                // busy bitcoind once held the loop 120 s per dispute message and every
+                // request it routes timed out (regtest, 2026-10-06). Unknown = keep the arm.
                 let chain = self.wallet.chain_backend();
-                let tip = chain.get_tip_height().unwrap_or(0);
-                match super::armers::pledge_failure(&*chain, rc, tip, 0) {
-                    Ok(Some(why)) => {
+                let rc = *rc;
+                let check = tokio::task::spawn_blocking(move || {
+                    let tip = chain.get_tip_height().unwrap_or(0);
+                    super::armers::pledge_failure(&*chain, &rc, tip, 0)
+                });
+                match tokio::time::timeout(std::time::Duration::from_secs(4), check).await {
+                    Ok(Ok(Ok(Some(why)))) => {
                         tracing::warn!("Our pledge no longer counts ({}); re-arming", why);
                         true
                     }
-                    _ => false,
+                    Ok(_) => false,
+                    Err(_) => {
+                        tracing::debug!("pledge check still running; keeping our arm for now");
+                        false
+                    }
                 }
             }
             _ => false,

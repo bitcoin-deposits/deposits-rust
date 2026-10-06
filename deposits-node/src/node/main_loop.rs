@@ -2615,7 +2615,12 @@ impl Node {
             // Handle disputes
             {
                 let phase_start = std::time::Instant::now();
-                while let Some(dispute) = self.nostr.try_recv_dispute() {
+                // Bounded per iteration: a flood (one theft fans out to every ledger the
+                // signers operate) must not keep the loop from routing responses.
+                while phase_start.elapsed() < std::time::Duration::from_secs(2) {
+                    let Some(dispute) = self.nostr.try_recv_dispute() else {
+                        break;
+                    };
                     tracing::info!(
                         "RECV dispute: ledger={}..., reason={}, from={}...",
                         &dispute.ledger_id[..16.min(dispute.ledger_id.len())],
@@ -2641,7 +2646,10 @@ impl Node {
             // Handle fraud proofs
             {
                 let phase_start = std::time::Instant::now();
-                while let Some(fp) = self.nostr.try_recv_fraud_proof() {
+                while phase_start.elapsed() < std::time::Duration::from_secs(2) {
+                    let Some(fp) = self.nostr.try_recv_fraud_proof() else {
+                        break;
+                    };
                     tracing::info!(
                         "RECV fraud_proof: from={}..., event={}...",
                         &fp.sender[..12.min(fp.sender.len())],
