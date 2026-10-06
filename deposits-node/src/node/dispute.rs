@@ -2720,7 +2720,25 @@ impl Node {
                 &paginated_updates,
                 None,
             ) {
-                Ok(set) if !set.participants.is_empty() => set.lottery_participants(),
+                Ok(set) if !set.participants.is_empty() => {
+                    // The set and E, comparable with cl-deposits' "participants of" line.
+                    tracing::info!(
+                        "lottery participants of {} at snapshot {}: [{}]; excluded: [{}]",
+                        ledger_prefix,
+                        set.snapshot,
+                        set.participants
+                            .iter()
+                            .map(|a| a.key.to_string()[..16].to_string())
+                            .collect::<Vec<_>>()
+                            .join(" "),
+                        set.excluded
+                            .iter()
+                            .map(|(a, why)| format!("{} ({})", &a.key.to_string()[..16], why))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    set.lottery_participants()
+                }
                 Ok(set) => {
                     tracing::info!(
                         "Only {} of {} armers of ledger {} are lottery participants; waiting",
