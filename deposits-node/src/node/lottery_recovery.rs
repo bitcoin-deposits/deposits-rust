@@ -35,6 +35,48 @@ pub(crate) enum LotteryClaimPath {
     Wait(String),
 }
 
+type Participant = (bitcoin::secp256k1::PublicKey, LotteryParticipant);
+
+/// The subset of `candidates` (trying `current` first) whose lottery output is
+/// `spk`, sorted canonically; `None` if none is. At most 8 candidates (255 subsets).
+pub(crate) fn match_landed_set(
+    spk: &bitcoin::ScriptBuf,
+    current: &[Participant],
+    candidates: &[Participant],
+    voters: &[XOnlyPublicKey],
+    threshold: usize,
+    network: bitcoin::Network,
+) -> Option<Vec<Participant>> {
+    let pays = |set: &[Participant]| {
+        let mut sorted = set.to_vec();
+        sorted.sort_by_key(|(_, p)| p.pubkey.serialize());
+        LotteryScriptBuilder::new(
+            sorted.iter().map(|(_, p)| p.clone()).collect(),
+            voters.to_vec(),
+            threshold,
+            network,
+        )
+        .build()
+        .ok()
+        .filter(|l| &l.script_pubkey() == spk)
+        .map(|_| sorted)
+    };
+    if let Some(s) = pays(current) {
+        return Some(s);
+    }
+    let n = candidates.len();
+    if n == 0 || n > 8 {
+        return None;
+    }
+    (1u32..(1 << n)).rev().find_map(|mask| {
+        let subset: Vec<_> = (0..n)
+            .filter(|i| mask & (1 << i) != 0)
+            .map(|i| candidates[i].clone())
+            .collect();
+        pays(&subset)
+    })
+}
+
 /// `preimages` parallel the participants (`None` where unrevealed). A
 /// preimage outside 17..=76 bytes cannot satisfy any leaf and counts as
 /// unrevealed.
@@ -220,16 +262,32 @@ impl Node {
                 _ => {}
             }
         }
-        // Participants: the DEP-03 eligibility cut, one per armer, sorted
-        // (the set the confiscation was built with).
-        let participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = self
+        // Participants: the DEP-03 eligibility cut, one per armer, sorted. A late arm
+        // at or below E changes the cut without moving E, so once a confiscation has
+        // landed its set is final: the one its lottery output commits to (DEP-03
+        // §"Replacement collateral declaration"), whatever our view says now.
+        let set = self
             .lottery_armer_set(ledger_id)
             .await
-            .map_err(Error::Protocol)?
+            .map_err(Error::Protocol)?;
+        let mut participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = set
             .participants
-            .into_iter()
-            .map(|a| (a.key, a.participant))
+            .iter()
+            .map(|a| (a.key, a.participant.clone()))
             .collect();
+        if let Some((voters, threshold)) = recovery_voters_from_updates(&updates) {
+            let candidates: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = set
+                .participants
+                .iter()
+                .chain(set.excluded.iter().map(|(a, _)| a))
+                .map(|a| (a.key, a.participant.clone()))
+                .collect();
+            if let Some(landed) =
+                self.landed_lottery_set(&updates, &participants, &candidates, &voters, threshold)
+            {
+                participants = landed;
+            }
+        }
         if participants.is_empty() {
             return Err(Error::Protocol(
                 "No DisputeArmed participants found".to_string(),
@@ -371,6 +429,36 @@ impl Node {
         }
 
         revealed
+    }
+
+    /// The participant set of the confiscation that spent the vault, if one has: the
+    /// subset of `candidates` whose lottery output its first output pays. `current`
+    /// (our cut now) is tried first. `None` while the vault is unspent or no subset
+    /// matches.
+    fn landed_lottery_set(
+        &self,
+        updates: &[deposits_core::SignedLedgerUpdate],
+        current: &[(bitcoin::secp256k1::PublicKey, LotteryParticipant)],
+        candidates: &[(bitcoin::secp256k1::PublicKey, LotteryParticipant)],
+        voters: &[XOnlyPublicKey],
+        threshold: usize,
+    ) -> Option<Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>> {
+        let (vault, _) = super::vault_watch::current_vault(updates)?;
+        let backend = self.wallet.chain_backend();
+        let from = backend.get_tx_block_height(&vault.txid).ok().flatten()?;
+        let spender = backend
+            .find_spending_tx(&vault, bitcoin::Script::new(), from)
+            .ok()
+            .flatten()?;
+        let spk = spender.output.first()?.script_pubkey.clone();
+        match_landed_set(
+            &spk,
+            current,
+            candidates,
+            voters,
+            threshold,
+            self.wallet.network(),
+        )
     }
 
     /// The unspent lottery output and its confirmations, if it is on chain.
@@ -768,6 +856,42 @@ mod tests {
     }
     fn pubkey(seed: u8) -> bitcoin::secp256k1::PublicKey {
         bitcoin::secp256k1::PublicKey::from_secret_key(&Secp256k1::new(), &secret(seed))
+    }
+
+    #[test]
+    fn the_landed_set_is_recovered_from_the_confirmed_output() {
+        let p = |i: u8| {
+            (
+                pubkey(i),
+                LotteryParticipant::new(pubkey(i).x_only_public_key().0, [i; 20], "t".into()),
+            )
+        };
+        let voters: Vec<XOnlyPublicKey> = (20..23u8)
+            .map(|i| pubkey(i).x_only_public_key().0)
+            .collect();
+        let all = vec![p(1), p(2), p(3), p(4)];
+        // The confiscation was built over 1, 2, 4; a late arm (3) joined our view since.
+        let mut landed = [p(1), p(2), p(4)];
+        landed.sort_by_key(|(_, x)| x.pubkey.serialize());
+        let spk = LotteryScriptBuilder::new(
+            landed.iter().map(|(_, x)| x.clone()).collect(),
+            voters.clone(),
+            2,
+            bitcoin::Network::Regtest,
+        )
+        .build()
+        .unwrap()
+        .script_pubkey();
+        let got =
+            match_landed_set(&spk, &all, &all, &voters, 2, bitcoin::Network::Regtest).unwrap();
+        assert_eq!(
+            got.iter().map(|(k, _)| *k).collect::<Vec<_>>(),
+            landed.iter().map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        let other = bitcoin::ScriptBuf::from_bytes(vec![0x51]);
+        assert!(
+            match_landed_set(&other, &all, &all, &voters, 2, bitcoin::Network::Regtest).is_none()
+        );
     }
 
     #[test]
