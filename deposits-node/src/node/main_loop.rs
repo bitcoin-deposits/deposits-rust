@@ -1659,10 +1659,23 @@ impl Node {
                 tracing::debug!("run loop iteration {}", loop_iteration);
             }
 
-            // Full wallet sync (every 30s fast / 60s normal) — expensive, ~40 HTTP requests
+            // Full wallet sync (every 30s fast / 60s normal) — expensive, ~40 blocking
+            // HTTP requests, each with a 60 s timeout. Off the loop, one at a time: inline,
+            // a busy chain backend stalled the loop for minutes and every request routed
+            // through it (consent, cosign responses) timed out (regtest, 2026-10-03).
             if last_wallet_sync.elapsed() >= wallet_sync_interval {
-                if let Err(e) = self.sync_wallet() {
-                    tracing::warn!("Full wallet sync failed: {}", e);
+                if !self
+                    .wallet_sync_running
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let node = Arc::clone(self);
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = node.sync_wallet() {
+                            tracing::warn!("Full wallet sync failed: {}", e);
+                        }
+                        node.wallet_sync_running
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    });
                 }
                 last_wallet_sync = tokio::time::Instant::now();
             }
@@ -1692,9 +1705,19 @@ impl Node {
             if last_periodic.elapsed() >= periodic_interval {
                 let periodic_start = std::time::Instant::now();
                 tracing::debug!("[CANARY] entering periodic section (v2-timeout-all)");
-                // Lightweight block height sync (2 HTTP requests)
-                if let Err(e) = self.sync_block_height() {
-                    tracing::warn!("Block height sync failed: {}", e);
+                // Block height sync (2 blocking HTTP requests): off the loop, one at a time.
+                if !self
+                    .height_sync_running
+                    .swap(true, std::sync::atomic::Ordering::AcqRel)
+                {
+                    let node = Arc::clone(self);
+                    tokio::task::spawn_blocking(move || {
+                        if let Err(e) = node.sync_block_height() {
+                            tracing::warn!("Block height sync failed: {}", e);
+                        }
+                        node.height_sync_running
+                            .store(false, std::sync::atomic::Ordering::Release);
+                    });
                 }
 
                 // Withdraw expiry disputes whose quorum came back. Its

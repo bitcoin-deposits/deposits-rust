@@ -528,6 +528,11 @@ pub struct Node {
     /// keyed by ledger id (see `lottery_recovery`).
     pending_subset_claims: Mutex<HashMap<String, lottery_recovery::PendingSubsetClaim>>,
 
+    /// A full wallet sync / block-height sync is running (spawned off the run
+    /// loop: both make blocking chain-backend calls).
+    wallet_sync_running: std::sync::atomic::AtomicBool,
+    height_sync_running: std::sync::atomic::AtomicBool,
+
     /// Joined ledger IDs detected as stale during cosign requests.
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
     stale_joined_ledgers: Mutex<std::collections::HashSet<String>>,

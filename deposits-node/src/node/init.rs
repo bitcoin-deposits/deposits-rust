@@ -325,6 +325,8 @@ impl Node {
             imported_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_confiscations: Mutex::new(HashMap::new()),
             pending_subset_claims: Mutex::new(HashMap::new()),
+            wallet_sync_running: std::sync::atomic::AtomicBool::new(false),
+            height_sync_running: std::sync::atomic::AtomicBool::new(false),
             stale_joined_ledgers: Mutex::new(std::collections::HashSet::new()),
             pending_fork_publications: Mutex::new(std::collections::HashSet::new()),
             pending_dereliction_watches: Mutex::new(HashMap::new()),

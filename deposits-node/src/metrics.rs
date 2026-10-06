@@ -702,6 +702,13 @@ pub fn record_pre_cosign_drain(updates_drained: usize, caught_up: bool) {
 
 /// Record the duration of a run loop phase.
 pub fn record_run_loop_phase(phase: &str, duration: Duration) {
+    if duration >= Duration::from_secs(5) {
+        tracing::warn!(
+            "[SLOW_PHASE] run loop phase '{}' took {:?}",
+            phase,
+            duration
+        );
+    }
     histogram!("run_loop_phase_seconds", "phase" => phase.to_string())
         .record(duration.as_secs_f64());
 }
