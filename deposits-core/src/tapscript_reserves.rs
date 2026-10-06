@@ -786,6 +786,16 @@ impl LotteryParticipant {
 /// nobody has a reason to claim, leaving the output stuck.
 pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
 
+/// Default confiscation feerate (sat/vB) while no `reference_feerate_sat_vb` is recorded.
+pub const CONFISCATION_DEFAULT_FEERATE_SAT_VB: u64 = 2;
+
+/// DEP-03 §"Confiscation fee": `feerate × (120 + 30 × voters)` sats, where `voters`
+/// counts the vault's voters (members and operator). A deterministic bound on the
+/// confiscation's vsize at any tier, so every cosigner builds the same transaction.
+pub fn confiscation_fee_sats(voters: usize, feerate_sat_vb: u64) -> u64 {
+    feerate_sat_vb.saturating_mul(120 + 30 * voters as u64)
+}
+
 /// Contributions are `LEN(preimage) - 16` in `1..=60`: uniform mod every
 /// `m` in `1..=6` (60 = lcm(1..6)); for `m = 7` residues 1-4 occur 9/60 and
 /// the rest 8/60 (DEP-06 §"Influence and bias").

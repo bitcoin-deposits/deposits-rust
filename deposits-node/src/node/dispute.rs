@@ -140,6 +140,78 @@ mod confiscation_outputs_tests {
     use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
     use bitcoin::{Amount, Network, ScriptBuf};
 
+    /// The unsigned confiscation, byte for byte, for cl-deposits to reproduce
+    /// (tests/vectors/confiscation_tx.txt; REGEN_VECTORS=1 rewrites it). A
+    /// 3-participant lottery (secrets [i;32], commitments [i;20], voters 21..23 at 2,
+    /// signet), a vault of 8 voters, operator secret [9;32].
+    #[test]
+    fn confiscation_tx_vector_is_pinned() {
+        use deposits_core::tapscript_reserves::{
+            confiscation_fee_sats, LotteryParticipant, LotteryScriptBuilder,
+            CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+        };
+        let xonly = |i: u8| pk(i).x_only_public_key().0;
+        let mut ps: Vec<LotteryParticipant> = (1..=3u8)
+            .map(|i| LotteryParticipant::new(xonly(i), [i; 20], format!("tb1p{}", i)))
+            .collect();
+        ps.sort_by_key(|p| p.pubkey.serialize());
+        let lottery = LotteryScriptBuilder::new(
+            ps,
+            vec![xonly(21), xonly(22), xonly(23)],
+            2,
+            Network::Signet,
+        )
+        .build()
+        .unwrap();
+        let fee = confiscation_fee_sats(8, CONFISCATION_DEFAULT_FEERATE_SAT_VB);
+        let outpoint = bitcoin::OutPoint::new(
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x11; 32])),
+            1,
+        );
+        let mut lines = vec![format!("VEC fee={}", fee)];
+        for (name, respectful, locktime) in [("punitive", false, 0u32), ("respectful", true, 1234)]
+        {
+            let outputs = build_expected_confiscation_outputs(
+                lottery.script_pubkey(),
+                pk(9),
+                Network::Signet,
+                50_000_000,
+                fee,
+                respectful,
+                10_000_000,
+            )
+            .unwrap();
+            let tx = bitcoin::Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::from_consensus(locktime),
+                input: vec![bitcoin::TxIn {
+                    previous_output: outpoint,
+                    script_sig: ScriptBuf::new(),
+                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: bitcoin::Witness::default(),
+                }],
+                output: outputs,
+            };
+            lines.push(format!(
+                "VEC {}={}",
+                name,
+                hex::encode(bitcoin::consensus::encode::serialize(&tx))
+            ));
+        }
+        let now = lines.join("\n") + "\n";
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/vectors/confiscation_tx.txt"
+        );
+        if std::env::var("REGEN_VECTORS").is_ok() {
+            std::fs::write(path, &now).unwrap();
+        }
+        assert_eq!(
+            now,
+            std::fs::read_to_string(path).expect("vector (REGEN_VECTORS=1)")
+        );
+    }
+
     fn pk(seed: u8) -> PublicKey {
         let secp = Secp256k1::new();
         PublicKey::from_secret_key(&secp, &SecretKey::from_slice(&[seed; 32]).unwrap())
@@ -2834,9 +2906,11 @@ impl Node {
             // we built a punitive (1-output) tx but the cosigner read
             // the inline evidence as QuorumExpired (respectful → 2
             // outputs), the cosign refuses on tx-shape mismatch.
-            let fee_rate = 2u64;
-            let estimated_vsize = 200u64;
-            let fee = fee_rate * estimated_vsize;
+            // DEP-03 §"Confiscation fee": deterministic, so every cosigner builds the same tx.
+            let fee = deposits_core::tapscript_reserves::confiscation_fee_sats(
+                quorum_members.len() + 1,
+                deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+            );
             let proof_type = match self.fetch_fraud_proof_type_for_ledger(&ledger_id).await {
                 Some(pt) => Some(pt),
                 None => match self.fetch_quorum_expired_inline_evidence(&ledger_id).await {

@@ -1597,14 +1597,16 @@ impl Node {
             ));
         }
 
-        // 8. Derive fee from proposed tx, then compute expected outputs
-        let total_out: u64 = proposed_tx.output.iter().map(|o| o.value.to_sat()).sum();
-        let fee = reserves_amount.checked_sub(total_out).ok_or_else(|| {
-            format!(
-                "outputs ({} sats) exceed input ({} sats)",
-                total_out, reserves_amount
-            )
-        })?;
+        // 8. The fee is the DEP-03 rule, not the proposer's choice: every cosigner
+        //    rebuilds the identical transaction.
+        let fee = deposits_core::tapscript_reserves::confiscation_fee_sats(
+            qb_members
+                .iter()
+                .filter(|pk| **pk != original_operator)
+                .count()
+                + 1,
+            deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+        );
 
         let expected_outputs = crate::node::dispute::build_expected_confiscation_outputs(
             lottery_output.script_pubkey(),
