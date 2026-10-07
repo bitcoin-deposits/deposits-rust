@@ -53,6 +53,14 @@ fn exit_ops_match_cl_byte_for_byte_and_authorize() {
         let tlv = hex::decode(field(&lines, "tlv")).unwrap();
         let op = LedgerOperation::tlv_decode(&tlv).expect("decodes");
         assert_eq!(op.tlv_encode(), tlv, "{name}: re-encodes byte for byte");
+        {
+            use bitcoin::hashes::{sha256, Hash};
+            assert_eq!(
+                hex::encode(sha256::Hash::hash(&tlv).to_byte_array()),
+                field(&lines, "id"),
+                "{name}: request id = SHA256(tlv)"
+            );
+        }
         assert_eq!(
             hex::encode(operation_sighash(&op).expect("signable")),
             field(&lines, "sighash"),
@@ -218,7 +226,10 @@ fn exit_fold_semantics() {
         ctx(102, 6, 6),
         LedgerOperation::ExitCancel {
             deposit_id: dep,
-            exit_request_id: [4; 32],
+            exit_request_id: {
+                use bitcoin::hashes::{sha256, Hash};
+                sha256::Hash::hash(&req(500_000, None, 2).tlv_encode()).to_byte_array()
+            },
             nonce: 5,
             expiry: 9999,
             witness: DescriptorWitness::new(),

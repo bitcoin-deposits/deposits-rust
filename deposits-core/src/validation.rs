@@ -901,11 +901,17 @@ impl LedgerConformanceValidator {
                 .map_err(|e| ValidationError::DecodeError(format!("{:?}", e)))?;
 
             // Apply state changes (skip validation for replay - we trust the history)
-            ledger.apply_state_changes(&operation).map_err(|e| {
-                ValidationError::StateTransitionFailed {
-                    sequence: update.sequence_number,
-                    reason: format!("{}", e),
-                }
+            let ctx = deposits_protocol::types::ApplyCtx {
+                height: update.block_height,
+                seq: update.sequence_number,
+                hash: update.chain_hash(),
+            };
+            deposits_protocol::types::with_apply_ctx(ctx, || {
+                ledger.apply_state_changes(&operation)
+            })
+            .map_err(|e| ValidationError::StateTransitionFailed {
+                sequence: update.sequence_number,
+                reason: format!("{}", e),
             })?;
 
             // Update sequence/hash to match the update (use chain_hash for signed entries

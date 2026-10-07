@@ -887,7 +887,7 @@ impl DepositsHandler {
             .filter(|u| (u.sequence_number as i64) > replay_after_seq)
             .filter_map(|u| {
                 match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
-                    Ok(op) => Some((u.sequence_number, op)),
+                    Ok(op) => Some((u.sequence_number, u.block_height, op)),
                     Err(e) => {
                         tracing::warn!(
                             "Ledger {} seq {}: failed to decode operation for replay: {}",
@@ -902,8 +902,15 @@ impl DepositsHandler {
             .collect();
 
         let mut replayed = 0u64;
-        for (seq, operation) in &ops_to_replay {
-            if let Err(e) = ledger.apply_state_changes(operation) {
+        for (seq, height, operation) in &ops_to_replay {
+            let ctx = deposits_core::types::ApplyCtx {
+                height: *height,
+                seq: *seq,
+                hash: [0; 32],
+            };
+            if let Err(e) =
+                deposits_core::types::with_apply_ctx(ctx, || ledger.apply_state_changes(operation))
+            {
                 tracing::warn!(
                     "Ledger {} seq {}: failed to replay state change: {}",
                     ledger_id,
@@ -2460,7 +2467,12 @@ impl DepositsHandler {
                     ))
                 }
             };
-            match ledger.apply_and_check(&op, update.block_height) {
+            match ledger.apply_and_check_at(
+                &op,
+                update.block_height,
+                update.block_height,
+                update.sequence_number,
+            ) {
                 Ok(violations) if !violations.is_empty() => {
                     tracing::warn!(
                         "apply_updates_to_ledger {}: conformance violations at seq {}: {:?}",
@@ -2544,7 +2556,12 @@ impl DepositsHandler {
 
             // Run the state machine + conformance verifier so custody /
             // dispute state / balances advance (not just the chain tip).
-            match ledger.apply_and_check(operation, block_height) {
+            match ledger.apply_and_check_at(
+                operation,
+                block_height,
+                update.block_height,
+                update.sequence_number,
+            ) {
                 Ok(violations) if !violations.is_empty() => {
                     tracing::warn!(
                         "commit_self_authored_update {}: conformance violations at seq {}: {:?}",

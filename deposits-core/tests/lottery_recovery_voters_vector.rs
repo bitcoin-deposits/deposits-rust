@@ -39,7 +39,10 @@ fn qb(members: &[u8]) -> LedgerOperation {
         amount: 0,
         quorum_expiry: 1000,
         ledger_hash: [0; 32],
-        quorum_members: members.iter().map(|i| QuorumMemberRef::new(pk(*i), String::new())).collect(),
+        quorum_members: members
+            .iter()
+            .map(|i| QuorumMemberRef::new(pk(*i), String::new()))
+            .collect(),
         collateral_amount: 0,
         protocol_version: Some("cltv-offset-v2".into()),
         exit_cutoff_height: None,
@@ -72,20 +75,50 @@ fn enter(last_valid: u64) -> LedgerOperation {
 #[allow(clippy::type_complexity)]
 fn cases() -> Vec<(&'static str, Vec<(u64, u8, &'static str, Vec<u64>)>)> {
     vec![
-        ("plain", vec![(0, 1, "open", vec![]), (1, 1, "qb", vec![1, 2, 3, 4]), (5, 2, "enter", vec![4])]),
+        (
+            "plain",
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3, 4]),
+                (5, 2, "enter", vec![4]),
+            ],
+        ),
         (
             "later_qb_past_fork_point",
-            vec![(0, 1, "open", vec![]), (1, 1, "qb", vec![1, 2, 3, 4]), (6, 1, "qb", vec![1, 5, 6]), (7, 2, "enter", vec![4])],
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3, 4]),
+                (6, 1, "qb", vec![1, 5, 6]),
+                (7, 2, "enter", vec![4]),
+            ],
         ),
         (
             "qb_by_another_author",
-            vec![(0, 1, "open", vec![]), (1, 1, "qb", vec![1, 2, 3, 4, 5, 6]), (3, 7, "qb", vec![7, 8, 9]), (4, 2, "enter", vec![3])],
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3, 4, 5, 6]),
+                (3, 7, "qb", vec![7, 8, 9]),
+                (4, 2, "enter", vec![3]),
+            ],
         ),
         (
             "lowest_fork_point_wins",
-            vec![(0, 1, "open", vec![]), (1, 1, "qb", vec![1, 2, 3]), (4, 1, "qb", vec![1, 4, 5, 6, 7]), (9, 2, "enter", vec![8]), (9, 3, "enter", vec![2])],
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3]),
+                (4, 1, "qb", vec![1, 4, 5, 6, 7]),
+                (9, 2, "enter", vec![8]),
+                (9, 3, "enter", vec![2]),
+            ],
         ),
-        ("no_dispute", vec![(0, 1, "open", vec![]), (1, 1, "qb", vec![1, 2, 3]), (8, 1, "qb", vec![1, 4, 5])]),
+        (
+            "no_dispute",
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3]),
+                (8, 1, "qb", vec![1, 4, 5]),
+            ],
+        ),
     ]
 }
 
@@ -114,21 +147,35 @@ fn recovery_voters_vector_is_pinned() {
                 "upd {seq} {} {kind}{}",
                 hex::encode(pk(*author).serialize()),
                 args.iter()
-                    .map(|a| if *kind == "qb" { format!(" {}", hex::encode(pk(*a as u8).serialize())) } else { format!(" {a}") })
+                    .map(|a| if *kind == "qb" {
+                        format!(" {}", hex::encode(pk(*a as u8).serialize()))
+                    } else {
+                        format!(" {a}")
+                    })
                     .collect::<String>()
             ));
         }
         let (voters, t) = lottery_recovery_voters(&build(&us)).unwrap();
         out.push(format!(
             "voters{}",
-            voters.iter().map(|v| format!(" {}", hex::encode(v.serialize()))).collect::<String>()
+            voters
+                .iter()
+                .map(|v| format!(" {}", hex::encode(v.serialize())))
+                .collect::<String>()
         ));
         out.push(format!("threshold {t}"));
     }
     let text = out.join("\n") + "\n";
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/lottery_recovery_voters.txt");
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/vectors/lottery_recovery_voters.txt"
+    );
     if std::env::var("REGEN_VECTORS").is_ok() {
         std::fs::write(path, &text).unwrap();
     }
-    assert_eq!(std::fs::read_to_string(path).unwrap(), text, "regenerate with REGEN_VECTORS=1");
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        text,
+        "regenerate with REGEN_VECTORS=1"
+    );
 }

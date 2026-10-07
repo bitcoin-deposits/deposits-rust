@@ -274,7 +274,12 @@ impl LedgerActor {
         // view at the moment it was committed; use it as the chain_tip
         // for descriptor `after()` checks. Matches the on-chain
         // perspective that `apply_and_check` is replaying.
-        match ledger.apply_and_check(&op, update.block_height) {
+        match ledger.apply_and_check_at(
+            &op,
+            update.block_height,
+            update.block_height,
+            update.sequence_number,
+        ) {
             Ok(violations) if !violations.is_empty() => {
                 tracing::warn!(
                     ledger_id = %self.ledger_id,

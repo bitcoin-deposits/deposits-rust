@@ -537,28 +537,21 @@ impl Node {
             None
         };
         let ledger_id = request.ledger_id.clone();
+        let op_bytes = {
+            use deposits_core::tlv::TlvEncode;
+            op.tlv_encode()
+        };
         if let Err(e) = self.commit_operation(&ledger_id, op).await {
             return (false, None, Some(format!("Failed to commit exit: {}", e)));
         }
-        // The request id is the chain_hash of the update just committed.
-        let id = cancel_id.or_else(|| {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            let l = ledgers.get(&ledger_id)?.read().unwrap();
-            l.history
-                .iter()
-                .rev()
-                .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-                    Ok(LedgerOperation::ExitRequest {
-                        deposit_id: d,
-                        nonce: n,
-                        ..
-                    }) if d == deposit_id && n == nonce => Some(u.chain_hash()),
-                    _ => None,
-                })
+        // DEP-20 §3: the request id is SHA256 of the ExitRequest operation's TLV bytes.
+        let id = cancel_id.unwrap_or_else(|| {
+            use bitcoin::hashes::{sha256, Hash};
+            sha256::Hash::hash(&op_bytes).to_byte_array()
         });
         (
             true,
-            Some(serde_json::json!({ "exit_request_id": id.map(hex::encode) }).to_string()),
+            Some(serde_json::json!({ "exit_request_id": hex::encode(id) }).to_string()),
             None,
         )
     }

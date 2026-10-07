@@ -690,8 +690,13 @@ impl LedgerState {
                     .ok_or(crate::DepositsError::DepositNotFound)?;
                 deposit.lock(*amount)?;
                 deposit.seen_nonces.insert((*nonce, *expiry));
+                // DEP-20 §3: the request id is SHA256 of the operation's TLV bytes.
+                let id = {
+                    use crate::tlv::TlvEncode;
+                    sha256::Hash::hash(&operation.tlv_encode()).to_byte_array()
+                };
                 next.pending_exits.insert(
-                    ctx.hash,
+                    id,
                     PendingExit {
                         deposit_id: *deposit_id,
                         amount: *amount,

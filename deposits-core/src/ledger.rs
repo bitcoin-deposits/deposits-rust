@@ -1028,8 +1028,13 @@ impl Ledger {
         signed_update.content_hash = signed_update.compute_hash();
         let new_hash = signed_update.content_hash;
 
-        // Apply state changes
-        self.apply_state_changes(&operation)?;
+        // Apply state changes under the update's height and sequence (DEP-20 exits).
+        let ctx = deposits_protocol::types::ApplyCtx {
+            height: block_height,
+            seq: sequence,
+            hash: new_hash,
+        };
+        deposits_protocol::types::with_apply_ctx(ctx, || self.apply_state_changes(&operation))?;
 
         // Update state.hash to content_hash for now — will be updated to
         // chain_hash() after operator signing via finalize_chain_hash()
@@ -1556,10 +1561,28 @@ impl Ledger {
         operation: &LedgerOperation,
         current_height: u32,
     ) -> DepositsResult<Vec<deposits_protocol::ConformanceViolation>> {
+        self.apply_and_check_at(operation, current_height, current_height, 0)
+    }
+
+    /// [`apply_and_check`](Self::apply_and_check) under the carrying update's height and
+    /// sequence (the DEP-20 exit rules read both).
+    pub fn apply_and_check_at(
+        &mut self,
+        operation: &LedgerOperation,
+        current_height: u32,
+        update_height: u32,
+        update_seq: u64,
+    ) -> DepositsResult<Vec<deposits_protocol::ConformanceViolation>> {
         let authorizer = crate::dep16::Dep16Authorizer::new();
-        let (new_state, violations) =
+        let ctx = deposits_protocol::types::ApplyCtx {
+            height: update_height,
+            seq: update_seq,
+            hash: [0; 32],
+        };
+        let (new_state, violations) = deposits_protocol::types::with_apply_ctx(ctx, || {
             self.state
-                .apply_with_verifier(operation, &authorizer, current_height)?;
+                .apply_with_verifier(operation, &authorizer, current_height)
+        })?;
         self.state = new_state;
         Ok(violations)
     }

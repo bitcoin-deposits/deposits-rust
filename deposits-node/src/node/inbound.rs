@@ -96,6 +96,8 @@ impl Node {
             "quote_invoice",
             "transfer_lock",
             "transfer_complete",
+            "exit_request",
+            "exit_cancel",
             "bump",
             "complete_offer",
             "deposit_credit",
