@@ -611,12 +611,19 @@ impl Node {
         // `eligible_armers` returns them in sorted-armer order, which must
         // match the confiscation TX's vout layout (vouts 1..=N).
 
-        let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
-            .iter()
-            .filter(|pk| **pk != original_operator)
-            .map(|pk| pk.x_only_public_key().0)
-            .collect();
-        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+        // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+        let Some((recovery_voters, recovery_threshold)) =
+            deposits_core::rotation_order::lottery_recovery_voters(&updates)
+        else {
+            return (
+                false,
+                None,
+                Some(
+                    "no QuorumBegin by the original operator at or before the fork point"
+                        .to_string(),
+                ),
+            );
+        };
 
         let armer_index = (share_vout - 1) as usize;
         let (armer_xonly, commitment_hash) = match participants.get(armer_index) {
@@ -1621,7 +1628,7 @@ impl Node {
                 }
             }
             state = state
-                .apply(&op)
+                .apply_for(u, &op)
                 .map_err(|e| format!("replay seq {}: {:?}", u.sequence_number, e))?;
         }
         let (qb_reserves_id, qb_ledger_hash, qb_members, qb_expiry, qb_ruleset) =
@@ -1639,12 +1646,11 @@ impl Node {
             ));
         }
 
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
-            .iter()
-            .filter(|pk| **pk != original_operator)
-            .map(|pk| pk.x_only_public_key().0)
-            .collect();
-        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+        // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+        let (recovery_voters, recovery_threshold) =
+            deposits_core::rotation_order::lottery_recovery_voters(&updates).ok_or_else(|| {
+                "no QuorumBegin by the original operator at or before the fork point".to_string()
+            })?;
 
         let lottery_builder = LotteryScriptBuilder::new(
             participants.clone(),

@@ -465,6 +465,21 @@ impl LedgerState {
     /// speculative checks, tests). One full clone per call, fine off the hot
     /// path. Per-history-op loops (append, replay) should use `apply_in_place`
     /// to stay O(1)/op instead of O(n)/op (the O(n) vs O(n^2) ledger question).
+    /// [`apply`](Self::apply) under `update`'s envelope (block height, sequence, chain_hash):
+    /// what a replay loop over raw updates needs (DEP-20 exits read all three).
+    pub fn apply_for(
+        &self,
+        update: &crate::types::SignedLedgerUpdate,
+        operation: &crate::messages::LedgerOperation,
+    ) -> crate::DepositsResult<Self> {
+        let ctx = ApplyCtx {
+            height: update.block_height,
+            seq: update.sequence_number,
+            hash: update.chain_hash(),
+        };
+        with_apply_ctx(ctx, || self.apply(operation))
+    }
+
     pub fn apply(
         &self,
         operation: &crate::messages::LedgerOperation,

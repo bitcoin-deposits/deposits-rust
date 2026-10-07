@@ -321,6 +321,19 @@ pub fn cli_armer_set<'a>(
     )
 }
 
+/// DEP-06 lottery recovery voters from raw relay events (the CLI's view).
+pub fn cli_recovery_voters<'a>(
+    events: impl IntoIterator<Item = &'a nostr_sdk::Event>,
+) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    let updates: Vec<SignedLedgerUpdate> = events
+        .into_iter()
+        .filter_map(|e| BASE64.decode(&e.content).ok())
+        .filter_map(|b| SignedLedgerUpdate::tlv_decode(&b).ok())
+        .collect();
+    deposits_core::rotation_order::lottery_recovery_voters(&updates)
+}
+
 /// For the CLI, from decoded updates.
 pub fn cli_armer_set_updates(
     electrum_url: &str,

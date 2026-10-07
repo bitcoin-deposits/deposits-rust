@@ -3242,13 +3242,11 @@ pub async fn recovery_confiscate(args: &[String]) -> Result<(), Box<dyn std::err
     );
 
     // Build recovery voters (quorum minus original operator)
-    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
-
-    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+    let (recovery_voters, recovery_threshold) =
+        crate::node::armers::cli_recovery_voters(events.iter()).ok_or_else(|| {
+            "no QuorumBegin by the original operator at or before the fork point".to_string()
+        })?;
 
     // Phase 2 precondition: recovery-quorum reachability.
     //
@@ -3951,12 +3949,11 @@ pub async fn recovery_forfeit_sweep(args: &[String]) -> Result<(), Box<dyn std::
     // Recovery voters (quorum minus original operator) + majority
     // threshold — same derivation `recovery confiscate` used when it
     // built the share outputs' sweep leaves.
-    let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
-    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+    let (recovery_voters, recovery_threshold) =
+        crate::node::armers::cli_recovery_voters(events.iter()).ok_or_else(|| {
+            "no QuorumBegin by the original operator at or before the fork point".to_string()
+        })?;
     if recovery_voters.len() < recovery_threshold {
         return Err("Not enough recovery voters for the sweep threshold".into());
     }
@@ -4855,11 +4852,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     let original_operator = original_operator.ok_or("Could not find original operator")?;
 
     // Build the recovery voters list (quorum members minus original operator)
-    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
+    // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+    let (recovery_voters, recovery_threshold) =
+        crate::node::armers::cli_recovery_voters(update_events.iter())
+            .ok_or("no QuorumBegin by the original operator at or before the fork point")?;
 
     println!(
         "  Original operator: {}...",
@@ -4873,7 +4869,6 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         participants.iter().map(|(_, p)| p.clone()).collect();
 
     // Calculate recovery threshold (majority of recovery voters)
-    let recovery_threshold = recovery_voters.len().div_ceil(2);
     if recovery_threshold == 0 {
         return Err("Not enough recovery voters".into());
     }
@@ -6093,7 +6088,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
             ));
         }
         state = state
-            .apply(&op)
+            .apply_for(u, &op)
             .map_err(|e| format!("replay seq {}: {:?}", u.sequence_number, e))?;
     }
     let (qb_reserves_id, qb_ledger_hash, qb_members, qb_expiry, qb_ruleset, qb_seq) =
@@ -6178,12 +6173,11 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
 
     // ── 5. Lottery script + reserves UTXO lookup ──
     println!("\n── 5. Derived lottery output + reserves UTXO ──");
-    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
-    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+    let (recovery_voters, recovery_threshold) =
+        deposits_core::rotation_order::lottery_recovery_voters(&updates).ok_or_else(|| {
+            "no QuorumBegin by the original operator at or before the fork point".to_string()
+        })?;
     let lottery_builder = LotteryScriptBuilder::new(
         participants.clone(),
         recovery_voters,
@@ -6485,19 +6479,15 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
 
     // Reserves address from latest QuorumBegin — used for NeverFunded gate.
     let mut reserves_id: Option<String> = None;
-    let mut quorum_members: Vec<PublicKey> = Vec::new();
     for u in &updates {
         if u.operator_id != original_operator {
             continue;
         }
         if let Ok(LedgerOperation::QuorumBegin {
-            reserves_id: rid,
-            quorum_members: qm,
-            ..
+            reserves_id: rid, ..
         }) = LedgerOperation::tlv_decode(&u.message)
         {
             reserves_id = Some(rid);
-            quorum_members = qm.iter().map(|m| m.pubkey).collect();
         }
     }
     let reserves_id = reserves_id.ok_or("No QuorumBegin observed")?;
@@ -6636,12 +6626,11 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
         at.cmp(&bt).then(a.outpoint.vout.cmp(&b.outpoint.vout))
     });
 
-    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = quorum_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
-    let recovery_threshold = (recovery_voters.len() / 2) + 1;
+    // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+    let (recovery_voters, recovery_threshold) =
+        deposits_core::rotation_order::lottery_recovery_voters(&updates).ok_or_else(|| {
+            "no QuorumBegin by the original operator at or before the fork point".to_string()
+        })?;
     let lottery_builder = LotteryScriptBuilder::new(
         participants.iter().map(|(_, p)| p.clone()).collect(),
         recovery_voters,

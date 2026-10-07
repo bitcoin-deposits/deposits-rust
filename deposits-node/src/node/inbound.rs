@@ -2447,11 +2447,7 @@ mod fork_point_collateral_tests {
         use deposits_core::TlvDecode;
         let mut state = LedgerState::new(operator, String::new(), 0);
         for u in chain {
-            state
-                .apply_in_place(&LedgerOperation::tlv_decode(&u.message).unwrap())
-                .unwrap();
-            state.sequence = u.sequence_number;
-            state.chain_tip_hash = u.chain_hash();
+            state.apply_update_in_place(u).unwrap();
         }
         state
     }

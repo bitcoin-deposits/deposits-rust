@@ -599,7 +599,7 @@ fn summarize_ledger(jsonl: &Path) -> Result<Option<LedgerSummary>, String> {
                 *quorum_expiry,
             ));
         }
-        match state.apply(&op) {
+        match state.apply_for(u, &op) {
             Ok(next) => state = next,
             Err(_) => continue, // best-effort replay; tip already captured above
         }

@@ -150,7 +150,7 @@ pub fn collateral_basis_at(
             }
         }
         state = state
-            .apply(&op)
+            .apply_for(update, &op)
             .map_err(|e| format!("replay failed at seq {}: {:?}", update.sequence_number, e))?;
     }
     // No QuorumBegin yet: there's no committed quorum to dispute.

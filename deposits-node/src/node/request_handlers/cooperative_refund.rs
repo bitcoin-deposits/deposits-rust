@@ -214,7 +214,7 @@ impl Node {
                 qb_members = quorum_members.iter().map(|m| m.pubkey).collect();
             }
             // Best-effort replay; if it diverges we still have qb_members.
-            if let Ok(next) = state.apply(&op) {
+            if let Ok(next) = state.apply_for(u, &op) {
                 state = next;
             }
         }
@@ -259,12 +259,19 @@ impl Node {
             );
         }
 
-        let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
-            .iter()
-            .filter(|pk| **pk != original_operator)
-            .map(|pk| pk.x_only_public_key().0)
-            .collect();
-        let recovery_threshold = (recovery_voters.len() / 2) + 1;
+        // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+        let Some((recovery_voters, recovery_threshold)) =
+            deposits_core::rotation_order::lottery_recovery_voters(&updates)
+        else {
+            return (
+                false,
+                None,
+                Some(
+                    "no QuorumBegin by the original operator at or before the fork point"
+                        .to_string(),
+                ),
+            );
+        };
         let lottery_builder = LotteryScriptBuilder::new(
             participants,
             recovery_voters,

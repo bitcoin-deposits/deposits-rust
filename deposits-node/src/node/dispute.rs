@@ -97,41 +97,7 @@ pub fn build_expected_confiscation_outputs(
 pub(crate) fn recovery_voters_from_updates(
     updates: &[deposits_core::SignedLedgerUpdate],
 ) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::TlvDecode;
-
-    let mut original_operator: Option<bitcoin::secp256k1::PublicKey> = None;
-    let mut latest_qb_seq: Option<u64> = None;
-    let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
-
-    for update in updates {
-        if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-            match op {
-                LedgerOperation::LedgerOpen { operator_id, .. } => {
-                    original_operator = Some(operator_id);
-                }
-                LedgerOperation::QuorumBegin { quorum_members, .. } => {
-                    let seq = update.sequence_number;
-                    if latest_qb_seq.map(|cur| seq > cur).unwrap_or(true) {
-                        latest_qb_seq = Some(seq);
-                        qb_members = quorum_members.into_iter().map(|m| m.pubkey).collect();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let original_operator = original_operator?;
-    latest_qb_seq?;
-
-    let recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = qb_members
-        .iter()
-        .filter(|pk| **pk != original_operator)
-        .map(|pk| pk.x_only_public_key().0)
-        .collect();
-    let recovery_threshold = (recovery_voters.len() / 2) + 1;
-    Some((recovery_voters, recovery_threshold))
+    deposits_core::rotation_order::lottery_recovery_voters(updates)
 }
 
 #[cfg(test)]
@@ -2863,13 +2829,16 @@ impl Node {
                 participants.len(), armed_heights.len(), ledger_prefix, quorum_members.len());
 
             // Build recovery voters (quorum minus original operator)
-            let recovery_voters: Vec<XOnlyPublicKey> = quorum_members
-                .iter()
-                .filter(|pk| **pk != original_operator)
-                .map(|pk| pk.x_only_public_key().0)
-                .collect();
-
-            let recovery_threshold = (recovery_voters.len() / 2) + 1;
+            // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
+            let Some((recovery_voters, recovery_threshold)) =
+                deposits_core::rotation_order::lottery_recovery_voters(&paginated_updates)
+            else {
+                tracing::debug!(
+                    "No QuorumBegin by the original operator at or before the fork point of {}",
+                    ledger_prefix
+                );
+                continue;
+            };
 
             // Build the lottery output
             let lottery_builder = LotteryScriptBuilder::new(

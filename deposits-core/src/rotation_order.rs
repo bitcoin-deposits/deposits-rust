@@ -279,3 +279,50 @@ pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 3
         .max_by_key(|(seq, _)| *seq)
         .map(|(_, t)| t)
 }
+
+/// DEP-06 recovery voters: the members, other than the original operator (author of sequence
+/// 0), of the latest `QuorumBegin` the original operator authored at a sequence at or below the
+/// dispute's fork point (the lowest `last_valid_sequence` any `DisputeEnter` names; with no
+/// `DisputeEnter`, every sequence). Sorted by x-only key; threshold floor(r/2) + 1.
+pub fn lottery_recovery_voters(
+    updates: &[SignedLedgerUpdate],
+) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
+    let operator = updates.iter().find(|u| u.sequence_number == 0)?.operator_id;
+    let fork_point = updates
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some(last_valid_sequence),
+            _ => None,
+        })
+        .min()
+        .unwrap_or(u64::MAX);
+    let mut best: Option<(u64, Vec<bitcoin::secp256k1::PublicKey>)> = None;
+    for u in updates {
+        if u.operator_id != operator || u.sequence_number > fork_point {
+            continue;
+        }
+        if let Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) =
+            LedgerOperation::tlv_decode(&u.message)
+        {
+            if best.as_ref().is_none_or(|(s, _)| u.sequence_number > *s) {
+                best = Some((
+                    u.sequence_number,
+                    quorum_members.iter().map(|m| m.pubkey).collect(),
+                ));
+            }
+        }
+    }
+    let (_, members) = best?;
+    let mut voters: Vec<bitcoin::secp256k1::XOnlyPublicKey> = members
+        .iter()
+        .filter(|pk| **pk != operator)
+        .map(|pk| pk.x_only_public_key().0)
+        .collect();
+    voters.sort_by_key(|k| k.serialize());
+    voters.dedup();
+    let t = voters.len() / 2 + 1;
+    Some((voters, t))
+}
