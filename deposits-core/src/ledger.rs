@@ -2793,6 +2793,8 @@ mod tests {
         let make_op = |cosigners: Vec<PublicKey>| LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),

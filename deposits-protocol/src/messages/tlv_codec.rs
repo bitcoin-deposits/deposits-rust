@@ -158,6 +158,8 @@ mod ledger_op_tlv {
                                              // DEP-20 §3 settlement fields.
     pub const EXIT_CUTOFF_HEIGHT: u64 = 278; // u32, QuorumBegin
     pub const EXIT_OUTPUTS: u64 = 280; // repeated deposit_id(16)‖amount(8)‖vout(4), QuorumBegin
+    pub const SPLICE_IN_OUTPOINT: u64 = 282; // txid(32)‖vout(4 BE), QuorumBegin (DEP-20 §4)
+    pub const SPLICE_IN_AMOUNT: u64 = 284; // u64 msats, QuorumBegin
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
     pub const EXPIRES_AT_HEIGHT: u64 = 302; // u32, ExitRequest (optional)
     pub const EXIT_REQUEST_ID: u64 = 304; // [u8; 32], ExitCancel
@@ -264,6 +266,8 @@ impl TlvEncode for LedgerOperation {
                 protocol_version,
                 exit_cutoff_height,
                 exit_outputs,
+                splice_in_outpoint,
+                splice_in_amount,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -312,6 +316,14 @@ impl TlvEncode for LedgerOperation {
                         b.extend_from_slice(&e.vout.to_be_bytes());
                     }
                     builder = builder.bytes_field(EXIT_OUTPUTS, &b);
+                }
+                if let Some((txid, vout)) = splice_in_outpoint {
+                    let mut b = txid.to_vec();
+                    b.extend_from_slice(&vout.to_be_bytes());
+                    builder = builder.bytes_field(SPLICE_IN_OUTPOINT, &b);
+                }
+                if let Some(a) = splice_in_amount {
+                    builder = builder.u64_field(SPLICE_IN_AMOUNT, *a);
                 }
             }
             Self::DepositOpen {
@@ -887,6 +899,20 @@ impl TlvDecode for LedgerOperation {
                                 .collect()
                         }
                     },
+                    splice_in_outpoint: match reader.read_raw_opt(SPLICE_IN_OUTPOINT) {
+                        None => None,
+                        Some(b) if b.len() == 36 => Some((
+                            b[..32].try_into().unwrap(),
+                            u32::from_be_bytes(b[32..36].try_into().unwrap()),
+                        )),
+                        Some(_) => {
+                            return Err(TlvError::InvalidFieldValue {
+                                field_type: SPLICE_IN_OUTPOINT,
+                                reason: "splice_in_outpoint is not 36 bytes".into(),
+                            })
+                        }
+                    },
+                    splice_in_amount: reader.read_u64_opt(SPLICE_IN_AMOUNT)?,
                 })
             }
             20 => Ok(Self::DepositOpen {

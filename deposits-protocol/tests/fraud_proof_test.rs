@@ -2614,6 +2614,8 @@ mod quorum_expired_verifier {
         let op = LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "rid".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0x11; 32],

@@ -302,6 +302,10 @@ pub enum LedgerOperation {
         exit_cutoff_height: Option<u32>,
         /// DEP-20 §3 settled exits (TLV 280), in due order; entry i pays rotation output i+1.
         exit_outputs: Vec<ExitOutput>,
+        /// DEP-20 §4 splice-in (TLV 282): txid (internal order) and vout, spent as input 1.
+        splice_in_outpoint: Option<([u8; 32], u32)>,
+        /// DEP-20 §4 (TLV 284): the splice outpoint's value × 1000.
+        splice_in_amount: Option<u64>,
     },
 
     // ========== Settlement (DEP-20) ==========
@@ -1253,6 +1257,8 @@ impl BinaryCodec for LedgerOperation {
             Self::QuorumBegin {
                 exit_cutoff_height: _,
                 exit_outputs: _,
+                splice_in_outpoint: _,
+                splice_in_amount: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1745,6 +1751,8 @@ impl BinaryCodec for LedgerOperation {
                 Ok(Self::QuorumBegin {
                     exit_cutoff_height: None,
                     exit_outputs: Vec::new(),
+                    splice_in_outpoint: None,
+                    splice_in_amount: None,
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,

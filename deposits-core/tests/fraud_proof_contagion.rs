@@ -88,6 +88,8 @@ fn quorum_begin() -> LedgerOperation {
     LedgerOperation::QuorumBegin {
         exit_cutoff_height: None,
         exit_outputs: Vec::new(),
+        splice_in_outpoint: None,
+        splice_in_amount: None,
         reserves_id: "bcrt1qreserves".to_string(),
         spending_txid: [0; 32],
         new_outpoint_txid: [1; 32],

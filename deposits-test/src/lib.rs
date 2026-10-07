@@ -333,6 +333,8 @@ impl Operator {
         let op = LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: format!("{}_rotated", self.ledger.state.reserves_key),
             spending_txid: [0x11; 32],
             new_outpoint_txid: [0x22; 32],

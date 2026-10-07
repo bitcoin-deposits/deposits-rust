@@ -41,6 +41,7 @@ pub fn verify_rotation_tx(
     op: &LedgerOperation,
     tx: &Transaction,
     network: Network,
+    splice_prevout: Option<TxOut>,
 ) -> Result<(), String> {
     let LedgerOperation::QuorumBegin {
         reserves_id,
@@ -49,6 +50,8 @@ pub fn verify_rotation_tx(
         amount,
         collateral_amount,
         exit_cutoff_height,
+        splice_in_outpoint,
+        splice_in_amount,
         ..
     } = op
     else {
@@ -99,7 +102,23 @@ pub fn verify_rotation_tx(
         value: Amount::from_sat(vault_sats),
         script_pubkey: vault_spk,
     };
-    vault_spend_signers(history, gov, tx, &[prevout])?;
+    // DEP-20 §4: a splice-in is input 1; its prevout (looked up by the caller) enters the sighash.
+    let splice = match (splice_in_outpoint, splice_prevout) {
+        (None, _) => None,
+        (Some(_), None) => return Err("splice-in outpoint not found".into()),
+        (Some((stxid, svout)), Some(sp)) => {
+            if *splice_in_amount != Some(sp.value.to_sat() * 1000) {
+                return Err("splice_in_amount_msats is not the outpoint's value".into());
+            }
+            Some((OutPoint::new(Txid::from_byte_array(*stxid), *svout), sp))
+        }
+    };
+    let mut prevouts = vec![prevout];
+    if let Some((_, sp)) = &splice {
+        prevouts.push(sp.clone());
+        verify_simple_input(tx, 1, &prevouts)?;
+    }
+    vault_spend_signers(history, gov, tx, &prevouts)?;
     let new_vault_spk: ScriptBuf = reserves_id
         .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
         .map_err(|e| format!("reserves_id: {e}"))?
@@ -113,7 +132,7 @@ pub fn verify_rotation_tx(
         feerate_sat_vb: CONFISCATION_DEFAULT_FEERATE_SAT_VB,
         lock_time: tx.lock_time.to_consensus_u32(),
         new_vault_spk,
-        splice_in: None,
+        splice_in: splice.as_ref().map(|(o, sp)| (*o, sp.value.to_sat())),
         extra_outputs: due_exit_outputs(state, height, *exit_cutoff_height),
     })
     .ok_or("the DEP-03 rotation leaves the vault below dust")?;
@@ -129,11 +148,62 @@ pub fn verify_rotation_tx(
         return Err("QuorumBegin amounts do not sum to the rotation's new vault".into());
     }
     let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
-    let fee = vault_sats.saturating_sub(extras).saturating_sub(new_sats);
-    if *collateral_amount != rotation_collateral(state, vault_sats, fee) {
-        return Err("QuorumBegin collateral is not the DEP-20 §3 share".into());
+    let added = splice.as_ref().map_or(0, |(_, sp)| sp.value.to_sat());
+    let fee = (vault_sats + added)
+        .saturating_sub(extras)
+        .saturating_sub(new_sats);
+    let c0 = rotation_collateral(state, vault_sats, fee);
+    if *collateral_amount < c0 || *collateral_amount > c0 + added * 1000 {
+        return Err("QuorumBegin collateral is not the DEP-20 §3-4 share".into());
     }
     Ok(())
+}
+
+/// Verify input `i`'s witness when it spends a P2TR key path or a P2WPKH output (a splice-in,
+/// DEP-20 §4): a recorded rotation must be broadcastable.
+pub fn verify_simple_input(tx: &Transaction, i: usize, prevouts: &[TxOut]) -> Result<(), String> {
+    use bitcoin::secp256k1::{Message, PublicKey, Secp256k1, XOnlyPublicKey};
+    use bitcoin::sighash::{Prevouts, SighashCache};
+    let secp = Secp256k1::verification_only();
+    let spk = &prevouts[i].script_pubkey;
+    let wit = &tx.input[i].witness;
+    let mut cache = SighashCache::new(tx);
+    if spk.is_p2tr() {
+        let key = XOnlyPublicKey::from_slice(&spk.as_bytes()[2..34]).map_err(|e| e.to_string())?;
+        let sig = wit.nth(0).ok_or("splice input has no witness")?;
+        let sig = bitcoin::taproot::Signature::from_slice(sig).map_err(|e| e.to_string())?;
+        let h = cache
+            .taproot_key_spend_signature_hash(i, &Prevouts::All(prevouts), sig.sighash_type)
+            .map_err(|e| e.to_string())?;
+        secp.verify_schnorr(
+            &sig.signature,
+            &Message::from_digest(h.to_byte_array()),
+            &key,
+        )
+        .map_err(|_| "splice input key-path signature does not verify".to_string())
+    } else if spk.is_p2wpkh() {
+        let (sig, pk) = (
+            wit.nth(0).ok_or("no signature")?,
+            wit.nth(1).ok_or("no pubkey")?,
+        );
+        let pk = PublicKey::from_slice(pk).map_err(|e| e.to_string())?;
+        let ours = bitcoin::CompressedPublicKey(pk);
+        if ScriptBuf::new_p2wpkh(&ours.wpubkey_hash()) != *spk {
+            return Err("splice input pubkey does not match its P2WPKH".into());
+        }
+        let sig = bitcoin::ecdsa::Signature::from_slice(sig).map_err(|e| e.to_string())?;
+        let h = cache
+            .p2wpkh_signature_hash(i, spk, prevouts[i].value, sig.sighash_type)
+            .map_err(|e| e.to_string())?;
+        secp.verify_ecdsa(
+            &Message::from_digest(h.to_byte_array()),
+            &sig.signature,
+            &pk,
+        )
+        .map_err(|_| "splice input signature does not verify".to_string())
+    } else {
+        Err("splice input must spend a P2TR key path or P2WPKH output".into())
+    }
 }
 
 /// DEP-20 §3 due exits at `height` under `cutoff` (absent: height − margin) as the

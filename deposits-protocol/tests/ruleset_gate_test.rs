@@ -51,6 +51,8 @@ fn quorum_begin(member: PublicKey, protocol_version: Option<String>) -> LedgerOp
     LedgerOperation::QuorumBegin {
         exit_cutoff_height: None,
         exit_outputs: Vec::new(),
+        splice_in_outpoint: None,
+        splice_in_amount: None,
         reserves_id: "rid2".into(),
         spending_txid: [0x11; 32],
         new_outpoint_txid: [0x22; 32],
@@ -200,6 +202,8 @@ fn nonlegacy_quorum_begin_rejects_when_any_member_unattested() {
     let op = LedgerOperation::QuorumBegin {
         exit_cutoff_height: None,
         exit_outputs: Vec::new(),
+        splice_in_outpoint: None,
+        splice_in_amount: None,
         reserves_id: "rid2".into(),
         spending_txid: [0x11; 32],
         new_outpoint_txid: [0x22; 32],

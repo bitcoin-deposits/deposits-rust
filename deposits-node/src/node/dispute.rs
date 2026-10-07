@@ -355,6 +355,8 @@ mod recovery_voter_derivation_tests {
         LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "bcrt1q...".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],
@@ -3796,6 +3798,8 @@ mod recovery_chaining_tests {
         let qb = LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "bcrt1qrot".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [1; 32],

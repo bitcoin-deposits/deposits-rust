@@ -1264,12 +1264,38 @@ impl Node {
                 }
             }
         };
-        let recomputed_sighash = match ReservesSpendBuilder::compute_sighash(
+        // DEP-20 §4: a splice-in ("txid:vout", txid in internal byte order) is input 1; we look
+        // it up ourselves (confirmed, unspent) and its prevout enters the sighash.
+        let splice = match request
+            .params
+            .get("splice_in_outpoint")
+            .and_then(|v| v.as_str())
+        {
+            None => None,
+            Some(s) => {
+                let parsed = s.split_once(':').and_then(|(t, v)| {
+                    Some((
+                        <[u8; 32]>::try_from(hex::decode(t).ok()?).ok()?,
+                        v.parse::<u32>().ok()?,
+                    ))
+                });
+                let Some((stxid, svout)) = parsed else {
+                    return (false, None, Some("bad splice_in_outpoint".to_string()));
+                };
+                match self.wallet.splice_prevout(stxid, svout) {
+                    Ok(p) => Some((stxid, svout, p)),
+                    Err(e) => return (false, None, Some(e)),
+                }
+            }
+        };
+        let more_prevouts: Vec<bitcoin::TxOut> = splice.iter().map(|(_, _, p)| p.clone()).collect();
+        let recomputed_sighash = match ReservesSpendBuilder::compute_sighash_with(
             &proposed_tx,
             0,
             reserves_amount,
             &reserves_script,
             &leaf_script,
+            &more_prevouts,
         ) {
             Ok(s) => s,
             Err(e) => return (false, None, Some(format!("recompute sighash: {:?}", e))),
@@ -1325,7 +1351,18 @@ impl Node {
                     deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
                 lock_time: chosen_tier.timelock_blocks,
                 new_vault_spk: expected_new.script_pubkey(),
-                splice_in: None,
+                splice_in: splice.as_ref().map(|(t, v, p)| {
+                    (
+                        bitcoin::OutPoint::new(
+                            {
+                                use bitcoin::hashes::Hash;
+                                bitcoin::Txid::from_byte_array(*t)
+                            },
+                            *v,
+                        ),
+                        p.value.to_sat(),
+                    )
+                }),
                 extra_outputs: exit_extras,
             },
         );

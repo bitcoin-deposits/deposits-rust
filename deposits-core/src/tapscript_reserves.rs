@@ -680,12 +680,33 @@ impl ReservesSpendBuilder {
         reserves_script_pubkey: &ScriptBuf,
         leaf_script: &ScriptBuf,
     ) -> DepositsResult<bitcoin::TapSighash> {
+        Self::compute_sighash_with(
+            tx,
+            input_index,
+            reserves_amount,
+            reserves_script_pubkey,
+            leaf_script,
+            &[],
+        )
+    }
+
+    /// As [`compute_sighash`](Self::compute_sighash), with further prevouts after the vault's
+    /// (a DEP-20 §4 splice-in is input 1; BIP-341 commits to every prevout).
+    pub fn compute_sighash_with(
+        tx: &bitcoin::Transaction,
+        input_index: usize,
+        reserves_amount: u64,
+        reserves_script_pubkey: &ScriptBuf,
+        leaf_script: &ScriptBuf,
+        more_prevouts: &[TxOut],
+    ) -> DepositsResult<bitcoin::TapSighash> {
         use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
 
-        let prevouts = vec![TxOut {
+        let mut prevouts = vec![TxOut {
             value: Amount::from_sat(reserves_amount),
             script_pubkey: reserves_script_pubkey.clone(),
         }];
+        prevouts.extend_from_slice(more_prevouts);
 
         let mut cache = SighashCache::new(tx);
 

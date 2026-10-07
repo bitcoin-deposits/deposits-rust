@@ -720,6 +720,19 @@ impl Node {
                             tracing::warn!("Refusing cosign: {}", msg);
                             return (false, None, Some(msg));
                         };
+                        let splice_prevout = match &operation {
+                            LedgerOperation::QuorumBegin {
+                                splice_in_outpoint: Some((stxid, svout)),
+                                ..
+                            } => match self.wallet.splice_prevout(*stxid, *svout) {
+                                Ok(p) => Some(p),
+                                Err(e) => {
+                                    tracing::warn!("Refusing cosign: {}", e);
+                                    return (false, None, Some(e));
+                                }
+                            },
+                            _ => None,
+                        };
                         if let Err(e) = deposits_core::rotation_order::verify_rotation_tx(
                             &history,
                             &pre_state,
@@ -727,6 +740,7 @@ impl Node {
                             &operation,
                             &tx,
                             self.wallet.network(),
+                            splice_prevout,
                         ) {
                             tracing::warn!("Refusing cosign: {}", e);
                             return (false, None, Some(e));

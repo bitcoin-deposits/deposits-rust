@@ -5483,6 +5483,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     let operation = LedgerOperation::QuorumBegin {
         exit_cutoff_height: None,
         exit_outputs: Vec::new(),
+        splice_in_outpoint: None,
+        splice_in_amount: None,
         reserves_id: new_reserves_address.to_string(),
         spending_txid: txid_bytes,
         new_outpoint_txid: txid_bytes,

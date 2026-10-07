@@ -1050,6 +1050,8 @@ mod tests {
         let qb = update_with(&LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "r".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],

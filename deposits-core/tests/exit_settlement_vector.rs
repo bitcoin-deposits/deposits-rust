@@ -240,6 +240,8 @@ fn exit_fold_semantics() {
         protocol_version: Some("cltv-offset-v2".into()),
         exit_cutoff_height: Some(cutoff),
         exit_outputs: outs,
+        splice_in_outpoint: None,
+        splice_in_amount: None,
     };
     let wrong = apply(&mut st.clone(), ctx(103, 7, 7), qb(103, Vec::new()));
     assert!(
@@ -270,4 +272,25 @@ fn exit_fold_semantics() {
         assert_eq!(st2.deposits[&dep].balance, 2_000_000);
         assert_eq!(st2.pending_exits.len(), 0);
     }
+}
+
+#[test]
+fn quorum_begin_with_splice_round_trips() {
+    let (_, lines) = cases()
+        .into_iter()
+        .find(|(n, _)| n == "quorum_begin_splice")
+        .unwrap();
+    let tlv = hex::decode(field(&lines, "tlv")).unwrap();
+    let op = LedgerOperation::tlv_decode(&tlv).unwrap();
+    let LedgerOperation::QuorumBegin {
+        splice_in_outpoint,
+        splice_in_amount,
+        ..
+    } = op
+    else {
+        panic!("not a QuorumBegin")
+    };
+    assert_eq!(splice_in_outpoint, Some(([0xd5; 32], 3)));
+    assert_eq!(splice_in_amount, Some(70_000_000));
+    assert_eq!(op.tlv_encode(), tlv);
 }

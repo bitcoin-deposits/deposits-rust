@@ -405,6 +405,8 @@ mod tests {
         let op = LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "bcrt1pdummy".to_string(),
             amount: 100_000_000,
             collateral_amount: 100_000_000,

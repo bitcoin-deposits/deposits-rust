@@ -310,6 +310,8 @@ impl Node {
         let operation = LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -1306,6 +1308,8 @@ impl Node {
         let operation = LedgerOperation::QuorumBegin {
             exit_cutoff_height,
             exit_outputs,
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,

@@ -221,6 +221,28 @@ impl Wallet {
         crate::chain_backend::from_env(&self.electrum_url).get_tx(&txid)
     }
 
+    /// DEP-20 §4: a splice-in outpoint (txid in internal order), confirmed and unspent: its
+    /// output (value and scriptPubKey enter the rotation's sighash).
+    pub fn splice_prevout(&self, txid: [u8; 32], vout: u32) -> Result<bitcoin::TxOut, String> {
+        use bitcoin::hashes::Hash;
+        let txid =
+            bitcoin::Txid::from_raw_hash(bitcoin::hashes::sha256d::Hash::from_byte_array(txid));
+        match self.get_outpoint_value_and_confs(txid, vout) {
+            Ok(Some((_, confs))) if confs >= 1 => {}
+            Ok(Some(_)) => return Err("splice-in outpoint is unconfirmed".into()),
+            Ok(None) => {
+                return Err(format!(
+                    "splice-in outpoint {txid}:{vout} is spent or unknown"
+                ))
+            }
+            Err(e) => return Err(format!("splice-in lookup: {e}")),
+        }
+        self.get_transaction(txid)
+            .map_err(|e| e.to_string())?
+            .and_then(|t| t.output.get(vout as usize).cloned())
+            .ok_or_else(|| "splice-in outpoint vanished".to_string())
+    }
+
     pub fn get_outpoint_value_and_confs(
         &self,
         txid: bitcoin::Txid,

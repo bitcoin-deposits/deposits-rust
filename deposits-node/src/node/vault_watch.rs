@@ -302,6 +302,8 @@ mod tests {
                 &LedgerOperation::QuorumBegin {
                     exit_cutoff_height: None,
                     exit_outputs: Vec::new(),
+                    splice_in_outpoint: None,
+                    splice_in_amount: None,
                     reserves_id: String::new(),
                     spending_txid: rotation_txid,
                     new_outpoint_txid: sha(&[0xf0, 0x0d]),
@@ -512,6 +514,8 @@ mod tests {
         let qb = |new_txid: [u8; 32]| LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
             exit_outputs: Vec::new(),
+            splice_in_outpoint: None,
+            splice_in_amount: None,
             reserves_id: "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr".into(),
             spending_txid: new_txid,
             new_outpoint_txid: new_txid,
@@ -532,11 +536,13 @@ mod tests {
             String::new(),
             0,
         );
-        assert!(verify_rotation_tx(&h, &st, 0, &qb([7; 32]), &spend.tx, net)
-            .unwrap_err()
-            .contains("new outpoint"));
+        assert!(
+            verify_rotation_tx(&h, &st, 0, &qb([7; 32]), &spend.tx, net, None)
+                .unwrap_err()
+                .contains("new outpoint")
+        );
         // A validly signed spend of the vault that is not the DEP-03 rotation.
-        let e = verify_rotation_tx(&h, &st, 0, &qb(txid), &spend.tx, net).unwrap_err();
+        let e = verify_rotation_tx(&h, &st, 0, &qb(txid), &spend.tx, net, None).unwrap_err();
         assert!(e.contains("differs from the DEP-03 rotation"), "{e}");
     }
 
