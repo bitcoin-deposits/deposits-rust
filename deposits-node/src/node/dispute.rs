@@ -323,6 +323,8 @@ mod recovery_voter_derivation_tests {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "bcrt1q...".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],
@@ -370,6 +372,8 @@ mod recovery_voter_derivation_tests {
                 m1,
                 LedgerOperation::QuorumAddMember {
                     min_collateral_bps: None,
+                    dormancy_blocks: None,
+                    dormancy_notice_blocks: None,
                     quorum_member: fork_added,
                     quorum_member_signature: [0u8; 64],
                     member_ledger_id: "x".to_string(),
@@ -957,6 +961,8 @@ impl Node {
 
                         let add_op = LedgerOperation::QuorumAddMember {
                             min_collateral_bps: None,
+                            dormancy_blocks: None,
+                            dormancy_notice_blocks: None,
                             quorum_member: *member,
                             quorum_member_signature: [0u8; 64],
                             member_ledger_id: member_ledger_id.clone(),
@@ -3769,6 +3775,8 @@ mod recovery_chaining_tests {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "bcrt1qrot".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [1; 32],
@@ -3792,6 +3800,8 @@ mod recovery_chaining_tests {
     fn quorum_add_member(member: PublicKey) -> LedgerOperation {
         LedgerOperation::QuorumAddMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             quorum_member: member,
             quorum_member_signature: [0u8; 64],
             member_ledger_id: "ledger".to_string(),

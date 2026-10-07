@@ -1017,6 +1017,8 @@ impl TlvDecode for Deposit {
             opened_at_block: reader
                 .read_u32_opt(deposit_fields::OPENED_AT_BLOCK)?
                 .unwrap_or(0),
+            // DEP-20 §8: not in this TLV; the replay path recomputes it.
+            last_signed_activity: 0,
             pending_fee_change: None, // transient state, not serialized in TLV
             // phase 5c: TLV doesn't yet carry seen_nonces — decoded value defaults to
             // empty. A freshly-decoded deposit accepts any (nonce, expiry) as its first
@@ -1429,6 +1431,7 @@ mod tests {
             fee_change_notice_blocks: Some(2016),
             fee_change_limit_bps: Some(1000),
             opened_at_block: 100,
+            last_signed_activity: 0,
             pending_fee_change: None,
             seen_nonces: std::collections::BTreeSet::new(),
         };

@@ -25,6 +25,8 @@ fn kp(seed: u8) -> (SecretKey, PublicKey) {
 fn staged_member(pk: PublicKey) -> QuorumMember {
     QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: pk,
         ledger_id: "a".repeat(64),
         min_fee_bps: None,
@@ -65,6 +67,8 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: "bcrt1ptest".to_string(),
         spending_txid: [0u8; 32],
         new_outpoint_txid: [0xAA; 32],

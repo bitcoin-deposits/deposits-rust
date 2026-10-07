@@ -53,6 +53,8 @@ fn build_update(
 
     let op = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: member_pk,
         quorum_member_signature: [0u8; 64],
         member_ledger_id: hex::encode(ledger_id_bytes),

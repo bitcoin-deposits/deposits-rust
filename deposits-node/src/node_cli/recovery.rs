@@ -1975,6 +1975,8 @@ pub async fn recovery_rebuild_quorum_add(
 
     let operation = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: member_pubkey,
         quorum_member_signature: [0u8; 64],
         member_ledger_id: member_ledger_id.clone(),
@@ -5480,6 +5482,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: new_reserves_address.to_string(),
         spending_txid: txid_bytes,
         new_outpoint_txid: txid_bytes,

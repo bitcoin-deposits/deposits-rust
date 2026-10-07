@@ -106,6 +106,8 @@ fn quorum_begin() {
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: "bcrt1qtest".into(),
         spending_txid: h32(),
         new_outpoint_txid: h32(),
@@ -346,6 +348,8 @@ fn transfer_fail() {
 fn quorum_add_member() {
     test_roundtrip(&LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: pk(),
         quorum_member_signature: sig(),
         member_ledger_id: "abc123".into(),

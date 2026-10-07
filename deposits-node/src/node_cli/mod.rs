@@ -1400,6 +1400,9 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
                     ),
                 ),
+                LedgerOperation::DormancyNotice {
+                    rotation_height, ..
+                } => ("DormancyNotice", format!("at:{}", rotation_height)),
                 LedgerOperation::ExitCancel { deposit_id, .. } => (
                     "ExitCancel",
                     format!(

@@ -109,7 +109,7 @@ fn due_set_matches_cl() {
             PendingExit {
                 deposit_id: id[..16].try_into().unwrap(),
                 amount: f[1].parse().unwrap(),
-                exit_address: vec![id[0]; 22],
+                exit_address: hex::decode(f[5]).unwrap(),
                 expires_at: (f[4] != "-").then(|| f[4].parse().unwrap()),
                 block_height: f[2].parse().unwrap(),
                 seq: f[3].parse().unwrap(),
@@ -121,14 +121,17 @@ fn due_set_matches_cl() {
     let ours: Vec<(String, u64)> = st
         .due_exits(h, c)
         .into_iter()
-        .map(|(id, e)| (hex::encode(id), e.amount))
+        .map(|(id, e)| {
+            let out = e.amount / 1000 - st.exit_cost(&e.exit_address);
+            (hex::encode(id), out)
+        })
         .collect();
     let cl: Vec<(String, u64)> = lines
         .iter()
         .filter_map(|l| l.strip_prefix("due "))
         .map(|l| {
             let f: Vec<&str> = l.split(' ').collect();
-            (f[0].to_string(), f[1].parse().unwrap())
+            (f[0].to_string(), f[2].parse().unwrap())
         })
         .collect();
     assert_eq!(ours, cl);
@@ -253,6 +256,8 @@ fn exit_fold_semantics() {
         exit_outputs: outs,
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
     };
     let wrong = apply(&mut st.clone(), ctx(103, 7, 7), qb(103, Vec::new()));
     assert!(

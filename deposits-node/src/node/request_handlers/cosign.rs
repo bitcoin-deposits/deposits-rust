@@ -658,10 +658,11 @@ impl Node {
                         // `self.wallet.get_block_height()` above) is
                         // the cosigner's view of the tip; the verifier
                         // uses it for descriptor `after()` checks.
-                        let violations = ledger.state.check_speculative(
+                        let violations = ledger.state.check_speculative_at(
                             &operation,
                             &deposits_core::dep16::Dep16Authorizer::new(),
                             current_block_height,
+                            fields.block_height,
                         );
                         if !violations.is_empty() {
                             tracing::warn!(
@@ -695,6 +696,24 @@ impl Node {
                     // DEP-03 §"Rotation ordering": a QuorumBegin that rotates the
                     // current vault is recorded before its rotation is broadcast; the
                     // request carries the signed rotation, which we verify instead.
+                    // DEP-03 Reference feerate: a recorded feerate must lie within the bounds
+                    // the last 6 blocks give (skipped when our backend cannot read them).
+                    if let LedgerOperation::QuorumBegin {
+                        reference_feerate: Some(f),
+                        ..
+                    } = &operation
+                    {
+                        if let Some(m) = self.wallet.median_feerate(fields.block_height) {
+                            let (lo, hi) = deposits_core::rotation_order::feerate_bounds(m);
+                            if (*f as u64) < lo || (*f as u64) > hi {
+                                let msg = format!(
+                                    "reference feerate {f} outside [{lo}, {hi}] (median {m})"
+                                );
+                                tracing::warn!("Refusing cosign: {}", msg);
+                                return (false, None, Some(msg));
+                            }
+                        }
+                    }
                     let rotating_history: Option<(
                         Vec<deposits_core::SignedLedgerUpdate>,
                         deposits_core::LedgerState,

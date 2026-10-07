@@ -551,6 +551,8 @@ fn invariant_s1_dispute_state_gate() {
         .ledger
         .apply_operation(&LedgerOperation::QuorumAddMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             quorum_member: bob_snap.public_key,
             member_ledger_id: "lid".into(),
             quorum_member_signature: [0xAB; 64],

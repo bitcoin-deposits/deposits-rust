@@ -45,6 +45,8 @@ fn make_deposit_open(descriptor: &str) -> LedgerOperation {
 fn make_quorum_add_member() -> LedgerOperation {
     LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey_2(),
         quorum_member_signature: [0xEF; 64],
         member_ledger_id: "member_ledger".to_string(),

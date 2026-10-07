@@ -312,6 +312,8 @@ impl Node {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -1260,12 +1262,27 @@ impl Node {
                     .get(ledger_id)
                     .map_or(0, |(_, _, s)| *s);
                 let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
+                let cutoff = self
+                    .handler
+                    .pending_rotation_cutoffs
+                    .lock()
+                    .unwrap()
+                    .get(ledger_id)
+                    .copied();
+                let (_, exits_cost, dorm_cost) = deposits_core::rotation_order::settlement_outputs(
+                    &l.state,
+                    self.wallet.get_block_height().unwrap_or(0),
+                    cutoff,
+                );
                 let fee = (vault_sats + added)
                     .saturating_sub(extras)
-                    .saturating_sub(result.amount);
-                // DEP-20 §4: the spliced value goes to collateral.
+                    .saturating_sub(result.amount)
+                    .saturating_sub(exits_cost)
+                    .saturating_sub(dorm_cost);
+                // DEP-20 §4: the spliced value goes to collateral; §8.4: spin-outs' costs out of it.
                 let collateral =
                     deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee)
+                        .saturating_sub(dorm_cost * 1000)
                         + added * 1000;
                 (total_msats.saturating_sub(collateral), collateral)
             } else if prev_total > 0 {
@@ -1290,7 +1307,7 @@ impl Node {
         );
 
         // DEP-20 §3: settle the exits due under the rotation's cutoff.
-        let (exit_cutoff_height, exit_outputs) = match self
+        let (exit_cutoff_height, exit_outputs, dormancy_outputs) = match self
             .handler
             .pending_rotation_cutoffs
             .lock()
@@ -1300,19 +1317,19 @@ impl Node {
             Some(cutoff) if rotating => {
                 let height = self.wallet.get_block_height().unwrap_or(0);
                 let ledgers = self.handler.ledgers.lock().unwrap();
-                let entries = ledgers
+                let (entries, dentries) = ledgers
                     .get(ledger_id)
                     .map(|arc| {
-                        deposits_core::rotation_order::due_exit_entries(
-                            &arc.read().unwrap().state,
-                            height,
-                            cutoff,
-                        )
+                        let st = &arc.read().unwrap().state;
+                        let e = deposits_core::rotation_order::due_exit_entries(st, height, cutoff);
+                        let d =
+                            deposits_core::rotation_order::dormancy_entries(st, cutoff, e.len());
+                        (e, d)
                     })
                     .unwrap_or_default();
-                (Some(cutoff), entries)
+                (Some(cutoff), entries, dentries)
             }
-            _ => (None, Vec::new()),
+            _ => (None, Vec::new(), Vec::new()),
         };
         let splice_fields = if rotating {
             self.handler
@@ -1328,6 +1345,12 @@ impl Node {
             exit_outputs,
             splice_in_outpoint: splice_fields.map(|(t, v, _)| (t, v)),
             splice_in_amount: splice_fields.map(|(_, _, s)| s * 1000),
+            // DEP-03: the chain-derived reference feerate governs the next rotation.
+            reference_feerate: self
+                .wallet
+                .median_feerate(self.wallet.get_block_height().unwrap_or(0))
+                .map(|m| m.max(2) as u32),
+            dormancy_outputs,
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,
@@ -1518,6 +1541,12 @@ impl Node {
         // cosigner rebuilds byte for byte, paying the DEP-20 §3 exits due at the
         // cutoff (this height) after the new vault.
         let exit_cutoff = current_height;
+        let rotation_feerate = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map_or(2, |l| l.read().unwrap().state.rotation_feerate())
+        };
         let exit_outputs = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let l = ledgers
@@ -1525,11 +1554,12 @@ impl Node {
                 .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
                 .read()
                 .unwrap();
-            deposits_core::rotation_order::due_exit_outputs(
+            deposits_core::rotation_order::settlement_outputs(
                 &l.state,
                 current_height,
                 Some(exit_cutoff),
             )
+            .0
         };
         self.handler
             .pending_rotation_cutoffs
@@ -1565,8 +1595,7 @@ impl Node {
                 vault: existing.outpoint,
                 vault_sats: existing.amount,
                 voters: cur_voter_set.all_voters().len(),
-                feerate_sat_vb:
-                    deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+                feerate_sat_vb: rotation_feerate,
                 lock_time: tier_lock_time,
                 new_vault_spk: new_script_pubkey.clone(),
                 splice_in: splice.as_ref().map(|(t, v, p)| {
@@ -3318,6 +3347,8 @@ mod first_ruleset_tests {
         let sk = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk),
             ledger_id: String::new(),
             min_fee_bps: None,

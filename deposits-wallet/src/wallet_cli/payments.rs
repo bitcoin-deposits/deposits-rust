@@ -1828,6 +1828,13 @@ fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> 
             ),
         ),
         L::ExitCancel { .. } => row("ExitCancel", None, "exit request cancelled".to_string()),
+        L::DormancyNotice {
+            rotation_height, ..
+        } => row(
+            "DormancyNotice",
+            None,
+            format!("dormancy bucket settles at block {}", rotation_height),
+        ),
 
         L::OnchainLock {
             amount,

@@ -262,6 +262,12 @@ impl ChainBackend for BitcoindRpcBackend {
         self.call("getblockcount", serde_json::json!([]))
     }
 
+    fn block_feerate(&self, height: u32) -> Result<Option<u64>, Error> {
+        let v: serde_json::Value =
+            self.call("getblockstats", serde_json::json!([height, ["avgfeerate"]]))?;
+        Ok(v.get("avgfeerate").and_then(|f| f.as_u64()))
+    }
+
     fn get_block_hash(&self, height: u32) -> Result<bitcoin::BlockHash, Error> {
         let s: String = self.call("getblockhash", serde_json::json!([height]))?;
         s.parse()

@@ -2616,6 +2616,8 @@ mod quorum_expired_verifier {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "rid".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0x11; 32],

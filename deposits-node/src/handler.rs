@@ -3231,6 +3231,8 @@ mod tests {
                 exit_outputs: Vec::new(),
                 splice_in_outpoint: None,
                 splice_in_amount: None,
+                reference_feerate: None,
+                dormancy_outputs: Vec::new(),
                 reserves_id: "tb1qres".to_string(),
                 spending_txid: [0; 32],
                 new_outpoint_txid: [1; 32],

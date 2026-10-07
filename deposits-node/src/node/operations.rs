@@ -392,6 +392,8 @@ impl Node {
 
         let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             quorum_member,
             quorum_member_signature: signature,
             member_ledger_id: member_ledger_id.to_string(),

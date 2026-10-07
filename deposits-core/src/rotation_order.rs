@@ -129,11 +129,11 @@ pub fn verify_rotation_tx(
         vault: OutPoint::new(Txid::from_byte_array(vtxid), vvout),
         vault_sats,
         voters: n_voters,
-        feerate_sat_vb: CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+        feerate_sat_vb: state.rotation_feerate(),
         lock_time: tx.lock_time.to_consensus_u32(),
         new_vault_spk,
         splice_in: splice.as_ref().map(|(o, sp)| (*o, sp.value.to_sat())),
-        extra_outputs: due_exit_outputs(state, height, *exit_cutoff_height),
+        extra_outputs: settlement_outputs(state, height, *exit_cutoff_height).0,
     })
     .ok_or("the DEP-03 rotation leaves the vault below dust")?;
     let mut stripped = tx.clone();
@@ -149,10 +149,14 @@ pub fn verify_rotation_tx(
     }
     let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
     let added = splice.as_ref().map_or(0, |(_, sp)| sp.value.to_sat());
+    let (_, exits_cost, dorm_cost) = settlement_outputs(state, height, *exit_cutoff_height);
     let fee = (vault_sats + added)
         .saturating_sub(extras)
-        .saturating_sub(new_sats);
-    let c0 = rotation_collateral(state, vault_sats, fee);
+        .saturating_sub(new_sats)
+        .saturating_sub(exits_cost)
+        .saturating_sub(dorm_cost);
+    // DEP-20 §8.4: spin-outs' own costs come out of collateral.
+    let c0 = rotation_collateral(state, vault_sats, fee).saturating_sub(dorm_cost * 1000);
     if *collateral_amount < c0 || *collateral_amount > c0 + added * 1000 {
         return Err("QuorumBegin collateral is not the DEP-20 §3-4 share".into());
     }
@@ -217,7 +221,13 @@ pub fn due_exit_outputs(
     state
         .due_exits(height, cutoff)
         .into_iter()
-        .map(|(_, e)| (ScriptBuf::from_bytes(e.exit_address), e.amount / 1000))
+        .map(|(_, e)| {
+            let cost = state.exit_cost(&e.exit_address);
+            (
+                ScriptBuf::from_bytes(e.exit_address),
+                e.amount / 1000 - cost,
+            )
+        })
         .collect()
 }
 
@@ -239,8 +249,19 @@ pub fn due_exit_entries(
         .collect()
 }
 
-/// DEP-20 §3 Amounts: the new collateral bears only its share of the rotation fee:
-/// floor(old_collateral × (V − F) × 1000 / (old_reserves + old_collateral)).
+/// DEP-20 §3 exits' own share of the rotation fee: Σ exit_cost over the due set.
+pub fn due_exits_cost(state: &crate::types::LedgerState, height: u32, cutoff: Option<u32>) -> u64 {
+    let cutoff = cutoff.unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
+    state
+        .due_exits(height, cutoff)
+        .iter()
+        .map(|(_, e)| state.exit_cost(&e.exit_address))
+        .sum()
+}
+
+/// DEP-20 §3 Amounts: the new collateral bears only its share of the vault's part of the
+/// rotation fee (`fee_sats`: the fee less what the exits paid themselves):
+/// floor(old_collateral × (V − F_v) × 1000 / (old_reserves + old_collateral)).
 pub fn rotation_collateral(
     state: &crate::types::LedgerState,
     vault_sats: u64,
@@ -325,4 +346,44 @@ pub fn lottery_recovery_voters(
     voters.dedup();
     let t = voters.len() / 2 + 1;
     Some((voters, t))
+}
+
+/// Every DEP-20 output a rotation at `height` pays after the new vault: the due exits (each
+/// less its own cost), then the dormancy spin-outs (full balance). (extras, exits' own cost,
+/// spin-outs' cost paid from collateral).
+pub fn settlement_outputs(
+    state: &crate::types::LedgerState,
+    height: u32,
+    cutoff: Option<u32>,
+) -> (Vec<(ScriptBuf, u64)>, u64, u64) {
+    let mut extras = due_exit_outputs(state, height, cutoff);
+    let exits_cost = due_exits_cost(state, height, cutoff);
+    let c = cutoff.unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
+    let spins = state.dormancy_spin_outs(c);
+    let dorm_cost = spins.len() as u64 * state.dormancy_cost();
+    extras.extend(spins.into_iter().map(|(_, bal, spk)| (spk, bal / 1000)));
+    (extras, exits_cost, dorm_cost)
+}
+
+/// The QuorumBegin `dormancy_outputs` entries after `nexits` exit outputs.
+pub fn dormancy_entries(
+    state: &crate::types::LedgerState,
+    cutoff: u32,
+    nexits: usize,
+) -> Vec<crate::messages::ExitOutput> {
+    state
+        .dormancy_spin_outs(cutoff)
+        .into_iter()
+        .enumerate()
+        .map(|(j, (id, bal, _))| crate::messages::ExitOutput {
+            deposit_id: id,
+            amount: bal,
+            vout: (nexits + j + 1) as u32,
+        })
+        .collect()
+}
+
+/// DEP-03 Reference feerate bounds for median m: [max(1, m/2), max(2, 2m)].
+pub fn feerate_bounds(m: u64) -> (u64, u64) {
+    ((m / 2).max(1), (2 * m).max(2))
 }

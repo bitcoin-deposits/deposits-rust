@@ -31,6 +31,8 @@ fn collateral_floor_matches_the_shared_vector() {
                 compensation_deposit_id: None,
                 compensation_frequency_blocks: None,
                 min_collateral_bps: b.as_u64().map(|x| x as u16),
+                dormancy_blocks: None,
+                dormancy_notice_blocks: None,
                 supported_rulesets: Vec::new(),
             })
             .collect();

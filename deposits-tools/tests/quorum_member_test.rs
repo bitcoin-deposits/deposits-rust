@@ -135,6 +135,8 @@ mod tests {
         ledger
             .apply_state_changes(&LedgerOperation::QuorumAddMember {
                 min_collateral_bps: None,
+                dormancy_blocks: None,
+                dormancy_notice_blocks: None,
                 quorum_member: member_key,
                 quorum_member_signature: [0xAA; 64],
                 member_ledger_id: "member_collateral_ledger".to_string(),
@@ -172,6 +174,8 @@ mod tests {
         ledger
             .apply_state_changes(&LedgerOperation::QuorumAddMember {
                 min_collateral_bps: None,
+                dormancy_blocks: None,
+                dormancy_notice_blocks: None,
                 quorum_member: member_key,
                 quorum_member_signature: [0xAA; 64],
                 member_ledger_id: "member_collateral_ledger".to_string(),
@@ -234,6 +238,8 @@ mod tests {
             let update = ledger
                 .apply_operation(&LedgerOperation::QuorumAddMember {
                     min_collateral_bps: None,
+                    dormancy_blocks: None,
+                    dormancy_notice_blocks: None,
                     quorum_member: *member,
                     quorum_member_signature: [0xAA; 64],
                     member_ledger_id: "member_collateral_ledger".to_string(),
@@ -271,6 +277,8 @@ mod tests {
                 exit_outputs: Vec::new(),
                 splice_in_outpoint: None,
                 splice_in_amount: None,
+                reference_feerate: None,
+                dormancy_outputs: Vec::new(),
                 reserves_id: "bcrt1qtest_rotated".to_string(),
                 spending_txid: [0x11; 32],
                 new_outpoint_txid: [0x22; 32],

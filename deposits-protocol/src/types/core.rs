@@ -418,6 +418,10 @@ pub struct Deposit {
     /// Block height at which the deposit was opened (for fee_change_after_blocks).
     #[serde(default)]
     pub opened_at_block: u32,
+    /// DEP-20 §8: height of the latest depositor-signed op spending from or authorising this
+    /// deposit (initially its DepositOpen's).
+    #[serde(default)]
+    pub last_signed_activity: u32,
     /// Pending fee change: new fees and the block at which they take effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_fee_change: Option<(FeeStructure, u32)>,
@@ -455,6 +459,7 @@ impl Deposit {
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
+            last_signed_activity: 0,
             pending_fee_change: None,
             seen_nonces: std::collections::BTreeSet::new(),
         }
@@ -681,6 +686,11 @@ pub struct QuorumMember {
     /// DEP-05 collateral floor this member requires (basis points of the vault).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_collateral_bps: Option<u16>,
+    /// DEP-20 §8 dormancy parameters this member declared (the largest applies).
+    #[serde(default)]
+    pub dormancy_blocks: Option<u32>,
+    #[serde(default)]
+    pub dormancy_notice_blocks: Option<u32>,
     /// Rulesets this member declared support for in their signed
     /// `QuorumMemberResponse`. Operators read this at `quorum begin` to
     /// confirm every pending member can validate under the chosen

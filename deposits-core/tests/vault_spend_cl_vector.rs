@@ -54,6 +54,8 @@ fn qb(spending_txid: [u8; 32], expiry: u32, version: &str) -> LedgerOperation {
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: String::new(),
         spending_txid,
         new_outpoint_txid: sha(&[0xf0, 0x0d]),

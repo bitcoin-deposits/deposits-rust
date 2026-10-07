@@ -171,6 +171,7 @@ fn deposit_struct_receive_requires_sig_tlv_roundtrip() {
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
         opened_at_block: 0,
+        last_signed_activity: 0,
         pending_fee_change: None,
         seen_nonces: std::collections::BTreeSet::new(),
     };
@@ -203,6 +204,7 @@ fn deposit_struct_without_flag_field_defaults_false() {
         fee_change_notice_blocks: None,
         fee_change_limit_bps: None,
         opened_at_block: 0,
+        last_signed_activity: 0,
         pending_fee_change: None,
         seen_nonces: std::collections::BTreeSet::new(),
     };

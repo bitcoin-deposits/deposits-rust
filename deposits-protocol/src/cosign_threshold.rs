@@ -226,6 +226,8 @@ mod tests {
     fn member(byte: u8) -> QuorumMember {
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: pk(byte),
             ledger_id: format!("{:064x}", byte as u128),
             min_fee_bps: None,
@@ -407,6 +409,8 @@ mod tests {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "bcrt1pdummy".to_string(),
             amount: 100_000_000,
             collateral_amount: 100_000_000,

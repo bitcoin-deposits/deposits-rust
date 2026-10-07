@@ -28,6 +28,8 @@ fn state_with_staged_member(
     let mut s = LedgerState::new(operator, "rid".into(), 0);
     s.next_quorum_members.push(QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: member,
         ledger_id: "member-ledger".into(),
         min_fee_bps: None,
@@ -53,6 +55,8 @@ fn quorum_begin(member: PublicKey, protocol_version: Option<String>) -> LedgerOp
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: "rid2".into(),
         spending_txid: [0x11; 32],
         new_outpoint_txid: [0x22; 32],
@@ -182,6 +186,8 @@ fn nonlegacy_quorum_begin_rejects_when_any_member_unattested() {
     ] {
         s.next_quorum_members.push(QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: m,
             ledger_id: "x".into(),
             min_fee_bps: None,
@@ -204,6 +210,8 @@ fn nonlegacy_quorum_begin_rejects_when_any_member_unattested() {
         exit_outputs: Vec::new(),
         splice_in_outpoint: None,
         splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
         reserves_id: "rid2".into(),
         spending_txid: [0x11; 32],
         new_outpoint_txid: [0x22; 32],

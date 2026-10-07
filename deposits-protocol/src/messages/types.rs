@@ -306,6 +306,10 @@ pub enum LedgerOperation {
         splice_in_outpoint: Option<([u8; 32], u32)>,
         /// DEP-20 §4 (TLV 284): the splice outpoint's value × 1000.
         splice_in_amount: Option<u64>,
+        /// DEP-03/DEP-20 §8 (TLV 292): reference feerate (sat/vB) governing the next rotation.
+        reference_feerate: Option<u32>,
+        /// DEP-20 §8.2 (TLV 336): dormant deposits paid out in full, after the exits.
+        dormancy_outputs: Vec<ExitOutput>,
     },
 
     // ========== Settlement (DEP-20) ==========
@@ -321,7 +325,13 @@ pub enum LedgerOperation {
         expiry: u32,
         witness: DescriptorWitness,
     },
-    /// DEP-20 §3: withdraw a pending ExitRequest (named by its update's chain_hash).
+    /// DEP-20 §8.1: a dormancy bucket settles at the first rotation at or after `rotation_height`.
+    DormancyNotice {
+        rotation_height: u32,
+        migration_receiver: Option<PublicKey>,
+        manifest_hash: Option<[u8; 32]>,
+    },
+    /// DEP-20 §3: withdraw a pending ExitRequest (named by SHA256 of its operation).
     ExitCancel {
         deposit_id: DepositId,
         exit_request_id: [u8; 32],
@@ -625,6 +635,10 @@ pub enum LedgerOperation {
         /// (basis points) this member accepts; the strictest member applies, and
         /// never below `MIN_COLLATERAL_BPS_FLOOR`.
         min_collateral_bps: Option<u16>,
+        /// DEP-20 §8 (TLV 318): blocks without signed activity before a deposit is dormant.
+        dormancy_blocks: Option<u32>,
+        /// DEP-20 §8 (TLV 332): least notice before the rotation that settles a bucket.
+        dormancy_notice_blocks: Option<u32>,
         /// Canonical TLV-encoded `QuorumMemberResponse` returned by the
         /// member during consent. When present, validators decode it,
         /// verify `member_signature` against
@@ -853,6 +867,7 @@ impl LedgerOperation {
             Self::DepositKeyRotate { .. } => 23,
             Self::ExitRequest { .. } => 100,
             Self::ExitCancel { .. } => 101,
+            Self::DormancyNotice { .. } => 102,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -911,7 +926,9 @@ impl LedgerOperation {
             Self::DisputeYield => consts::LEDGER_UPDATE,
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
-            Self::ExitRequest { .. } | Self::ExitCancel { .. } => consts::LEDGER_UPDATE,
+            Self::ExitRequest { .. } | Self::ExitCancel { .. } | Self::DormancyNotice { .. } => {
+                consts::LEDGER_UPDATE
+            }
             Self::LedgerClose => consts::LEDGER_CLOSE,
             Self::Batch(_) => consts::BATCH,
         }
@@ -952,7 +969,7 @@ impl LedgerOperation {
             46 => consts::QUORUM_JOIN,
             45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
-            54 | 55 | 56 | 57 | 80 | 100 | 101 => consts::LEDGER_UPDATE,
+            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
             70 => consts::TRANSFER_LOCK,
             71 => consts::TRANSFER_COMPLETE,
@@ -1259,6 +1276,8 @@ impl BinaryCodec for LedgerOperation {
                 exit_outputs: _,
                 splice_in_outpoint: _,
                 splice_in_amount: _,
+                reference_feerate: _,
+                dormancy_outputs: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1671,7 +1690,7 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, claim_txid)?;
                 write_string(w, new_reserves_address)?;
             }
-            Self::ExitRequest { .. } | Self::ExitCancel { .. } => {
+            Self::ExitRequest { .. } | Self::ExitCancel { .. } | Self::DormancyNotice { .. } => {
                 return Err(CodecError::InvalidData(
                     "DEP-20 exits have no legacy encoding; use TLV".into(),
                 ));
@@ -1753,6 +1772,8 @@ impl BinaryCodec for LedgerOperation {
                     exit_outputs: Vec::new(),
                     splice_in_outpoint: None,
                     splice_in_amount: None,
+                    reference_feerate: None,
+                    dormancy_outputs: Vec::new(),
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,
@@ -2023,6 +2044,8 @@ impl BinaryCodec for LedgerOperation {
             }),
             43 => Ok(Self::QuorumAddMember {
                 min_collateral_bps: None,
+                dormancy_blocks: None,
+                dormancy_notice_blocks: None,
                 quorum_member: read_pubkey(r)?,
                 quorum_member_signature: read_64(r)?,
                 member_ledger_id: read_string(r)?,

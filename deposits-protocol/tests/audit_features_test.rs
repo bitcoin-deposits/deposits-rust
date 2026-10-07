@@ -90,6 +90,8 @@ fn delivery_embed_binary_roundtrip() {
 fn quorum_add_member_with_timing_params_tlv_roundtrip() {
     let original = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey(),
         quorum_member_signature: [0xAA; 64],
         member_ledger_id: "test-ledger-id-123".to_string(),
@@ -115,6 +117,8 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
     match decoded {
         LedgerOperation::QuorumAddMember {
             min_collateral_bps: _,
+            dormancy_blocks: _,
+            dormancy_notice_blocks: _,
             quorum_member,
             quorum_member_signature,
             member_ledger_id,
@@ -164,6 +168,8 @@ fn quorum_add_member_with_timing_params_tlv_roundtrip() {
 fn quorum_add_member_none_timing_params_tlv_roundtrip() {
     let original = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey_2(),
         quorum_member_signature: [0xBB; 64],
         member_ledger_id: "legacy-ledger".to_string(),
@@ -189,6 +195,8 @@ fn quorum_add_member_none_timing_params_tlv_roundtrip() {
     match decoded {
         LedgerOperation::QuorumAddMember {
             min_collateral_bps: _,
+            dormancy_blocks: _,
+            dormancy_notice_blocks: _,
             quorum_member,
             quorum_member_signature,
             member_ledger_id,
@@ -243,6 +251,8 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
     // the roundtrip and that the optional fields degrade gracefully.
     let original = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey(),
         quorum_member_signature: [0xCC; 64],
         member_ledger_id: "binary-test-ledger".to_string(),
@@ -269,6 +279,8 @@ fn quorum_add_member_binary_roundtrip_with_timing_params() {
     match decoded {
         LedgerOperation::QuorumAddMember {
             min_collateral_bps: _,
+            dormancy_blocks: _,
+            dormancy_notice_blocks: _,
             quorum_member,
             quorum_member_signature,
             member_ledger_id,

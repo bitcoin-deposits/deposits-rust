@@ -160,6 +160,13 @@ mod ledger_op_tlv {
     pub const EXIT_OUTPUTS: u64 = 280; // repeated deposit_id(16)‖amount(8)‖vout(4), QuorumBegin
     pub const SPLICE_IN_OUTPOINT: u64 = 282; // txid(32)‖vout(4 BE), QuorumBegin (DEP-20 §4)
     pub const SPLICE_IN_AMOUNT: u64 = 284; // u64 msats, QuorumBegin
+    pub const REFERENCE_FEERATE: u64 = 292; // u32 sat/vB, QuorumBegin (DEP-03, DEP-20 §8)
+    pub const ROTATION_HEIGHT: u64 = 306; // u32, DormancyNotice
+    pub const MANIFEST_HASH: u64 = 308; // [u8; 32], DormancyNotice
+    pub const MIGRATION_RECEIVER: u64 = 288; // pubkey, DormancyNotice
+    pub const DORMANCY_BLOCKS: u64 = 318; // u32, QuorumAddMember
+    pub const DORMANCY_NOTICE_BLOCKS: u64 = 332; // u32, QuorumAddMember
+    pub const DORMANCY_OUTPUTS: u64 = 336; // repeated deposit_id‖amount‖vout, QuorumBegin
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
     pub const EXPIRES_AT_HEIGHT: u64 = 302; // u32, ExitRequest (optional)
     pub const EXIT_REQUEST_ID: u64 = 304; // [u8; 32], ExitCancel
@@ -268,6 +275,8 @@ impl TlvEncode for LedgerOperation {
                 exit_outputs,
                 splice_in_outpoint,
                 splice_in_amount,
+                reference_feerate,
+                dormancy_outputs,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -324,6 +333,18 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(a) = splice_in_amount {
                     builder = builder.u64_field(SPLICE_IN_AMOUNT, *a);
+                }
+                if let Some(f) = reference_feerate {
+                    builder = builder.u32_field(REFERENCE_FEERATE, *f);
+                }
+                if !dormancy_outputs.is_empty() {
+                    let mut b = Vec::with_capacity(dormancy_outputs.len() * 28);
+                    for e in dormancy_outputs {
+                        b.extend_from_slice(&e.deposit_id);
+                        b.extend_from_slice(&e.amount.to_be_bytes());
+                        b.extend_from_slice(&e.vout.to_be_bytes());
+                    }
+                    builder = builder.bytes_field(DORMANCY_OUTPUTS, &b);
                 }
             }
             Self::DepositOpen {
@@ -423,6 +444,19 @@ impl TlvEncode for LedgerOperation {
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
+            }
+            Self::DormancyNotice {
+                rotation_height,
+                migration_receiver,
+                manifest_hash,
+            } => {
+                builder = builder.u32_field(ROTATION_HEIGHT, *rotation_height);
+                if let Some(r) = migration_receiver {
+                    builder = builder.bytes_field(MIGRATION_RECEIVER, &r.serialize());
+                }
+                if let Some(h) = manifest_hash {
+                    builder = builder.bytes_field(MANIFEST_HASH, h);
+                }
             }
             Self::ExitCancel {
                 deposit_id,
@@ -656,6 +690,8 @@ impl TlvEncode for LedgerOperation {
                 compensation_deposit_id,
                 compensation_frequency_blocks,
                 min_collateral_bps,
+                dormancy_blocks,
+                dormancy_notice_blocks,
                 member_response,
                 member_signature,
             } => {
@@ -698,6 +734,12 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = compensation_frequency_blocks {
                     builder = builder.u32_field(COMPENSATION_FREQUENCY_BLOCKS, *v);
+                }
+                if let Some(v) = dormancy_blocks {
+                    builder = builder.u32_field(DORMANCY_BLOCKS, *v);
+                }
+                if let Some(v) = dormancy_notice_blocks {
+                    builder = builder.u32_field(DORMANCY_NOTICE_BLOCKS, *v);
                 }
                 if let Some(v) = min_collateral_bps {
                     builder = builder.u16_field(MIN_COLLATERAL_BPS, *v);
@@ -913,6 +955,11 @@ impl TlvDecode for LedgerOperation {
                         }
                     },
                     splice_in_amount: reader.read_u64_opt(SPLICE_IN_AMOUNT)?,
+                    reference_feerate: reader.read_u32_opt(REFERENCE_FEERATE)?,
+                    dormancy_outputs: read_exit_outputs(
+                        reader.read_raw_opt(DORMANCY_OUTPUTS),
+                        DORMANCY_OUTPUTS,
+                    )?,
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -954,6 +1001,21 @@ impl TlvDecode for LedgerOperation {
                 expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
+            102 => {
+                Ok(Self::DormancyNotice {
+                    rotation_height: reader.read_u32(ROTATION_HEIGHT)?,
+                    migration_receiver: match reader.read_raw_opt(MIGRATION_RECEIVER) {
+                        None => None,
+                        Some(b) => Some(PublicKey::from_slice(b).map_err(|e| {
+                            TlvError::InvalidFieldValue {
+                                field_type: MIGRATION_RECEIVER,
+                                reason: e.to_string(),
+                            }
+                        })?),
+                    },
+                    manifest_hash: reader.read_bytes_opt(MANIFEST_HASH)?,
+                })
+            }
             101 => Ok(Self::ExitCancel {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 exit_request_id: reader.read_bytes(EXIT_REQUEST_ID)?,
@@ -1078,6 +1140,8 @@ impl TlvDecode for LedgerOperation {
                 compensation_frequency_blocks: reader
                     .read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
                 min_collateral_bps: reader.read_u16_opt(MIN_COLLATERAL_BPS)?,
+                dormancy_blocks: reader.read_u32_opt(DORMANCY_BLOCKS)?,
+                dormancy_notice_blocks: reader.read_u32_opt(DORMANCY_NOTICE_BLOCKS)?,
                 member_response: reader.read_raw_opt(MEMBER_RESPONSE).map(|b| b.to_vec()),
                 member_signature: reader.read_bytes_opt(MEMBER_SIGNATURE)?,
             }),
@@ -2097,6 +2161,24 @@ impl DepositsMessage {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// DEP-02 type 280 / 336: repeated `deposit_id(16) ‖ amount_msats(8) ‖ vout(4)`.
+fn read_exit_outputs(raw: Option<&[u8]>, field_type: u64) -> Result<Vec<ExitOutput>, TlvError> {
+    let Some(b) = raw else { return Ok(Vec::new()) };
+    if b.len() % 28 != 0 {
+        return Err(TlvError::InvalidFieldValue {
+            field_type,
+            reason: "not a multiple of 28 bytes".into(),
+        });
+    }
+    Ok(b.chunks(28)
+        .map(|c| ExitOutput {
+            deposit_id: c[..16].try_into().unwrap(),
+            amount: u64::from_be_bytes(c[16..24].try_into().unwrap()),
+            vout: u32::from_be_bytes(c[24..28].try_into().unwrap()),
+        })
+        .collect())
+}
 
 #[cfg(test)]
 mod tests {

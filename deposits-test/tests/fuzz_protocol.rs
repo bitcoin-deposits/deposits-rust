@@ -176,6 +176,8 @@ impl ProtocolSim {
                     .ledger
                     .append_operation(LedgerOperation::QuorumAddMember {
                         min_collateral_bps: None,
+                        dormancy_blocks: None,
+                        dormancy_notice_blocks: None,
                         quorum_member: member_pk,
                         quorum_member_signature: [0xAA; 64],
                         member_ledger_id: format!("reserves_{}", m),
@@ -210,6 +212,8 @@ impl ProtocolSim {
                     exit_outputs: Vec::new(),
                     splice_in_outpoint: None,
                     splice_in_amount: None,
+                    reference_feerate: None,
+                    dormancy_outputs: Vec::new(),
                     reserves_id: format!("reserves_{}_rotated", i),
                     spending_txid: [0x11; 32],
                     new_outpoint_txid: [(0x20 + i as u8); 32],
@@ -642,6 +646,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
         LedgerOperation::ExitRequest { .. } => "ExitRequest",
         LedgerOperation::ExitCancel { .. } => "ExitCancel",
+        LedgerOperation::DormancyNotice { .. } => "DormancyNotice",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFulfill { .. } => "InvoiceFulfill",

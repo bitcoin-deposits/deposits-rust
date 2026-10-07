@@ -228,6 +228,8 @@ impl Operator {
     pub fn add_quorum_member(&mut self, member: &Operator, member_ledger_id: &str) {
         let op = LedgerOperation::QuorumAddMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             quorum_member: member.public_key,
             member_ledger_id: member_ledger_id.to_string(),
             quorum_member_signature: [0xAB; 64],
@@ -284,6 +286,8 @@ impl Operator {
                     self.ledger
                         .append_operation(LedgerOperation::QuorumAddMember {
                             min_collateral_bps: None,
+                            dormancy_blocks: None,
+                            dormancy_notice_blocks: None,
                             quorum_member: pk,
                             member_ledger_id: format!("synthetic_pad_{:02x}", filler),
                             quorum_member_signature: [0xCD; 64],
@@ -335,6 +339,8 @@ impl Operator {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: format!("{}_rotated", self.ledger.state.reserves_key),
             spending_txid: [0x11; 32],
             new_outpoint_txid: [0x22; 32],

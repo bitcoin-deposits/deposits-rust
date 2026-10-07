@@ -243,6 +243,20 @@ impl Wallet {
             .ok_or_else(|| "splice-in outpoint vanished".to_string())
     }
 
+    /// DEP-03 Reference feerate: m = floor((s3 + s4) / 2) of the block feerates at heights
+    /// h-6 .. h-1, or None when the backend cannot give them.
+    pub fn median_feerate(&self, height: u32) -> Option<u64> {
+        let backend = crate::chain_backend::from_env(&self.electrum_url);
+        let mut fs: Vec<u64> = (height.saturating_sub(6)..height)
+            .map(|h| backend.block_feerate(h).ok().flatten())
+            .collect::<Option<Vec<u64>>>()?;
+        if fs.len() != 6 {
+            return None;
+        }
+        fs.sort_unstable();
+        Some((fs[2] + fs[3]) / 2)
+    }
+
     /// The height of the block confirming `txid`, or None while unconfirmed.
     pub fn tx_block_height(&self, txid: bitcoin::Txid) -> Result<Option<u32>, Error> {
         crate::chain_backend::from_env(&self.electrum_url).get_tx_block_height(&txid)

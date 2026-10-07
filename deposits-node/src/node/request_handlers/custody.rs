@@ -1324,6 +1324,7 @@ impl Node {
 
         // DEP-20 §3: the exits due under the operator's cutoff, which must sit within
         // the margin below our height (absent: height − margin).
+        let rotation_feerate = ledger_arc.read().unwrap().state.rotation_feerate();
         let exit_extras = {
             let h = self.wallet.get_block_height().unwrap_or(0);
             let margin = deposits_core::types::EXIT_CUTOFF_MARGIN_BLOCKS;
@@ -1333,21 +1334,21 @@ impl Node {
                 .and_then(|v| v.as_u64())
                 .map(|c| c as u32);
             if let Some(c) = cutoff {
-                if c > h || c < h.saturating_sub(margin) {
+                if c > h + 6 || c < h.saturating_sub(margin + 6) {
                     return (
                         false,
                         None,
                         Some(format!(
                             "exit_cutoff_height {} outside [{}, {}]",
                             c,
-                            h.saturating_sub(margin),
-                            h
+                            h.saturating_sub(margin + 6),
+                            h + 6
                         )),
                     );
                 }
             }
             let ledger = ledger_arc.read().unwrap();
-            deposits_core::rotation_order::due_exit_outputs(&ledger.state, h, cutoff)
+            deposits_core::rotation_order::settlement_outputs(&ledger.state, h, cutoff).0
         };
         // DEP-03 §"Rotation transaction": rebuild it and sign only an identical one
         // (shape and fee are rules, not the proposer's choice).
@@ -1356,8 +1357,7 @@ impl Node {
                 vault: reserves_outpoint,
                 vault_sats: reserves_amount,
                 voters: current_output.voter_set.all_voters().len(),
-                feerate_sat_vb:
-                    deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+                feerate_sat_vb: rotation_feerate,
                 lock_time: chosen_tier.timelock_blocks,
                 new_vault_spk: expected_new.script_pubkey(),
                 splice_in: splice.as_ref().map(|(t, v, p)| {

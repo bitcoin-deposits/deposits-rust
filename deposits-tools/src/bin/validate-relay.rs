@@ -419,6 +419,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
         LedgerOperation::ExitRequest { .. } => "ExitRequest",
         LedgerOperation::ExitCancel { .. } => "ExitCancel",
+        LedgerOperation::DormancyNotice { .. } => "DormancyNotice",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFail { .. } => "InvoiceFail",

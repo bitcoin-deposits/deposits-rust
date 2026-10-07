@@ -267,6 +267,41 @@ pub struct LedgerState {
     /// A QuorumBegin vault the next QuorumBegin rotates (cleared by DisputeAcquire).
     #[serde(default)]
     pub vault_current: bool,
+    /// The governing QuorumBegin's reference_feerate_sat_vb (DEP-03; None = 2 sat/vB).
+    #[serde(default)]
+    pub reference_feerate: Option<u32>,
+    /// DEP-20 §8 parameters in force (the largest the promoted members declared).
+    #[serde(default = "dormancy_blocks_default")]
+    pub dormancy_blocks: u32,
+    #[serde(default = "dormancy_notice_blocks_default")]
+    pub dormancy_notice_blocks: u32,
+    /// The outstanding DormancyNotice: (its block height, rotation_height).
+    #[serde(default)]
+    pub dormancy_notice: Option<(u32, u32)>,
+}
+
+pub const DORMANCY_BLOCKS_DEFAULT: u32 = 26280;
+pub const DORMANCY_NOTICE_BLOCKS_DEFAULT: u32 = 2016;
+fn dormancy_blocks_default() -> u32 {
+    DORMANCY_BLOCKS_DEFAULT
+}
+fn dormancy_notice_blocks_default() -> u32 {
+    DORMANCY_NOTICE_BLOCKS_DEFAULT
+}
+
+/// DEP-20 §8: a pk(K) deposit's address, the key-path P2TR with K's x-only key internal.
+pub fn pk_key_path_spk(descriptor: &str) -> Option<bitcoin::ScriptBuf> {
+    let hex_key = descriptor.strip_prefix("pk(")?.strip_suffix(')')?;
+    if hex_key.len() != 66 {
+        return None;
+    }
+    let pk = PublicKey::from_slice(&hex::decode(hex_key).ok()?).ok()?;
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    Some(bitcoin::ScriptBuf::new_p2tr(
+        &secp,
+        pk.x_only_public_key().0,
+        None,
+    ))
 }
 
 impl LedgerState {
@@ -322,7 +357,61 @@ impl LedgerState {
             dispute_fork_sequence: 0,
             pending_exits: HashMap::new(),
             vault_current: false,
+            reference_feerate: None,
+            dormancy_blocks: DORMANCY_BLOCKS_DEFAULT,
+            dormancy_notice_blocks: DORMANCY_NOTICE_BLOCKS_DEFAULT,
+            dormancy_notice: None,
         }
+    }
+
+    /// DEP-03: the governing QuorumBegin's reference feerate, or 2 sat/vB when none is recorded.
+    pub fn rotation_feerate(&self) -> u64 {
+        self.reference_feerate.map_or(2, u64::from)
+    }
+
+    /// DEP-20 §8: 10 × 34 vB × the governing feerate, msat.
+    pub fn dormancy_amount_msats(&self) -> u64 {
+        10 * 34 * self.rotation_feerate() * 1000
+    }
+
+    /// DEP-20 §8.4: a spin-out's own cost (34-byte P2TR), paid from collateral.
+    pub fn dormancy_cost(&self) -> u64 {
+        self.rotation_feerate() * (9 + 34)
+    }
+
+    /// DEP-20 §8.2: if a rotating QuorumBegin at `height` consumes the outstanding notice, the
+    /// addressable bucket deposits at or above the floor, ascending deposit id:
+    /// (deposit_id, balance msat, address script).
+    pub fn dormancy_spin_outs(&self, cutoff: u32) -> Vec<(DepositId, u64, bitcoin::ScriptBuf)> {
+        let Some((notice_height, rotation_height)) = self.dormancy_notice else {
+            return Vec::new();
+        };
+        if !self.vault_current || cutoff < rotation_height {
+            return Vec::new();
+        }
+        let bound = notice_height.saturating_sub(self.dormancy_blocks);
+        let floor = self.dormancy_amount_msats();
+        let pending: std::collections::HashSet<DepositId> =
+            self.pending_exits.values().map(|e| e.deposit_id).collect();
+        let mut out: Vec<(DepositId, u64, bitcoin::ScriptBuf)> = self
+            .deposits
+            .iter()
+            .filter(|(id, d)| {
+                d.balance > 0
+                    && d.locked_balance == 0
+                    && !pending.contains(*id)
+                    && d.last_signed_activity <= bound
+                    && d.balance >= floor
+            })
+            .filter_map(|(id, d)| pk_key_path_spk(&d.descriptor).map(|s| (*id, d.balance, s)))
+            .collect();
+        out.sort_by_key(|(id, _, _)| *id);
+        out
+    }
+
+    /// DEP-20 §3: an exit output's own marginal cost, feerate × (9 + len(spk)) sats.
+    pub fn exit_cost(&self, exit_address: &[u8]) -> u64 {
+        self.rotation_feerate() * (9 + exit_address.len() as u64)
     }
 
     /// DEP-20 §3 due set at `height` under `cutoff`: pending requests appended at block
@@ -333,8 +422,9 @@ impl LedgerState {
             .iter()
             .filter(|(_, e)| {
                 e.block_height <= cutoff
-                    && e.amount >= EXIT_DUST_MSATS
-                    && e.expires_at.is_none_or(|x| x > height)
+                    && (e.amount / 1000).saturating_sub(self.exit_cost(&e.exit_address))
+                        >= EXIT_DUST_MSATS / 1000
+                    && e.expires_at.is_none_or(|x| x > cutoff)
             })
             .map(|(k, e)| (*k, e.clone()))
             .collect();
@@ -501,14 +591,40 @@ impl LedgerState {
         // DEP-20 §3: before an update's operation, release the exit requests that expired at
         // or below its height (on a scratch copy, so a failing op leaves state untouched).
         let h = apply_ctx().height;
-        if h > 0 && self.has_expired_exits(h) {
+        let is_qb = matches!(
+            operation,
+            crate::messages::LedgerOperation::QuorumBegin { .. }
+        );
+        if h > 0 && !is_qb && self.has_expired_exits(h) {
             let mut scratch = self.clone();
             scratch.release_expired_exits(h);
             scratch.apply_op_in_place(operation)?;
             *self = scratch;
-            return Ok(());
+        } else {
+            self.apply_op_in_place(operation)?;
         }
-        self.apply_op_in_place(operation)
+        self.note_signed_activity(operation, h);
+        Ok(())
+    }
+
+    /// DEP-20 §8 signed activity: depositor-signed operations only (a DepositOpen starts it).
+    fn note_signed_activity(&mut self, operation: &crate::messages::LedgerOperation, h: u32) {
+        use crate::messages::LedgerOperation as O;
+        let id = match operation {
+            O::DepositOpen { deposit_id, .. }
+            | O::InvoiceLock { deposit_id, .. }
+            | O::OnchainLock { deposit_id, .. }
+            | O::DepositKeyRotate { deposit_id, .. }
+            | O::ExitRequest { deposit_id, .. }
+            | O::ExitCancel { deposit_id, .. } => deposit_id,
+            O::TransferLock {
+                source_deposit_id, ..
+            } => source_deposit_id,
+            _ => return,
+        };
+        if let Some(d) = self.deposits.get_mut(id) {
+            d.last_signed_activity = h;
+        }
     }
 
     fn apply_op_in_place(
@@ -542,8 +658,36 @@ impl LedgerState {
                 protocol_version,
                 exit_cutoff_height,
                 exit_outputs,
+                reference_feerate,
+                dormancy_outputs,
                 ..
             } => {
+                // DEP-20 §8.2: dormancy_outputs must be exactly the spin-outs (pre-state), a
+                // function of the recorded cutoff (absent: height − margin).
+                let qb_cutoff = exit_cutoff_height
+                    .unwrap_or(apply_ctx().height.saturating_sub(EXIT_CUTOFF_MARGIN_BLOCKS));
+                let spins = next.dormancy_spin_outs(qb_cutoff);
+                let nexits = exit_outputs.len() as u32;
+                let spins_ok = spins.len() == dormancy_outputs.len()
+                    && spins.iter().zip(dormancy_outputs.iter()).enumerate().all(
+                        |(j, ((id, bal, _), o))| {
+                            o.deposit_id == *id
+                                && o.amount == *bal
+                                && o.vout == nexits + j as u32 + 1
+                        },
+                    );
+                if !spins_ok {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_outputs".to_string(),
+                        details: format!(
+                            "{} spin-outs due, {} recorded or mismatched",
+                            spins.len(),
+                            dormancy_outputs.len()
+                        ),
+                    });
+                }
+                let consumes_notice =
+                    next.vault_current && next.dormancy_notice.is_some_and(|(_, r)| qb_cutoff >= r);
                 // DEP-20 §3: exit_outputs must be exactly the due set (rotating QuorumBegins).
                 let settled: Vec<[u8; 32]> = if next.vault_current {
                     let h = apply_ctx().height;
@@ -666,7 +810,57 @@ impl LedgerState {
                         }
                     }
                 }
+                for (id, _, _) in &spins {
+                    if let Some(d) = next.deposits.get_mut(id) {
+                        let before = d.balance;
+                        d.balance = 0;
+                        next.add_balance_delta(before, 0);
+                    }
+                }
+                if consumes_notice {
+                    next.dormancy_notice = None;
+                }
+                // DEP-20 §3 Expiry: a rotating QuorumBegin releases expired requests after it
+                // settles (the caller skipped the pre-op release).
+                let h = apply_ctx().height;
+                if h > 0 {
+                    next.release_expired_exits(h);
+                }
                 next.vault_current = true;
+                next.reference_feerate = *reference_feerate;
+                next.dormancy_blocks = next
+                    .quorum_members
+                    .iter()
+                    .filter_map(|m| m.dormancy_blocks)
+                    .max()
+                    .unwrap_or(DORMANCY_BLOCKS_DEFAULT);
+                next.dormancy_notice_blocks = next
+                    .quorum_members
+                    .iter()
+                    .filter_map(|m| m.dormancy_notice_blocks)
+                    .max()
+                    .unwrap_or(DORMANCY_NOTICE_BLOCKS_DEFAULT);
+            }
+            LedgerOperation::DormancyNotice {
+                rotation_height, ..
+            } => {
+                let h = apply_ctx().height;
+                if next.dormancy_notice.is_some() {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_notice".to_string(),
+                        details: "a notice is already outstanding".to_string(),
+                    });
+                }
+                if *rotation_height < h.saturating_add(next.dormancy_notice_blocks) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_notice".to_string(),
+                        details: format!(
+                            "rotation_height {} is less than {} blocks ahead",
+                            rotation_height, next.dormancy_notice_blocks
+                        ),
+                    });
+                }
+                next.dormancy_notice = Some((h, *rotation_height));
             }
             LedgerOperation::ExitRequest {
                 deposit_id,
@@ -1057,6 +1251,8 @@ impl LedgerState {
                 compensation_deposit_id,
                 compensation_frequency_blocks,
                 min_collateral_bps,
+                dormancy_blocks,
+                dormancy_notice_blocks,
                 member_response,
                 ..
             } => {
@@ -1092,6 +1288,8 @@ impl LedgerState {
                     compensation_deposit_id: *compensation_deposit_id,
                     compensation_frequency_blocks: *compensation_frequency_blocks,
                     min_collateral_bps: *min_collateral_bps,
+                    dormancy_blocks: *dormancy_blocks,
+                    dormancy_notice_blocks: *dormancy_notice_blocks,
                     supported_rulesets,
                 };
                 // Upsert into next_quorum_members. Re-staging an existing
@@ -1162,6 +1360,7 @@ impl LedgerState {
             }
             LedgerOperation::DisputeAcquire { new_custodian, .. } => {
                 next.vault_current = false;
+                next.dormancy_notice = None;
                 next.operator_key = *new_custodian;
                 next.parent_pubkey = *new_custodian;
                 next.dispute_state = DisputeState::Normal;
@@ -1671,8 +1870,21 @@ impl LedgerState {
         authorizer: &impl crate::types::Authorizer,
         current_height: u32,
     ) -> Vec<ConformanceViolation> {
+        self.check_speculative_at(operation, authorizer, current_height, current_height)
+    }
+
+    /// [`check_speculative`](Self::check_speculative) for an update signed at `update_height`
+    /// (a cosigner checking a proposed update): the operation applies at the update's height,
+    /// as it will on every replica (DEP-20 rules read it), while signature windows use ours.
+    pub fn check_speculative_at(
+        &self,
+        operation: &crate::messages::LedgerOperation,
+        authorizer: &impl crate::types::Authorizer,
+        current_height: u32,
+        update_height: u32,
+    ) -> Vec<ConformanceViolation> {
         let ctx = ApplyCtx {
-            height: current_height,
+            height: update_height,
             seq: self.sequence + 1,
             hash: [0u8; 32],
         };

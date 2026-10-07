@@ -753,6 +753,8 @@ impl Ledger {
             .next_quorum_members
             .push(crate::types::QuorumMember {
                 min_collateral_bps: None,
+                dormancy_blocks: None,
+                dormancy_notice_blocks: None,
                 pubkey: partner,
                 ledger_id: member_ledger_id,
                 min_fee_bps: None,
@@ -2609,6 +2611,7 @@ mod tests {
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
+            last_signed_activity: 0,
             pending_fee_change: None,
             seen_nonces: std::collections::BTreeSet::new(),
         };
@@ -2626,6 +2629,7 @@ mod tests {
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
+            last_signed_activity: 0,
             pending_fee_change: None,
             seen_nonces: std::collections::BTreeSet::new(),
         };
@@ -2724,6 +2728,7 @@ mod tests {
             fee_change_notice_blocks: None,
             fee_change_limit_bps: None,
             opened_at_block: 0,
+            last_signed_activity: 0,
             pending_fee_change: None,
             seen_nonces: std::collections::BTreeSet::new(),
         };
@@ -2818,6 +2823,8 @@ mod tests {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),
@@ -2935,6 +2942,8 @@ mod tests {
         ledger.state.quorum_expiry = Some(500);
         ledger.state.quorum_members = vec![QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: pk(2),
             ledger_id: "m1".into(),
             min_fee_bps: None,
@@ -3013,6 +3022,8 @@ mod tests {
         // One member caps lock timeouts at 1008 blocks.
         ledger.state.quorum_members = vec![QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: pk(2),
             ledger_id: "m1".into(),
             min_fee_bps: None,

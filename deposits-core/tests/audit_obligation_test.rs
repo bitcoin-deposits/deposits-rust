@@ -61,6 +61,8 @@ fn quorum_begin_stores_quorum_expiry() {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "tb1qtest_taproot".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -87,6 +89,8 @@ fn quorum_begin_updates_reserves_key_and_amount() {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "tb1p_new_taproot_addr".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -115,6 +119,8 @@ fn quorum_begin_overwrites_previous_values() {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "tb1p_first".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -137,6 +143,8 @@ fn quorum_begin_overwrites_previous_values() {
             exit_outputs: Vec::new(),
             splice_in_outpoint: None,
             splice_in_amount: None,
+            reference_feerate: None,
+            dormancy_outputs: Vec::new(),
             reserves_id: "tb1p_second".to_string(),
             spending_txid: [1u8; 32],
             new_outpoint_txid: [1u8; 32],
@@ -229,6 +237,8 @@ fn delivery_embed_on_empty_ledger() {
 fn quorum_member_timing_fields_roundtrip() {
     let member = QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger_id".to_string(),
         min_fee_bps: None,
@@ -266,6 +276,8 @@ fn quorum_member_timing_fields_roundtrip() {
 fn quorum_member_timing_fields_default_to_none() {
     let member = QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger_id".to_string(),
         min_fee_bps: None,
@@ -334,6 +346,8 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
     // JSON from an older version that doesn't include timing fields.
     let member = QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: "old_format".to_string(),
         min_fee_bps: None,

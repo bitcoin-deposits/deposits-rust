@@ -78,6 +78,12 @@ pub trait ChainBackend: Send + Sync {
     /// - `Ok(None)` — backend doesn't know the outpoint at all.
     fn is_output_unspent(&self, txid: &Txid, vout: u32) -> Result<Option<bool>, Error>;
 
+    /// DEP-03 Reference feerate: floor(4 × Σ fee / Σ weight) over the block's non-coinbase
+    /// transactions (getblockstats `avgfeerate`). `Ok(None)` when the backend cannot say.
+    fn block_feerate(&self, _height: u32) -> Result<Option<u64>, Error> {
+        Ok(None)
+    }
+
     /// Find the first unspent output paying to `script`, if any. Used by
     /// the reserves-UTXO scan path — callers want "the live UTXO at this
     /// address" without paginating through the address's full history.

@@ -57,6 +57,8 @@ fn add_member(
     ledger
         .apply_state_changes(&LedgerOperation::QuorumAddMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             quorum_member: member,
             quorum_member_signature: [0u8; 64],
             member_ledger_id: "abc123".repeat(11)[..64].to_string(),
@@ -188,6 +190,8 @@ fn quorum_add_member_partial_limits() {
 fn quorum_add_member_fee_limits_tlv_roundtrip() {
     let op = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey_2(),
         quorum_member_signature: [0xAA; 64],
         member_ledger_id: "a".repeat(64),
@@ -229,6 +233,8 @@ fn quorum_add_member_fee_limits_tlv_roundtrip() {
 fn quorum_add_member_no_limits_tlv_roundtrip() {
     let op = LedgerOperation::QuorumAddMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         quorum_member: test_pubkey_2(),
         quorum_member_signature: [0xBB; 64],
         member_ledger_id: "b".repeat(64),
@@ -274,6 +280,8 @@ fn quorum_add_member_no_limits_tlv_roundtrip() {
 fn strictest_limits_single_member() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: Some(50),
@@ -302,6 +310,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
     let members = vec![
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
             min_fee_bps: Some(50),      // less strict
@@ -320,6 +330,8 @@ fn strictest_limits_multiple_members_takes_most_restrictive() {
         },
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
             min_fee_bps: Some(100),     // more strict (higher min)
@@ -350,6 +362,8 @@ fn strictest_limits_with_none_values() {
     let members = vec![
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
             min_fee_bps: Some(50),
@@ -368,6 +382,8 @@ fn strictest_limits_with_none_values() {
         },
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
             min_fee_bps: None,
@@ -397,6 +413,8 @@ fn strictest_limits_with_none_values() {
 fn strictest_limits_all_none() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: None,
@@ -428,6 +446,8 @@ fn strictest_limits_all_none() {
 fn fees_meeting_all_limits_pass() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: Some(50),
@@ -458,6 +478,8 @@ fn fees_meeting_all_limits_pass() {
 fn fees_below_min_bps_rejected() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: Some(100),
@@ -489,6 +511,8 @@ fn fees_below_min_bps_rejected() {
 fn fees_below_min_fixed_rejected() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: None,
@@ -524,6 +548,8 @@ fn fees_below_min_fixed_rejected() {
 fn fees_exceeding_max_period_rejected() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: None,
@@ -559,6 +585,8 @@ fn fees_exceeding_max_period_rejected() {
 fn fees_with_no_quorum_limits_always_pass() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: None,
@@ -591,6 +619,8 @@ fn fees_must_satisfy_strictest_member() {
     let members = vec![
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
             min_fee_bps: Some(50),
@@ -609,6 +639,8 @@ fn fees_must_satisfy_strictest_member() {
         },
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
             min_fee_bps: Some(200), // strictest
@@ -723,6 +755,8 @@ fn deposit_open_on_ledger_with_quorum_fee_limits() {
 fn quorum_member_struct_fee_limits_survive_json_roundtrip() {
     let member = QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger".to_string(),
         min_fee_bps: Some(75),
@@ -753,6 +787,8 @@ fn quorum_member_struct_fee_limits_survive_json_roundtrip() {
 fn quorum_member_struct_no_limits_json_roundtrip() {
     let member = QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger".to_string(),
         min_fee_bps: None,
@@ -829,6 +865,8 @@ fn membership_duration_limited_by_shortest_commitment() {
     let members = vec![
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_2(),
             ledger_id: String::new(),
             min_fee_bps: None,
@@ -847,6 +885,8 @@ fn membership_duration_limited_by_shortest_commitment() {
         },
         QuorumMember {
             min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
             pubkey: test_pubkey_3(),
             ledger_id: String::new(),
             min_fee_bps: None,
@@ -872,6 +912,8 @@ fn membership_duration_limited_by_shortest_commitment() {
 fn membership_duration_no_commitments_no_limit() {
     let members = vec![QuorumMember {
         min_collateral_bps: None,
+        dormancy_blocks: None,
+        dormancy_notice_blocks: None,
         pubkey: test_pubkey_2(),
         ledger_id: String::new(),
         min_fee_bps: None,
