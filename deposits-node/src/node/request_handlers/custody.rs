@@ -966,12 +966,14 @@ impl Node {
             Err(e) => return (false, None, Some(format!("unsigned_tx parse: {}", e))),
         };
 
-        if proposed_tx.input.len() != 1 || proposed_tx.output.len() != 1 {
+        // DEP-03 / DEP-20: the vault (and a splice-in), then the new vault and any exit or
+        // migration outputs. The byte-for-byte rebuild below fixes the exact shape.
+        if !(1..=2).contains(&proposed_tx.input.len()) || proposed_tx.output.is_empty() {
             return (
                 false,
                 None,
                 Some(format!(
-                    "rotation tx must be 1-in/1-out, got {}-in/{}-out",
+                    "rotation tx has {} inputs and {} outputs",
                     proposed_tx.input.len(),
                     proposed_tx.output.len()
                 )),
