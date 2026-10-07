@@ -1252,12 +1252,21 @@ impl Node {
                 // DEP-20 §3 Amounts: collateral bears only its share of the fee; exits
                 // come out of reserves.
                 let vault_sats = prev_total / 1000;
+                let added = self
+                    .handler
+                    .pending_rotation_splices
+                    .lock()
+                    .unwrap()
+                    .get(ledger_id)
+                    .map_or(0, |(_, _, s)| *s);
                 let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
-                let fee = vault_sats
+                let fee = (vault_sats + added)
                     .saturating_sub(extras)
                     .saturating_sub(result.amount);
+                // DEP-20 §4: the spliced value goes to collateral.
                 let collateral =
-                    deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee);
+                    deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee)
+                        + added * 1000;
                 (total_msats.saturating_sub(collateral), collateral)
             } else if prev_total > 0 {
                 let collateral = (l.state.collateral_amount as u128 * total_msats as u128
@@ -1305,11 +1314,20 @@ impl Node {
             }
             _ => (None, Vec::new()),
         };
+        let splice_fields = if rotating {
+            self.handler
+                .pending_rotation_splices
+                .lock()
+                .unwrap()
+                .remove(ledger_id)
+        } else {
+            None
+        };
         let operation = LedgerOperation::QuorumBegin {
             exit_cutoff_height,
             exit_outputs,
-            splice_in_outpoint: None,
-            splice_in_amount: None,
+            splice_in_outpoint: splice_fields.map(|(t, v, _)| (t, v)),
+            splice_in_amount: splice_fields.map(|(_, _, s)| s * 1000),
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,
@@ -1519,6 +1537,29 @@ impl Node {
             .unwrap()
             .insert(ledger_id.to_string(), exit_cutoff);
         let prev_script_pubkey = existing.taproot_output.script_pubkey();
+        // DEP-20 §4: a requested splice-in (our operator key's P2WPKH) is input 1.
+        let splice = match self
+            .handler
+            .requested_splices
+            .lock()
+            .unwrap()
+            .remove(ledger_id)
+        {
+            None => None,
+            Some((stxid, svout)) => {
+                let prevout = self
+                    .wallet
+                    .splice_prevout(stxid, svout)
+                    .map_err(Error::Protocol)?;
+                let ours = bitcoin::CompressedPublicKey(operator_key);
+                if prevout.script_pubkey != bitcoin::ScriptBuf::new_p2wpkh(&ours.wpubkey_hash()) {
+                    return Err(Error::Protocol(
+                        "splice-in must pay the operator key's P2WPKH".to_string(),
+                    ));
+                }
+                Some((stxid, svout, prevout))
+            }
+        };
         let rotation_tx = deposits_core::tapscript_reserves::build_rotation_tx(
             &deposits_core::tapscript_reserves::RotationTxParams {
                 vault: existing.outpoint,
@@ -1528,7 +1569,12 @@ impl Node {
                     deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
                 lock_time: tier_lock_time,
                 new_vault_spk: new_script_pubkey.clone(),
-                splice_in: None,
+                splice_in: splice.as_ref().map(|(t, v, p)| {
+                    (
+                        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(*t), *v),
+                        p.value.to_sat(),
+                    )
+                }),
                 extra_outputs: exit_outputs,
             },
         )
@@ -1546,12 +1592,14 @@ impl Node {
             .build_threshold_leaf(&tier)
             .map_err(|e| Error::Wallet(format!("build tier-{} leaf: {:?}", tier_index, e)))?;
 
-        let sighash = ReservesSpendBuilder::compute_sighash(
+        let more_prevouts: Vec<bitcoin::TxOut> = splice.iter().map(|(_, _, p)| p.clone()).collect();
+        let sighash = ReservesSpendBuilder::compute_sighash_with(
             &rotation_tx,
             0,
             existing.amount,
             &prev_script_pubkey,
             &leaf_script,
+            &more_prevouts,
         )
         .map_err(|e| Error::Wallet(format!("compute rotation sighash: {:?}", e)))?;
         let sighash_bytes: [u8; 32] = *sighash.as_ref();
@@ -1588,6 +1636,7 @@ impl Node {
         // is rotating at a degraded tier.
         let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&rotation_tx));
         let request_params = serde_json::json!({
+            "splice_in_outpoint": splice.as_ref().map(|(t, v, _)| format!("{}:{}", hex::encode(t), v)),
             "exit_cutoff_height": exit_cutoff,
             "sighash": hex::encode(sighash_bytes),
             "unsigned_tx": unsigned_tx_hex,
@@ -1785,6 +1834,39 @@ impl Node {
 
         let mut signed_tx = rotation_tx;
         signed_tx.input[0].witness = witness;
+        if let Some((stxid, svout, prevout)) = &splice {
+            use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+            let h = SighashCache::new(&signed_tx)
+                .p2wpkh_signature_hash(
+                    1,
+                    &prevout.script_pubkey,
+                    prevout.value,
+                    EcdsaSighashType::All,
+                )
+                .map_err(|e| Error::Protocol(format!("splice sighash: {}", e)))?;
+            let sig = self
+                .handler
+                .signer
+                .ecdsa_sign_sighash(
+                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                    h.as_ref(),
+                )
+                .map_err(|e| Error::Protocol(format!("splice sighash sign: {}", e)))?;
+            let mut der = sig.serialize_der().to_vec();
+            der.push(EcdsaSighashType::All as u8);
+            let mut w = Witness::new();
+            w.push(&der);
+            w.push(operator_key.serialize());
+            signed_tx.input[1].witness = w;
+            self.handler
+                .pending_rotation_splices
+                .lock()
+                .unwrap()
+                .insert(
+                    ledger_id.to_string(),
+                    (*stxid, *svout, prevout.value.to_sat()),
+                );
+        }
 
         let _ = LeafVersion::TapScript;
 

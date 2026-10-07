@@ -830,6 +830,31 @@ impl Node {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
+        // DEP-20 §4: "splice_in_outpoint": "<txid hex, internal byte order>:<vout>", a confirmed
+        // UTXO paying the operator key's P2WPKH, added at this rotation.
+        if let Some(sp) = request
+            .params
+            .get("splice_in_outpoint")
+            .and_then(|v| v.as_str())
+        {
+            let parsed = sp.split_once(':').and_then(|(t, v)| {
+                Some((
+                    <[u8; 32]>::try_from(hex::decode(t).ok()?).ok()?,
+                    v.parse::<u32>().ok()?,
+                ))
+            });
+            match parsed {
+                Some(p) => {
+                    self.handler
+                        .requested_splices
+                        .lock()
+                        .unwrap()
+                        .insert(request.ledger_id.clone(), p);
+                }
+                None => return (false, None, Some("bad splice_in_outpoint".to_string())),
+            }
+        }
+
         match self
             .rotate_reserves_to_quorum(
                 &ledger_id,

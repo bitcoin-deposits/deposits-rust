@@ -144,6 +144,10 @@ pub struct DepositsHandler {
     pub pending_rotation_txs: Mutex<HashMap<String, bitcoin::Transaction>>,
     /// DEP-20 §3 exit cutoff each pending rotation was built under (ledger id -> height).
     pub pending_rotation_cutoffs: Mutex<HashMap<String, u32>>,
+    /// DEP-20 §4 splice-in requested for a ledger's next rotation (txid internal order, vout).
+    pub requested_splices: Mutex<HashMap<String, ([u8; 32], u32)>>,
+    /// The splice a pending rotation spends (txid internal order, vout, sats).
+    pub pending_rotation_splices: Mutex<HashMap<String, ([u8; 32], u32, u64)>>,
 
     /// Recorded rotations (ours or ones we cosigned or received as Kind 9107),
     /// rebroadcast until they confirm.
@@ -328,6 +332,8 @@ impl DepositsHandler {
             flagged_non_conforming: Mutex::new(HashMap::new()),
             pending_rotation_txs: Mutex::new(HashMap::new()),
             pending_rotation_cutoffs: Mutex::new(HashMap::new()),
+            requested_splices: Mutex::new(HashMap::new()),
+            pending_rotation_splices: Mutex::new(HashMap::new()),
             inflight_rotations: Mutex::new(HashMap::new()),
             rotation_lookups: Mutex::new(std::collections::HashSet::new()),
             scanned_non_conforming: Mutex::new(HashMap::new()),

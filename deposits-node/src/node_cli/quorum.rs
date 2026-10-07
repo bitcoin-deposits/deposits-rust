@@ -63,12 +63,25 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut amount_sats: Option<u64> = None;
     let mut protocol_version: Option<String> = None;
     let mut expiry_blocks: Option<u32> = None;
+    let mut splice: Option<String> = None;
     let mut config_args = Vec::new();
 
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
             match args[i].as_str() {
+                // DEP-20 §4: --splice TXID:VOUT (display txid), a confirmed UTXO paying the
+                // operator key's P2WPKH, added to the vault at this rotation.
+                "--splice" if i + 1 < args.len() => {
+                    let (t, v) = args[i + 1]
+                        .split_once(':')
+                        .ok_or("--splice expects TXID:VOUT")?;
+                    let txid: bitcoin::Txid = t.parse().map_err(|_| "--splice: bad txid")?;
+                    let vout: u32 = v.parse().map_err(|_| "--splice: bad vout")?;
+                    use bitcoin::hashes::Hash;
+                    splice = Some(format!("{}:{}", hex::encode(txid.to_byte_array()), vout));
+                    i += 1;
+                }
                 "--collateral-ratio" if i + 1 < args.len() => {
                     let raw = &args[i + 1];
                     let ratio: f64 = raw.parse().map_err(|_| {
@@ -163,6 +176,9 @@ async fn quorum_begin(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     if let Some(n) = expiry_blocks {
         println!("  Quorum expiry: current_block + {} blocks (override)", n);
         params.insert("expiry_blocks".to_string(), serde_json::json!(n));
+    }
+    if let Some(ref sp) = splice {
+        params.insert("splice_in_outpoint".to_string(), serde_json::json!(sp));
     }
     let result = send_daemon_request(
         &config,
