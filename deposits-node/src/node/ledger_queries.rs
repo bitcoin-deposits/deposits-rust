@@ -2661,6 +2661,58 @@ impl Node {
     ///
     /// This is the async version that handles the full co-signing flow.
     /// Uses a per-offer lock file to prevent concurrent completion by daemon and CLI.
+    /// DEP-10 §Completion: (vout, sats) of the output of `funding_txid` (display or internal
+    /// hex) paying the offer's address, confirmed at a height <= the offer's deadline.
+    fn offer_funding_output(
+        &self,
+        offer: &deposits_core::types::DepositOffer,
+        funding_txid: &str,
+    ) -> Result<(u32, u64), Error> {
+        use bitcoin::hashes::Hash;
+        let raw: [u8; 32] = hex::decode(funding_txid)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| Error::Protocol("Invalid txid".to_string()))?;
+        let mut rev = raw;
+        rev.reverse();
+        let spk = offer
+            .funding_address
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .map_err(|e| Error::Protocol(format!("offer address: {e}")))?
+            .assume_checked()
+            .script_pubkey();
+        for txid in [
+            bitcoin::Txid::from_byte_array(rev),
+            bitcoin::Txid::from_byte_array(raw),
+        ] {
+            let Some(tx) = self.wallet.get_transaction(txid)? else {
+                continue;
+            };
+            let Some((i, o)) = tx
+                .output
+                .iter()
+                .enumerate()
+                .find(|(_, o)| o.script_pubkey == spk)
+            else {
+                continue;
+            };
+            let h = self
+                .wallet
+                .tx_block_height(txid)?
+                .ok_or_else(|| Error::Protocol("funding transaction is unconfirmed".to_string()))?;
+            if h > offer.deadline_block {
+                return Err(Error::Protocol(format!(
+                    "funding confirmed at {h}, after the offer's deadline {}",
+                    offer.deadline_block
+                )));
+            }
+            return Ok((i as u32, o.value.to_sat()));
+        }
+        Err(Error::Protocol(
+            "no output of that transaction pays the offer's address".to_string(),
+        ))
+    }
+
     pub async fn complete_deposit_offer(
         &self,
         offer_id: &[u8; 32],
@@ -2697,7 +2749,13 @@ impl Node {
             )));
         }
 
-        // Check amount is within bounds
+        // DEP-10 §Completion: the output of `funding_txid` paying the offer's address, confirmed
+        // at a height <= deadline_block; its value (not the caller's claim) is credited, and its
+        // index is the credit's vout (a DEP-20 migration lands at an exit vout, not 0).
+        let _ = funding_amount_sats;
+        let current_block = self.wallet.get_block_height()?;
+        let (funding_vout, funding_amount_sats) =
+            self.offer_funding_output(&offer, &funding_txid)?;
         if funding_amount_sats < offer.min_amount_sats {
             return Err(Error::Protocol(format!(
                 "Funding amount {} sats below minimum {} sats",
@@ -2705,12 +2763,6 @@ impl Node {
             )));
         }
         let credited_amount = funding_amount_sats.min(offer.max_amount_sats);
-
-        // Check deadline
-        let current_block = self.wallet.get_block_height()?;
-        if offer.is_expired(current_block) {
-            return Err(Error::Protocol("Deposit offer has expired".to_string()));
-        }
 
         // Credit the deposit (convert sats to msats)
         let amount_msats = credited_amount * 1000;
@@ -2766,7 +2818,7 @@ impl Node {
                 &offer.descriptor,
                 amount_msats,
                 txid_bytes,
-                0, // vout - typically 0 for deposit offers
+                funding_vout,
                 offer.funding_address.clone(),
             )
             .await?;

@@ -243,6 +243,11 @@ impl Wallet {
             .ok_or_else(|| "splice-in outpoint vanished".to_string())
     }
 
+    /// The height of the block confirming `txid`, or None while unconfirmed.
+    pub fn tx_block_height(&self, txid: bitcoin::Txid) -> Result<Option<u32>, Error> {
+        crate::chain_backend::from_env(&self.electrum_url).get_tx_block_height(&txid)
+    }
+
     pub fn get_outpoint_value_and_confs(
         &self,
         txid: bitcoin::Txid,
