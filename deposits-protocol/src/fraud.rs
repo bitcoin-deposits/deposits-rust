@@ -1338,7 +1338,8 @@ pub fn verify_non_conforming_cosignature(
 ///   genesis to the fault's predecessor and the fault is applied to that
 ///   state. The proof holds exactly when the state machine refuses it or
 ///   conformance reports a violation: a credit past reserves
-///   (`InsufficientReserves`) or past collateral (`ExceedsCollateral`), a
+///   (`InsufficientReserves`), a quorum below its collateral floor
+///   (`CollateralBelowFloor`), a
 ///   debit past a deposit's balance, a zero-amount lock, a wrong balance
 ///   commitment, and so on. A fault that applies cleanly is conforming and
 ///   the proof is refused.
@@ -1760,7 +1761,7 @@ pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
         | V::ZeroAmount { .. }
         | V::EmptyDestination
         | V::UnparseableDescriptor { .. }
-        | V::ExceedsCollateral { .. }
+        | V::CollateralBelowFloor { .. }
         | V::FeeWindowNotElapsed { .. }
         | V::FeeExceedsAssessment { .. }
         | V::UnknownRuleset { .. }

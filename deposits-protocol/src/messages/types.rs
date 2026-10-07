@@ -583,6 +583,10 @@ pub enum LedgerOperation {
         compensation_deposit_id: Option<DepositId>,
         /// Payout cadence in blocks. See `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS`.
         compensation_frequency_blocks: Option<u32>,
+        /// DEP-05 §"Collateral floor": the smallest collateral share of the vault
+        /// (basis points) this member accepts; the strictest member applies, and
+        /// never below `MIN_COLLATERAL_BPS_FLOOR`.
+        min_collateral_bps: Option<u16>,
         /// Canonical TLV-encoded `QuorumMemberResponse` returned by the
         /// member during consent. When present, validators decode it,
         /// verify `member_signature` against
@@ -1962,6 +1966,7 @@ impl BinaryCodec for LedgerOperation {
                 commitment: None,
             }),
             43 => Ok(Self::QuorumAddMember {
+                min_collateral_bps: None,
                 quorum_member: read_pubkey(r)?,
                 quorum_member_signature: read_64(r)?,
                 member_ledger_id: read_string(r)?,

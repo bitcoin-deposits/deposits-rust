@@ -27,6 +27,7 @@ fn state_with_staged_member(
 ) -> LedgerState {
     let mut s = LedgerState::new(operator, "rid".into(), 0);
     s.next_quorum_members.push(QuorumMember {
+        min_collateral_bps: None,
         pubkey: member,
         ledger_id: "member-ledger".into(),
         min_fee_bps: None,
@@ -176,6 +177,7 @@ fn nonlegacy_quorum_begin_rejects_when_any_member_unattested() {
         (m3, Vec::<String>::new()), // legacy-only by inference
     ] {
         s.next_quorum_members.push(QuorumMember {
+            min_collateral_bps: None,
             pubkey: m,
             ledger_id: "x".into(),
             min_fee_bps: None,

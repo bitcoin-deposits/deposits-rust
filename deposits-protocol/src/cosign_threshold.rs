@@ -225,6 +225,7 @@ mod tests {
 
     fn member(byte: u8) -> QuorumMember {
         QuorumMember {
+            min_collateral_bps: None,
             pubkey: pk(byte),
             ledger_id: format!("{:064x}", byte as u128),
             min_fee_bps: None,

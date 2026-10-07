@@ -52,6 +52,7 @@ fn build_update(
     let member_pk = PublicKey::from_secret_key(&secp, &member_sk);
 
     let op = LedgerOperation::QuorumAddMember {
+        min_collateral_bps: None,
         quorum_member: member_pk,
         quorum_member_signature: [0u8; 64],
         member_ledger_id: hex::encode(ledger_id_bytes),

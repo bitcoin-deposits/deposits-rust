@@ -939,6 +939,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         (
             "QuorumAddMember",
             LedgerOperation::QuorumAddMember {
+                min_collateral_bps: None,
                 quorum_member: pk(),
                 quorum_member_signature: sig(),
                 member_ledger_id: "abc123".into(),

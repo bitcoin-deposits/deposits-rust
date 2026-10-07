@@ -513,17 +513,6 @@ pub fn validate_cosign_invoice(
         ));
     }
 
-    // CRITICAL: Check that cosigning wouldn't exceed declared collateral (only when quorum is active)
-    if ledger.state.quorum_state == crate::types::QuorumState::Active
-        && new_total_deposits > ledger.state.total_collateral()
-    {
-        return Err(format!(
-            "Cosigning would exceed collateral: potential deposits {} msat > collateral {} msat",
-            new_total_deposits,
-            ledger.state.total_collateral()
-        ));
-    }
-
     Ok(())
 }
 

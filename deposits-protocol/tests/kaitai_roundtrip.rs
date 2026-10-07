@@ -341,6 +341,7 @@ fn transfer_fail() {
 #[test]
 fn quorum_add_member() {
     test_roundtrip(&LedgerOperation::QuorumAddMember {
+        min_collateral_bps: None,
         quorum_member: pk(),
         quorum_member_signature: sig(),
         member_ledger_id: "abc123".into(),

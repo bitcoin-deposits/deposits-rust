@@ -1,0 +1,12 @@
+{
+  "comment": "DEP-05 collateral floor: collateral * 10000 >= floor_bps * (reserves + collateral), floor_bps = max(2000, every member's min_collateral_bps). Amounts in msats. Shared with cl-deposits (inspect/vectors/collateral_floor.json).",
+  "cases": [
+    {"name": "exactly at the 20% spec floor", "reserves": 80000000, "collateral": 20000000, "member_bps": [null, null, null], "floor_bps": 2000, "ok": true},
+    {"name": "one msat below the spec floor", "reserves": 80000001, "collateral": 19999999, "member_bps": [null, null, null], "floor_bps": 2000, "ok": false},
+    {"name": "a member requires 30%: 25% is refused", "reserves": 75000000, "collateral": 25000000, "member_bps": [null, 3000, 2500], "floor_bps": 3000, "ok": false},
+    {"name": "the strictest member's 30% is met", "reserves": 70000000, "collateral": 30000000, "member_bps": [3000, 2500, null], "floor_bps": 3000, "ok": true},
+    {"name": "a member asking less than the spec floor does not lower it", "reserves": 85000000, "collateral": 15000000, "member_bps": [1000, null], "floor_bps": 2000, "ok": false},
+    {"name": "no reserves at all (collateral only)", "reserves": 0, "collateral": 1000, "member_bps": [], "floor_bps": 2000, "ok": true},
+    {"name": "no collateral: a pure-reserves vault is refused", "reserves": 50000000, "collateral": 0, "member_bps": [null], "floor_bps": 2000, "ok": false}
+  ]
+}

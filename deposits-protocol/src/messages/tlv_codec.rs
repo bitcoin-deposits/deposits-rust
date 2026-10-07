@@ -154,6 +154,7 @@ mod ledger_op_tlv {
     /// QuorumAddMember: BIP-340 signature by the member over the
     /// QuorumMemberResponse digest.
     pub const MEMBER_SIGNATURE: u64 = 290; // [u8; 64]
+    pub const MIN_COLLATERAL_BPS: u64 = 314; // u16, QuorumAddMember (DEP-05)
 
     /// DisputeEnter QuorumExpired evidence: a confirmed block whose
     /// height exceeds the disputed ledger's `quorum_expiry`. Receivers
@@ -587,6 +588,7 @@ impl TlvEncode for LedgerOperation {
                 compensation_bps,
                 compensation_deposit_id,
                 compensation_frequency_blocks,
+                min_collateral_bps,
                 member_response,
                 member_signature,
             } => {
@@ -629,6 +631,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = compensation_frequency_blocks {
                     builder = builder.u32_field(COMPENSATION_FREQUENCY_BLOCKS, *v);
+                }
+                if let Some(v) = min_collateral_bps {
+                    builder = builder.u16_field(MIN_COLLATERAL_BPS, *v);
                 }
                 if let Some(v) = member_response {
                     builder = builder.bytes_field(MEMBER_RESPONSE, v);
@@ -956,6 +961,7 @@ impl TlvDecode for LedgerOperation {
                 compensation_deposit_id: reader.read_deposit_id_opt(COMPENSATION_DEPOSIT_ID)?,
                 compensation_frequency_blocks: reader
                     .read_u32_opt(COMPENSATION_FREQUENCY_BLOCKS)?,
+                min_collateral_bps: reader.read_u16_opt(MIN_COLLATERAL_BPS)?,
                 member_response: reader.read_raw_opt(MEMBER_RESPONSE).map(|b| b.to_vec()),
                 member_signature: reader.read_bytes_opt(MEMBER_SIGNATURE)?,
             }),

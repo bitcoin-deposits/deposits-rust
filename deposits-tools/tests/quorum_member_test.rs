@@ -134,6 +134,7 @@ mod tests {
 
         ledger
             .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                min_collateral_bps: None,
                 quorum_member: member_key,
                 quorum_member_signature: [0xAA; 64],
                 member_ledger_id: "member_collateral_ledger".to_string(),
@@ -170,6 +171,7 @@ mod tests {
         // Add a member
         ledger
             .apply_state_changes(&LedgerOperation::QuorumAddMember {
+                min_collateral_bps: None,
                 quorum_member: member_key,
                 quorum_member_signature: [0xAA; 64],
                 member_ledger_id: "member_collateral_ledger".to_string(),
@@ -231,6 +233,7 @@ mod tests {
         for member in &[member_key, member2_key, member3_key] {
             let update = ledger
                 .apply_operation(&LedgerOperation::QuorumAddMember {
+                    min_collateral_bps: None,
                     quorum_member: *member,
                     quorum_member_signature: [0xAA; 64],
                     member_ledger_id: "member_collateral_ledger".to_string(),

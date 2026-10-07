@@ -2979,6 +2979,7 @@ mod first_ruleset_tests {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let sk = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
         QuorumMember {
+            min_collateral_bps: None,
             pubkey: bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk),
             ledger_id: String::new(),
             min_fee_bps: None,

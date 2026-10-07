@@ -678,6 +678,9 @@ pub struct QuorumMember {
     /// Defaults to `DEFAULT_COMPENSATION_FREQUENCY_BLOCKS` (2016 ≈ 2 weeks).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compensation_frequency_blocks: Option<u32>,
+    /// DEP-05 collateral floor this member requires (basis points of the vault).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_collateral_bps: Option<u16>,
     /// Rulesets this member declared support for in their signed
     /// `QuorumMemberResponse`. Operators read this at `quorum begin` to
     /// confirm every pending member can validate under the chosen
@@ -692,6 +695,24 @@ pub struct QuorumMember {
 /// Default compensation rate for a quorum member: 3% (300 bips) of collected
 /// fees. Recommended when the member doesn't care to negotiate a custom rate.
 pub const DEFAULT_COMPENSATION_BPS: u16 = 300;
+
+/// DEP-05 §"Collateral floor": no quorum may let collateral fall below 20% of the
+/// vault (R ≤ 0.8, docs/TRUST-MODEL.md §2h); a member may require more.
+pub const MIN_COLLATERAL_BPS_FLOOR: u16 = 2_000;
+
+/// The collateral floor a quorum's members impose: the strictest member's
+/// `min_collateral_bps`, never below `MIN_COLLATERAL_BPS_FLOOR`.
+pub fn collateral_floor_bps<'a>(members: impl IntoIterator<Item = &'a QuorumMember>) -> u16 {
+    members
+        .into_iter()
+        .filter_map(|m| m.min_collateral_bps)
+        .fold(MIN_COLLATERAL_BPS_FLOOR, u16::max)
+}
+
+/// Whether `collateral` is at least `floor_bps` of `reserves + collateral`.
+pub fn collateral_meets_floor(reserves: u64, collateral: u64, floor_bps: u16) -> bool {
+    (collateral as u128) * 10_000 >= (floor_bps as u128) * (reserves as u128 + collateral as u128)
+}
 
 /// Default compensation payout cadence: 2016 blocks (~2 weeks). Mirrors the
 /// default `frequency_blocks` on `FeeStructure`, so by default a member is

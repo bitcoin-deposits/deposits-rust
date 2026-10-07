@@ -399,6 +399,7 @@ mod recovery_voter_derivation_tests {
                 6,
                 m1,
                 LedgerOperation::QuorumAddMember {
+                    min_collateral_bps: None,
                     quorum_member: fork_added,
                     quorum_member_signature: [0u8; 64],
                     member_ledger_id: "x".to_string(),
@@ -985,6 +986,7 @@ impl Node {
                         }
 
                         let add_op = LedgerOperation::QuorumAddMember {
+                            min_collateral_bps: None,
                             quorum_member: *member,
                             quorum_member_signature: [0u8; 64],
                             member_ledger_id: member_ledger_id.clone(),
@@ -3812,6 +3814,7 @@ mod recovery_chaining_tests {
 
     fn quorum_add_member(member: PublicKey) -> LedgerOperation {
         LedgerOperation::QuorumAddMember {
+            min_collateral_bps: None,
             quorum_member: member,
             quorum_member_signature: [0u8; 64],
             member_ledger_id: "ledger".to_string(),

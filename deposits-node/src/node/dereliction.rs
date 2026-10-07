@@ -319,6 +319,7 @@ mod tests {
 
     fn member(pubkey: PublicKey, ledger_id: [u8; 32], required: u32) -> QuorumMember {
         QuorumMember {
+            min_collateral_bps: None,
             pubkey,
             ledger_id: hex::encode(ledger_id),
             min_fee_bps: None,

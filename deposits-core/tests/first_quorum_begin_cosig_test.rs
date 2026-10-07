@@ -24,6 +24,7 @@ fn kp(seed: u8) -> (SecretKey, PublicKey) {
 
 fn staged_member(pk: PublicKey) -> QuorumMember {
     QuorumMember {
+        min_collateral_bps: None,
         pubkey: pk,
         ledger_id: "a".repeat(64),
         min_fee_bps: None,

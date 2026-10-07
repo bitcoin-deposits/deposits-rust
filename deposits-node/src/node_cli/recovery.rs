@@ -1974,6 +1974,7 @@ pub async fn recovery_rebuild_quorum_add(
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
     let operation = LedgerOperation::QuorumAddMember {
+        min_collateral_bps: None,
         quorum_member: member_pubkey,
         quorum_member_signature: [0u8; 64],
         member_ledger_id: member_ledger_id.clone(),

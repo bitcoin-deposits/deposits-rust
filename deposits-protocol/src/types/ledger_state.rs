@@ -804,6 +804,7 @@ impl LedgerState {
                 compensation_bps,
                 compensation_deposit_id,
                 compensation_frequency_blocks,
+                min_collateral_bps,
                 member_response,
                 ..
             } => {
@@ -838,6 +839,7 @@ impl LedgerState {
                     compensation_bps: *compensation_bps,
                     compensation_deposit_id: *compensation_deposit_id,
                     compensation_frequency_blocks: *compensation_frequency_blocks,
+                    min_collateral_bps: *min_collateral_bps,
                     supported_rulesets,
                 };
                 // Upsert into next_quorum_members. Re-staging an existing
@@ -1436,9 +1438,8 @@ impl LedgerState {
 
         let mut violations = Vec::new();
 
-        // Reserve sufficiency: after any credit, total deposits must not exceed reserves.
-        // Plus collateral ceiling: while a quorum is active, total deposits also
-        // can't push past the declared collateral envelope.
+        // DEP-05: obligations never exceed reserves. Collateral is not a cap on
+        // credits; it is a floor on the vault's split, checked at QuorumBegin.
         match operation {
             LedgerOperation::InvoiceCredit { .. }
             | LedgerOperation::OnchainCredit { .. }
@@ -1450,12 +1451,18 @@ impl LedgerState {
                         obligations,
                     });
                 }
-                if self.quorum_state == crate::types::QuorumState::Active
-                    && obligations > self.collateral_amount
-                {
-                    violations.push(ConformanceViolation::ExceedsCollateral {
-                        credit: obligations,
+            }
+            LedgerOperation::QuorumBegin { .. } => {
+                let floor_bps = crate::types::collateral_floor_bps(self.quorum_members.iter());
+                if !crate::types::collateral_meets_floor(
+                    self.reserves_amount,
+                    self.collateral_amount,
+                    floor_bps,
+                ) {
+                    violations.push(ConformanceViolation::CollateralBelowFloor {
+                        reserves: self.reserves_amount,
                         collateral: self.collateral_amount,
+                        floor_bps,
                     });
                 }
             }

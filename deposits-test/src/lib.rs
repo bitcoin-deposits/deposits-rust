@@ -227,6 +227,7 @@ impl Operator {
     /// Add a quorum member to this operator's ledger.
     pub fn add_quorum_member(&mut self, member: &Operator, member_ledger_id: &str) {
         let op = LedgerOperation::QuorumAddMember {
+            min_collateral_bps: None,
             quorum_member: member.public_key,
             member_ledger_id: member_ledger_id.to_string(),
             quorum_member_signature: [0xAB; 64],
@@ -282,6 +283,7 @@ impl Operator {
                 if !already_staged {
                     self.ledger
                         .append_operation(LedgerOperation::QuorumAddMember {
+                            min_collateral_bps: None,
                             quorum_member: pk,
                             member_ledger_id: format!("synthetic_pad_{:02x}", filler),
                             quorum_member_signature: [0xCD; 64],

@@ -175,6 +175,7 @@ impl ProtocolSim {
                 operators[i]
                     .ledger
                     .append_operation(LedgerOperation::QuorumAddMember {
+                        min_collateral_bps: None,
                         quorum_member: member_pk,
                         quorum_member_signature: [0xAA; 64],
                         member_ledger_id: format!("reserves_{}", m),

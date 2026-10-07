@@ -44,12 +44,14 @@ pub enum ConformanceViolation {
         detail: String,
     },
 
-    /// Credit-class operation (InvoiceCredit/OnchainCredit/
-    /// TransferComplete) would push total credited balances above the
-    /// active quorum's collateral envelope. Separate from
-    /// InsufficientReserves: reserves cap absolute custody, collateral
-    /// caps the share an under-collateralised operator can route.
-    ExceedsCollateral { credit: u64, collateral: u64 },
+    /// A `QuorumBegin` whose collateral is below the quorum's floor: the
+    /// strictest member's `min_collateral_bps`, never below 20% of the vault
+    /// (DEP-05 §"Collateral floor"). Collateral is a floor, not a cap on credits.
+    CollateralBelowFloor {
+        reserves: u64,
+        collateral: u64,
+        floor_bps: u16,
+    },
 
     /// FeeCollect fired before the deposit's fee window elapsed.
     /// Operators can't accelerate fee assessment past the
@@ -158,10 +160,14 @@ impl std::fmt::Display for ConformanceViolation {
                 "unparseable descriptor in {}: {}",
                 operation, detail
             ),
-            Self::ExceedsCollateral { credit, collateral } => write!(
+            Self::CollateralBelowFloor {
+                reserves,
+                collateral,
+                floor_bps,
+            } => write!(
                 f,
-                "credit ({}) would exceed quorum collateral ({})",
-                credit, collateral
+                "collateral {} is below {} bps of the vault (reserves {})",
+                collateral, floor_bps, reserves
             ),
             Self::FeeWindowNotElapsed {
                 current_block,

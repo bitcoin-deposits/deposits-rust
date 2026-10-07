@@ -212,6 +212,7 @@ fn delivery_embed_on_empty_ledger() {
 #[test]
 fn quorum_member_timing_fields_roundtrip() {
     let member = QuorumMember {
+        min_collateral_bps: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger_id".to_string(),
         min_fee_bps: None,
@@ -248,6 +249,7 @@ fn quorum_member_timing_fields_roundtrip() {
 #[test]
 fn quorum_member_timing_fields_default_to_none() {
     let member = QuorumMember {
+        min_collateral_bps: None,
         pubkey: test_pubkey_2(),
         ledger_id: "test_ledger_id".to_string(),
         min_fee_bps: None,
@@ -315,6 +317,7 @@ fn quorum_member_missing_timing_fields_deserialize_as_none() {
     // Serialize a minimal QuorumMember, then strip optional fields to simulate
     // JSON from an older version that doesn't include timing fields.
     let member = QuorumMember {
+        min_collateral_bps: None,
         pubkey: test_pubkey_2(),
         ledger_id: "old_format".to_string(),
         min_fee_bps: None,

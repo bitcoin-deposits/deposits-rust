@@ -47,15 +47,6 @@ impl Node {
             ));
         }
 
-        // Check collateral limit: total obligations <= collateral_amount
-        let collateral = ledger.state.total_collateral();
-        if collateral > 0 && new_total_all > collateral {
-            return Some(format!(
-                "Would exceed collateral: {} + {} = {} msats > {} msats (collateral)",
-                all_deposits, additional_msats, new_total_all, collateral
-            ));
-        }
-
         None
     }
 
@@ -400,6 +391,7 @@ impl Node {
         }
 
         let operation = deposits_core::messages::LedgerOperation::QuorumAddMember {
+            min_collateral_bps: None,
             quorum_member,
             quorum_member_signature: signature,
             member_ledger_id: member_ledger_id.to_string(),

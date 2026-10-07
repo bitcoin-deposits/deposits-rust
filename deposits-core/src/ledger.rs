@@ -752,6 +752,7 @@ impl Ledger {
         self.state
             .next_quorum_members
             .push(crate::types::QuorumMember {
+                min_collateral_bps: None,
                 pubkey: partner,
                 ledger_id: member_ledger_id,
                 min_fee_bps: None,
@@ -2906,6 +2907,7 @@ mod tests {
         ledger.state.quorum_state = QuorumState::Active;
         ledger.state.quorum_expiry = Some(500);
         ledger.state.quorum_members = vec![QuorumMember {
+            min_collateral_bps: None,
             pubkey: pk(2),
             ledger_id: "m1".into(),
             min_fee_bps: None,
@@ -2983,6 +2985,7 @@ mod tests {
         ledger.state.parent_pubkey = operator;
         // One member caps lock timeouts at 1008 blocks.
         ledger.state.quorum_members = vec![QuorumMember {
+            min_collateral_bps: None,
             pubkey: pk(2),
             ledger_id: "m1".into(),
             min_fee_bps: None,
