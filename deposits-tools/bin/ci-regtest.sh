@@ -251,7 +251,9 @@ phase4() {
   WATCH=(alice charlie diana)
   who=$(wait_any_log "INVALID UPDATE DETECTED on ledger ${B:0:16}.*sequence_skip" 180 10) || fail "no member reported the skip"
   ok "$who reported the skip as a NonConformingUpdate"
-  for i in $(seq 1 180); do
+  # A proposer that has not yet seen every arm builds a lottery its peers refuse; it
+  # re-proposes once the arms reach it (DEP-03), which takes longer on a slow runner.
+  for i in $(seq 1 420); do
     [ -z "$(bcli gettxout "${vault%:*}" "${vault#*:}")" ] && break
     [ $((i % 5)) -eq 0 ] && mine 1; sleep 1
   done

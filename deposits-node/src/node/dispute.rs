@@ -100,6 +100,33 @@ pub(crate) fn recovery_voters_from_updates(
     deposits_core::rotation_order::lottery_recovery_voters(updates)
 }
 
+/// One line naming every input of a lottery address, so two members' views can be compared.
+pub(crate) fn lottery_inputs_line(
+    participants: &[deposits_core::tapscript_reserves::LotteryParticipant],
+    voters: &[bitcoin::secp256k1::XOnlyPublicKey],
+    threshold: usize,
+) -> String {
+    format!(
+        "participants [{}] voters [{}] threshold {}",
+        participants
+            .iter()
+            .map(|p| format!(
+                "{}:{}:{}",
+                &p.pubkey.to_string()[..12],
+                &hex::encode(p.commitment_hash)[..12],
+                p.target_reserves
+            ))
+            .collect::<Vec<_>>()
+            .join(" "),
+        voters
+            .iter()
+            .map(|v| v.to_string()[..12].to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+        threshold
+    )
+}
+
 #[cfg(test)]
 mod confiscation_outputs_tests {
     use super::*;
@@ -2846,6 +2873,11 @@ impl Node {
                 continue;
             };
 
+            tracing::info!(
+                "lottery inputs (proposer) for {}: {}",
+                ledger_prefix,
+                lottery_inputs_line(&participants, &recovery_voters, recovery_threshold)
+            );
             // Build the lottery output
             let lottery_builder = LotteryScriptBuilder::new(
                 participants.clone(),

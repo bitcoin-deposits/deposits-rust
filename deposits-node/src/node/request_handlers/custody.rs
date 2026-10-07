@@ -1654,6 +1654,15 @@ impl Node {
                 "no QuorumBegin by the original operator at or before the fork point".to_string()
             })?;
 
+        tracing::info!(
+            "lottery inputs (verifier) for {}: {}",
+            &ledger_id[..16.min(ledger_id.len())],
+            crate::node::dispute::lottery_inputs_line(
+                &participants,
+                &recovery_voters,
+                recovery_threshold
+            )
+        );
         let lottery_builder = LotteryScriptBuilder::new(
             participants.clone(),
             recovery_voters,
