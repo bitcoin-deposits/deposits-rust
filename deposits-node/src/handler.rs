@@ -139,6 +139,14 @@ pub struct DepositsHandler {
     /// See [`Handler::first_non_conforming`].
     flagged_non_conforming: Mutex<HashMap<String, u64>>,
 
+    /// DEP-03 §"Rotation ordering": per ledger we operate, the signed rotation
+    /// awaiting its QuorumBegin (carried in that update's cosign request).
+    pub pending_rotation_txs: Mutex<HashMap<String, bitcoin::Transaction>>,
+
+    /// Recorded rotations (ours or ones we cosigned or received as Kind 9107),
+    /// rebroadcast until they confirm.
+    pub inflight_rotations: Mutex<HashMap<bitcoin::Txid, bitcoin::Transaction>>,
+
     /// Per ledger, the first non-conforming update found by scanning the
     /// history once (`find_non_conforming_update`), which covers what was
     /// applied before this process started (the JSONL loader applies without
@@ -313,6 +321,8 @@ impl DepositsHandler {
             persist_locks: Mutex::new(HashMap::new()),
             damaged_ledgers,
             flagged_non_conforming: Mutex::new(HashMap::new()),
+            pending_rotation_txs: Mutex::new(HashMap::new()),
+            inflight_rotations: Mutex::new(HashMap::new()),
             scanned_non_conforming: Mutex::new(HashMap::new()),
             last_file_modtimes: Mutex::new(HashMap::new()),
             appends_since_compaction: Mutex::new(HashMap::new()),

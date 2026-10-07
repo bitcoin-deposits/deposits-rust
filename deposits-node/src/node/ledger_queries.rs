@@ -1051,19 +1051,9 @@ impl Node {
                         &new_ruleset_name,
                     )
                     .await?;
-                // The rotation tx is broadcast and has spent the old vault.
-                // Persist the new one NOW, as the fresh-build branch does, so
-                // a crash or restart before Phase 5 resumes it (see
-                // `uncommitted_rotation`) instead of losing the only record
-                // of where the reserves went.
-                if let Err(e) = ledger_wallet.commit_taproot_reserves(pending.clone()) {
-                    tracing::warn!(
-                        "failed to persist rotated taproot reserves before conf-wait for \
-                         ledger {} ({}): a restart during the wait would lose the new vault",
-                        &ledger_id[..16.min(ledger_id.len())],
-                        e
-                    );
-                }
+                // DEP-03 §"Rotation ordering": the rotation is not broadcast until
+                // its QuorumBegin commits, so the old vault is unspent until then and
+                // a restart simply builds the rotation again; Phase 5 persists it.
                 (result, pending)
             } else if let Some(existing) = pending_resume {
                 tracing::info!(
@@ -1195,21 +1185,31 @@ impl Node {
         // first QuorumBegin. Timeout is generous so block-time variance
         // doesn't sporadically fail legitimate rotations; tune shorter if a
         // genuine bad-UTXO is suspected.
+        let rotating = self
+            .handler
+            .pending_rotation_txs
+            .lock()
+            .unwrap()
+            .contains_key(ledger_id);
         let required_confs =
             deposits_core::quorum_policy::default_quorum_begin_confs(self.wallet.network());
-        wait_for_outpoint_confs(
-            &self.wallet,
-            txid,
-            result.outpoint.vout,
-            required_confs,
-            // Budget ~30 min per required confirmation. On mainnet
-            // `required_confs` is 6 (≈1h of blocks, longer on slow stretches),
-            // so a single begin attempt waits it out rather than giving up at
-            // ~1 conf (the old flat 600s). Scales with the network's
-            // required_confs (regtest=1 → 30 min, ample).
-            std::time::Duration::from_secs(required_confs.max(1) as u64 * 30 * 60),
-        )
-        .await?;
+        // A rotation is recorded before it is broadcast (DEP-03 §"Rotation
+        // ordering"): its cosigners verify the signed transaction, not the chain.
+        if !rotating {
+            wait_for_outpoint_confs(
+                &self.wallet,
+                txid,
+                result.outpoint.vout,
+                required_confs,
+                // Budget ~30 min per required confirmation. On mainnet
+                // `required_confs` is 6 (≈1h of blocks, longer on slow stretches),
+                // so a single begin attempt waits it out rather than giving up at
+                // ~1 conf (the old flat 600s). Scales with the network's
+                // required_confs (regtest=1 → 30 min, ample).
+                std::time::Duration::from_secs(required_confs.max(1) as u64 * 30 * 60),
+            )
+            .await?;
+        }
 
         // --- Phase 4: stage + cosign + commit the QuorumBegin operation ---
         // Store the rotation txid in internal sha256d byte order (the natural
@@ -1287,7 +1287,31 @@ impl Node {
         // is still PreQuorum here) it goes through request_cosign against
         // next_quorum_members and embeds their signatures into the update,
         // producing a result that peers' validators will accept.
-        self.commit_operation(ledger_id, operation).await?;
+        let committed = self.commit_operation(ledger_id, operation).await;
+        let rotation_tx = self
+            .handler
+            .pending_rotation_txs
+            .lock()
+            .unwrap()
+            .remove(ledger_id);
+        committed?;
+        if let Some(tx) = rotation_tx {
+            // Recorded: now broadcast it, publish it (Kind 9107) so any member or
+            // watcher can, and rebroadcast until it confirms.
+            match self.wallet.broadcast(&tx) {
+                Ok(t) => tracing::info!(
+                    "auto_rotation: broadcast rotation tx {} after its QuorumBegin",
+                    t
+                ),
+                Err(e) => tracing::warn!("rotation broadcast failed (members rebroadcast): {}", e),
+            }
+            self.publish_rotation_tx(ledger_id, &tx).await;
+            self.handler
+                .inflight_rotations
+                .lock()
+                .unwrap()
+                .insert(tx.compute_txid(), tx);
+        }
 
         // --- Phase 5: the ledger op has committed → confirm wallet state ---
         // The taproot record was already persisted right after broadcast (see
@@ -1692,11 +1716,17 @@ impl Node {
 
         let _ = LeafVersion::TapScript;
 
-        // Broadcast via the node wallet (regular Bitcoin RPC / esplora).
-        let broadcast_txid = self.wallet.broadcast(&signed_tx)?;
+        // DEP-03 §"Rotation ordering": not broadcast here. The QuorumBegin naming
+        // it is cosigned first (its request carries this transaction), then the
+        // rotation is broadcast (rotate_reserves, after commit_operation).
+        self.handler
+            .pending_rotation_txs
+            .lock()
+            .unwrap()
+            .insert(ledger_id.to_string(), signed_tx.clone());
         tracing::info!(
-            "auto_rotation: broadcast rotation tx {} (ledger {}..., {} -> {} sats, fee {})",
-            broadcast_txid,
+            "auto_rotation: rotation tx {} signed, awaiting its QuorumBegin (ledger {}..., {} -> {} sats, fee {})",
+            new_txid,
             &ledger_id[..16],
             existing.amount,
             new_amount,
@@ -2105,6 +2135,48 @@ impl Node {
     }
 
     /// Fetch BTC/USD price and publish as a Nostr price oracle event.
+    /// Publish a recorded rotation as Kind 9107 (DEP-03 §"Rotation ordering").
+    pub(crate) async fn publish_rotation_tx(&self, ledger_id: &str, tx: &bitcoin::Transaction) {
+        let seq = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|l| l.read().unwrap().next_sequence().saturating_sub(1))
+                .unwrap_or(0)
+        };
+        let hex = bitcoin::consensus::encode::serialize_hex(tx);
+        if let Err(e) = self.nostr.publish_rotation_tx(ledger_id, seq, &hex).await {
+            tracing::debug!("Failed to publish rotation tx: {}", e);
+        }
+    }
+
+    /// DEP-03: rebroadcast every recorded rotation we hold until it confirms.
+    pub(crate) fn rebroadcast_inflight_rotations(&self) {
+        let txs: Vec<bitcoin::Transaction> = self
+            .handler
+            .inflight_rotations
+            .lock()
+            .unwrap()
+            .values()
+            .cloned()
+            .collect();
+        for tx in txs {
+            let txid = tx.compute_txid();
+            match self.wallet.get_outpoint_value_and_confs(txid, 0) {
+                Ok(Some((_, confs))) if confs >= 1 => {
+                    self.handler
+                        .inflight_rotations
+                        .lock()
+                        .unwrap()
+                        .remove(&txid);
+                }
+                _ => {
+                    let _ = self.wallet.broadcast(&tx);
+                }
+            }
+        }
+    }
+
     pub(crate) async fn publish_price_oracle(&self) {
         // Fetch from mempool.space (or esplora — operator has its own)
         let url = "https://mempool.space/api/v1/prices";

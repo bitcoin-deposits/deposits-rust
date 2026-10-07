@@ -485,4 +485,46 @@ mod tests {
         )
         .unwrap();
     }
+
+    /// DEP-03 §"Rotation ordering": which vault the next QuorumBegin rotates, and a
+    /// cosigner's check of the carried rotation (a valid tier witness is not enough:
+    /// it must be the DEP-03 rotation the QuorumBegin names).
+    #[test]
+    fn a_rotating_quorum_begin_is_checked_against_its_rotation() {
+        use deposits_core::rotation_order::{rotating_quorum_begin_seq, verify_rotation_tx};
+        let h = history([9; 32]);
+        assert_eq!(rotating_quorum_begin_seq(&h), Some(1));
+        let mut acquired = h.clone();
+        acquired.push(update(
+            2,
+            &LedgerOperation::DisputeAcquire {
+                new_custodian: pubkey(3),
+                claim_txid: [0; 32],
+                new_reserves_address: String::new(),
+            },
+        ));
+        assert_eq!(rotating_quorum_begin_seq(&acquired), None);
+
+        let (_, spend) = cl_theft();
+        let txid = spend.tx.compute_txid().to_byte_array();
+        let qb = |new_txid: [u8; 32]| LedgerOperation::QuorumBegin {
+            reserves_id: "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr".into(),
+            spending_txid: new_txid,
+            new_outpoint_txid: new_txid,
+            new_outpoint_vout: 0,
+            amount: 0,
+            quorum_expiry: 6000,
+            ledger_hash: sha(&[0xbb]),
+            quorum_members: Vec::new(),
+            collateral_amount: 0,
+            protocol_version: Some("cltv-offset-v2".into()),
+        };
+        let net = bitcoin::Network::Bitcoin;
+        assert!(verify_rotation_tx(&h, &qb([7; 32]), &spend.tx, net)
+            .unwrap_err()
+            .contains("new outpoint"));
+        // A validly signed spend of the vault that is not the DEP-03 rotation.
+        let e = verify_rotation_tx(&h, &qb(txid), &spend.tx, net).unwrap_err();
+        assert!(e.contains("differs from the DEP-03 rotation"), "{e}");
+    }
 }

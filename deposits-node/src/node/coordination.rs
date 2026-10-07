@@ -385,6 +385,28 @@ impl Node {
             }
         }
 
+        // DEP-03 §"Rotation ordering": a rotating QuorumBegin carries its signed
+        // rotation, which cosigners verify in place of an on-chain outpoint.
+        {
+            use deposits_core::messages::LedgerOperation;
+            use deposits_core::TlvDecode;
+            if matches!(
+                LedgerOperation::tlv_decode(&update.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            ) {
+                if let Some(tx) = self
+                    .handler
+                    .pending_rotation_txs
+                    .lock()
+                    .unwrap()
+                    .get(ledger_id)
+                {
+                    params["rotation_tx"] =
+                        serde_json::json!(bitcoin::consensus::encode::serialize_hex(tx));
+                }
+            }
+        }
+
         // Determine cosig threshold per DEP-05 §Lifecycle.
         //
         // Tier-0 active period resolves to strict majority of the

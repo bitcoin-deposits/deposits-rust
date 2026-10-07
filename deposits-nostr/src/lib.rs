@@ -201,6 +201,10 @@ pub const KIND_RECOVERY_AGREE: u16 = 9104;
 /// `commitment_hash` field of an earlier `DisputeArmed`.
 pub const KIND_CUSTODY_LOTTERY_REVEAL: u16 = 9106;
 
+/// DEP-03 §"Rotation ordering": the signed rotation a `QuorumBegin` names,
+/// `{ledger_id, sequence, tx}`, so any member or watcher can broadcast it.
+pub const KIND_ROTATION_TX: u16 = 9107;
+
 /// Custom Kind for ledger advertisement (operator terms)
 /// Uses NIP-33 parameterized replaceable events (30000-39999).
 /// Tag `d` = ledger_id ensures only latest ad per ledger is kept.
@@ -3767,6 +3771,37 @@ impl NostrTransport {
     /// piggyback on the price feed to learn the tip without polling
     /// another source. `0` means "unknown" — wallets ignore the
     /// height in that case.
+    /// Publish a recorded rotation (Kind 9107, DEP-03 §"Rotation ordering").
+    pub async fn publish_rotation_tx(
+        &self,
+        ledger_id: &str,
+        sequence: u64,
+        tx_hex: &str,
+    ) -> Result<String, Error> {
+        let content = serde_json::json!({
+            "ledger_id": ledger_id,
+            "sequence": sequence,
+            "tx": tx_hex,
+        })
+        .to_string();
+        let event = EventBuilder::new(Kind::Custom(KIND_ROTATION_TX), &content)
+            .tag(Tag::custom(TagKind::custom("l"), [ledger_id]))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [&ledger_id[..16.min(ledger_id.len())]],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign rotation event: {}", e)))?;
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event.clone())
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to publish rotation: {}", e)))?;
+        if let Some(ref tx) = self.mirror_tx {
+            let _ = tx.send(event);
+        }
+        Ok(event_id)
+    }
+
     pub async fn publish_price(&self, price_usd: f64, block_height: u32) -> Result<String, Error> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

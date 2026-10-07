@@ -692,7 +692,47 @@ impl Node {
                     // cosigner attesting the rotation would be rubber-
                     // stamping a UTXO they never checked — exactly the gap
                     // that motivated this check.
-                    if let LedgerOperation::QuorumBegin {
+                    // DEP-03 §"Rotation ordering": a QuorumBegin that rotates the
+                    // current vault is recorded before its rotation is broadcast; the
+                    // request carries the signed rotation, which we verify instead.
+                    let rotating_history: Option<Vec<deposits_core::SignedLedgerUpdate>> =
+                        if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            ledgers.get(&request.ledger_id).and_then(|arc| {
+                                let l = arc.read().unwrap();
+                                deposits_core::rotation_order::rotating_quorum_begin_seq(&l.history)
+                                    .map(|_| l.history.clone())
+                            })
+                        } else {
+                            None
+                        };
+                    if let Some(history) = rotating_history {
+                        let tx: Option<bitcoin::Transaction> = request
+                            .params
+                            .get("rotation_tx")
+                            .and_then(|v| v.as_str())
+                            .and_then(|h| hex::decode(h).ok())
+                            .and_then(|b| bitcoin::consensus::deserialize(&b).ok());
+                        let Some(tx) = tx else {
+                            let msg = "a rotating QuorumBegin must carry rotation_tx".to_string();
+                            tracing::warn!("Refusing cosign: {}", msg);
+                            return (false, None, Some(msg));
+                        };
+                        if let Err(e) = deposits_core::rotation_order::verify_rotation_tx(
+                            &history,
+                            &operation,
+                            &tx,
+                            self.wallet.network(),
+                        ) {
+                            tracing::warn!("Refusing cosign: {}", e);
+                            return (false, None, Some(e));
+                        }
+                        self.handler
+                            .inflight_rotations
+                            .lock()
+                            .unwrap()
+                            .insert(tx.compute_txid(), tx);
+                    } else if let LedgerOperation::QuorumBegin {
                         new_outpoint_txid,
                         new_outpoint_vout,
                         amount: reserves_amount_msats,
