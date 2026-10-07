@@ -527,4 +527,21 @@ mod tests {
         let e = verify_rotation_tx(&h, &qb(txid), &spend.tx, net).unwrap_err();
         assert!(e.contains("differs from the DEP-03 rotation"), "{e}");
     }
+
+    /// DEP-03 §"Rotation ordering": a node that did not cosign takes the rotation a
+    /// QuorumBegin names from the published Kind 9107 candidates, by txid only.
+    #[test]
+    fn a_published_rotation_is_found_by_the_quorum_begin_txid() {
+        use deposits_core::rotation_order::{latest_quorum_begin_txid, published_rotation};
+        let (_, spend) = cl_theft();
+        let hex = bitcoin::consensus::encode::serialize_hex(&spend.tx);
+        let txid = spend.tx.compute_txid().to_byte_array();
+        let found = published_rotation(txid, &["zz".to_string(), "00".to_string(), hex.clone()]);
+        assert_eq!(found.map(|t| t.compute_txid().to_byte_array()), Some(txid));
+        assert!(published_rotation([7; 32], &[hex]).is_none());
+        assert_eq!(
+            latest_quorum_begin_txid(&history([9; 32])),
+            Some(sha(&[0xf0, 0x0d]))
+        );
+    }
 }

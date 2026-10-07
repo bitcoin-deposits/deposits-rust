@@ -147,6 +147,9 @@ pub struct DepositsHandler {
     /// rebroadcast until they confirm.
     pub inflight_rotations: Mutex<HashMap<bitcoin::Txid, bitcoin::Transaction>>,
 
+    /// Rotation txids already looked up among Kind 9107 events (found or not).
+    pub rotation_lookups: Mutex<std::collections::HashSet<bitcoin::Txid>>,
+
     /// Per ledger, the first non-conforming update found by scanning the
     /// history once (`find_non_conforming_update`), which covers what was
     /// applied before this process started (the JSONL loader applies without
@@ -323,6 +326,7 @@ impl DepositsHandler {
             flagged_non_conforming: Mutex::new(HashMap::new()),
             pending_rotation_txs: Mutex::new(HashMap::new()),
             inflight_rotations: Mutex::new(HashMap::new()),
+            rotation_lookups: Mutex::new(std::collections::HashSet::new()),
             scanned_non_conforming: Mutex::new(HashMap::new()),
             last_file_modtimes: Mutex::new(HashMap::new()),
             appends_since_compaction: Mutex::new(HashMap::new()),

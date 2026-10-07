@@ -126,3 +126,29 @@ pub fn verify_rotation_tx(
     }
     Ok(())
 }
+
+/// Of published rotation candidates (transaction hex, e.g. Kind 9107 contents), the one
+/// whose txid is `new_outpoint_txid`: the rotation a recorded `QuorumBegin` names.
+pub fn published_rotation(
+    new_outpoint_txid: [u8; 32],
+    candidates: &[String],
+) -> Option<Transaction> {
+    candidates.iter().find_map(|h| {
+        let tx: Transaction = bitcoin::consensus::deserialize(&hex::decode(h).ok()?).ok()?;
+        (tx.compute_txid().to_byte_array() == new_outpoint_txid).then_some(tx)
+    })
+}
+
+/// The new outpoint txid of the `QuorumBegin` latest in `history`, if any.
+pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 32]> {
+    history
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid, ..
+            }) => Some((u.sequence_number, new_outpoint_txid)),
+            _ => None,
+        })
+        .max_by_key(|(seq, _)| *seq)
+        .map(|(_, t)| t)
+}

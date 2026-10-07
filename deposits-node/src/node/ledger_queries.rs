@@ -2150,8 +2150,65 @@ impl Node {
         }
     }
 
-    /// DEP-03: rebroadcast every recorded rotation we hold until it confirms.
-    pub(crate) fn rebroadcast_inflight_rotations(&self) {
+    /// DEP-03 §"Rotation ordering": for every ledger we replicate whose latest
+    /// QuorumBegin's rotation is not yet confirmed and not held, take it from the
+    /// published Kind 9107 events (whoever published it), then rebroadcast every
+    /// recorded rotation we hold until it confirms.
+    pub(crate) async fn rebroadcast_inflight_rotations(&self) {
+        use bitcoin::hashes::Hash;
+        let wanted: Vec<(String, [u8; 32])> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(k, _)| k.len() == 64)
+                .filter_map(|(k, arc)| {
+                    deposits_core::rotation_order::latest_quorum_begin_txid(
+                        &arc.read().unwrap().history,
+                    )
+                    .map(|t| (k.clone(), t))
+                })
+                .collect()
+        };
+        for (ledger_id, txid_bytes) in wanted {
+            let txid = bitcoin::Txid::from_byte_array(txid_bytes);
+            if self
+                .handler
+                .inflight_rotations
+                .lock()
+                .unwrap()
+                .contains_key(&txid)
+            {
+                continue;
+            }
+            if !self.handler.rotation_lookups.lock().unwrap().insert(txid) {
+                continue; // looked up once already
+            }
+            if let Ok(Some((_, confs))) = self.wallet.get_outpoint_value_and_confs(txid, 0) {
+                if confs >= 1 {
+                    continue; // confirmed
+                }
+            }
+            if let Ok(candidates) = self.nostr.fetch_rotation_txs(&ledger_id).await {
+                if let Some(tx) =
+                    deposits_core::rotation_order::published_rotation(txid_bytes, &candidates)
+                {
+                    tracing::info!(
+                        "rotation {} for {}... taken from Kind 9107",
+                        txid,
+                        &ledger_id[..16]
+                    );
+                    self.handler
+                        .inflight_rotations
+                        .lock()
+                        .unwrap()
+                        .insert(txid, tx);
+                }
+            }
+        }
+        self.rebroadcast_held_rotations();
+    }
+
+    fn rebroadcast_held_rotations(&self) {
         let txs: Vec<bitcoin::Transaction> = self
             .handler
             .inflight_rotations

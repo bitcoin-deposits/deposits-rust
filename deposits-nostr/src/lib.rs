@@ -3378,6 +3378,30 @@ impl NostrTransport {
         Ok(reveals)
     }
 
+    /// The signed rotations published for `ledger_id` (Kind 9107, DEP-03
+    /// §"Rotation ordering"), as transaction hex, by anyone.
+    pub async fn fetch_rotation_txs(&self, ledger_id: &str) -> Result<Vec<String>, Error> {
+        let filters = vec![
+            Filter::new()
+                .kind(Kind::Custom(KIND_ROTATION_TX))
+                .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)]),
+            Filter::new()
+                .kind(Kind::Custom(KIND_ROTATION_TX))
+                .custom_tag(TAG_LEDGER_REQ, [ledger_id]),
+        ];
+        let events = self
+            .client
+            .fetch_events(filters, Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch rotations: {}", e)))?;
+        Ok(events
+            .iter()
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.content).ok())
+            .filter(|v| v.get("ledger_id").and_then(|l| l.as_str()) == Some(ledger_id))
+            .filter_map(|v| v.get("tx").and_then(|t| t.as_str()).map(str::to_string))
+            .collect())
+    }
+
     /// Publish a ledger advertisement
     ///
     /// Uses NIP-33 parameterized replaceable events, so only the latest
@@ -3785,10 +3809,13 @@ impl NostrTransport {
         })
         .to_string();
         let event = EventBuilder::new(Kind::Custom(KIND_ROTATION_TX), &content)
-            .tag(Tag::custom(TagKind::custom("l"), [ledger_id]))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
+            ))
             .tag(Tag::custom(
                 TagKind::SingleLetter(TAG_LEDGER_ID),
-                [&ledger_id[..16.min(ledger_id.len())]],
+                [ledger_tag(ledger_id)],
             ))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign rotation event: {}", e)))?;
