@@ -50,6 +50,8 @@ fn update(seq: u64, op: &LedgerOperation) -> SignedLedgerUpdate {
 
 fn qb(spending_txid: [u8; 32], expiry: u32, version: &str) -> LedgerOperation {
     LedgerOperation::QuorumBegin {
+        exit_cutoff_height: None,
+        exit_outputs: Vec::new(),
         reserves_id: String::new(),
         spending_txid,
         new_outpoint_txid: sha(&[0xf0, 0x0d]),

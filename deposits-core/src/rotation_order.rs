@@ -36,6 +36,8 @@ pub fn rotating_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<u64> 
 /// vault to threshold; output 0 worth the op's amounts.
 pub fn verify_rotation_tx(
     history: &[SignedLedgerUpdate],
+    state: &crate::types::LedgerState,
+    height: u32,
     op: &LedgerOperation,
     tx: &Transaction,
     network: Network,
@@ -46,6 +48,7 @@ pub fn verify_rotation_tx(
         new_outpoint_vout,
         amount,
         collateral_amount,
+        exit_cutoff_height,
         ..
     } = op
     else {
@@ -111,7 +114,7 @@ pub fn verify_rotation_tx(
         lock_time: tx.lock_time.to_consensus_u32(),
         new_vault_spk,
         splice_in: None,
-        extra_outputs: Vec::new(),
+        extra_outputs: due_exit_outputs(state, height, *exit_cutoff_height),
     })
     .ok_or("the DEP-03 rotation leaves the vault below dust")?;
     let mut stripped = tx.clone();
@@ -121,10 +124,64 @@ pub fn verify_rotation_tx(
     if stripped != ours {
         return Err("rotation_tx differs from the DEP-03 rotation we build".into());
     }
-    if tx.output[0].value.to_sat() != (amount + collateral_amount) / 1000 {
+    let new_sats = tx.output[0].value.to_sat();
+    if new_sats != (amount + collateral_amount) / 1000 {
         return Err("QuorumBegin amounts do not sum to the rotation's new vault".into());
     }
+    let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
+    let fee = vault_sats.saturating_sub(extras).saturating_sub(new_sats);
+    if *collateral_amount != rotation_collateral(state, vault_sats, fee) {
+        return Err("QuorumBegin collateral is not the DEP-20 §3 share".into());
+    }
     Ok(())
+}
+
+/// DEP-20 §3 due exits at `height` under `cutoff` (absent: height − margin) as the
+/// rotation's extra outputs: (exit_address, floor(amount / 1000)) in due order.
+pub fn due_exit_outputs(
+    state: &crate::types::LedgerState,
+    height: u32,
+    cutoff: Option<u32>,
+) -> Vec<(ScriptBuf, u64)> {
+    let cutoff = cutoff.unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
+    state
+        .due_exits(height, cutoff)
+        .into_iter()
+        .map(|(_, e)| (ScriptBuf::from_bytes(e.exit_address), e.amount / 1000))
+        .collect()
+}
+
+/// The QuorumBegin `exit_outputs` entries for the due set (vout = i + 1).
+pub fn due_exit_entries(
+    state: &crate::types::LedgerState,
+    height: u32,
+    cutoff: u32,
+) -> Vec<crate::messages::ExitOutput> {
+    state
+        .due_exits(height, cutoff)
+        .into_iter()
+        .enumerate()
+        .map(|(i, (_, e))| crate::messages::ExitOutput {
+            deposit_id: e.deposit_id,
+            amount: e.amount,
+            vout: i as u32 + 1,
+        })
+        .collect()
+}
+
+/// DEP-20 §3 Amounts: the new collateral bears only its share of the rotation fee:
+/// floor(old_collateral × (V − F) × 1000 / (old_reserves + old_collateral)).
+pub fn rotation_collateral(
+    state: &crate::types::LedgerState,
+    vault_sats: u64,
+    fee_sats: u64,
+) -> u64 {
+    let old = state.reserves_amount as u128 + state.collateral_amount as u128;
+    if old == 0 {
+        return 0;
+    }
+    (state.collateral_amount as u128 * (vault_sats.saturating_sub(fee_sats)) as u128 * 1000 / old)
+        as u64
 }
 
 /// Of published rotation candidates (transaction hex, e.g. Kind 9107 contents), the one

@@ -195,6 +195,59 @@ pub fn to_dep16(op: &LedgerOperation) -> Option<OperationData<PublicKey>> {
             expiry: *expiry,
         }),
 
+        // ----- settlement (DEP-20 §3) --------------------------------------------------------
+        LedgerOperation::ExitRequest {
+            deposit_id,
+            amount,
+            exit_address,
+            expires_at_height,
+            nonce,
+            expiry,
+            ..
+        } => Some(OperationData {
+            op_type: Symbol::new(op_type::SPEND),
+            args: {
+                let mut a = BTreeMap::new();
+                a.insert("amount".to_string(), Value::Int(*amount as i128));
+                a.insert(
+                    "destination".to_string(),
+                    Value::Bytes(exit_address.clone()),
+                );
+                a.insert("kind".to_string(), Value::Symbol(Symbol::new("exit")));
+                if let Some(h) = expires_at_height {
+                    a.insert("expires_at_height".to_string(), Value::Int(*h as i128));
+                }
+                a
+            },
+            deposit_id: pad_deposit_id(deposit_id),
+            nonce: *nonce,
+            expiry: *expiry,
+        }),
+        LedgerOperation::ExitCancel {
+            deposit_id,
+            exit_request_id,
+            nonce,
+            expiry,
+            ..
+        } => Some(OperationData {
+            op_type: Symbol::new(op_type::SPEND),
+            args: {
+                let mut a = BTreeMap::new();
+                a.insert(
+                    "exit_request_id".to_string(),
+                    Value::Bytes(exit_request_id.to_vec()),
+                );
+                a.insert(
+                    "kind".to_string(),
+                    Value::Symbol(Symbol::new("exit_cancel")),
+                );
+                a
+            },
+            deposit_id: pad_deposit_id(deposit_id),
+            nonce: *nonce,
+            expiry: *expiry,
+        }),
+
         // ----- modification ----------------------------------------------------------------
         LedgerOperation::DepositKeyRotate {
             deposit_id,

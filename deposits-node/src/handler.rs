@@ -142,6 +142,8 @@ pub struct DepositsHandler {
     /// DEP-03 §"Rotation ordering": per ledger we operate, the signed rotation
     /// awaiting its QuorumBegin (carried in that update's cosign request).
     pub pending_rotation_txs: Mutex<HashMap<String, bitcoin::Transaction>>,
+    /// DEP-20 §3 exit cutoff each pending rotation was built under (ledger id -> height).
+    pub pending_rotation_cutoffs: Mutex<HashMap<String, u32>>,
 
     /// Recorded rotations (ours or ones we cosigned or received as Kind 9107),
     /// rebroadcast until they confirm.
@@ -325,6 +327,7 @@ impl DepositsHandler {
             damaged_ledgers,
             flagged_non_conforming: Mutex::new(HashMap::new()),
             pending_rotation_txs: Mutex::new(HashMap::new()),
+            pending_rotation_cutoffs: Mutex::new(HashMap::new()),
             inflight_rotations: Mutex::new(HashMap::new()),
             rotation_lookups: Mutex::new(std::collections::HashSet::new()),
             scanned_non_conforming: Mutex::new(HashMap::new()),
@@ -3201,6 +3204,8 @@ mod tests {
                 collateral_amount: 30_000_000_000,
             },
             LedgerOperation::QuorumBegin {
+                exit_cutoff_height: None,
+                exit_outputs: Vec::new(),
                 reserves_id: "tb1qres".to_string(),
                 spending_txid: [0; 32],
                 new_outpoint_txid: [1; 32],

@@ -695,18 +695,20 @@ impl Node {
                     // DEP-03 §"Rotation ordering": a QuorumBegin that rotates the
                     // current vault is recorded before its rotation is broadcast; the
                     // request carries the signed rotation, which we verify instead.
-                    let rotating_history: Option<Vec<deposits_core::SignedLedgerUpdate>> =
-                        if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
-                            let ledgers = self.handler.ledgers.lock().unwrap();
-                            ledgers.get(&request.ledger_id).and_then(|arc| {
-                                let l = arc.read().unwrap();
-                                deposits_core::rotation_order::rotating_quorum_begin_seq(&l.history)
-                                    .map(|_| l.history.clone())
-                            })
-                        } else {
-                            None
-                        };
-                    if let Some(history) = rotating_history {
+                    let rotating_history: Option<(
+                        Vec<deposits_core::SignedLedgerUpdate>,
+                        deposits_core::LedgerState,
+                    )> = if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        ledgers.get(&request.ledger_id).and_then(|arc| {
+                            let l = arc.read().unwrap();
+                            deposits_core::rotation_order::rotating_quorum_begin_seq(&l.history)
+                                .map(|_| (l.history.clone(), l.state.clone()))
+                        })
+                    } else {
+                        None
+                    };
+                    if let Some((history, pre_state)) = rotating_history {
                         let tx: Option<bitcoin::Transaction> = request
                             .params
                             .get("rotation_tx")
@@ -720,6 +722,8 @@ impl Node {
                         };
                         if let Err(e) = deposits_core::rotation_order::verify_rotation_tx(
                             &history,
+                            &pre_state,
+                            fields.block_height,
                             &operation,
                             &tx,
                             self.wallet.network(),

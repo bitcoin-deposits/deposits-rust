@@ -61,6 +61,8 @@ fn ledger_with_staged(operator_pk: PublicKey, staged_pks: &[PublicKey]) -> Ledge
 /// Build a QuorumBegin LedgerOperation with stable placeholder values.
 fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
     LedgerOperation::QuorumBegin {
+        exit_cutoff_height: None,
+        exit_outputs: Vec::new(),
         reserves_id: "bcrt1ptest".to_string(),
         spending_txid: [0u8; 32],
         new_outpoint_txid: [0xAA; 32],

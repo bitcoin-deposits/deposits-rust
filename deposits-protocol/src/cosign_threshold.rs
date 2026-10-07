@@ -403,6 +403,8 @@ mod tests {
         s.quorum_expiry = None; // not yet set; first QuorumBegin is committing it
         use crate::messages::QuorumMemberRef;
         let op = LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "bcrt1pdummy".to_string(),
             amount: 100_000_000,
             collateral_amount: 100_000_000,

@@ -228,6 +228,8 @@ impl Node {
             "make_offer" => self.process_make_offer_request(&request).await,
             "withdraw" => self.process_withdraw_request(&request).await,
             "transfer_lock" => self.process_transfer_lock_request(&request).await,
+            "exit_request" => self.process_exit_request(&request, false).await,
+            "exit_cancel" => self.process_exit_request(&request, true).await,
             "transfer_complete" => self.process_transfer_complete_request(&request).await,
             "custody_transfer_sign" => self.process_custody_transfer_sign_request(&request).await,
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
@@ -2397,6 +2399,8 @@ mod fork_point_collateral_tests {
                 collateral_amount: COLLATERAL,
             },
             LedgerOperation::QuorumBegin {
+                exit_cutoff_height: None,
+                exit_outputs: Vec::new(),
                 reserves_id: "bcrt1qreserves".to_string(),
                 spending_txid: [0; 32],
                 new_outpoint_txid: [1; 32],

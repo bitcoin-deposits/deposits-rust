@@ -9,6 +9,7 @@
 //!   deposits-wallet list                       - List deposits with aliases
 //!   deposits-wallet balance                    - Check balances
 //!   deposits-wallet withdraw <alias> <amount>  - Withdraw funds (on-chain)
+//!   deposits-wallet exit <alias> <amount> --to <addr> - DEP-20 exit at the next rotation
 //!   deposits-wallet make_invoice <alias> <amt> - Create Lightning invoice
 //!   deposits-wallet pay_invoice <alias> <bolt11> - Pay Lightning invoice
 
@@ -45,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "balance" => wallet_cli::deposit::show_balance(&args[2..]).await,
         "sync" => wallet_cli::deposit::sync_deposits(&args[2..]).await,
         "withdraw" => wallet_cli::payments::withdraw(&args[2..]).await,
+        "exit" => wallet_cli::payments::exit(&args[2..]).await,
         "transfer" => wallet_cli::payments::transfer_lock(&args[2..]).await,
         "transfer_complete" => wallet_cli::payments::transfer_complete(&args[2..]).await,
         "escalate" => wallet_cli::escalate::escalate(&args[2..]).await,

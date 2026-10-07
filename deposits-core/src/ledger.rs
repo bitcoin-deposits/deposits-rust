@@ -2791,6 +2791,8 @@ mod tests {
         ledger.state.reserves_amount = 1_000_000;
 
         let make_op = |cosigners: Vec<PublicKey>| LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),

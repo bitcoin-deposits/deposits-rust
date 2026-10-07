@@ -49,6 +49,8 @@ fn opname(op: &LedgerOperation) -> &'static str {
         O::DepositOpen { .. } => "DepositOpen",
         O::DepositClose { .. } => "DepositClose",
         O::DepositKeyRotate { .. } => "DepositKeyRotate",
+        O::ExitRequest { .. } => "ExitRequest",
+        O::ExitCancel { .. } => "ExitCancel",
         O::FeeChange { .. } => "FeeChange",
         O::FeeCollect { .. } => "FeeCollect",
         O::InvoiceCredit { .. } => "InvoiceCredit",

@@ -206,6 +206,8 @@ impl ProtocolSim {
             operators[i]
                 .ledger
                 .append_operation(LedgerOperation::QuorumBegin {
+                    exit_cutoff_height: None,
+                    exit_outputs: Vec::new(),
                     reserves_id: format!("reserves_{}_rotated", i),
                     spending_txid: [0x11; 32],
                     new_outpoint_txid: [(0x20 + i as u8); 32],
@@ -636,6 +638,8 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DepositClose { .. } => "DepositClose",
         LedgerOperation::FeeChange { .. } => "FeeChange",
         LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
+        LedgerOperation::ExitRequest { .. } => "ExitRequest",
+        LedgerOperation::ExitCancel { .. } => "ExitCancel",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFulfill { .. } => "InvoiceFulfill",
@@ -724,6 +728,7 @@ fn validate_per_op_as_cosigner(
         // is strictly stronger than what those validators checked, so
         // these preflight arms are deliberately permissive.
         LedgerOperation::DepositKeyRotate { .. } => true,
+        LedgerOperation::ExitRequest { .. } | LedgerOperation::ExitCancel { .. } => true,
         LedgerOperation::InvoiceCredit {
             payment_hash,
             deposit_id,

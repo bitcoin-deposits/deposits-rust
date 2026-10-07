@@ -308,6 +308,8 @@ impl Node {
 
         // Publish QuorumBegin operation. Total UTXO = reserves + collateral.
         let operation = LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -1237,7 +1239,25 @@ impl Node {
                 .state
                 .reserves_amount
                 .saturating_add(l.state.collateral_amount);
-            if prev_total > 0 {
+            let pending_rotation = self
+                .handler
+                .pending_rotation_txs
+                .lock()
+                .unwrap()
+                .get(ledger_id)
+                .cloned();
+            if let (true, Some(tx)) = (prev_total > 0, pending_rotation.as_ref()) {
+                // DEP-20 §3 Amounts: collateral bears only its share of the fee; exits
+                // come out of reserves.
+                let vault_sats = prev_total / 1000;
+                let extras: u64 = tx.output[1..].iter().map(|o| o.value.to_sat()).sum();
+                let fee = vault_sats
+                    .saturating_sub(extras)
+                    .saturating_sub(result.amount);
+                let collateral =
+                    deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee);
+                (total_msats.saturating_sub(collateral), collateral)
+            } else if prev_total > 0 {
                 let collateral = (l.state.collateral_amount as u128 * total_msats as u128
                     / prev_total as u128) as u64;
                 (total_msats.saturating_sub(collateral), collateral)
@@ -1258,7 +1278,34 @@ impl Node {
                 .unwrap_or(0),
         );
 
+        // DEP-20 §3: settle the exits due under the rotation's cutoff.
+        let (exit_cutoff_height, exit_outputs) = match self
+            .handler
+            .pending_rotation_cutoffs
+            .lock()
+            .unwrap()
+            .remove(ledger_id)
+        {
+            Some(cutoff) if rotating => {
+                let height = self.wallet.get_block_height().unwrap_or(0);
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let entries = ledgers
+                    .get(ledger_id)
+                    .map(|arc| {
+                        deposits_core::rotation_order::due_exit_entries(
+                            &arc.read().unwrap().state,
+                            height,
+                            cutoff,
+                        )
+                    })
+                    .unwrap_or_default();
+                (Some(cutoff), entries)
+            }
+            _ => (None, Vec::new()),
+        };
         let operation = LedgerOperation::QuorumBegin {
+            exit_cutoff_height,
+            exit_outputs,
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,
@@ -1446,7 +1493,27 @@ impl Node {
         let operator_alone = tier.threshold == 1 && tier.requires_tie_breaker;
 
         // DEP-03 §"Rotation transaction": the deterministic rotation every
-        // cosigner rebuilds byte for byte (no DEP-20 exits recorded yet).
+        // cosigner rebuilds byte for byte, paying the DEP-20 §3 exits due at the
+        // cutoff (this height) after the new vault.
+        let exit_cutoff = current_height;
+        let exit_outputs = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let l = ledgers
+                .get(ledger_id)
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?
+                .read()
+                .unwrap();
+            deposits_core::rotation_order::due_exit_outputs(
+                &l.state,
+                current_height,
+                Some(exit_cutoff),
+            )
+        };
+        self.handler
+            .pending_rotation_cutoffs
+            .lock()
+            .unwrap()
+            .insert(ledger_id.to_string(), exit_cutoff);
         let prev_script_pubkey = existing.taproot_output.script_pubkey();
         let rotation_tx = deposits_core::tapscript_reserves::build_rotation_tx(
             &deposits_core::tapscript_reserves::RotationTxParams {
@@ -1458,7 +1525,7 @@ impl Node {
                 lock_time: tier_lock_time,
                 new_vault_spk: new_script_pubkey.clone(),
                 splice_in: None,
-                extra_outputs: Vec::new(),
+                extra_outputs: exit_outputs,
             },
         )
         .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".to_string()))?;
@@ -1517,6 +1584,7 @@ impl Node {
         // is rotating at a degraded tier.
         let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&rotation_tx));
         let request_params = serde_json::json!({
+            "exit_cutoff_height": exit_cutoff,
             "sighash": hex::encode(sighash_bytes),
             "unsigned_tx": unsigned_tx_hex,
             "tier_index": tier_index,

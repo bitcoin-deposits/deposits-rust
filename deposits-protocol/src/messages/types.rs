@@ -150,6 +150,14 @@ pub struct LedgerUpdateResponseMsg {
 /// cosigning. Without the ledger_id pairing, fraud-proof verifiers
 /// (and the explorer) had to derive it from prior `QuorumAddMember`
 /// operations on the operator's history.
+/// DEP-20 §3 / DEP-02 type 280 entry: `deposit_id(16) ‖ amount_msats(8) ‖ vout(4)`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitOutput {
+    pub deposit_id: crate::types::DepositId,
+    pub amount: u64,
+    pub vout: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QuorumMemberRef {
     pub pubkey: PublicKey,
@@ -290,6 +298,32 @@ pub enum LedgerOperation {
         /// New producers MUST populate this to opt into a specific
         /// ruleset's behaviour.
         protocol_version: Option<String>,
+        /// DEP-20 §3 exit cutoff (TLV 278): requests appended at or before it are due.
+        exit_cutoff_height: Option<u32>,
+        /// DEP-20 §3 settled exits (TLV 280), in due order; entry i pays rotation output i+1.
+        exit_outputs: Vec<ExitOutput>,
+    },
+
+    // ========== Settlement (DEP-20) ==========
+    /// DEP-20 §3: a depositor's request to be paid on chain at the next rotation.
+    ExitRequest {
+        deposit_id: DepositId,
+        /// msats; locked until settled, cancelled or expired.
+        amount: u64,
+        /// scriptPubKey the rotation pays.
+        exit_address: Vec<u8>,
+        expires_at_height: Option<u32>,
+        nonce: u64,
+        expiry: u32,
+        witness: DescriptorWitness,
+    },
+    /// DEP-20 §3: withdraw a pending ExitRequest (named by its update's chain_hash).
+    ExitCancel {
+        deposit_id: DepositId,
+        exit_request_id: [u8; 32],
+        nonce: u64,
+        expiry: u32,
+        witness: DescriptorWitness,
     },
 
     // ========== Deposit Operations (6) ==========
@@ -813,6 +847,8 @@ impl LedgerOperation {
             Self::DepositClose { .. } => 21,
             Self::FeeChange { .. } => 22,
             Self::DepositKeyRotate { .. } => 23,
+            Self::ExitRequest { .. } => 100,
+            Self::ExitCancel { .. } => 101,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -871,6 +907,7 @@ impl LedgerOperation {
             Self::DisputeYield => consts::LEDGER_UPDATE,
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
+            Self::ExitRequest { .. } | Self::ExitCancel { .. } => consts::LEDGER_UPDATE,
             Self::LedgerClose => consts::LEDGER_CLOSE,
             Self::Batch(_) => consts::BATCH,
         }
@@ -911,7 +948,7 @@ impl LedgerOperation {
             46 => consts::QUORUM_JOIN,
             45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
-            54 | 55 | 56 | 57 | 80 => consts::LEDGER_UPDATE,
+            54 | 55 | 56 | 57 | 80 | 100 | 101 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
             70 => consts::TRANSFER_LOCK,
             71 => consts::TRANSFER_COMPLETE,
@@ -927,6 +964,8 @@ impl LedgerOperation {
             | Self::DepositClose { deposit_id, .. }
             | Self::FeeChange { deposit_id, .. }
             | Self::DepositKeyRotate { deposit_id, .. }
+            | Self::ExitRequest { deposit_id, .. }
+            | Self::ExitCancel { deposit_id, .. }
             | Self::InvoiceCredit { deposit_id, .. }
             | Self::InvoiceLock { deposit_id, .. }
             | Self::InvoiceFail { deposit_id, .. }
@@ -1212,6 +1251,8 @@ impl BinaryCodec for LedgerOperation {
                 write_u64(w, *collateral_amount)?;
             }
             Self::QuorumBegin {
+                exit_cutoff_height: _,
+                exit_outputs: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1624,6 +1665,11 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, claim_txid)?;
                 write_string(w, new_reserves_address)?;
             }
+            Self::ExitRequest { .. } | Self::ExitCancel { .. } => {
+                return Err(CodecError::InvalidData(
+                    "DEP-20 exits have no legacy encoding; use TLV".into(),
+                ));
+            }
             Self::DeliveryEmbed {
                 request_hash,
                 target_ledger_id,
@@ -1697,6 +1743,8 @@ impl BinaryCodec for LedgerOperation {
                 let ledger_hash = read_32(r)?;
                 let collateral_amount = read_u64(r).unwrap_or(0);
                 Ok(Self::QuorumBegin {
+                    exit_cutoff_height: None,
+                    exit_outputs: Vec::new(),
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,

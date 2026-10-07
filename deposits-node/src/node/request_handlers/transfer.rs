@@ -484,6 +484,85 @@ impl Node {
         )
     }
 
+    /// DEP-20 §3: a depositor-signed `ExitRequest` / `ExitCancel` (params: `operation`, the
+    /// TLV-encoded op, base64). Committed as signed; staging's conformance check verifies the
+    /// witness, nonce and expiry. Answers the request id (the ExitRequest update's chain_hash).
+    pub(crate) async fn process_exit_request(
+        &self,
+        request: &crate::nostr::LedgerRequest,
+        cancel: bool,
+    ) -> (bool, Option<String>, Option<String>) {
+        use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+
+        let Some(b64) = request.params.get("operation").and_then(|v| v.as_str()) else {
+            return (false, None, Some("operation required".to_string()));
+        };
+        let op = match BASE64
+            .decode(b64)
+            .map_err(|e| e.to_string())
+            .and_then(|b| LedgerOperation::tlv_decode(&b).map_err(|e| format!("{e:?}")))
+        {
+            Ok(op) => op,
+            Err(e) => return (false, None, Some(format!("bad operation: {e}"))),
+        };
+        let (deposit_id, nonce) = match (&op, cancel) {
+            (
+                LedgerOperation::ExitRequest {
+                    deposit_id, nonce, ..
+                },
+                false,
+            )
+            | (
+                LedgerOperation::ExitCancel {
+                    deposit_id, nonce, ..
+                },
+                true,
+            ) => (*deposit_id, *nonce),
+            _ => {
+                return (
+                    false,
+                    None,
+                    Some("not the requested exit operation".to_string()),
+                )
+            }
+        };
+        let cancel_id = if let LedgerOperation::ExitCancel {
+            exit_request_id, ..
+        } = &op
+        {
+            Some(*exit_request_id)
+        } else {
+            None
+        };
+        let ledger_id = request.ledger_id.clone();
+        if let Err(e) = self.commit_operation(&ledger_id, op).await {
+            return (false, None, Some(format!("Failed to commit exit: {}", e)));
+        }
+        // The request id is the chain_hash of the update just committed.
+        let id = cancel_id.or_else(|| {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let l = ledgers.get(&ledger_id)?.read().unwrap();
+            l.history
+                .iter()
+                .rev()
+                .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::ExitRequest {
+                        deposit_id: d,
+                        nonce: n,
+                        ..
+                    }) if d == deposit_id && n == nonce => Some(u.chain_hash()),
+                    _ => None,
+                })
+        });
+        (
+            true,
+            Some(serde_json::json!({ "exit_request_id": id.map(hex::encode) }).to_string()),
+            None,
+        )
+    }
+
     /// Process a transfer_complete request - complete a transfer by revealing preimage
     pub(crate) async fn process_transfer_complete_request(
         &self,

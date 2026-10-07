@@ -5481,6 +5481,8 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
     // script's CLTV targets and the QuorumBegin record agree; reuse it.
 
     let operation = LedgerOperation::QuorumBegin {
+        exit_cutoff_height: None,
+        exit_outputs: Vec::new(),
         reserves_id: new_reserves_address.to_string(),
         spending_txid: txid_bytes,
         new_outpoint_txid: txid_bytes,

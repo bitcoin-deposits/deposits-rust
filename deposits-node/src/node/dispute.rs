@@ -353,6 +353,8 @@ mod recovery_voter_derivation_tests {
 
     fn qb(members: &[PublicKey]) -> LedgerOperation {
         LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "bcrt1q...".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],
@@ -3792,6 +3794,8 @@ mod recovery_chaining_tests {
         let u0 = signed(0, operator, &ledger_open(operator), [0u8; 32]);
         let u1 = signed(1, winner, &dispute_acquire(winner), u0.chain_hash());
         let qb = LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "bcrt1qrot".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [1; 32],

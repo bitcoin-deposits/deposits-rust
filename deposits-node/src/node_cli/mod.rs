@@ -1391,6 +1391,22 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
                     ),
                 ),
+                LedgerOperation::ExitRequest {
+                    deposit_id, amount, ..
+                } => (
+                    "ExitRequest",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x} amt:{}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3], amount
+                    ),
+                ),
+                LedgerOperation::ExitCancel { deposit_id, .. } => (
+                    "ExitCancel",
+                    format!(
+                        "id:{:02x}{:02x}{:02x}{:02x}",
+                        deposit_id[0], deposit_id[1], deposit_id[2], deposit_id[3]
+                    ),
+                ),
                 LedgerOperation::DepositKeyRotate { deposit_id, .. } => (
                     "DepositKeyRotate",
                     format!(

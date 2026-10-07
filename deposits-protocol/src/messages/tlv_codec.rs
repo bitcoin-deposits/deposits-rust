@@ -155,6 +155,12 @@ mod ledger_op_tlv {
     /// QuorumMemberResponse digest.
     pub const MEMBER_SIGNATURE: u64 = 290; // [u8; 64]
     pub const MIN_COLLATERAL_BPS: u64 = 314; // u16, QuorumAddMember (DEP-05)
+                                             // DEP-20 §3 settlement fields.
+    pub const EXIT_CUTOFF_HEIGHT: u64 = 278; // u32, QuorumBegin
+    pub const EXIT_OUTPUTS: u64 = 280; // repeated deposit_id(16)‖amount(8)‖vout(4), QuorumBegin
+    pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
+    pub const EXPIRES_AT_HEIGHT: u64 = 302; // u32, ExitRequest (optional)
+    pub const EXIT_REQUEST_ID: u64 = 304; // [u8; 32], ExitCancel
 
     /// DisputeEnter QuorumExpired evidence: a confirmed block whose
     /// height exceeds the disputed ledger's `quorum_expiry`. Receivers
@@ -256,6 +262,8 @@ impl TlvEncode for LedgerOperation {
                 quorum_members,
                 collateral_amount,
                 protocol_version,
+                exit_cutoff_height,
+                exit_outputs,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -292,6 +300,18 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = protocol_version {
                     builder = builder.string_field(PROTOCOL_VERSION, v);
+                }
+                if let Some(c) = exit_cutoff_height {
+                    builder = builder.u32_field(EXIT_CUTOFF_HEIGHT, *c);
+                }
+                if !exit_outputs.is_empty() {
+                    let mut b = Vec::with_capacity(exit_outputs.len() * 28);
+                    for e in exit_outputs {
+                        b.extend_from_slice(&e.deposit_id);
+                        b.extend_from_slice(&e.amount.to_be_bytes());
+                        b.extend_from_slice(&e.vout.to_be_bytes());
+                    }
+                    builder = builder.bytes_field(EXIT_OUTPUTS, &b);
                 }
             }
             Self::DepositOpen {
@@ -367,6 +387,41 @@ impl TlvEncode for LedgerOperation {
                 builder = builder
                     .deposit_id_field(DEPOSIT_ID, deposit_id)
                     .string_field(NEW_DESCRIPTOR, new_descriptor)
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
+                    .witness_field(WITNESS, witness);
+            }
+            Self::ExitRequest {
+                deposit_id,
+                amount,
+                exit_address,
+                expires_at_height,
+                nonce,
+                expiry,
+                witness,
+            } => {
+                builder = builder
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
+                    .u64_field(AMOUNT, *amount)
+                    .bytes_field(EXIT_ADDRESS, exit_address);
+                if let Some(h) = expires_at_height {
+                    builder = builder.u32_field(EXPIRES_AT_HEIGHT, *h);
+                }
+                builder = builder
+                    .u64_field(NONCE, *nonce)
+                    .u32_field(EXPIRY, *expiry)
+                    .witness_field(WITNESS, witness);
+            }
+            Self::ExitCancel {
+                deposit_id,
+                exit_request_id,
+                nonce,
+                expiry,
+                witness,
+            } => {
+                builder = builder
+                    .deposit_id_field(DEPOSIT_ID, deposit_id)
+                    .bytes_field(EXIT_REQUEST_ID, exit_request_id)
                     .u64_field(NONCE, *nonce)
                     .u32_field(EXPIRY, *expiry)
                     .witness_field(WITNESS, witness);
@@ -813,6 +868,25 @@ impl TlvDecode for LedgerOperation {
                     quorum_members,
                     collateral_amount: reader.read_u64(TOTAL_COLLATERAL)?,
                     protocol_version: reader.read_string_opt(PROTOCOL_VERSION)?,
+                    exit_cutoff_height: reader.read_u32_opt(EXIT_CUTOFF_HEIGHT)?,
+                    exit_outputs: match reader.read_raw_opt(EXIT_OUTPUTS) {
+                        None => Vec::new(),
+                        Some(b) => {
+                            if b.len() % 28 != 0 {
+                                return Err(TlvError::InvalidFieldValue {
+                                    field_type: EXIT_OUTPUTS,
+                                    reason: "exit_outputs not a multiple of 28 bytes".into(),
+                                });
+                            }
+                            b.chunks(28)
+                                .map(|c| ExitOutput {
+                                    deposit_id: c[..16].try_into().unwrap(),
+                                    amount: u64::from_be_bytes(c[16..24].try_into().unwrap()),
+                                    vout: u32::from_be_bytes(c[24..28].try_into().unwrap()),
+                                })
+                                .collect()
+                        }
+                    },
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -841,6 +915,22 @@ impl TlvDecode for LedgerOperation {
             23 => Ok(Self::DepositKeyRotate {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 new_descriptor: reader.read_string(NEW_DESCRIPTOR)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
+                witness: reader.read_witness(WITNESS)?,
+            }),
+            100 => Ok(Self::ExitRequest {
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
+                amount: reader.read_u64(AMOUNT)?,
+                exit_address: reader.read_raw(EXIT_ADDRESS)?.to_vec(),
+                expires_at_height: reader.read_u32_opt(EXPIRES_AT_HEIGHT)?,
+                nonce: reader.read_u64(NONCE)?,
+                expiry: reader.read_u32(EXPIRY)?,
+                witness: reader.read_witness(WITNESS)?,
+            }),
+            101 => Ok(Self::ExitCancel {
+                deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
+                exit_request_id: reader.read_bytes(EXIT_REQUEST_ID)?,
                 nonce: reader.read_u64(NONCE)?,
                 expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,

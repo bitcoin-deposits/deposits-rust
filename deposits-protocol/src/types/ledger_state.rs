@@ -67,6 +67,51 @@ pub fn reserves_family(ruleset_name: &str) -> &'static str {
 }
 
 // ============================================================================
+// DEP-20 §3 exits
+// ============================================================================
+
+/// A pending ExitRequest, keyed in `pending_exits` by its update's `chain_hash`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingExit {
+    pub deposit_id: DepositId,
+    pub amount: u64,
+    pub exit_address: Vec<u8>,
+    pub expires_at: Option<u32>,
+    pub block_height: u32,
+    pub seq: u64,
+}
+
+/// DEP-11 default `exit_cutoff_margin_blocks`.
+pub const EXIT_CUTOFF_MARGIN_BLOCKS: u32 = 144;
+/// DEP-20 §3: requests below 330 sats are carried, not settled.
+pub const EXIT_DUST_MSATS: u64 = 330_000;
+
+/// The update envelope an operation is applied under (block height, sequence, chain_hash):
+/// ExitRequest ids, expiry and the exit due set need it, and `apply_in_place` sees only the op.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ApplyCtx {
+    pub height: u32,
+    pub seq: u64,
+    pub hash: [u8; 32],
+}
+
+thread_local! {
+    static APPLY_CTX: std::cell::Cell<ApplyCtx> = std::cell::Cell::new(ApplyCtx::default());
+}
+
+/// Run `f` with `ctx` as the apply context (restored afterwards).
+pub fn with_apply_ctx<R>(ctx: ApplyCtx, f: impl FnOnce() -> R) -> R {
+    let prev = APPLY_CTX.with(|c| c.replace(ctx));
+    let r = f();
+    APPLY_CTX.with(|c| c.set(prev));
+    r
+}
+
+fn apply_ctx() -> ApplyCtx {
+    APPLY_CTX.with(|c| c.get())
+}
+
+// ============================================================================
 // Ledger State
 // ============================================================================
 
@@ -216,6 +261,12 @@ pub struct LedgerState {
     /// Used for dispute validation.
     #[serde(default)]
     pub dispute_fork_sequence: u64,
+    /// DEP-20 §3 pending exit requests (id = the ExitRequest update's chain_hash).
+    #[serde(with = "serde_transfer_id_map", default)]
+    pub pending_exits: HashMap<[u8; 32], PendingExit>,
+    /// A QuorumBegin vault the next QuorumBegin rotates (cleared by DisputeAcquire).
+    #[serde(default)]
+    pub vault_current: bool,
 }
 
 impl LedgerState {
@@ -269,6 +320,48 @@ impl LedgerState {
             parent_pubkey: operator_key,
             quorum_at_fork: Vec::new(),
             dispute_fork_sequence: 0,
+            pending_exits: HashMap::new(),
+            vault_current: false,
+        }
+    }
+
+    /// DEP-20 §3 due set at `height` under `cutoff`: pending requests appended at block
+    /// height <= cutoff, at least the dust floor, unexpired, in append order.
+    pub fn due_exits(&self, height: u32, cutoff: u32) -> Vec<([u8; 32], PendingExit)> {
+        let mut due: Vec<([u8; 32], PendingExit)> = self
+            .pending_exits
+            .iter()
+            .filter(|(_, e)| {
+                e.block_height <= cutoff
+                    && e.amount >= EXIT_DUST_MSATS
+                    && e.expires_at.is_none_or(|x| x > height)
+            })
+            .map(|(k, e)| (*k, e.clone()))
+            .collect();
+        due.sort_by_key(|(_, e)| e.seq);
+        due
+    }
+
+    fn has_expired_exits(&self, height: u32) -> bool {
+        self.pending_exits
+            .values()
+            .any(|e| e.expires_at.is_some_and(|x| x <= height))
+    }
+
+    /// DEP-20 §3 expiry: release every pending request with expires_at_height <= height.
+    fn release_expired_exits(&mut self, height: u32) {
+        let gone: Vec<[u8; 32]> = self
+            .pending_exits
+            .iter()
+            .filter(|(_, e)| e.expires_at.is_some_and(|x| x <= height))
+            .map(|(k, _)| *k)
+            .collect();
+        for k in gone {
+            if let Some(e) = self.pending_exits.remove(&k) {
+                if let Some(d) = self.deposits.get_mut(&e.deposit_id) {
+                    d.unlock(e.amount);
+                }
+            }
         }
     }
 
@@ -305,7 +398,12 @@ impl LedgerState {
                 details: format!("seq {}: {}", update.sequence_number, e),
             }
         })?;
-        self.apply_in_place(&op)?;
+        let ctx = ApplyCtx {
+            height: update.block_height,
+            seq: update.sequence_number,
+            hash: update.chain_hash(),
+        };
+        with_apply_ctx(ctx, || self.apply_in_place(&op))?;
         if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
             if update.block_height > 0 {
                 if let Some(deposit) = self.deposits.get_mut(deposit_id) {
@@ -385,6 +483,23 @@ impl LedgerState {
         &mut self,
         operation: &crate::messages::LedgerOperation,
     ) -> crate::DepositsResult<()> {
+        // DEP-20 §3: before an update's operation, release the exit requests that expired at
+        // or below its height (on a scratch copy, so a failing op leaves state untouched).
+        let h = apply_ctx().height;
+        if h > 0 && self.has_expired_exits(h) {
+            let mut scratch = self.clone();
+            scratch.release_expired_exits(h);
+            scratch.apply_op_in_place(operation)?;
+            *self = scratch;
+            return Ok(());
+        }
+        self.apply_op_in_place(operation)
+    }
+
+    fn apply_op_in_place(
+        &mut self,
+        operation: &crate::messages::LedgerOperation,
+    ) -> crate::DepositsResult<()> {
         use crate::messages::LedgerOperation;
 
         let next = &mut *self;
@@ -410,8 +525,56 @@ impl LedgerState {
                 quorum_expiry,
                 quorum_members,
                 protocol_version,
+                exit_cutoff_height,
+                exit_outputs,
                 ..
             } => {
+                // DEP-20 §3: exit_outputs must be exactly the due set (rotating QuorumBegins).
+                let settled: Vec<[u8; 32]> = if next.vault_current {
+                    let h = apply_ctx().height;
+                    let cutoff =
+                        exit_cutoff_height.unwrap_or(h.saturating_sub(EXIT_CUTOFF_MARGIN_BLOCKS));
+                    if cutoff > h || cutoff < h.saturating_sub(EXIT_CUTOFF_MARGIN_BLOCKS) {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "exit_cutoff".to_string(),
+                            details: format!(
+                                "cutoff {} outside [{}, {}]",
+                                cutoff,
+                                h.saturating_sub(EXIT_CUTOFF_MARGIN_BLOCKS),
+                                h
+                            ),
+                        });
+                    }
+                    let due = next.due_exits(h, cutoff);
+                    let matches = due.len() == exit_outputs.len()
+                        && due.iter().zip(exit_outputs.iter()).enumerate().all(
+                            |(i, ((_, e), o))| {
+                                o.deposit_id == e.deposit_id
+                                    && o.amount == e.amount
+                                    && o.vout as usize == i + 1
+                            },
+                        );
+                    if !matches {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "exit_outputs".to_string(),
+                            details: format!(
+                                "{} due exits, {} settled or mismatched",
+                                due.len(),
+                                exit_outputs.len()
+                            ),
+                        });
+                    }
+                    due.into_iter().map(|(k, _)| k).collect()
+                } else {
+                    if !exit_outputs.is_empty() {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "exit_outputs".to_string(),
+                            details: "a QuorumBegin with no current vault settles no exits"
+                                .to_string(),
+                        });
+                    }
+                    Vec::new()
+                };
                 let chosen_ruleset = protocol_version.clone().unwrap_or_default();
                 if !ruleset_known(&chosen_ruleset) {
                     return Err(crate::DepositsError::ProtocolViolation {
@@ -478,6 +641,75 @@ impl LedgerState {
                 next.active_ruleset_name = chosen_ruleset;
                 next.quorum_members = promoted;
                 next.quorum_state = QuorumState::Active;
+                for k in settled {
+                    if let Some(e) = next.pending_exits.remove(&k) {
+                        if let Some(d) = next.deposits.get_mut(&e.deposit_id) {
+                            let before = d.balance;
+                            d.fulfill(e.amount);
+                            let after = d.balance;
+                            next.add_balance_delta(before, after);
+                        }
+                    }
+                }
+                next.vault_current = true;
+            }
+            LedgerOperation::ExitRequest {
+                deposit_id,
+                amount,
+                exit_address,
+                expires_at_height,
+                nonce,
+                expiry,
+                ..
+            } => {
+                if *amount == 0 {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "exit_amount".to_string(),
+                        details: "zero".to_string(),
+                    });
+                }
+                let ctx = apply_ctx();
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.lock(*amount)?;
+                deposit.seen_nonces.insert((*nonce, *expiry));
+                next.pending_exits.insert(
+                    ctx.hash,
+                    PendingExit {
+                        deposit_id: *deposit_id,
+                        amount: *amount,
+                        exit_address: exit_address.clone(),
+                        expires_at: *expires_at_height,
+                        block_height: ctx.height,
+                        seq: ctx.seq,
+                    },
+                );
+            }
+            LedgerOperation::ExitCancel {
+                deposit_id,
+                exit_request_id,
+                nonce,
+                expiry,
+                ..
+            } => {
+                let pending = next
+                    .pending_exits
+                    .get(exit_request_id)
+                    .filter(|e| &e.deposit_id == deposit_id)
+                    .cloned()
+                    .ok_or_else(|| crate::DepositsError::ProtocolViolation {
+                        violation_type: "exit_cancel".to_string(),
+                        details: "names no pending exit request of this deposit".to_string(),
+                    })?;
+                let deposit = next
+                    .deposits
+                    .get_mut(deposit_id)
+                    .ok_or(crate::DepositsError::DepositNotFound)?;
+                deposit.unlock(pending.amount);
+                deposit.seen_nonces.insert((*nonce, *expiry));
+                next.pending_exits.remove(exit_request_id);
             }
             LedgerOperation::DepositOpen {
                 deposit_id,
@@ -909,6 +1141,7 @@ impl LedgerState {
                 next.dispute_state = DisputeState::Armed;
             }
             LedgerOperation::DisputeAcquire { new_custodian, .. } => {
+                next.vault_current = false;
                 next.operator_key = *new_custodian;
                 next.parent_pubkey = *new_custodian;
                 next.dispute_state = DisputeState::Normal;
@@ -1371,8 +1604,14 @@ impl LedgerState {
                 details: format!("{:?}", e),
             }
         })?;
-        let (mut next, violations) =
-            self.apply_with_verifier(&op, authorizer, update.block_height)?;
+        let ctx = ApplyCtx {
+            height: update.block_height,
+            seq: update.sequence_number,
+            hash: update.chain_hash(),
+        };
+        let (mut next, violations) = with_apply_ctx(ctx, || {
+            self.apply_with_verifier(&op, authorizer, update.block_height)
+        })?;
         if let Some(v) = violations.first() {
             return Err(crate::DepositsError::ProtocolViolation {
                 violation_type: "conformance".to_string(),
@@ -1412,7 +1651,12 @@ impl LedgerState {
         authorizer: &impl crate::types::Authorizer,
         current_height: u32,
     ) -> Vec<ConformanceViolation> {
-        match self.apply(operation) {
+        let ctx = ApplyCtx {
+            height: current_height,
+            seq: self.sequence + 1,
+            hash: [0u8; 32],
+        };
+        match with_apply_ctx(ctx, || self.apply(operation)) {
             Ok(next) => next.check_conformance(operation, Some(self), authorizer, current_height),
             Err(e) => vec![ConformanceViolation::StateMachineRejected {
                 detail: format!("{:?}", e),
@@ -1554,6 +1798,18 @@ impl LedgerState {
                     Some(*nonce),
                     Some(*expiry),
                 ),
+                LedgerOperation::ExitRequest {
+                    deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => ("ExitRequest", Some(deposit_id), Some(*nonce), Some(*expiry)),
+                LedgerOperation::ExitCancel {
+                    deposit_id,
+                    nonce,
+                    expiry,
+                    ..
+                } => ("ExitCancel", Some(deposit_id), Some(*nonce), Some(*expiry)),
                 _ => ("", None, None, None),
             };
             if let (Some(deposit_id), Some(op_nonce), Some(op_expiry)) =
@@ -1770,6 +2026,22 @@ impl LedgerState {
                                     .to_string(),
                             });
                         }
+                    }
+                }
+            }
+            LedgerOperation::ExitRequest { deposit_id, .. }
+            | LedgerOperation::ExitCancel { deposit_id, .. } => {
+                // DEP-20 §3: depositor-signed like any spend (DEP-17 op `spend`, kind exit/exit_cancel).
+                if let Some(deposit) = self.deposits.get(deposit_id) {
+                    if !authorizer.authorize(&deposit.descriptor, operation) {
+                        violations.push(ConformanceViolation::InvalidWitness {
+                            operation: if matches!(operation, LedgerOperation::ExitRequest { .. }) {
+                                "ExitRequest"
+                            } else {
+                                "ExitCancel"
+                            },
+                            detail: "witness does not satisfy deposit descriptor".to_string(),
+                        });
                     }
                 }
             }

@@ -449,6 +449,8 @@ fn op_name(op: &deposits_core::messages::LedgerOperation) -> &'static str {
         Op::DepositClose { .. } => "DepositClose",
         Op::FeeChange { .. } => "FeeChange",
         Op::DepositKeyRotate { .. } => "DepositKeyRotate",
+        Op::ExitRequest { .. } => "ExitRequest",
+        Op::ExitCancel { .. } => "ExitCancel",
         Op::QuorumAddMember { .. } => "QuorumAddMember",
         Op::QuorumRemoveMember { .. } => "QuorumRemoveMember",
         Op::QuorumJoin { .. } => "QuorumJoin",

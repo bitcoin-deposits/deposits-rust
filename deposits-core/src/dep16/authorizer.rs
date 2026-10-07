@@ -182,6 +182,8 @@ fn extract_witness(op: &LedgerOperation) -> Option<&DescriptorWitness> {
         LedgerOperation::OnchainLock { witness, .. } => Some(witness),
         LedgerOperation::TransferLock { witness, .. } => Some(witness),
         LedgerOperation::DepositKeyRotate { witness, .. } => Some(witness),
+        LedgerOperation::ExitRequest { witness, .. } => Some(witness),
+        LedgerOperation::ExitCancel { witness, .. } => Some(witness),
         // TransferComplete's script_witness is the lock's release-descriptor witness;
         // the caller routes this through Authorizer against the lock's completion_script.
         LedgerOperation::TransferComplete { script_witness, .. } => Some(script_witness),

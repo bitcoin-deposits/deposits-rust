@@ -419,6 +419,36 @@ pub fn sign_op(
             expiry,
             witness,
         },
+        LedgerOperation::ExitRequest {
+            deposit_id,
+            amount,
+            exit_address,
+            expires_at_height,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::ExitRequest {
+            deposit_id,
+            amount,
+            exit_address,
+            expires_at_height,
+            nonce,
+            expiry,
+            witness,
+        },
+        LedgerOperation::ExitCancel {
+            deposit_id,
+            exit_request_id,
+            nonce,
+            expiry,
+            witness: _,
+        } => LedgerOperation::ExitCancel {
+            deposit_id,
+            exit_request_id,
+            nonce,
+            expiry,
+            witness,
+        },
         LedgerOperation::TransferComplete { transfer_id, .. } => {
             LedgerOperation::TransferComplete {
                 transfer_id,

@@ -1819,6 +1819,15 @@ fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> 
             None,
             "depositor key rotated".to_string(),
         ),
+        L::ExitRequest { amount, .. } => row(
+            "ExitRequest",
+            None,
+            format!(
+                "exit of {} msat requested (locked until the next rotation)",
+                amount
+            ),
+        ),
+        L::ExitCancel { .. } => row("ExitCancel", None, "exit request cancelled".to_string()),
 
         L::OnchainLock {
             amount,
@@ -2761,4 +2770,148 @@ pub async fn bridge_pay(args: &[String]) -> Result<(), Box<dyn std::error::Error
     println!("Bridge pay complete: invoice paid via '{}'", alias);
     println!("  proof of payment (preimage): {}", hex::encode(proof));
     Ok(())
+}
+
+/// DEP-20 §3: `exit <alias> <amount_sats> --to <address> [--expires <height>]` requests an
+/// on-chain exit at the next rotation; `exit <alias> --cancel <request_id>` withdraws one.
+pub async fn exit(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+    use deposits_core::tlv::TlvEncode;
+
+    let mut alias: Option<String> = None;
+    let mut amount_sats: Option<u64> = None;
+    let mut destination: Option<String> = None;
+    let mut expires: Option<u32> = None;
+    let mut cancel: Option<String> = None;
+    let mut config_args = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--to" if i + 1 < args.len() => {
+                destination = Some(args[i + 1].clone());
+                i += 1;
+            }
+            "--expires" if i + 1 < args.len() => {
+                expires = Some(args[i + 1].parse()?);
+                i += 1;
+            }
+            "--cancel" if i + 1 < args.len() => {
+                cancel = Some(args[i + 1].clone());
+                i += 1;
+            }
+            s if s.starts_with("--") => {
+                config_args.push(args[i].clone());
+                if i + 1 < args.len() && !args[i + 1].starts_with("--") {
+                    config_args.push(args[i + 1].clone());
+                    i += 1;
+                }
+            }
+            _ => {
+                if alias.is_none() {
+                    alias = Some(args[i].clone());
+                } else if amount_sats.is_none() {
+                    amount_sats = Some(args[i].parse()?);
+                }
+            }
+        }
+        i += 1;
+    }
+    let usage = "Usage: deposits-wallet exit <alias> <amount_sats> --to <address> [--expires <height>] | exit <alias> --cancel <request_id>";
+    let alias = alias.ok_or(usage)?;
+    let config = parse_config(&config_args)?;
+    if config.relays.is_empty() {
+        return Err("No relay specified. Use --relay <url>".into());
+    }
+    let deposits_file = config.data_dir.join("deposits.json");
+    let deposits: Vec<serde_json::Value> =
+        serde_json::from_str(&std::fs::read_to_string(&deposits_file)?)?;
+    let deposit = deposits
+        .iter()
+        .find(|d| d.get("alias").and_then(|v| v.as_str()) == Some(&alias))
+        .ok_or_else(|| format!("No deposit found with alias '{}'", alias))?;
+    let ledger_id = deposit
+        .get("ledger_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Invalid deposit record: missing ledger_id")?;
+    let key_index = deposit
+        .get("key_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as u32;
+    let secret_key = derive_secret_key_at_index(&config.seed, config.network, key_index)?;
+    let secp = Secp256k1::new();
+    let pubkey = bitcoin::secp256k1::Keypair::from_secret_key(&secp, &secret_key).public_key();
+    let deposit_id = deposits_core::types::compute_deposit_id(&format!(
+        "pk({})",
+        hex::encode(pubkey.serialize())
+    ));
+
+    let nonce = deposits_core::signing::fresh_op_nonce();
+    let expiry = u32::MAX;
+    let witness = deposits_core::types::DescriptorWitness::new();
+    let (action, proto) = if let Some(id_hex) = &cancel {
+        let bytes = hex::decode(id_hex)?;
+        let exit_request_id: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "request id must be 64 hex chars")?;
+        (
+            "exit_cancel",
+            deposits_core::messages::LedgerOperation::ExitCancel {
+                deposit_id,
+                exit_request_id,
+                nonce,
+                expiry,
+                witness,
+            },
+        )
+    } else {
+        let amount_sats = amount_sats.ok_or(usage)?;
+        let address = destination.ok_or(usage)?;
+        let spk = address
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()?
+            .require_network(config.network)?
+            .script_pubkey();
+        (
+            "exit_request",
+            deposits_core::messages::LedgerOperation::ExitRequest {
+                deposit_id,
+                amount: amount_sats * 1000,
+                exit_address: spk.to_bytes(),
+                expires_at_height: expires,
+                nonce,
+                expiry,
+                witness,
+            },
+        )
+    };
+    let signed = deposits_core::signing::sign_op(proto, &secret_key)
+        .ok_or("sign_op failed: unsignable variant")?;
+    let transport = NostrTransportBuilder::new(config.nostr_key()?)
+        .relay(&config.relays[0])
+        .build()
+        .await?;
+    transport.set_response_ledger_filter(vec![ledger_id.to_string()]);
+    let request_id = transport
+        .send_ledger_request(
+            ledger_id,
+            action,
+            serde_json::json!({ "operation": BASE64.encode(signed.tlv_encode()) }),
+        )
+        .await?;
+    match transport.wait_for_response(&request_id, 10000).await {
+        Ok(r) if r.success => {
+            println!(
+                "{} accepted: {}",
+                action,
+                r.result.map(|v| v.to_string()).unwrap_or_default()
+            );
+            Ok(())
+        }
+        Ok(r) => Err(format!(
+            "{} failed: {}",
+            action,
+            r.error.as_deref().unwrap_or("unknown")
+        )
+        .into()),
+        Err(e) => Err(format!("Timeout waiting for operator response: {}", e).into()),
+    }
 }

@@ -1287,6 +1287,33 @@ impl Node {
             );
         }
 
+        // DEP-20 §3: the exits due under the operator's cutoff, which must sit within
+        // the margin below our height (absent: height − margin).
+        let exit_extras = {
+            let h = self.wallet.get_block_height().unwrap_or(0);
+            let margin = deposits_core::types::EXIT_CUTOFF_MARGIN_BLOCKS;
+            let cutoff = request
+                .params
+                .get("exit_cutoff_height")
+                .and_then(|v| v.as_u64())
+                .map(|c| c as u32);
+            if let Some(c) = cutoff {
+                if c > h || c < h.saturating_sub(margin) {
+                    return (
+                        false,
+                        None,
+                        Some(format!(
+                            "exit_cutoff_height {} outside [{}, {}]",
+                            c,
+                            h.saturating_sub(margin),
+                            h
+                        )),
+                    );
+                }
+            }
+            let ledger = ledger_arc.read().unwrap();
+            deposits_core::rotation_order::due_exit_outputs(&ledger.state, h, cutoff)
+        };
         // DEP-03 §"Rotation transaction": rebuild it and sign only an identical one
         // (shape and fee are rules, not the proposer's choice).
         let expected_tx = deposits_core::tapscript_reserves::build_rotation_tx(
@@ -1299,7 +1326,7 @@ impl Node {
                 lock_time: chosen_tier.timelock_blocks,
                 new_vault_spk: expected_new.script_pubkey(),
                 splice_in: None,
-                extra_outputs: Vec::new(),
+                extra_outputs: exit_extras,
             },
         );
         if expected_tx.as_ref() != Some(&proposed_tx) {

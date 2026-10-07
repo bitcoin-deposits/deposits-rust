@@ -300,6 +300,8 @@ mod tests {
             update(
                 1,
                 &LedgerOperation::QuorumBegin {
+                    exit_cutoff_height: None,
+                    exit_outputs: Vec::new(),
                     reserves_id: String::new(),
                     spending_txid: rotation_txid,
                     new_outpoint_txid: sha(&[0xf0, 0x0d]),
@@ -508,6 +510,8 @@ mod tests {
         let (_, spend) = cl_theft();
         let txid = spend.tx.compute_txid().to_byte_array();
         let qb = |new_txid: [u8; 32]| LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "bc1p5cyxnuxmeuwuvkwfem96lqzszd02n6xdcjrs20cac6yqjjwudpxqkedrcr".into(),
             spending_txid: new_txid,
             new_outpoint_txid: new_txid,
@@ -520,11 +524,19 @@ mod tests {
             protocol_version: Some("cltv-offset-v2".into()),
         };
         let net = bitcoin::Network::Bitcoin;
-        assert!(verify_rotation_tx(&h, &qb([7; 32]), &spend.tx, net)
+        let st = deposits_core::types::LedgerState::new(
+            bitcoin::secp256k1::PublicKey::from_secret_key(
+                &bitcoin::secp256k1::Secp256k1::new(),
+                &bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap(),
+            ),
+            String::new(),
+            0,
+        );
+        assert!(verify_rotation_tx(&h, &st, 0, &qb([7; 32]), &spend.tx, net)
             .unwrap_err()
             .contains("new outpoint"));
         // A validly signed spend of the vault that is not the DEP-03 rotation.
-        let e = verify_rotation_tx(&h, &qb(txid), &spend.tx, net).unwrap_err();
+        let e = verify_rotation_tx(&h, &st, 0, &qb(txid), &spend.tx, net).unwrap_err();
         assert!(e.contains("differs from the DEP-03 rotation"), "{e}");
     }
 

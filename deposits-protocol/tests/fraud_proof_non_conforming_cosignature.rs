@@ -121,6 +121,8 @@ fn prefix() -> Vec<SignedLedgerUpdate> {
             collateral_amount: COLLATERAL,
         },
         LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "bcrt1qreserves".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [1; 32],

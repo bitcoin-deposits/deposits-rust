@@ -331,6 +331,8 @@ impl Operator {
             .min()
             .unwrap_or(900_000);
         let op = LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: format!("{}_rotated", self.ledger.state.reserves_key),
             spending_txid: [0x11; 32],
             new_outpoint_txid: [0x22; 32],

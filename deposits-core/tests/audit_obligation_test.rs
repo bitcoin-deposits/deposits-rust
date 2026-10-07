@@ -57,6 +57,8 @@ fn quorum_begin_stores_quorum_expiry() {
 
     ledger
         .apply_state_changes(&LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "tb1qtest_taproot".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -79,6 +81,8 @@ fn quorum_begin_updates_reserves_key_and_amount() {
 
     ledger
         .apply_state_changes(&LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "tb1p_new_taproot_addr".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -103,6 +107,8 @@ fn quorum_begin_overwrites_previous_values() {
     // First QuorumBegin
     ledger
         .apply_state_changes(&LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "tb1p_first".to_string(),
             spending_txid: [0u8; 32],
             new_outpoint_txid: [0u8; 32],
@@ -121,6 +127,8 @@ fn quorum_begin_overwrites_previous_values() {
     // Second QuorumBegin overwrites
     ledger
         .apply_state_changes(&LedgerOperation::QuorumBegin {
+            exit_cutoff_height: None,
+            exit_outputs: Vec::new(),
             reserves_id: "tb1p_second".to_string(),
             spending_txid: [1u8; 32],
             new_outpoint_txid: [1u8; 32],

@@ -395,6 +395,12 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::DepositKeyRotate { deposit_id, .. } => {
             ("DepositKeyRotate".to_string(), Some(*deposit_id))
         }
+        LedgerOperation::ExitRequest { deposit_id, .. } => {
+            ("ExitRequest".to_string(), Some(*deposit_id))
+        }
+        LedgerOperation::ExitCancel { deposit_id, .. } => {
+            ("ExitCancel".to_string(), Some(*deposit_id))
+        }
         LedgerOperation::TransferLock {
             source_deposit_id, ..
         } => ("TransferLock".to_string(), Some(*source_deposit_id)),

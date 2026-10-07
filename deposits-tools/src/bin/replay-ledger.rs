@@ -197,6 +197,18 @@ fn format_op(op: &LedgerOperation) -> String {
             format_msats(new_fees.annualized_msats),
             effective_block
         ),
+        LedgerOperation::ExitRequest {
+            deposit_id, amount, ..
+        } => {
+            format!(
+                "ExitRequest  id={} amount={}",
+                short_deposit_id(deposit_id),
+                amount
+            )
+        }
+        LedgerOperation::ExitCancel { deposit_id, .. } => {
+            format!("ExitCancel  id={}", short_deposit_id(deposit_id))
+        }
         LedgerOperation::DepositKeyRotate {
             deposit_id,
             new_descriptor,
@@ -1482,6 +1494,8 @@ fn discriminant_name(disc: u8) -> &'static str {
         21 => "DepositClose",
         22 => "FeeChange",
         23 => "DepositKeyRotate",
+        100 => "ExitRequest",
+        101 => "ExitCancel",
         30 => "InvoiceCredit",
         31 => "InvoiceLock",
         32 => "InvoiceFail",

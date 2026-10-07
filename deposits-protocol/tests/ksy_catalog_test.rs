@@ -752,6 +752,8 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         (
             "QuorumBegin",
             LedgerOperation::QuorumBegin {
+                exit_cutoff_height: None,
+                exit_outputs: Vec::new(),
                 reserves_id: "bcrt1qtest".into(),
                 spending_txid: h32(),
                 new_outpoint_txid: h32(),

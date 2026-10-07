@@ -417,6 +417,8 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DepositClose { .. } => "DepositClose",
         LedgerOperation::FeeChange { .. } => "FeeChange",
         LedgerOperation::DepositKeyRotate { .. } => "DepositKeyRotate",
+        LedgerOperation::ExitRequest { .. } => "ExitRequest",
+        LedgerOperation::ExitCancel { .. } => "ExitCancel",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFail { .. } => "InvoiceFail",
