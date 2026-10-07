@@ -1716,37 +1716,40 @@ impl Node {
             .require_network(self.wallet.network())
             .map_err(|e| Error::Protocol(format!("Address network mismatch: {}", e)))?;
 
-        // Build claim transaction
-        let claim_fee = 400u64;
-        let output_amount = lottery_amount.saturating_sub(claim_fee);
-
-        let claim_tx = Transaction {
-            version: bitcoin::transaction::Version::TWO,
-            lock_time: bitcoin::absolute::LockTime::ZERO,
-            input: vec![TxIn {
-                previous_output: lottery_outpoint,
-                script_sig: ScriptBuf::new(),
-                // A subset leaf opens LOTTERY_REVEAL_CSV_BLOCKS after the confiscation.
-                sequence: if subset.is_some() {
-                    bitcoin::Sequence::from_height(
-                        deposits_core::tapscript_reserves::LOTTERY_REVEAL_CSV_BLOCKS as u16,
-                    )
-                } else {
-                    bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME
-                },
-                witness: Witness::new(),
-            }],
-            output: vec![TxOut {
-                value: Amount::from_sat(output_amount),
-                script_pubkey: target_address.script_pubkey(),
-            }],
+        // The claim (DEP-03): the lottery output plus our declared replacement
+        // collateral (a P2WPKH of our key), less claim_fee_floor.
+        let our_compressed = bitcoin::CompressedPublicKey::from_slice(&our_pubkey.serialize())
+            .map_err(|e| Error::Protocol(format!("Invalid pubkey: {}", e)))?;
+        let collateral_spk =
+            bitcoin::Address::p2wpkh(&our_compressed, self.wallet.network()).script_pubkey();
+        let collateral = match LedgerOperation::tlv_decode(&our_armed.message) {
+            Ok(LedgerOperation::DisputeArmed {
+                replacement_collateral: Some(rc),
+                ..
+            }) => Some((
+                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout),
+                rc.amount,
+            )),
+            _ => None,
         };
-
-        // Compute sighash
-        let prevouts = vec![TxOut {
+        let claim_tx = deposits_core::tapscript_reserves::build_lottery_claim_tx(
+            lottery_outpoint,
+            lottery_amount,
+            collateral,
+            target_address.script_pubkey(),
+            deposits_core::tapscript_reserves::CLAIM_FEE_FLOOR_SATS,
+            subset.is_some(),
+        );
+        let mut prevouts = vec![TxOut {
             value: Amount::from_sat(lottery_amount),
             script_pubkey: lottery_script.clone(),
         }];
+        if let Some((_, sats)) = collateral {
+            prevouts.push(TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: collateral_spk.clone(),
+            });
+        }
 
         let leaf = match subset {
             Some(idx) => lottery_output
@@ -1805,6 +1808,31 @@ impl Node {
 
         let mut claim_tx = claim_tx;
         claim_tx.input[0].witness = witness;
+        if let Some((_, sats)) = collateral {
+            use bitcoin::sighash::EcdsaSighashType;
+            let rc_sighash = SighashCache::new(&claim_tx)
+                .p2wpkh_signature_hash(
+                    1,
+                    &collateral_spk,
+                    Amount::from_sat(sats),
+                    EcdsaSighashType::All,
+                )
+                .map_err(|e| Error::Protocol(format!("collateral sighash: {}", e)))?;
+            let rc_sig = self
+                .handler
+                .signer
+                .ecdsa_sign_sighash(
+                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                    rc_sighash.as_ref(),
+                )
+                .map_err(|e| Error::Protocol(format!("collateral sighash sign: {}", e)))?;
+            let mut der = rc_sig.serialize_der().to_vec();
+            der.push(EcdsaSighashType::All as u8);
+            let mut w = Witness::new();
+            w.push(&der);
+            w.push(our_pubkey.serialize());
+            claim_tx.input[1].witness = w;
+        }
 
         // Broadcast
         tracing::info!("Broadcasting claim transaction...");

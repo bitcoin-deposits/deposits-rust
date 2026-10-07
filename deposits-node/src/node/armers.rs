@@ -19,7 +19,7 @@ use crate::chain_backend::{ChainBackend, ConfirmedSpend};
 
 /// DEP-03 `claim_fee_floor` when the governing `QuorumBegin` records no
 /// reference feerate (this implementation never records one).
-pub const CLAIM_FEE_FLOOR_SATS: u64 = 5_000;
+pub use deposits_core::tapscript_reserves::CLAIM_FEE_FLOOR_SATS;
 
 /// Arms that count per armer: the first arm and up to three re-arms. Later
 /// arms are ignored, so a griefer cannot keep moving E (DEP-03).

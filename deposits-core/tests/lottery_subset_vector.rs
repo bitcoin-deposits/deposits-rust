@@ -95,6 +95,39 @@ fn render() -> String {
             hex::encode(LotteryOutput::derive_lottery_preimage(&seed))
         ));
     }
+    // The unsigned claim (DEP-03): lottery [0x22;32]:0 of 1_000_000, collateral
+    // [0x33;32]:1 of 600_000, paying a key-path script of participant 1.
+    {
+        use deposits_core::tapscript_reserves::{build_lottery_claim_tx, CLAIM_FEE_FLOOR_SATS};
+        let op = |b: u8, v: u32| {
+            bitcoin::OutPoint::new(
+                bitcoin::Txid::from_raw_hash(Hash::from_byte_array([b; 32])),
+                v,
+            )
+        };
+        let dest = bitcoin::ScriptBuf::from_bytes(
+            [&[0x51u8, 0x20][..], &xonly(1).serialize()[..]].concat(),
+        );
+        for (name, subset, coll) in [
+            ("claim_full", false, Some((op(0x33, 1), 600_000u64))),
+            ("claim_subset", true, Some((op(0x33, 1), 600_000u64))),
+            ("claim_sole_no_collateral", false, None),
+        ] {
+            let tx = build_lottery_claim_tx(
+                op(0x22, 0),
+                1_000_000,
+                coll,
+                dest.clone(),
+                CLAIM_FEE_FLOOR_SATS,
+                subset,
+            );
+            lines.push(format!(
+                "VEC {}={}",
+                name,
+                hex::encode(bitcoin::consensus::encode::serialize(&tx))
+            ));
+        }
+    }
     let share =
         build_armer_share_output(&xonly(1), &[1u8; 20], &voters, 2, Network::Signet).unwrap();
     lines.push(format!("VEC armer_share={}", share.address));

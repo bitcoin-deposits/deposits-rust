@@ -796,6 +796,54 @@ pub fn confiscation_fee_sats(voters: usize, feerate_sat_vb: u64) -> u64 {
     feerate_sat_vb.saturating_mul(120 + 30 * voters as u64)
 }
 
+/// DEP-03 `claim_fee_floor` with no `reference_feerate_sat_vb` recorded: the lottery
+/// claim's fee, and the padding every replacement-collateral declaration must cover.
+pub const CLAIM_FEE_FLOOR_SATS: u64 = 5_000;
+
+/// The unsigned lottery claim (DEP-03 §"Claim transaction"): input 0 the lottery
+/// output (nSequence `LOTTERY_REVEAL_CSV_BLOCKS` for a revealer-subset leaf, else
+/// `0xfffffffd`), input 1 the winner's declared replacement collateral at its declared
+/// value (`0xfffffffd`), one output to the winner's target of the inputs less `fee`.
+pub fn build_lottery_claim_tx(
+    lottery: bitcoin::OutPoint,
+    lottery_sats: u64,
+    collateral: Option<(bitcoin::OutPoint, u64)>,
+    destination: ScriptBuf,
+    fee: u64,
+    subset_leaf: bool,
+) -> bitcoin::Transaction {
+    use bitcoin::{Sequence, TxIn, Witness};
+    let mut input = vec![TxIn {
+        previous_output: lottery,
+        script_sig: ScriptBuf::new(),
+        sequence: if subset_leaf {
+            Sequence::from_height(LOTTERY_REVEAL_CSV_BLOCKS as u16)
+        } else {
+            Sequence::ENABLE_RBF_NO_LOCKTIME
+        },
+        witness: Witness::new(),
+    }];
+    let mut total = lottery_sats;
+    if let Some((outpoint, sats)) = collateral {
+        input.push(TxIn {
+            previous_output: outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        });
+        total += sats;
+    }
+    bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input,
+        output: vec![TxOut {
+            value: Amount::from_sat(total.saturating_sub(fee)),
+            script_pubkey: destination,
+        }],
+    }
+}
+
 /// Contributions are `LEN(preimage) - 16` in `1..=60`: uniform mod every
 /// `m` in `1..=6` (60 = lcm(1..6)); for `m = 7` residues 1-4 occur 9/60 and
 /// the rest 8/60 (DEP-06 §"Influence and bias").

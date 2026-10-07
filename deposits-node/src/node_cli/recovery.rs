@@ -4923,73 +4923,45 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     // strict cosigners expect (DEP-03 §"Claim transaction (multi-input)").
     use bitcoin::{Amount, OutPoint, ScriptBuf, TxIn, TxOut, Witness};
 
-    // Fee budget: 400 sats for single-input parity; 1200 sats for the
-    // multi-input case (~3× the bytes due to the second input + ECDSA
-    // witness). Both are well under the cosigner policy default of 5000.
-    let (claim_fee, mut tx_inputs, mut prevouts, replacement_collateral_input) = if let Some(rc) =
-        our_replacement_collateral
-    {
-        let rc_txid = bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid));
-        let rc_outpoint = OutPoint::new(rc_txid, rc.vout);
-        // Operator-key controlled wpkh — see RC4 design note in
-        // recovery.rs: the disputant declares a UTXO at their
-        // operator pubkey's P2WPKH address. RC6 will tighten arm-time
-        // construction to enforce that placement.
-        let our_compressed = bitcoin::CompressedPublicKey::from_slice(&our_pubkey.serialize())
-            .map_err(|e| format!("Compressed pubkey: {}", e))?;
-        let rc_script = bitcoin::Address::p2wpkh(&our_compressed, config.network).script_pubkey();
-        let prevs = vec![
-            TxOut {
-                value: Amount::from_sat(lottery_amount),
-                script_pubkey: lottery_script.clone(),
-            },
-            TxOut {
-                value: Amount::from_sat(rc.amount),
-                script_pubkey: rc_script.clone(),
-            },
-        ];
-        let inputs = vec![
-            TxIn {
-                previous_output: lottery_outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            },
-            TxIn {
-                previous_output: rc_outpoint,
-                script_sig: ScriptBuf::new(),
-                sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                witness: Witness::new(),
-            },
-        ];
-        (1200u64, inputs, prevs, Some((rc, rc_script)))
-    } else {
-        let prevs = vec![TxOut {
-            value: Amount::from_sat(lottery_amount),
-            script_pubkey: lottery_script.clone(),
-        }];
-        let inputs = vec![TxIn {
-            previous_output: lottery_outpoint,
-            script_sig: ScriptBuf::new(),
-            sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-            witness: Witness::new(),
-        }];
-        (400u64, inputs, prevs, None)
+    // DEP-03 §"Claim transaction": lottery output plus the declared replacement
+    // collateral (operator-key P2WPKH), less claim_fee_floor.
+    let replacement_collateral_input = match our_replacement_collateral {
+        Some(rc) => {
+            let our_compressed = bitcoin::CompressedPublicKey::from_slice(&our_pubkey.serialize())
+                .map_err(|e| format!("Compressed pubkey: {}", e))?;
+            let rc_script =
+                bitcoin::Address::p2wpkh(&our_compressed, config.network).script_pubkey();
+            Some((rc, rc_script))
+        }
+        None => None,
     };
-    let _ = (&mut tx_inputs, &mut prevouts);
-
-    let total_input_value: u64 = prevouts.iter().map(|o| o.value.to_sat()).sum();
-    let output_amount = total_input_value.saturating_sub(claim_fee);
-
-    let claim_tx = bitcoin::Transaction {
-        version: bitcoin::transaction::Version::TWO,
-        lock_time: bitcoin::absolute::LockTime::ZERO,
-        input: tx_inputs,
-        output: vec![TxOut {
-            value: Amount::from_sat(output_amount),
-            script_pubkey: target_address.script_pubkey(),
-        }],
-    };
+    let collateral = replacement_collateral_input.as_ref().map(|(rc, _)| {
+        (
+            OutPoint::new(
+                bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(rc.txid)),
+                rc.vout,
+            ),
+            rc.amount,
+        )
+    });
+    let mut prevouts = vec![TxOut {
+        value: Amount::from_sat(lottery_amount),
+        script_pubkey: lottery_script.clone(),
+    }];
+    if let Some((rc, rc_script)) = &replacement_collateral_input {
+        prevouts.push(TxOut {
+            value: Amount::from_sat(rc.amount),
+            script_pubkey: rc_script.clone(),
+        });
+    }
+    let claim_tx = deposits_core::tapscript_reserves::build_lottery_claim_tx(
+        lottery_outpoint,
+        lottery_amount,
+        collateral,
+        target_address.script_pubkey(),
+        deposits_core::tapscript_reserves::CLAIM_FEE_FLOOR_SATS,
+        false,
+    );
 
     // Compute sighashes. Lottery input (index 0) uses Taproot script-spend;
     // replacement collateral input (index 1, if present) uses BIP143 wpkh.
@@ -5094,7 +5066,8 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
     println!("  Txid: {}", claim_txid);
     println!(
         "  Output: {} sats to {}",
-        output_amount, winner_participant.target_reserves
+        claim_tx.output[0].value.to_sat(),
+        winner_participant.target_reserves
     );
 
     // Publish DisputeAcquire to Nostr
