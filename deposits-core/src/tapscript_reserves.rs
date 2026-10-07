@@ -796,6 +796,79 @@ pub fn confiscation_fee_sats(voters: usize, feerate_sat_vb: u64) -> u64 {
     feerate_sat_vb.saturating_mul(120 + 30 * voters as u64)
 }
 
+/// DEP-03 §"Rotation transaction": the deterministic vsize bound from its outputs,
+/// `46 + 30 × voters + Σ (9 + len(spk)) + 68 × [splice-in]`.
+pub fn rotation_vsize(voters: usize, output_spk_lens: &[usize], splice_in: bool) -> u64 {
+    46 + 30 * voters as u64
+        + output_spk_lens.iter().map(|l| 9 + *l as u64).sum::<u64>()
+        + if splice_in { 68 } else { 0 }
+}
+
+/// The inputs DEP-03 §"Rotation transaction" fixes the rotation from.
+#[derive(Clone, Debug)]
+pub struct RotationTxParams {
+    pub vault: bitcoin::OutPoint,
+    pub vault_sats: u64,
+    /// Keys of the vault being spent (members and operator).
+    pub voters: usize,
+    pub feerate_sat_vb: u64,
+    /// The spending tier's CLTV (0 at Tier 0).
+    pub lock_time: u32,
+    pub new_vault_spk: ScriptBuf,
+    pub splice_in: Option<(bitcoin::OutPoint, u64)>,
+    /// Exit outputs in recorded order, then the migration output, as (spk, sats).
+    pub extra_outputs: Vec<(ScriptBuf, u64)>,
+}
+
+/// The unsigned rotation (DEP-03 §"Rotation transaction"): version 2, nLockTime the
+/// tier's CLTV, input 0 the vault and input 1 the splice-in (both `0xfffffffd`),
+/// output 0 the new vault, then the exit and migration outputs. `None` if the new
+/// vault would fall below 330 sats.
+pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
+    use bitcoin::{
+        absolute::LockTime, transaction::Version, Amount, Sequence, TxIn, TxOut, Witness,
+    };
+    let mut input = vec![TxIn {
+        previous_output: p.vault,
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+        witness: Witness::new(),
+    }];
+    if let Some((outpoint, _)) = p.splice_in {
+        input.push(TxIn {
+            previous_output: outpoint,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        });
+    }
+    let mut lens = vec![p.new_vault_spk.len()];
+    lens.extend(p.extra_outputs.iter().map(|(spk, _)| spk.len()));
+    let fee =
+        p.feerate_sat_vb
+            .saturating_mul(rotation_vsize(p.voters, &lens, p.splice_in.is_some()));
+    let paid_out: u64 = p.extra_outputs.iter().map(|(_, v)| *v).sum();
+    let total = p.vault_sats + p.splice_in.map(|(_, v)| v).unwrap_or(0);
+    let new_vault = total.checked_sub(paid_out)?.checked_sub(fee)?;
+    if new_vault < 330 {
+        return None;
+    }
+    let mut output = vec![TxOut {
+        value: Amount::from_sat(new_vault),
+        script_pubkey: p.new_vault_spk.clone(),
+    }];
+    output.extend(p.extra_outputs.iter().map(|(spk, v)| TxOut {
+        value: Amount::from_sat(*v),
+        script_pubkey: spk.clone(),
+    }));
+    Some(bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::from_consensus(p.lock_time),
+        input,
+        output,
+    })
+}
+
 /// DEP-03 `claim_fee_floor` with no `reference_feerate_sat_vb` recorded: the lottery
 /// claim's fee, and the padding every replacement-collateral declaration must cover.
 pub const CLAIM_FEE_FLOOR_SATS: u64 = 5_000;

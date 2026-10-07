@@ -112,14 +112,20 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+                // DEP-05 §"Deposed operator" (an expiry dispute does not freeze).
+                if let Some(why) = crate::node::cosign_policy::refusal_for(
+                    &ledgers,
+                    &request.ledger_id,
+                    &ledger,
+                    &self.node_id_hex,
+                ) {
                     return (
                         false,
                         None,
                         Some(format!(
-                            "Ledger {}... in dispute state {:?}",
+                            "Ledger {}... deposed: {}",
                             &request.ledger_id[..16.min(request.ledger_id.len())],
-                            ledger.state.dispute_state
+                            why
                         )),
                     );
                 }
@@ -868,18 +874,22 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             if let Some(ledger_arc) = ledgers.get(&request.ledger_id) {
                 let ledger = ledger_arc.read().unwrap();
-                if ledger.state.dispute_state != deposits_core::types::DisputeState::Normal {
+                if let Some(why) = crate::node::cosign_policy::refusal_for(
+                    &ledgers,
+                    &request.ledger_id,
+                    &ledger,
+                    &self.node_id_hex,
+                ) {
                     tracing::warn!(
-                        "Refusing to cosign offer for ledger {} - dispute state: {:?}",
+                        "Refusing to cosign offer for ledger {} - deposed: {}",
                         &request.ledger_id[..16.min(request.ledger_id.len())],
-                        ledger.state.dispute_state
+                        why
                     );
                     return (
                         false,
                         None,
                         Some(format!(
-                            "Ledger is in {:?} state - cannot co-sign offers",
-                            ledger.state.dispute_state
+                            "Ledger operator is deposed ({why}) - cannot co-sign offers"
                         )),
                     );
                 }

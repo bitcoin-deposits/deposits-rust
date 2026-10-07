@@ -624,6 +624,7 @@ impl Node {
 pub mod armers;
 pub mod auto_tasks;
 pub mod coordination;
+pub mod cosign_policy;
 pub mod dereliction;
 pub mod dispute;
 pub mod expiry_watch;

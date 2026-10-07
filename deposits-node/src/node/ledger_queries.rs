@@ -1421,20 +1421,23 @@ impl Node {
         let tier_lock_time = tier.timelock_blocks;
         let operator_alone = tier.threshold == 1 && tier.requires_tie_breaker;
 
-        // Build the deterministic rotation TX (1 input → 1 output).
-        // lock_time matches the tier's CLTV target (0 for Tier 0).
-        let params = SpendTxParams {
-            reserves_outpoint: existing.outpoint,
-            reserves_amount: existing.amount,
-            destination_script: new_script_pubkey.clone(),
-            splits: Vec::new(),
-            fee_rate_sat_vbyte: 5,
-            lock_time: tier_lock_time,
-        };
+        // DEP-03 §"Rotation transaction": the deterministic rotation every
+        // cosigner rebuilds byte for byte (no DEP-20 exits recorded yet).
         let prev_script_pubkey = existing.taproot_output.script_pubkey();
-        let rotation_tx =
-            ReservesSpendBuilder::build_spend_transaction(&params, &prev_script_pubkey)
-                .map_err(|e| Error::Wallet(format!("build rotation tx: {:?}", e)))?;
+        let rotation_tx = deposits_core::tapscript_reserves::build_rotation_tx(
+            &deposits_core::tapscript_reserves::RotationTxParams {
+                vault: existing.outpoint,
+                vault_sats: existing.amount,
+                voters: cur_voter_set.all_voters().len(),
+                feerate_sat_vb:
+                    deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+                lock_time: tier_lock_time,
+                new_vault_spk: new_script_pubkey.clone(),
+                splice_in: None,
+                extra_outputs: Vec::new(),
+            },
+        )
+        .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".to_string()))?;
         let new_amount = rotation_tx.output[0].value.to_sat();
         let new_txid = rotation_tx.compute_txid();
 

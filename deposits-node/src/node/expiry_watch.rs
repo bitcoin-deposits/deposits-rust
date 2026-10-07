@@ -79,7 +79,7 @@ pub(crate) fn expiry_dispute_stands_down(
 }
 
 /// The `reason` of the `DisputeEnter` on a fork branch, if it holds one.
-fn dispute_enter_reason(history: &[SignedLedgerUpdate]) -> Option<String> {
+pub(crate) fn dispute_enter_reason(history: &[SignedLedgerUpdate]) -> Option<String> {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::TlvDecode;
     history

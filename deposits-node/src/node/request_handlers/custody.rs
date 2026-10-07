@@ -976,7 +976,19 @@ impl Node {
         let ledger_arc = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             match ledgers.get(&request.ledger_id) {
-                Some(arc) => arc.clone(),
+                Some(arc) => {
+                    // DEP-05 §"Deposed operator" (an expiry dispute does not freeze).
+                    let refusal = crate::node::cosign_policy::refusal_for(
+                        &ledgers,
+                        &request.ledger_id,
+                        &arc.read().unwrap(),
+                        &self.node_id_hex,
+                    );
+                    if let Some(why) = refusal {
+                        return (false, None, Some(format!("operator deposed: {why}")));
+                    }
+                    arc.clone()
+                }
                 None => {
                     return (
                         false,
@@ -1171,30 +1183,6 @@ impl Node {
                 ),
             );
         }
-        let proposed_value = proposed_tx.output[0].value.to_sat();
-        if proposed_value > reserves_amount {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "output value {} > reserves amount {}",
-                    proposed_value, reserves_amount
-                )),
-            );
-        }
-        let fee_paid = reserves_amount - proposed_value;
-        const MAX_ROTATION_FEE_SATS: u64 = 100_000;
-        if fee_paid > MAX_ROTATION_FEE_SATS {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "rotation fee {} sats exceeds ceiling {}",
-                    fee_paid, MAX_ROTATION_FEE_SATS
-                )),
-            );
-        }
-
         // Build the *current* Taproot output → get its tier-0 leaf for
         // sighash recomputation. Tier-0 is the "majority immediate" leaf
         // (no timelock); rotations always use it. Uses *our* state for
@@ -1299,6 +1287,29 @@ impl Node {
             );
         }
 
+        // DEP-03 §"Rotation transaction": rebuild it and sign only an identical one
+        // (shape and fee are rules, not the proposer's choice).
+        let expected_tx = deposits_core::tapscript_reserves::build_rotation_tx(
+            &deposits_core::tapscript_reserves::RotationTxParams {
+                vault: reserves_outpoint,
+                vault_sats: reserves_amount,
+                voters: current_output.voter_set.all_voters().len(),
+                feerate_sat_vb:
+                    deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+                lock_time: chosen_tier.timelock_blocks,
+                new_vault_spk: expected_new.script_pubkey(),
+                splice_in: None,
+                extra_outputs: Vec::new(),
+            },
+        );
+        if expected_tx.as_ref() != Some(&proposed_tx) {
+            return (
+                false,
+                None,
+                Some("rotation tx differs from the DEP-03 rotation we build".to_string()),
+            );
+        }
+
         let signature_bytes = match self.handler.signer.bip340_sign(
             &SignContext::no_ledger(SigPurpose::OnchainSighash),
             &sighash_bytes,
@@ -1316,7 +1327,13 @@ impl Node {
         tracing::info!(
             "[rotation_sign] signed for ledger {}, fee={}sats",
             ledger_prefix,
-            fee_paid
+            reserves_amount.saturating_sub(
+                proposed_tx
+                    .output
+                    .iter()
+                    .map(|o| o.value.to_sat())
+                    .sum::<u64>()
+            )
         );
         (true, Some(result.to_string()), None)
     }
