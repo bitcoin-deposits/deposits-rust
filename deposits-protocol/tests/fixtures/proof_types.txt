@@ -1,0 +1,11 @@
+# DEP-06 proof_type_byte: the wire discriminant per proof type (shared cl-deposits / deposits-rust vector)
+1 UncreditedOnchainPayment
+2 UncreditedLightningPayment
+3 StaleCosignature
+4 DisputeDereliction
+5 NonConformingUpdate
+6 QuorumExpired
+7 WinnerCollateralDeviation
+8 Equivocation
+9 NonConformingCosignature
+10 UnauthorizedVaultSpend

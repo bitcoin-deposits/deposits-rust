@@ -3186,3 +3186,18 @@ mod cl_cross_impl {
         .expect("cl-built DisputeDereliction must verify on the reference");
     }
 }
+
+/// DEP-06 wire discriminants, pinned by the vector shared with cl-deposits
+/// (inspect/vectors/proof_types.txt there).
+#[test]
+fn discriminants_match_shared_vector() {
+    let text = include_str!("fixtures/proof_types.txt");
+    let mut n = 0;
+    for line in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+        let (byte, name) = line.split_once(' ').unwrap();
+        let t: FraudProofType = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+        assert_eq!(t.discriminant(), byte.parse::<u8>().unwrap(), "{name}");
+        n += 1;
+    }
+    assert_eq!(n, 10);
+}
