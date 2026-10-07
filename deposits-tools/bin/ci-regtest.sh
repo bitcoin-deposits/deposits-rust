@@ -240,6 +240,9 @@ phase4() {
   step "4  skip: bob signs an update that skips sequences on B; members prove it, confiscate"
   local B=${OWN[bob]} op who vault
   fund_collateral
+  # alice's ledger A was taken from her in phase 3: its members refuse to extend it
+  # (DEP-05 "Deposed operator"), so her QuorumJoin for B goes on a fresh ledger.
+  OWN[alice]=$(open_ledger alice); [ -n "${OWN[alice]}" ] || fail "alice's second ledger"
   for op in alice charlie diana; do add_member bob "$B" "$op" || fail "add $op to B"; done
   begin_quorum bob "$B" || fail "quorum begin on B"
   vault=$(vault_outpoint bob "$B"); [ -n "$vault" ] || fail "B's vault"
