@@ -312,7 +312,7 @@ impl Node {
             operator_ledger_arc
                 .as_ref()
                 .map(|arc| arc.read().unwrap().ledger_id()),
-            self.wallet.get_block_height().unwrap_or(0),
+            self.height_for(fields.block_height, COSIGN_MAX_BLOCK_SKEW),
             |h| self.wallet.block_hash_at(h),
         ) {
             tracing::warn!(

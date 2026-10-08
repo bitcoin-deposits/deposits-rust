@@ -393,6 +393,28 @@ impl Node {
     }
 
     /// Lightweight sync: just block height + hash (cheap)
+    /// Our chain height, refreshed first when a peer names a height more than
+    /// `skew` beyond the cached one: heights are synced on the periodic, and a
+    /// burst of blocks left them behind long enough that members refused honest
+    /// cosigns and rotations as "more than 6 blocks from our height" (regtest,
+    /// 2026-10-08). Called from request workers, never the run loop.
+    pub fn height_for(&self, peer_height: u32, skew: u32) -> u32 {
+        let cached = self.wallet.get_block_height().unwrap_or(0);
+        if peer_height <= cached.saturating_add(skew) {
+            return cached;
+        }
+        let multi = matches!(
+            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        );
+        let _ = if multi {
+            tokio::task::block_in_place(|| self.sync_block_height())
+        } else {
+            self.sync_block_height()
+        };
+        self.wallet.get_block_height().unwrap_or(cached)
+    }
+
     pub fn sync_block_height(&self) -> Result<(), Error> {
         self.wallet.sync_block_height()
     }

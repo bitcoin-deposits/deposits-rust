@@ -1326,13 +1326,13 @@ impl Node {
         // the margin below our height (absent: height − margin).
         let rotation_feerate = ledger_arc.read().unwrap().state.rotation_feerate();
         let exit_extras = {
-            let h = self.wallet.get_block_height().unwrap_or(0);
             let margin = deposits_core::types::EXIT_CUTOFF_MARGIN_BLOCKS;
             let cutoff = request
                 .params
                 .get("exit_cutoff_height")
                 .and_then(|v| v.as_u64())
                 .map(|c| c as u32);
+            let h = self.height_for(cutoff.unwrap_or(0), 6);
             if let Some(c) = cutoff {
                 if c > h + 6 || c < h.saturating_sub(margin + 6) {
                     return (
