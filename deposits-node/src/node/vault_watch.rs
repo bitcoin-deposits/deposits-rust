@@ -204,7 +204,7 @@ impl crate::Node {
     }
 
     /// DEP-20 §8.3: for each ledger we hold whose latest rotation migrated deposits, once the
-    /// receiver has signed an update `MIGRATION_SERVICE_RESPONSE_BLOCKS` after the migration
+    /// receiver has signed an update its own `service_response_blocks` after the migration
     /// confirmed without crediting every migrated entry, broadcast the UncreditedOnchainPayment
     /// proof against it. Mirrors cl-deposits' `drive-migration-watch`.
     pub(crate) async fn drive_migration_watch(&self) {
@@ -212,7 +212,6 @@ impl crate::Node {
             latest_migration, uncredited_migration_proof, verify_uncredited_migration,
             FraudBroadcast,
         };
-        const MIGRATION_SERVICE_RESPONSE_BLOCKS: u32 = 72;
         let histories: Vec<(String, Vec<SignedLedgerUpdate>)> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -239,9 +238,6 @@ impl crate::Node {
             let Ok(Some(confirmed)) = self.wallet.tx_block_height(txid) else {
                 continue;
             };
-            if tip < confirmed + MIGRATION_SERVICE_RESPONSE_BLOCKS {
-                continue;
-            }
             let Some(confirmed_hash) = self.wallet.block_hash_at(confirmed) else {
                 continue;
             };
@@ -269,13 +265,7 @@ impl crate::Node {
                         .await
                 }
             };
-            match uncredited_migration_proof(
-                &source,
-                &receiver,
-                confirmed_hash,
-                confirmed,
-                MIGRATION_SERVICE_RESPONSE_BLOCKS,
-            ) {
+            match uncredited_migration_proof(&source, &receiver, confirmed_hash, confirmed) {
                 Some(proof) => {
                     let wallet = &self.wallet;
                     let oracle = |b: &[u8; 32]| {
@@ -309,7 +299,7 @@ impl crate::Node {
                 None => {
                     // All credited by the receiver's latest update: nothing more to watch.
                     if !receiver.is_empty()
-                        && uncredited_migration_proof(&source, &receiver, confirmed_hash, 0, 0)
+                        && uncredited_migration_proof(&source, &receiver, confirmed_hash, 0)
                             .is_none()
                     {
                         self.migrations_done.lock().unwrap().insert(key);
