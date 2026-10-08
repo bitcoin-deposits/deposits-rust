@@ -498,7 +498,8 @@ impl LedgerState {
                 });
             }
         }
-        if out.is_empty() {
+        // Below the 330-sat dust floor the output would not relay: nothing migrates.
+        if out.is_empty() || (total + m.premium) / 1000 < 330 {
             None
         } else {
             Some((out, m.spk.clone(), (total + m.premium) / 1000))
