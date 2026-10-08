@@ -50,6 +50,7 @@ fn dormancy_vector_matches_cl() {
                 st.vault_current = true;
                 let mut kv = std::collections::HashMap::new();
                 let mut ats = Vec::new();
+                let mut offers: Vec<Vec<String>> = Vec::new();
                 for l in &lines {
                     let w: Vec<&str> = l.split(' ').collect();
                     match w[0] {
@@ -77,6 +78,7 @@ fn dormancy_vector_matches_cl() {
                             );
                         }
                         "at" => ats.push(w.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+                        "offer" => offers.push(w.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
                         k => {
                             kv.insert(k.to_string(), w[1].to_string());
                         }
@@ -90,6 +92,15 @@ fn dormancy_vector_matches_cl() {
                 ));
                 assert_eq!(st.dormancy_amount_msats().to_string(), kv["floor_msat"]);
                 bucket = Some(st.clone());
+                for w in &offers {
+                    let ours: Vec<String> = st
+                        .dormancy_offer(w[1].parse().unwrap())
+                        .iter()
+                        .map(|e| format!("{}:{}", hex::encode(e.deposit_id), e.amount))
+                        .collect();
+                    assert_eq!(ours, w[2..].to_vec(), "offer at {}", w[1]);
+                    checked += 1;
+                }
                 for w in ats {
                     let ours: Vec<String> = st
                         .dormancy_spin_outs(w[1].parse().unwrap())

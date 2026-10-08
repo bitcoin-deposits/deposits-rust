@@ -407,6 +407,26 @@ impl Node {
             }
         }
 
+        // DEP-20 §8.3: a DormancyAccept's cosigners check the manifest it names.
+        {
+            use deposits_core::messages::LedgerOperation;
+            use deposits_core::TlvDecode;
+            if matches!(
+                LedgerOperation::tlv_decode(&update.message),
+                Ok(LedgerOperation::DormancyAccept { .. })
+            ) {
+                if let Some(m) = self
+                    .handler
+                    .pending_migration_manifests
+                    .lock()
+                    .unwrap()
+                    .get(ledger_id)
+                {
+                    params["migration_manifest"] = serde_json::json!(hex::encode(m));
+                }
+            }
+        }
+
         // Determine cosig threshold per DEP-05 §Lifecycle.
         //
         // Tier-0 active period resolves to strict majority of the

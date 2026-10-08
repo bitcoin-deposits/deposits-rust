@@ -2,7 +2,8 @@
 //! cl-deposits generates (tests/vectors/migration_proof.txt): the proof hash and the verdict
 //! over the receiver's history, for several `proof_sequence` / `service_response_blocks`.
 use deposits_core::fraud::{
-    verify_uncredited_migration, FraudEvidence, FraudProof, FraudProofType,
+    uncredited_migration_proof, verify_uncredited_migration, FraudEvidence, FraudProof,
+    FraudProofType,
 };
 use deposits_core::types::SignedLedgerUpdate;
 use deposits_core::TlvDecode;
@@ -14,6 +15,7 @@ fn migration_proof_matches_cl() {
     let mut history: Vec<SignedLedgerUpdate> = Vec::new();
     let mut blocks: HashMap<[u8; 32], u32> = HashMap::new();
     let mut checked = 0;
+    let mut cl_json: Option<String> = None;
     for line in include_str!("vectors/migration_proof.txt").lines() {
         if line.starts_with('#') || line.is_empty() {
             continue;
@@ -28,6 +30,35 @@ fn migration_proof_matches_cl() {
                     hex::decode(w[1]).unwrap().try_into().unwrap(),
                     w[2].parse().unwrap(),
                 );
+            }
+            "json" => cl_json = Some(line[5..].to_string()),
+            "produce" => {
+                let upto: u64 = w[1].parse().unwrap();
+                let source = vec![
+                    SignedLedgerUpdate::tlv_decode(&hex::decode(&kv["notice"]).unwrap()).unwrap(),
+                    SignedLedgerUpdate::tlv_decode(&hex::decode(&kv["qb"]).unwrap()).unwrap(),
+                ];
+                let receiver: Vec<SignedLedgerUpdate> = history
+                    .iter()
+                    .filter(|u| u.sequence_number <= upto)
+                    .cloned()
+                    .collect();
+                let confirmed = *blocks.iter().find(|(_, h)| **h == 150).unwrap().0;
+                let p = uncredited_migration_proof(
+                    &source,
+                    &receiver,
+                    confirmed,
+                    150,
+                    w[2].parse().unwrap(),
+                );
+                let got = p.map_or("none".to_string(), |p| match p.evidence {
+                    FraudEvidence::UncreditedMigration { proof_sequence, .. } => {
+                        proof_sequence.to_string()
+                    }
+                    _ => "other".into(),
+                });
+                assert_eq!(got, w[3], "{line}");
+                checked += 1;
             }
             "proof" => {
                 let proof = FraudProof {
@@ -47,6 +78,20 @@ fn migration_proof_matches_cl() {
                     },
                 };
                 assert_eq!(hex::encode(proof.proof_hash()), w[6], "hash of {line}");
+                assert!(
+                    !proof.requires_embedding(),
+                    "migration evidence is self-evident"
+                );
+                if let (Some(j), "11", "72") = (&cl_json, w[1], w[2]) {
+                    let b: deposits_core::fraud::FraudBroadcast = serde_json::from_str(j).unwrap();
+                    assert_eq!(
+                        b.proof.proof_hash(),
+                        proof.proof_hash(),
+                        "cl's broadcast JSON"
+                    );
+                    b.verify_chain_structure().unwrap();
+                    checked += 1;
+                }
                 let oracle = |b: &[u8; 32]| blocks.get(b).copied();
                 let verdict = verify_uncredited_migration(&proof, &history, &oracle);
                 assert_eq!(verdict.is_ok(), w[4] == "1", "{line}: {verdict:?}");
@@ -57,5 +102,5 @@ fn migration_proof_matches_cl() {
             }
         }
     }
-    assert_eq!(checked, 4);
+    assert_eq!(checked, 9);
 }

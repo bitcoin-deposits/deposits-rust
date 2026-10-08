@@ -106,6 +106,10 @@ impl Node {
             "quorum_join",
             "quorum_begin",
             "quorum_upgrade",
+            "dormancy_offer",
+            "dormancy_accept",
+            "dormancy_notice",
+            "dormancy_credit",
             // consent_request targets the operator of the *member's*
             // collateral ledger (`#l = member_ledger_id`). Any non-operator
             // who happens to subscribe to that ledger (e.g. via the consent
@@ -437,6 +441,9 @@ impl Node {
             "consent_request" => self.process_consent_request(&request).await,
             "quorum_begin" => self.process_quorum_begin_request(&request).await,
             "quorum_upgrade" => self.process_quorum_upgrade_request(&request).await,
+            "dormancy_offer" | "dormancy_accept" | "dormancy_notice" | "dormancy_credit" => {
+                self.process_dormancy_request(&request).await
+            }
             "resync" => self.process_resync_request(&request).await,
             "health_status" => self.process_health_status_request().await,
             "health_ping" => self.process_health_ping_request(&request).await,
@@ -1333,7 +1340,7 @@ impl Node {
         //    accused ledger is named explicitly.
         let mut needed: std::collections::HashSet<String> =
             std::iter::once(broadcast.proof.ledger_id.clone()).collect();
-        if broadcast.proof.proof_type.requires_embedding() {
+        if broadcast.proof.requires_embedding() {
             if let Some(embedding) = &broadcast.embedding {
                 needed.insert(embedding.ledger_id.clone());
             }
@@ -1514,7 +1521,7 @@ impl Node {
         }
 
         match &broadcast.embedding {
-            Some(embedding) if broadcast.proof.proof_type.requires_embedding() => {
+            Some(embedding) if broadcast.proof.requires_embedding() => {
                 tracing::warn!(
                     "Fraud proof VERIFIED: {} at seq {} on {}, evidence type {:?}",
                     &proof_hash_hex[..16],

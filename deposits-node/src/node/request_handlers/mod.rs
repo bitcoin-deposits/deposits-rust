@@ -10,6 +10,7 @@ pub mod cooperative_refund;
 pub mod cosign;
 pub mod custody;
 pub mod deposits;
+pub mod dormancy;
 pub mod health;
 pub mod invoice;
 pub mod quorum;

@@ -111,6 +111,7 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         "bootstrap" => node_cli::bootstrap::bootstrap_command(&args[2..]).await?,
         "reserves" => node_cli::reserves::reserves_command(&args[2..]).await?,
         "quorum" => node_cli::quorum::quorum_command(&args[2..]).await?,
+        "dormancy" => node_cli::dormancy::dormancy_command(&args[2..]).await?,
         "ledger" => node_cli::ledger::ledger_command(&args[2..]).await?,
         "collateral" => node_cli::collateral_command(&args[2..]).await?,
         "deposit" => node_cli::deposit::deposit_command(&args[2..]).await?,

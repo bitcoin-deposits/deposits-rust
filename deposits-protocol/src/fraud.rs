@@ -240,7 +240,7 @@ pub enum FraudEvidence {
         /// The source's QuorumBegin update that paid the migration (TLV hex).
         source_qb_update: String,
         /// Block in which the migration output (the rotation) confirmed.
-        #[serde(with = "crate::types::serde_32")]
+        #[serde(with = "crate::types::serde_32_hex")]
         confirmed_at_block_hash: [u8; 32],
         /// The receiver's update `service_response_blocks` or more after that block.
         proof_sequence: u64,
@@ -485,6 +485,14 @@ impl FraudProof {
         input.extend_from_slice(&self.evidence.canonical_bytes());
 
         sha256::Hash::hash(&input).to_byte_array()
+    }
+
+    /// Whether this proof needs an embedding (DEP-06): its type's rule, except that DEP-20 §8.3
+    /// migration evidence is self-evident — the source's signed updates and the receiver's own
+    /// late update date it, so nothing off the ledger needs timestamping.
+    pub fn requires_embedding(&self) -> bool {
+        self.proof_type.requires_embedding()
+            && !matches!(self.evidence, FraudEvidence::UncreditedMigration { .. })
     }
 
     /// Verify that a given 32-byte value matches this proof's hash.
@@ -2501,6 +2509,106 @@ pub fn verify_uncredited_onchain(
     Ok(())
 }
 
+/// DEP-20 §8.3: the newest `QuorumBegin` in `source_history` (ascending) that migrated, and the
+/// `DormancyNotice` before it carrying the accept: (qb update, notice update).
+pub fn latest_migration(
+    source_history: &[crate::types::SignedLedgerUpdate],
+) -> Option<(
+    crate::types::SignedLedgerUpdate,
+    crate::types::SignedLedgerUpdate,
+)> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    let mut qb = None;
+    for u in source_history.iter().rev() {
+        match (LedgerOperation::tlv_decode(&u.message), &qb) {
+            (
+                Ok(LedgerOperation::QuorumBegin {
+                    migration_manifest, ..
+                }),
+                None,
+            ) if !migration_manifest.is_empty() => qb = Some(u.clone()),
+            (
+                Ok(LedgerOperation::DormancyNotice {
+                    dormancy_accept: Some(_),
+                    ..
+                }),
+                Some(q),
+            ) => return Some((q.clone(), u.clone())),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// DEP-20 §8.3 producer: an `UncreditedOnchainPayment` (migration evidence) against the receiver
+/// of `source_history`'s latest migration, if `receiver_history` (ascending) has an update signed
+/// `service_response_blocks` or more after `confirmed_height` (the rotation's block) while some
+/// migrated entry is uncredited. Mirrors cl-deposits' `uncredited-migration-proof`.
+pub fn uncredited_migration_proof(
+    source_history: &[crate::types::SignedLedgerUpdate],
+    receiver_history: &[crate::types::SignedLedgerUpdate],
+    confirmed_block_hash: [u8; 32],
+    confirmed_height: u32,
+    service_response_blocks: u32,
+) -> Option<FraudProof> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::{TlvDecode, TlvEncode};
+    let (qu, nu) = latest_migration(source_history)?;
+    let Ok(LedgerOperation::QuorumBegin {
+        migration_manifest,
+        migration_vout: Some(vout),
+        new_outpoint_txid,
+        ..
+    }) = LedgerOperation::tlv_decode(&qu.message)
+    else {
+        return None;
+    };
+    let Ok(LedgerOperation::DormancyNotice {
+        dormancy_accept: Some(accept),
+        ..
+    }) = LedgerOperation::tlv_decode(&nu.message)
+    else {
+        return None;
+    };
+    let au = crate::types::SignedLedgerUpdate::tlv_decode(&accept).ok()?;
+    let pu = receiver_history
+        .iter()
+        .rfind(|u| u.block_height >= confirmed_height.saturating_add(service_response_blocks))?;
+    let credited: std::collections::HashSet<(crate::types::DepositId, u64)> = receiver_history
+        .iter()
+        .filter(|u| u.sequence_number <= pu.sequence_number)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::OnchainCredit {
+                txid,
+                vout: v,
+                deposit_id,
+                amount,
+                ..
+            }) if txid == new_outpoint_txid && v == vout => Some((deposit_id, amount)),
+            _ => None,
+        })
+        .collect();
+    if migration_manifest
+        .iter()
+        .all(|m| credited.contains(&(m.deposit_id, m.amount)))
+    {
+        return None;
+    }
+    Some(FraudProof {
+        proof_type: FraudProofType::UncreditedOnchainPayment,
+        accused: hex::encode(au.operator_id.serialize()),
+        ledger_id: hex::encode(au.ledger_id),
+        evidence: FraudEvidence::UncreditedMigration {
+            source_notice_update: hex::encode(nu.tlv_encode()),
+            source_qb_update: hex::encode(qu.tlv_encode()),
+            confirmed_at_block_hash: confirmed_block_hash,
+            proof_sequence: pu.sequence_number,
+            service_response_blocks,
+        },
+    })
+}
+
 /// Verify an `UncreditedOnchainPayment` claim with DEP-20 §8.3 migration evidence.
 ///
 /// Checks: the notice and the QuorumBegin are the same source operator's signed updates on one
@@ -2779,7 +2887,7 @@ pub fn verify_fraud_broadcast(
     block_oracle: &dyn BlockOracle,
     authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
-    if broadcast.proof.proof_type.requires_embedding() {
+    if broadcast.proof.requires_embedding() {
         verify_embedding_and_causal_chain(broadcast, ledgers)?;
     }
     verify_fraud_evidence(&broadcast.proof, ledgers, block_oracle, authorizer)
@@ -3015,7 +3123,7 @@ impl FraudBroadcast {
     /// no embedding or chain, so it passes whatever they hold. An
     /// embedding-required type without an embedding fails.
     pub fn verify_chain_structure(&self) -> Result<(), String> {
-        if self.proof.proof_type.is_self_evident() {
+        if !self.proof.requires_embedding() {
             return Ok(());
         }
         let Some(embedding) = self.embedding.as_ref() else {

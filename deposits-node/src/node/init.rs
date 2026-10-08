@@ -333,6 +333,7 @@ impl Node {
             reported_derelictions: Mutex::new(std::collections::HashSet::new()),
             vault_scanned: Mutex::new(None),
             reported_vault_spends: Mutex::new(std::collections::HashSet::new()),
+            migrations_done: Mutex::new(std::collections::HashSet::new()),
             known_confiscation_txids: Mutex::new(std::collections::HashSet::new()),
             seen_lottery_reveals: Mutex::new(HashMap::new()),
             last_relay_fetch_times: Mutex::new(HashMap::new()),

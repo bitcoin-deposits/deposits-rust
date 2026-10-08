@@ -12,6 +12,7 @@ pub mod archive;
 pub mod bootstrap;
 pub mod deposit;
 pub mod disputes;
+pub mod dormancy;
 pub mod health;
 pub mod keys;
 pub mod ledger;

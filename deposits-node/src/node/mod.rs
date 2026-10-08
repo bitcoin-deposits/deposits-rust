@@ -556,6 +556,8 @@ pub struct Node {
     pub(crate) vault_scanned: Mutex<Option<u32>>,
     /// Ledgers whose vault theft we already reported: once each.
     pub(crate) reported_vault_spends: Mutex<std::collections::HashSet<String>>,
+    /// DEP-20 §8.3: migrations ("ledger:seq") settled — proved against, or fully credited.
+    pub(crate) migrations_done: Mutex<std::collections::HashSet<String>>,
     /// Txids of confiscations we built, which spend a vault legitimately
     /// before any `QuorumBegin` records them.
     pub(crate) known_confiscation_txids: Mutex<std::collections::HashSet<[u8; 32]>>,

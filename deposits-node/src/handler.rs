@@ -142,6 +142,8 @@ pub struct DepositsHandler {
     /// DEP-03 §"Rotation ordering": per ledger we operate, the signed rotation
     /// awaiting its QuorumBegin (carried in that update's cosign request).
     pub pending_rotation_txs: Mutex<HashMap<String, bitcoin::Transaction>>,
+    /// DEP-20 §8.3: the manifest a pending DormancyAccept's cosigners are shown.
+    pub pending_migration_manifests: Mutex<HashMap<String, Vec<u8>>>,
     /// DEP-20 §3 exit cutoff each pending rotation was built under (ledger id -> height).
     pub pending_rotation_cutoffs: Mutex<HashMap<String, u32>>,
     /// DEP-20 §4 splice-in requested for a ledger's next rotation (txid internal order, vout).
@@ -331,6 +333,7 @@ impl DepositsHandler {
             damaged_ledgers,
             flagged_non_conforming: Mutex::new(HashMap::new()),
             pending_rotation_txs: Mutex::new(HashMap::new()),
+            pending_migration_manifests: Mutex::new(HashMap::new()),
             pending_rotation_cutoffs: Mutex::new(HashMap::new()),
             requested_splices: Mutex::new(HashMap::new()),
             pending_rotation_splices: Mutex::new(HashMap::new()),

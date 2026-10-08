@@ -506,6 +506,32 @@ impl LedgerState {
         }
     }
 
+    /// DEP-20 §8.3: what a DormancyOffer offers at `height` — the dormant deposits a spin-out
+    /// would not pay (no key-path address, or below the floor), ascending deposit id.
+    pub fn dormancy_offer(&self, height: u32) -> Vec<crate::messages::ManifestEntry> {
+        let bound = height.saturating_sub(self.dormancy_blocks);
+        let floor = self.dormancy_amount_msats();
+        let pending: std::collections::HashSet<DepositId> =
+            self.pending_exits.values().map(|e| e.deposit_id).collect();
+        // im::OrdMap iterates in key order: ascending deposit id.
+        self.deposits
+            .iter()
+            .filter(|(id, d)| {
+                d.balance > 0
+                    && d.locked_balance == 0
+                    && !pending.contains(*id)
+                    && d.last_signed_activity <= bound
+                    && (pk_key_path_spk(&d.descriptor).is_none() || d.balance < floor)
+            })
+            .map(|(id, d)| crate::messages::ManifestEntry {
+                deposit_id: *id,
+                amount: d.balance,
+                fees: d.fees.clone(),
+                descriptor: d.descriptor.clone(),
+            })
+            .collect()
+    }
+
     /// DEP-20 §3: an exit output's own marginal cost, feerate × (9 + len(spk)) sats.
     pub fn exit_cost(&self, exit_address: &[u8]) -> u64 {
         self.rotation_feerate() * (9 + exit_address.len() as u64)

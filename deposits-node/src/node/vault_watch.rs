@@ -203,6 +203,122 @@ impl crate::Node {
         *self.vault_scanned.lock().unwrap() = Some(to);
     }
 
+    /// DEP-20 §8.3: for each ledger we hold whose latest rotation migrated deposits, once the
+    /// receiver has signed an update `MIGRATION_SERVICE_RESPONSE_BLOCKS` after the migration
+    /// confirmed without crediting every migrated entry, broadcast the UncreditedOnchainPayment
+    /// proof against it. Mirrors cl-deposits' `drive-migration-watch`.
+    pub(crate) async fn drive_migration_watch(&self) {
+        use deposits_core::fraud::{
+            latest_migration, uncredited_migration_proof, verify_uncredited_migration,
+            FraudBroadcast,
+        };
+        const MIGRATION_SERVICE_RESPONSE_BLOCKS: u32 = 72;
+        let histories: Vec<(String, Vec<SignedLedgerUpdate>)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .map(|(id, arc)| (id.clone(), arc.read().unwrap().history.clone()))
+                .collect()
+        };
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        for (id, source) in histories {
+            let Some((qu, nu)) = latest_migration(&source) else {
+                continue;
+            };
+            let key = format!("{}:{}", id, qu.sequence_number);
+            if self.migrations_done.lock().unwrap().contains(&key) {
+                continue;
+            }
+            let Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid, ..
+            }) = LedgerOperation::tlv_decode(&qu.message)
+            else {
+                continue;
+            };
+            let txid = bitcoin::Txid::from_byte_array(new_outpoint_txid);
+            let Ok(Some(confirmed)) = self.wallet.tx_block_height(txid) else {
+                continue;
+            };
+            if tip < confirmed + MIGRATION_SERVICE_RESPONSE_BLOCKS {
+                continue;
+            }
+            let Some(confirmed_hash) = self.wallet.block_hash_at(confirmed) else {
+                continue;
+            };
+            let Ok(LedgerOperation::DormancyNotice {
+                dormancy_accept: Some(accept),
+                ..
+            }) = LedgerOperation::tlv_decode(&nu.message)
+            else {
+                continue;
+            };
+            let Ok(au) = SignedLedgerUpdate::tlv_decode(&accept) else {
+                continue;
+            };
+            let rid = hex::encode(au.ledger_id);
+            let local = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&rid)
+                    .map(|arc| arc.read().unwrap().history.clone())
+            };
+            let receiver = match local {
+                Some(h) => h,
+                None => {
+                    self.fetch_ledger_updates_paginated_filtered(&rid, &[])
+                        .await
+                }
+            };
+            match uncredited_migration_proof(
+                &source,
+                &receiver,
+                confirmed_hash,
+                confirmed,
+                MIGRATION_SERVICE_RESPONSE_BLOCKS,
+            ) {
+                Some(proof) => {
+                    let wallet = &self.wallet;
+                    let oracle = |b: &[u8; 32]| {
+                        (confirmed..=tip)
+                            .rev()
+                            .find(|h| wallet.block_hash_at(*h).as_ref() == Some(b))
+                    };
+                    if let Err(e) = verify_uncredited_migration(&proof, &receiver, &oracle) {
+                        tracing::warn!(
+                            "uncredited-migration proof against {} does not verify: {}",
+                            &rid[..8],
+                            e
+                        );
+                        continue;
+                    }
+                    tracing::warn!(
+                        "UNCREDITED MIGRATION: {} has not credited {}'s migration; proof broadcast",
+                        &rid[..8],
+                        &id[..8]
+                    );
+                    self.migrations_done.lock().unwrap().insert(key);
+                    let b = FraudBroadcast {
+                        proof,
+                        embedding: None,
+                        causal_chain: Vec::new(),
+                    };
+                    if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
+                        tracing::error!("migration watch: fraud broadcast failed: {}", e);
+                    }
+                }
+                None => {
+                    // All credited by the receiver's latest update: nothing more to watch.
+                    if !receiver.is_empty()
+                        && uncredited_migration_proof(&source, &receiver, confirmed_hash, 0, 0)
+                            .is_none()
+                    {
+                        self.migrations_done.lock().unwrap().insert(key);
+                    }
+                }
+            }
+        }
+    }
+
     async fn report_vault_spend(&self, theft: &VaultTheft) {
         self.reported_vault_spends
             .lock()
