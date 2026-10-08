@@ -402,6 +402,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
             ("ExitCancel".to_string(), Some(*deposit_id))
         }
         LedgerOperation::DormancyNotice { .. } => ("DormancyNotice".to_string(), None),
+        LedgerOperation::DormancyAccept { .. } => ("DormancyAccept".to_string(), None),
         LedgerOperation::TransferLock {
             source_deposit_id, ..
         } => ("TransferLock".to_string(), Some(*source_deposit_id)),

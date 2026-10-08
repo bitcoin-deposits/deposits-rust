@@ -212,6 +212,9 @@ fn format_op(op: &LedgerOperation) -> String {
         LedgerOperation::DormancyNotice {
             rotation_height, ..
         } => format!("DormancyNotice  at={}", rotation_height),
+        LedgerOperation::DormancyAccept { accepted_total, .. } => {
+            format!("DormancyAccept  total={}", accepted_total)
+        }
         LedgerOperation::DepositKeyRotate {
             deposit_id,
             new_descriptor,
@@ -1500,6 +1503,7 @@ fn discriminant_name(disc: u8) -> &'static str {
         100 => "ExitRequest",
         101 => "ExitCancel",
         102 => "DormancyNotice",
+        103 => "DormancyAccept",
         30 => "InvoiceCredit",
         31 => "InvoiceLock",
         32 => "InvoiceFail",

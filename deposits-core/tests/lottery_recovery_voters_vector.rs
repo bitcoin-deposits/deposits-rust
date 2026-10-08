@@ -51,6 +51,9 @@ fn qb(members: &[u8]) -> LedgerOperation {
         splice_in_amount: None,
         reference_feerate: None,
         dormancy_outputs: Vec::new(),
+        migration_manifest: Vec::new(),
+        migration_receiver: None,
+        migration_vout: None,
     }
 }
 

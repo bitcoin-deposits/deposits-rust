@@ -230,6 +230,23 @@ pub enum FraudEvidence {
         proof_sequence: u64,
     },
 
+    /// DEP-20 §8.3: a receiver didn't credit a dormancy migration it accepted (proof type
+    /// `UncreditedOnchainPayment`). The source's signed `DormancyNotice` carries the receiver's
+    /// signed accept and the offered manifest; the source's signed `QuorumBegin` records the
+    /// migrated entries and the output.
+    UncreditedMigration {
+        /// The source's DormancyNotice update (TLV hex).
+        source_notice_update: String,
+        /// The source's QuorumBegin update that paid the migration (TLV hex).
+        source_qb_update: String,
+        /// Block in which the migration output (the rotation) confirmed.
+        #[serde(with = "crate::types::serde_32")]
+        confirmed_at_block_hash: [u8; 32],
+        /// The receiver's update `service_response_blocks` or more after that block.
+        proof_sequence: u64,
+        service_response_blocks: u32,
+    },
+
     /// Operator didn't credit a lightning payment.
     UncreditedLightning {
         /// The cosigned invoice (BOLT11).
@@ -2484,6 +2501,156 @@ pub fn verify_uncredited_onchain(
     Ok(())
 }
 
+/// Verify an `UncreditedOnchainPayment` claim with DEP-20 §8.3 migration evidence.
+///
+/// Checks: the notice and the QuorumBegin are the same source operator's signed updates on one
+/// ledger, the notice first; the notice's accept is the accused's signed `DormancyAccept` on the
+/// proof's ledger, over the notice's manifest, unexpired at the QuorumBegin; the QuorumBegin
+/// migrates entries of that manifest to the accused; its rotation confirmed in
+/// `confirmed_at_block_hash`; the accused signed `proof_sequence` at least
+/// `service_response_blocks` later; and some migrated entry has no matching credit (deposit,
+/// exact amount, rotation txid and `migration_vout`) at or before `proof_sequence`.
+pub fn verify_uncredited_migration(
+    proof: &FraudProof,
+    accused_history: &[crate::types::SignedLedgerUpdate],
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    use crate::types::SignedLedgerUpdate;
+    let FraudEvidence::UncreditedMigration {
+        source_notice_update,
+        source_qb_update,
+        confirmed_at_block_hash,
+        proof_sequence,
+        service_response_blocks,
+    } = &proof.evidence
+    else {
+        return Err("verify_uncredited_migration: wrong evidence type".into());
+    };
+    let decode = |h: &str, what: &str| -> Result<(SignedLedgerUpdate, LedgerOperation), String> {
+        let u =
+            SignedLedgerUpdate::tlv_decode(&hex::decode(h).map_err(|e| format!("{what}: {e}"))?)
+                .map_err(|e| format!("{what}: {e:?}"))?;
+        u.verify_operator_signature()
+            .map_err(|e| format!("{what}: {e}"))?;
+        let op = LedgerOperation::tlv_decode(&u.message).map_err(|e| format!("{what}: {e:?}"))?;
+        Ok((u, op))
+    };
+    let (nu, notice) = decode(source_notice_update, "source notice")?;
+    let (qu, qb) = decode(source_qb_update, "source QuorumBegin")?;
+    if nu.operator_id != qu.operator_id
+        || nu.ledger_id != qu.ledger_id
+        || nu.sequence_number >= qu.sequence_number
+    {
+        return Err("the notice and QuorumBegin are not one source ledger's, in order".into());
+    }
+    let LedgerOperation::DormancyNotice {
+        migration_receiver: Some(receiver),
+        manifest_hash: Some(manifest_hash),
+        migration_manifest: offered,
+        dormancy_accept: Some(accept_bytes),
+        ..
+    } = notice
+    else {
+        return Err("the source notice names no migration".into());
+    };
+    let au = SignedLedgerUpdate::tlv_decode(&accept_bytes).map_err(|e| format!("accept: {e:?}"))?;
+    au.verify_operator_signature()
+        .map_err(|e| format!("accept: {e}"))?;
+    let Ok(LedgerOperation::DormancyAccept {
+        manifest_hash: accept_hash,
+        expires_at_height,
+        ..
+    }) = LedgerOperation::tlv_decode(&au.message)
+    else {
+        return Err("the notice's accept is not a DormancyAccept".into());
+    };
+    let accused = hex::encode(au.operator_id.serialize());
+    if au.operator_id != receiver
+        || accused != proof.accused
+        || hex::encode(au.ledger_id) != proof.ledger_id
+    {
+        return Err("the accept is not the accused's, on the proof's ledger".into());
+    }
+    if accept_hash != manifest_hash {
+        return Err("the accept is for another manifest".into());
+    }
+    let LedgerOperation::QuorumBegin {
+        migration_manifest,
+        migration_receiver,
+        migration_vout: Some(vout),
+        new_outpoint_txid,
+        ..
+    } = qb
+    else {
+        return Err("the source QuorumBegin records no migration".into());
+    };
+    if migration_receiver != Some(receiver) || migration_manifest.is_empty() {
+        return Err("the source QuorumBegin migrates to someone else".into());
+    }
+    if !migration_manifest
+        .iter()
+        .all(|m| offered.iter().any(|o| o.deposit_id == m.deposit_id))
+    {
+        return Err("the QuorumBegin migrates deposits the accepted manifest does not list".into());
+    }
+    if qu.block_height >= expires_at_height {
+        return Err("the accept had expired when the source rotated".into());
+    }
+    let confirmed = block_oracle
+        .confirms(confirmed_at_block_hash)
+        .ok_or("confirmed_at_block_hash not in the verifier's confirmed chain")?;
+    let pu = accused_history
+        .iter()
+        .find(|u| u.sequence_number == *proof_sequence)
+        .ok_or_else(|| format!("proof_sequence {} not in accused history", proof_sequence))?;
+    let ph = block_oracle
+        .confirms(&pu.block_hash)
+        .ok_or("proof_sequence update's block_hash not in the verifier's confirmed chain")?;
+    if ph.saturating_sub(confirmed) < *service_response_blocks {
+        return Err(format!(
+            "proof_sequence block {ph} is fewer than {service_response_blocks} blocks past {confirmed}"
+        ));
+    }
+    let mut credited = std::collections::HashSet::new();
+    fn walk(
+        op: &LedgerOperation,
+        txid: [u8; 32],
+        vout: u32,
+        out: &mut std::collections::HashSet<(crate::types::DepositId, u64)>,
+    ) {
+        match op {
+            LedgerOperation::OnchainCredit {
+                txid: t,
+                vout: v,
+                deposit_id,
+                amount,
+                ..
+            } if *t == txid && *v == vout => {
+                out.insert((*deposit_id, *amount));
+            }
+            LedgerOperation::Batch(inner) => inner.iter().for_each(|o| walk(o, txid, vout, out)),
+            _ => {}
+        }
+    }
+    for u in accused_history
+        .iter()
+        .filter(|u| u.sequence_number <= *proof_sequence)
+    {
+        if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
+            walk(&op, new_outpoint_txid, vout, &mut credited);
+        }
+    }
+    if migration_manifest
+        .iter()
+        .all(|m| credited.contains(&(m.deposit_id, m.amount)))
+    {
+        return Err("every migrated deposit was credited — not fraud".into());
+    }
+    Ok(())
+}
+
 // ============================================================================
 // The Broadcast (proof + causal chain, constructed after embedding)
 // ============================================================================
@@ -2740,7 +2907,11 @@ pub fn verify_fraud_evidence(
                     &proof.ledger_id[..16.min(proof.ledger_id.len())]
                 )
             })?;
-            verify_uncredited_onchain(proof, &accused_history, block_oracle)?;
+            if matches!(proof.evidence, FraudEvidence::UncreditedMigration { .. }) {
+                verify_uncredited_migration(proof, &accused_history, block_oracle)?;
+            } else {
+                verify_uncredited_onchain(proof, &accused_history, block_oracle)?;
+            }
         }
         FraudProofType::NonConformingUpdate => {
             // The accused operator BIP-340-signed an update on their own ledger
@@ -2927,6 +3098,18 @@ impl FraudEvidence {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
+            Self::UncreditedMigration {
+                source_notice_update,
+                source_qb_update,
+                confirmed_at_block_hash,
+                proof_sequence,
+                ..
+            } => {
+                out.extend_from_slice(source_notice_update.as_bytes());
+                out.extend_from_slice(source_qb_update.as_bytes());
+                out.extend_from_slice(confirmed_at_block_hash);
+                out.extend_from_slice(&proof_sequence.to_le_bytes());
+            }
             Self::UncreditedOnchain {
                 offer_id,
                 deadline_block,

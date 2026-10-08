@@ -155,8 +155,11 @@ pub fn verify_rotation_tx(
         .saturating_sub(new_sats)
         .saturating_sub(exits_cost)
         .saturating_sub(dorm_cost);
-    // DEP-20 §8.4: spin-outs' own costs come out of collateral.
-    let c0 = rotation_collateral(state, vault_sats, fee).saturating_sub(dorm_cost * 1000);
+    // DEP-20 §8.4: spin-outs' own costs come out of collateral; §8.3: so does the premium.
+    let c = exit_cutoff_height
+        .unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
+    let c0 = rotation_collateral(state, vault_sats, fee)
+        .saturating_sub((dorm_cost + migration_premium_sats(state, c)) * 1000);
     if *collateral_amount < c0 || *collateral_amount > c0 + added * 1000 {
         return Err("QuorumBegin collateral is not the DEP-20 §3-4 share".into());
     }
@@ -360,9 +363,44 @@ pub fn settlement_outputs(
     let exits_cost = due_exits_cost(state, height, cutoff);
     let c = cutoff.unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
     let spins = state.dormancy_spin_outs(c);
-    let dorm_cost = spins.len() as u64 * state.dormancy_cost();
+    let mut dorm_cost = spins.len() as u64 * state.dormancy_cost();
     extras.extend(spins.into_iter().map(|(_, bal, spk)| (spk, bal / 1000)));
+    // DEP-20 §8.3: the migration output, after the spin-outs; its own cost is a fee like theirs.
+    if let Some((_, spk, sats)) = state.dormancy_migration(c) {
+        dorm_cost += state.exit_cost(&spk);
+        extras.push((ScriptBuf::from_bytes(spk), sats));
+    }
     (extras, exits_cost, dorm_cost)
+}
+
+/// DEP-20 §8.3: the premium (sats) the migration output carries; collateral pays it (not a fee).
+pub fn migration_premium_sats(state: &crate::types::LedgerState, cutoff: u32) -> u64 {
+    match (state.dormancy_migration(cutoff), &state.migration) {
+        (Some(_), Some(m)) => m.premium / 1000,
+        _ => 0,
+    }
+}
+
+/// DEP-20 §8.3: the QuorumBegin's migration fields at `cutoff` after `nexits` exits and
+/// `nspins` spin-outs: (migration_manifest, migration_receiver, migration_vout).
+pub fn migration_entries(
+    state: &crate::types::LedgerState,
+    cutoff: u32,
+    nexits: usize,
+    nspins: usize,
+) -> (
+    Vec<crate::messages::ManifestEntry>,
+    Option<bitcoin::secp256k1::PublicKey>,
+    Option<u32>,
+) {
+    match state.dormancy_migration(cutoff) {
+        Some((entries, _, _)) => (
+            entries,
+            state.migration.as_ref().map(|m| m.receiver),
+            Some((nexits + nspins + 1) as u32),
+        ),
+        None => (Vec::new(), None, None),
+    }
 }
 
 /// The QuorumBegin `dormancy_outputs` entries after `nexits` exit outputs.

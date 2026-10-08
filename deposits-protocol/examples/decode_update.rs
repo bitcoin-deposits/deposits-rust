@@ -52,6 +52,7 @@ fn opname(op: &LedgerOperation) -> &'static str {
         O::ExitRequest { .. } => "ExitRequest",
         O::ExitCancel { .. } => "ExitCancel",
         O::DormancyNotice { .. } => "DormancyNotice",
+        O::DormancyAccept { .. } => "DormancyAccept",
         O::FeeChange { .. } => "FeeChange",
         O::FeeCollect { .. } => "FeeCollect",
         O::InvoiceCredit { .. } => "InvoiceCredit",

@@ -258,6 +258,9 @@ fn exit_fold_semantics() {
         splice_in_amount: None,
         reference_feerate: None,
         dormancy_outputs: Vec::new(),
+        migration_manifest: Vec::new(),
+        migration_receiver: None,
+        migration_vout: None,
     };
     let wrong = apply(&mut st.clone(), ctx(103, 7, 7), qb(103, Vec::new()));
     assert!(

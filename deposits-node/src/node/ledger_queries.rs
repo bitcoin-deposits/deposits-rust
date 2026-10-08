@@ -314,6 +314,9 @@ impl Node {
             splice_in_amount: None,
             reference_feerate: None,
             dormancy_outputs: Vec::new(),
+            migration_manifest: Vec::new(),
+            migration_receiver: None,
+            migration_vout: None,
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -1280,9 +1283,12 @@ impl Node {
                     .saturating_sub(exits_cost)
                     .saturating_sub(dorm_cost);
                 // DEP-20 §4: the spliced value goes to collateral; §8.4: spin-outs' costs out of it.
+                let premium = cutoff.map_or(0, |c| {
+                    deposits_core::rotation_order::migration_premium_sats(&l.state, c)
+                });
                 let collateral =
                     deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee)
-                        .saturating_sub(dorm_cost * 1000)
+                        .saturating_sub((dorm_cost + premium) * 1000)
                         + added * 1000;
                 (total_msats.saturating_sub(collateral), collateral)
             } else if prev_total > 0 {
@@ -1307,7 +1313,7 @@ impl Node {
         );
 
         // DEP-20 §3: settle the exits due under the rotation's cutoff.
-        let (exit_cutoff_height, exit_outputs, dormancy_outputs) = match self
+        let (exit_cutoff_height, exit_outputs, dormancy_outputs, migration) = match self
             .handler
             .pending_rotation_cutoffs
             .lock()
@@ -1317,19 +1323,25 @@ impl Node {
             Some(cutoff) if rotating => {
                 let height = self.wallet.get_block_height().unwrap_or(0);
                 let ledgers = self.handler.ledgers.lock().unwrap();
-                let (entries, dentries) = ledgers
+                let (entries, dentries, mig) = ledgers
                     .get(ledger_id)
                     .map(|arc| {
                         let st = &arc.read().unwrap().state;
                         let e = deposits_core::rotation_order::due_exit_entries(st, height, cutoff);
                         let d =
                             deposits_core::rotation_order::dormancy_entries(st, cutoff, e.len());
-                        (e, d)
+                        let m = deposits_core::rotation_order::migration_entries(
+                            st,
+                            cutoff,
+                            e.len(),
+                            d.len(),
+                        );
+                        (e, d, m)
                     })
-                    .unwrap_or_default();
-                (Some(cutoff), entries, dentries)
+                    .unwrap_or_else(|| (Vec::new(), Vec::new(), (Vec::new(), None, None)));
+                (Some(cutoff), entries, dentries, mig)
             }
-            _ => (None, Vec::new(), Vec::new()),
+            _ => (None, Vec::new(), Vec::new(), (Vec::new(), None, None)),
         };
         let splice_fields = if rotating {
             self.handler
@@ -1351,6 +1363,9 @@ impl Node {
                 .median_feerate(self.wallet.get_block_height().unwrap_or(0))
                 .map(|m| m.max(2) as u32),
             dormancy_outputs,
+            migration_manifest: migration.0,
+            migration_receiver: migration.1,
+            migration_vout: migration.2,
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,

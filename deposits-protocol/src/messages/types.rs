@@ -150,6 +150,58 @@ pub struct LedgerUpdateResponseMsg {
 /// cosigning. Without the ledger_id pairing, fraud-proof verifiers
 /// (and the explorer) had to derive it from prior `QuorumAddMember`
 /// operations on the operator's history.
+/// DEP-20 §8.3 / DEP-02 type 316 entry: a deposit migrated with its terms and descriptor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ManifestEntry {
+    pub deposit_id: crate::types::DepositId,
+    pub amount: u64,
+    pub fees: crate::types::FeeStructure,
+    pub descriptor: String,
+}
+
+/// DEP-02 type 316 encoding: repeated deposit_id(16) ‖ amount(8) ‖ annualized_msats(8) ‖
+/// annualized_bps(2) ‖ frequency_blocks(4) ‖ u16 len ‖ descriptor.
+pub fn encode_manifest(entries: &[ManifestEntry]) -> Vec<u8> {
+    let mut b = Vec::new();
+    for e in entries {
+        b.extend_from_slice(&e.deposit_id);
+        b.extend_from_slice(&e.amount.to_be_bytes());
+        b.extend_from_slice(&e.fees.annualized_msats.to_be_bytes());
+        b.extend_from_slice(&e.fees.annualized_bps.to_be_bytes());
+        b.extend_from_slice(&e.fees.frequency_blocks.to_be_bytes());
+        b.extend_from_slice(&(e.descriptor.len() as u16).to_be_bytes());
+        b.extend_from_slice(e.descriptor.as_bytes());
+    }
+    b
+}
+
+pub fn decode_manifest(b: &[u8]) -> Result<Vec<ManifestEntry>, String> {
+    let mut out = Vec::new();
+    let mut p = 0;
+    while p < b.len() {
+        if p + 40 > b.len() {
+            return Err("truncated manifest".into());
+        }
+        let len = u16::from_be_bytes([b[p + 38], b[p + 39]]) as usize;
+        if p + 40 + len > b.len() {
+            return Err("truncated manifest descriptor".into());
+        }
+        out.push(ManifestEntry {
+            deposit_id: b[p..p + 16].try_into().unwrap(),
+            amount: u64::from_be_bytes(b[p + 16..p + 24].try_into().unwrap()),
+            fees: crate::types::FeeStructure {
+                annualized_msats: u64::from_be_bytes(b[p + 24..p + 32].try_into().unwrap()),
+                annualized_bps: u16::from_be_bytes(b[p + 32..p + 34].try_into().unwrap()),
+                frequency_blocks: u32::from_be_bytes(b[p + 34..p + 38].try_into().unwrap()),
+            },
+            descriptor: String::from_utf8(b[p + 40..p + 40 + len].to_vec())
+                .map_err(|e| e.to_string())?,
+        });
+        p += 40 + len;
+    }
+    Ok(out)
+}
+
 /// DEP-20 §3 / DEP-02 type 280 entry: `deposit_id(16) ‖ amount_msats(8) ‖ vout(4)`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitOutput {
@@ -310,6 +362,12 @@ pub enum LedgerOperation {
         reference_feerate: Option<u32>,
         /// DEP-20 §8.2 (TLV 336): dormant deposits paid out in full, after the exits.
         dormancy_outputs: Vec<ExitOutput>,
+        /// DEP-20 §8.3 (TLV 316): deposits migrated to the receiver.
+        migration_manifest: Vec<ManifestEntry>,
+        /// DEP-20 §8.3 (TLV 288): the receiver's operator key.
+        migration_receiver: Option<PublicKey>,
+        /// DEP-20 §8.3 (TLV 290): the migration output's vout.
+        migration_vout: Option<u32>,
     },
 
     // ========== Settlement (DEP-20) ==========
@@ -330,6 +388,21 @@ pub enum LedgerOperation {
         rotation_height: u32,
         migration_receiver: Option<PublicKey>,
         manifest_hash: Option<[u8; 32]>,
+        /// DEP-20 §8.3 (TLV 316): the offered manifest.
+        migration_manifest: Vec<ManifestEntry>,
+        /// DEP-20 §8.3 (TLV 338): the receiver's signed DormancyAccept update, TLV bytes.
+        dormancy_accept: Option<Vec<u8>>,
+        /// DEP-20 §8.3 (TLV 340): premium paid to the receiver, whole sats.
+        premium: Option<u64>,
+    },
+    /// DEP-20 §8.3: the receiver accepts a dormancy migration (appended to its own ledger).
+    DormancyAccept {
+        premium_deposit: Option<DepositId>,
+        exit_address: Vec<u8>,
+        expires_at_height: u32,
+        manifest_hash: [u8; 32],
+        offer_event_id: [u8; 32],
+        accepted_total: u64,
     },
     /// DEP-20 §3: withdraw a pending ExitRequest (named by SHA256 of its operation).
     ExitCancel {
@@ -868,6 +941,7 @@ impl LedgerOperation {
             Self::ExitRequest { .. } => 100,
             Self::ExitCancel { .. } => 101,
             Self::DormancyNotice { .. } => 102,
+            Self::DormancyAccept { .. } => 103,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -926,9 +1000,10 @@ impl LedgerOperation {
             Self::DisputeYield => consts::LEDGER_UPDATE,
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
-            Self::ExitRequest { .. } | Self::ExitCancel { .. } | Self::DormancyNotice { .. } => {
-                consts::LEDGER_UPDATE
-            }
+            Self::ExitRequest { .. }
+            | Self::ExitCancel { .. }
+            | Self::DormancyNotice { .. }
+            | Self::DormancyAccept { .. } => consts::LEDGER_UPDATE,
             Self::LedgerClose => consts::LEDGER_CLOSE,
             Self::Batch(_) => consts::BATCH,
         }
@@ -969,7 +1044,7 @@ impl LedgerOperation {
             46 => consts::QUORUM_JOIN,
             45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
-            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 => consts::LEDGER_UPDATE,
+            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 | 103 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
             70 => consts::TRANSFER_LOCK,
             71 => consts::TRANSFER_COMPLETE,
@@ -1278,6 +1353,9 @@ impl BinaryCodec for LedgerOperation {
                 splice_in_amount: _,
                 reference_feerate: _,
                 dormancy_outputs: _,
+                migration_manifest: _,
+                migration_receiver: _,
+                migration_vout: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1690,7 +1768,10 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, claim_txid)?;
                 write_string(w, new_reserves_address)?;
             }
-            Self::ExitRequest { .. } | Self::ExitCancel { .. } | Self::DormancyNotice { .. } => {
+            Self::ExitRequest { .. }
+            | Self::ExitCancel { .. }
+            | Self::DormancyNotice { .. }
+            | Self::DormancyAccept { .. } => {
                 return Err(CodecError::InvalidData(
                     "DEP-20 exits have no legacy encoding; use TLV".into(),
                 ));
@@ -1774,6 +1855,9 @@ impl BinaryCodec for LedgerOperation {
                     splice_in_amount: None,
                     reference_feerate: None,
                     dormancy_outputs: Vec::new(),
+                    migration_manifest: Vec::new(),
+                    migration_receiver: None,
+                    migration_vout: None,
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,

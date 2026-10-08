@@ -714,6 +714,50 @@ impl Node {
                             }
                         }
                     }
+                    // DEP-20 §8.3: a receiver's DormancyAccept carries the manifest; it must hash
+                    // to the accept's, and every deposit's fees must meet each member's floor.
+                    if let LedgerOperation::DormancyAccept { manifest_hash, .. } = &operation {
+                        let manifest = request
+                            .params
+                            .get("migration_manifest")
+                            .and_then(|v| v.as_str())
+                            .and_then(|h| hex::decode(h).ok());
+                        let refuse = |msg: String| {
+                            tracing::warn!("Refusing cosign: {}", msg);
+                            (false, None, Some(msg))
+                        };
+                        let Some(bytes) = manifest else {
+                            return refuse(
+                                "a DormancyAccept cosign must carry the manifest".into(),
+                            );
+                        };
+                        use bitcoin::hashes::{sha256, Hash};
+                        if sha256::Hash::hash(&bytes).to_byte_array() != *manifest_hash {
+                            return refuse("manifest does not hash to the accept's".into());
+                        }
+                        let Ok(entries) = deposits_core::messages::decode_manifest(&bytes) else {
+                            return refuse("manifest does not decode".into());
+                        };
+                        let members = {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            ledgers
+                                .get(&request.ledger_id)
+                                .map(|arc| arc.read().unwrap().state.quorum_members.clone())
+                                .unwrap_or_default()
+                        };
+                        for m in &members {
+                            for e in &entries {
+                                if m.min_fee_bps.is_some_and(|f| e.fees.annualized_bps < f)
+                                    || m.min_fee_fixed.is_some_and(|f| e.fees.annualized_msats < f)
+                                {
+                                    return refuse(format!(
+                                        "deposit {}'s fees are below a member's floor",
+                                        hex::encode(e.deposit_id)
+                                    ));
+                                }
+                            }
+                        }
+                    }
                     let rotating_history: Option<(
                         Vec<deposits_core::SignedLedgerUpdate>,
                         deposits_core::LedgerState,

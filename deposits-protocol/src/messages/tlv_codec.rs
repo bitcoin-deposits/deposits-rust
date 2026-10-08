@@ -167,6 +167,12 @@ mod ledger_op_tlv {
     pub const DORMANCY_BLOCKS: u64 = 318; // u32, QuorumAddMember
     pub const DORMANCY_NOTICE_BLOCKS: u64 = 332; // u32, QuorumAddMember
     pub const DORMANCY_OUTPUTS: u64 = 336; // repeated deposit_id‖amount‖vout, QuorumBegin
+    pub const MIGRATION_MANIFEST: u64 = 316; // QuorumBegin, DormancyNotice (DEP-20 §8.3)
+    pub const MIGRATION_VOUT: u64 = 290; // u32, QuorumBegin
+    pub const DORMANCY_ACCEPT: u64 = 338; // signed update bytes, DormancyNotice
+    pub const PREMIUM_MSATS: u64 = 340; // u64, DormancyNotice
+    pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
+    pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
     pub const EXPIRES_AT_HEIGHT: u64 = 302; // u32, ExitRequest (optional)
     pub const EXIT_REQUEST_ID: u64 = 304; // [u8; 32], ExitCancel
@@ -277,6 +283,9 @@ impl TlvEncode for LedgerOperation {
                 splice_in_amount,
                 reference_feerate,
                 dormancy_outputs,
+                migration_manifest,
+                migration_receiver,
+                migration_vout,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -345,6 +354,16 @@ impl TlvEncode for LedgerOperation {
                         b.extend_from_slice(&e.vout.to_be_bytes());
                     }
                     builder = builder.bytes_field(DORMANCY_OUTPUTS, &b);
+                }
+                if !migration_manifest.is_empty() {
+                    builder = builder
+                        .bytes_field(MIGRATION_MANIFEST, &encode_manifest(migration_manifest));
+                }
+                if let Some(r) = migration_receiver {
+                    builder = builder.bytes_field(MIGRATION_RECEIVER, &r.serialize());
+                }
+                if let Some(v) = migration_vout {
+                    builder = builder.u32_field(MIGRATION_VOUT, *v);
                 }
             }
             Self::DepositOpen {
@@ -449,6 +468,9 @@ impl TlvEncode for LedgerOperation {
                 rotation_height,
                 migration_receiver,
                 manifest_hash,
+                migration_manifest,
+                dormancy_accept,
+                premium,
             } => {
                 builder = builder.u32_field(ROTATION_HEIGHT, *rotation_height);
                 if let Some(r) = migration_receiver {
@@ -457,6 +479,34 @@ impl TlvEncode for LedgerOperation {
                 if let Some(h) = manifest_hash {
                     builder = builder.bytes_field(MANIFEST_HASH, h);
                 }
+                if !migration_manifest.is_empty() {
+                    builder = builder
+                        .bytes_field(MIGRATION_MANIFEST, &encode_manifest(migration_manifest));
+                }
+                if let Some(a) = dormancy_accept {
+                    builder = builder.bytes_field(DORMANCY_ACCEPT, a);
+                }
+                if let Some(p) = premium {
+                    builder = builder.u64_field(PREMIUM_MSATS, *p);
+                }
+            }
+            Self::DormancyAccept {
+                premium_deposit,
+                exit_address,
+                expires_at_height,
+                manifest_hash,
+                offer_event_id,
+                accepted_total,
+            } => {
+                if let Some(d) = premium_deposit {
+                    builder = builder.deposit_id_field(DEPOSIT_ID, d);
+                }
+                builder = builder
+                    .bytes_field(EXIT_ADDRESS, exit_address)
+                    .u32_field(EXPIRES_AT_HEIGHT, *expires_at_height)
+                    .bytes_field(MANIFEST_HASH, manifest_hash)
+                    .bytes_field(OFFER_EVENT_ID, offer_event_id)
+                    .u64_field(ACCEPTED_TOTAL, *accepted_total);
             }
             Self::ExitCancel {
                 deposit_id,
@@ -960,6 +1010,12 @@ impl TlvDecode for LedgerOperation {
                         reader.read_raw_opt(DORMANCY_OUTPUTS),
                         DORMANCY_OUTPUTS,
                     )?,
+                    migration_manifest: read_manifest(reader.read_raw_opt(MIGRATION_MANIFEST))?,
+                    migration_receiver: read_pubkey_opt(
+                        reader.read_raw_opt(MIGRATION_RECEIVER),
+                        MIGRATION_RECEIVER,
+                    )?,
+                    migration_vout: reader.read_u32_opt(MIGRATION_VOUT)?,
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -1001,21 +1057,31 @@ impl TlvDecode for LedgerOperation {
                 expiry: reader.read_u32(EXPIRY)?,
                 witness: reader.read_witness(WITNESS)?,
             }),
-            102 => {
-                Ok(Self::DormancyNotice {
-                    rotation_height: reader.read_u32(ROTATION_HEIGHT)?,
-                    migration_receiver: match reader.read_raw_opt(MIGRATION_RECEIVER) {
-                        None => None,
-                        Some(b) => Some(PublicKey::from_slice(b).map_err(|e| {
-                            TlvError::InvalidFieldValue {
-                                field_type: MIGRATION_RECEIVER,
-                                reason: e.to_string(),
-                            }
-                        })?),
-                    },
-                    manifest_hash: reader.read_bytes_opt(MANIFEST_HASH)?,
-                })
-            }
+            102 => Ok(Self::DormancyNotice {
+                rotation_height: reader.read_u32(ROTATION_HEIGHT)?,
+                migration_receiver: read_pubkey_opt(
+                    reader.read_raw_opt(MIGRATION_RECEIVER),
+                    MIGRATION_RECEIVER,
+                )?,
+                manifest_hash: reader.read_bytes_opt(MANIFEST_HASH)?,
+                migration_manifest: read_manifest(reader.read_raw_opt(MIGRATION_MANIFEST))?,
+                dormancy_accept: reader.read_raw_opt(DORMANCY_ACCEPT).map(|b| b.to_vec()),
+                premium: reader.read_u64_opt(PREMIUM_MSATS)?,
+            }),
+            103 => Ok(Self::DormancyAccept {
+                premium_deposit: match reader.read_raw_opt(DEPOSIT_ID) {
+                    None => None,
+                    Some(b) => Some(b.try_into().map_err(|_| TlvError::InvalidFieldValue {
+                        field_type: DEPOSIT_ID,
+                        reason: "deposit_id is not 16 bytes".into(),
+                    })?),
+                },
+                exit_address: reader.read_raw(EXIT_ADDRESS)?.to_vec(),
+                expires_at_height: reader.read_u32(EXPIRES_AT_HEIGHT)?,
+                manifest_hash: reader.read_bytes(MANIFEST_HASH)?,
+                offer_event_id: reader.read_bytes(OFFER_EVENT_ID)?,
+                accepted_total: reader.read_u64(ACCEPTED_TOTAL)?,
+            }),
             101 => Ok(Self::ExitCancel {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
                 exit_request_id: reader.read_bytes(EXIT_REQUEST_ID)?,
@@ -2161,6 +2227,30 @@ impl DepositsMessage {
 // ============================================================================
 // Tests
 // ============================================================================
+
+/// DEP-02 type 316 (DEP-20 §8.3 manifest).
+fn read_manifest(raw: Option<&[u8]>) -> Result<Vec<ManifestEntry>, TlvError> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some(b) => decode_manifest(b).map_err(|reason| TlvError::InvalidFieldValue {
+            field_type: ledger_op_tlv::MIGRATION_MANIFEST,
+            reason,
+        }),
+    }
+}
+
+fn read_pubkey_opt(
+    raw: Option<&[u8]>,
+    field_type: u64,
+) -> Result<Option<bitcoin::secp256k1::PublicKey>, TlvError> {
+    raw.map(|b| {
+        bitcoin::secp256k1::PublicKey::from_slice(b).map_err(|e| TlvError::InvalidFieldValue {
+            field_type,
+            reason: e.to_string(),
+        })
+    })
+    .transpose()
+}
 
 /// DEP-02 type 280 / 336: repeated `deposit_id(16) ‖ amount_msats(8) ‖ vout(4)`.
 fn read_exit_outputs(raw: Option<&[u8]>, field_type: u64) -> Result<Vec<ExitOutput>, TlvError> {

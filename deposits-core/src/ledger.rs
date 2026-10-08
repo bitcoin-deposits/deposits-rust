@@ -2825,6 +2825,9 @@ mod tests {
             splice_in_amount: None,
             reference_feerate: None,
             dormancy_outputs: Vec::new(),
+            migration_manifest: Vec::new(),
+            migration_receiver: None,
+            migration_vout: None,
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),

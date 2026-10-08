@@ -278,6 +278,47 @@ pub struct LedgerState {
     /// The outstanding DormancyNotice: (its block height, rotation_height).
     #[serde(default)]
     pub dormancy_notice: Option<(u32, u32)>,
+    /// DEP-20 §8.3 source: the outstanding notice's migration, if it names a receiver.
+    #[serde(default)]
+    pub migration: Option<MigrationNotice>,
+    /// DEP-20 §8.3 receiver: our outstanding DormancyAccept.
+    #[serde(default)]
+    pub dormancy_accept: Option<AcceptState>,
+}
+
+/// DEP-20 §8.3: what a source's DormancyNotice commits to migrate.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationNotice {
+    #[serde(with = "serde_pubkey")]
+    pub receiver: PublicKey,
+    pub manifest: Vec<DepositId>,
+    pub spk: Vec<u8>,
+    pub total: u64,
+    pub premium: u64,
+}
+
+/// DEP-20 §8.3: a receiver's accept, its reservation and (after the first credit) the outpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptState {
+    pub manifest_hash: [u8; 32],
+    pub spk: Vec<u8>,
+    pub total: u64,
+    pub expires: u32,
+    pub premium_deposit: Option<DepositId>,
+    pub credited: u64,
+    pub outpoint: Option<([u8; 32], u32)>,
+}
+
+impl AcceptState {
+    /// Still reserving capacity at `height`: credited (awaiting its splice) or unexpired.
+    pub fn live(&self, height: u32) -> bool {
+        self.outpoint.is_some() || self.expires > height
+    }
+}
+
+/// DEP-20 §8.3: the funding_address marker of a migration credit.
+pub fn migration_marker(manifest_hash: &[u8; 32]) -> String {
+    format!("migration:{}", hex::encode(manifest_hash))
 }
 
 pub const DORMANCY_BLOCKS_DEFAULT: u32 = 26280;
@@ -361,6 +402,8 @@ impl LedgerState {
             dormancy_blocks: DORMANCY_BLOCKS_DEFAULT,
             dormancy_notice_blocks: DORMANCY_NOTICE_BLOCKS_DEFAULT,
             dormancy_notice: None,
+            migration: None,
+            dormancy_accept: None,
         }
     }
 
@@ -407,6 +450,59 @@ impl LedgerState {
             .collect();
         out.sort_by_key(|(id, _, _)| *id);
         out
+    }
+
+    /// DEP-20 §8.3: at a rotating QuorumBegin with cutoff `cutoff` consuming a notice that names
+    /// a receiver, the migrated deposits (manifest ∩ bucket, not spun out, ascending, capped by
+    /// the accepted total), the receiver's script and the output in sats.
+    pub fn dormancy_migration(
+        &self,
+        cutoff: u32,
+    ) -> Option<(Vec<crate::messages::ManifestEntry>, Vec<u8>, u64)> {
+        let (notice_height, rotation_height) = self.dormancy_notice?;
+        let m = self.migration.as_ref()?;
+        if !self.vault_current || cutoff < rotation_height {
+            return None;
+        }
+        let bound = notice_height.saturating_sub(self.dormancy_blocks);
+        let spun: std::collections::HashSet<DepositId> = self
+            .dormancy_spin_outs(cutoff)
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect();
+        let pending: std::collections::HashSet<DepositId> =
+            self.pending_exits.values().map(|e| e.deposit_id).collect();
+        let mut cands: Vec<(&DepositId, &Deposit)> = self
+            .deposits
+            .iter()
+            .filter(|(id, d)| {
+                d.balance > 0
+                    && d.locked_balance == 0
+                    && !pending.contains(*id)
+                    && d.last_signed_activity <= bound
+                    && !spun.contains(*id)
+                    && m.manifest.contains(id)
+            })
+            .collect();
+        cands.sort_by_key(|(id, _)| **id);
+        let mut total = 0u64;
+        let mut out = Vec::new();
+        for (id, d) in cands {
+            if total + d.balance + m.premium <= m.total {
+                total += d.balance;
+                out.push(crate::messages::ManifestEntry {
+                    deposit_id: *id,
+                    amount: d.balance,
+                    fees: d.fees.clone(),
+                    descriptor: d.descriptor.clone(),
+                });
+            }
+        }
+        if out.is_empty() {
+            None
+        } else {
+            Some((out, m.spk.clone(), (total + m.premium) / 1000))
+        }
     }
 
     /// DEP-20 §3: an exit output's own marginal cost, feerate × (9 + len(spk)) sats.
@@ -660,6 +756,10 @@ impl LedgerState {
                 exit_outputs,
                 reference_feerate,
                 dormancy_outputs,
+                migration_manifest,
+                migration_receiver,
+                migration_vout,
+                splice_in_outpoint,
                 ..
             } => {
                 // DEP-20 §8.2: dormancy_outputs must be exactly the spin-outs (pre-state), a
@@ -685,6 +785,52 @@ impl LedgerState {
                             dormancy_outputs.len()
                         ),
                     });
+                }
+                // DEP-20 §8.3 source: the migration must be exactly the rule's (pre-state).
+                let mig = next.dormancy_migration(qb_cutoff);
+                let mig_ok = match &mig {
+                    None => migration_manifest.is_empty(),
+                    Some((entries, _, _)) => {
+                        entries.len() == migration_manifest.len()
+                            && entries
+                                .iter()
+                                .zip(migration_manifest.iter())
+                                .all(|(a, b)| a.deposit_id == b.deposit_id && a.amount == b.amount)
+                            && *migration_receiver == next.migration.as_ref().map(|m| m.receiver)
+                            && *migration_vout == Some(nexits + spins.len() as u32 + 1)
+                    }
+                };
+                if !mig_ok {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "migration_manifest".to_string(),
+                        details: format!(
+                            "{} deposits migrate, {} recorded or mismatched",
+                            mig.as_ref().map_or(0, |(e, _, _)| e.len()),
+                            migration_manifest.len()
+                        ),
+                    });
+                }
+                // DEP-20 §8.3 receiver: a credited migration must be spliced in at this rotation.
+                if next.vault_current {
+                    if let Some(op) = next.dormancy_accept.as_ref().and_then(|a| a.outpoint) {
+                        if *splice_in_outpoint != Some(op) {
+                            return Err(crate::DepositsError::ProtocolViolation {
+                                violation_type: "migration_splice".to_string(),
+                                details: "a credited migration output must be spliced in at this rotation"
+                                    .to_string(),
+                            });
+                        }
+                        next.dormancy_accept = None;
+                    }
+                }
+                if let Some((entries, _, _)) = &mig {
+                    for e in entries {
+                        if let Some(d) = next.deposits.get_mut(&e.deposit_id) {
+                            let before = d.balance;
+                            d.balance = 0;
+                            next.add_balance_delta(before, 0);
+                        }
+                    }
                 }
                 let consumes_notice =
                     next.vault_current && next.dormancy_notice.is_some_and(|(_, r)| qb_cutoff >= r);
@@ -819,6 +965,7 @@ impl LedgerState {
                 }
                 if consumes_notice {
                     next.dormancy_notice = None;
+                    next.migration = None;
                 }
                 // DEP-20 §3 Expiry: a rotating QuorumBegin releases expired requests after it
                 // settles (the caller skipped the pre-op release).
@@ -842,7 +989,12 @@ impl LedgerState {
                     .unwrap_or(DORMANCY_NOTICE_BLOCKS_DEFAULT);
             }
             LedgerOperation::DormancyNotice {
-                rotation_height, ..
+                rotation_height,
+                migration_receiver,
+                manifest_hash,
+                migration_manifest,
+                dormancy_accept,
+                premium,
             } => {
                 let h = apply_ctx().height;
                 if next.dormancy_notice.is_some() {
@@ -860,7 +1012,99 @@ impl LedgerState {
                         ),
                     });
                 }
+                next.migration = match migration_receiver {
+                    None => None,
+                    Some(receiver) => {
+                        // DEP-20 §8.3: the receiver's signed accept, verified without its ledger.
+                        let bad = |d: &str| crate::DepositsError::ProtocolViolation {
+                            violation_type: "dormancy_notice".to_string(),
+                            details: d.to_string(),
+                        };
+                        let u = dormancy_accept
+                            .as_ref()
+                            .and_then(|b| {
+                                <crate::types::SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(
+                                    b,
+                                )
+                                .ok()
+                            })
+                            .ok_or_else(|| bad("dormancy_accept does not decode"))?;
+                        let a = <LedgerOperation as crate::TlvDecode>::tlv_decode(&u.message)
+                            .map_err(|_| bad("dormancy_accept does not decode"))?;
+                        let LedgerOperation::DormancyAccept {
+                            exit_address,
+                            expires_at_height,
+                            manifest_hash: accept_hash,
+                            accepted_total,
+                            ..
+                        } = a
+                        else {
+                            return Err(bad("dormancy_accept is not a DormancyAccept"));
+                        };
+                        if u.operator_id != *receiver || u.verify_operator_signature().is_err() {
+                            return Err(bad(
+                                "dormancy_accept is not the receiver's signed DormancyAccept",
+                            ));
+                        }
+                        let encoded = crate::messages::encode_manifest(migration_manifest);
+                        let digest: [u8; 32] = sha256::Hash::hash(&encoded).to_byte_array();
+                        if migration_manifest.is_empty()
+                            || *manifest_hash != Some(digest)
+                            || accept_hash != digest
+                        {
+                            return Err(bad("manifest, its hash and the accept disagree"));
+                        }
+                        if expires_at_height <= *rotation_height {
+                            return Err(bad("the accept expires before the rotation"));
+                        }
+                        if premium.unwrap_or(0) % 1000 != 0 {
+                            return Err(bad("premium_msats must be whole satoshis"));
+                        }
+                        Some(MigrationNotice {
+                            receiver: *receiver,
+                            manifest: migration_manifest.iter().map(|e| e.deposit_id).collect(),
+                            spk: exit_address,
+                            total: accepted_total,
+                            premium: premium.unwrap_or(0),
+                        })
+                    }
+                };
                 next.dormancy_notice = Some((h, *rotation_height));
+            }
+            LedgerOperation::DormancyAccept {
+                premium_deposit,
+                exit_address,
+                expires_at_height,
+                manifest_hash,
+                accepted_total,
+                ..
+            } => {
+                let h = apply_ctx().height;
+                if next.dormancy_accept.as_ref().is_some_and(|a| a.live(h)) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_accept".to_string(),
+                        details: "another migration is outstanding".to_string(),
+                    });
+                }
+                let obligations = next.total_deposit_balance();
+                if obligations.saturating_add(*accepted_total) > next.reserves_amount {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_accept".to_string(),
+                        details: format!(
+                            "obligations {} + {} exceed reserves {}",
+                            obligations, accepted_total, next.reserves_amount
+                        ),
+                    });
+                }
+                next.dormancy_accept = Some(AcceptState {
+                    manifest_hash: *manifest_hash,
+                    spk: exit_address.clone(),
+                    total: *accepted_total,
+                    expires: *expires_at_height,
+                    premium_deposit: *premium_deposit,
+                    credited: 0,
+                    outpoint: None,
+                });
             }
             LedgerOperation::ExitRequest {
                 deposit_id,
@@ -1115,8 +1359,46 @@ impl LedgerState {
                 next.add_balance_delta(before, after);
             }
             LedgerOperation::OnchainCredit {
-                deposit_id, amount, ..
+                deposit_id,
+                amount,
+                txid,
+                vout,
+                funding_address,
+                ..
             } => {
+                let h = apply_ctx().height;
+                let room = next
+                    .reserves_amount
+                    .saturating_sub(next.total_deposit_balance());
+                match next.dormancy_accept.as_mut() {
+                    // DEP-20 §8.3: a migration credit draws on the accept's reservation, one outpoint.
+                    Some(a) if *funding_address == migration_marker(&a.manifest_hash) => {
+                        if a.credited + amount > a.total {
+                            return Err(crate::DepositsError::ProtocolViolation {
+                                violation_type: "over_obligation".to_string(),
+                                details: "migration credits exceed the accepted total".to_string(),
+                            });
+                        }
+                        if a.outpoint.is_some_and(|o| o != (*txid, *vout)) {
+                            return Err(crate::DepositsError::ProtocolViolation {
+                                violation_type: "over_obligation".to_string(),
+                                details: "migration credits name another outpoint".to_string(),
+                            });
+                        }
+                        a.credited += amount;
+                        a.outpoint = Some((*txid, *vout));
+                    }
+                    Some(a) if a.live(h) => {
+                        if amount.saturating_add(a.total - a.credited) > room {
+                            return Err(crate::DepositsError::ProtocolViolation {
+                                violation_type: "over_obligation".to_string(),
+                                details: "the credit would eat a migration's reservation"
+                                    .to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
                 let deposit = next
                     .deposits
                     .get_mut(deposit_id)
@@ -1361,6 +1643,7 @@ impl LedgerState {
             LedgerOperation::DisputeAcquire { new_custodian, .. } => {
                 next.vault_current = false;
                 next.dormancy_notice = None;
+                next.migration = None;
                 next.operator_key = *new_custodian;
                 next.parent_pubkey = *new_custodian;
                 next.dispute_state = DisputeState::Normal;

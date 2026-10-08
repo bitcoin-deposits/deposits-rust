@@ -1403,6 +1403,9 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                 LedgerOperation::DormancyNotice {
                     rotation_height, ..
                 } => ("DormancyNotice", format!("at:{}", rotation_height)),
+                LedgerOperation::DormancyAccept { accepted_total, .. } => {
+                    ("DormancyAccept", format!("total:{}", accepted_total))
+                }
                 LedgerOperation::ExitCancel { deposit_id, .. } => (
                     "ExitCancel",
                     format!(
