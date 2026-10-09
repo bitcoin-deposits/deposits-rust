@@ -418,7 +418,7 @@ fn add_duplicate_quorum_member_is_idempotent() {
 }
 
 #[test]
-fn transfer_complete_on_already_completed_ignored() {
+fn transfer_complete_on_already_completed_is_refused() {
     let mut net = TestNetwork::new(&["alice"], 1_000_000);
     let sender = net.create_depositor("sender", 10);
     let receiver = net.create_depositor("receiver", 20);
@@ -460,7 +460,8 @@ fn transfer_complete_on_already_completed_ignored() {
         })
         .unwrap();
 
-    // Complete again (should be no-op — transfer already removed from pending)
+    // Complete again: no pending transfer remains, so it is refused (FINDINGS L6 — an
+    // operator-only settlement naming nothing must not be cosignable).
     let result = net
         .op_mut("alice")
         .ledger
@@ -472,10 +473,8 @@ fn transfer_complete_on_already_completed_ignored() {
             commitment: None,
             dest_commitment: None,
         });
-    // This should succeed (no-op) or fail gracefully — transfer not found
-    // The protocol applies it as a no-op (pending_transfers.remove returns None)
     assert!(
-        result.is_ok(),
-        "Double complete should be a no-op, not an error"
+        result.is_err(),
+        "a second TransferComplete names no pending transfer and must be refused"
     );
 }

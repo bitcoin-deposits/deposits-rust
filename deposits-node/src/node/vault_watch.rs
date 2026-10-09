@@ -913,8 +913,10 @@ mod tests {
         assert_eq!(ts.len(), 1);
         let mut owed = OwedTheft::from_theft(&ts[0], 1000);
         owed.published.insert("02ab:target".into());
-        let mut state = VaultWatchState::default();
-        state.scanned = Some(990);
+        let mut state = VaultWatchState {
+            scanned: Some(990),
+            ..Default::default()
+        };
         state
             .owed
             .insert(vault_spend_key(&ts[0].ledger_id, &spend.tx), owed);

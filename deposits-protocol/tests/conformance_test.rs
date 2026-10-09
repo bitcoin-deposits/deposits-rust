@@ -312,15 +312,14 @@ fn fee_collect_over_one_period_is_rejected() {
             .any(|v| matches!(v, ConformanceViolation::FeeExceedsAssessment { .. }))
     };
 
-    // Dormant on `legacy` (DEP-18 version gate): the over-cap amount must NOT
-    // be faulted, so an upgraded node never retroactively confiscates a
-    // FeeCollect cosigned before the ledger adopts fee-cap-v3.
-    let (_l, legacy_v) = state
+    // A rule of every ruleset (DEP-07; FINDINGS L6): the over-cap amount is rejected even on
+    // a ledger that never adopted fee-cap-v3.
+    let (_l, plain_v) = state
         .apply_with_verifier(&fee_collect(greedy), &AllowAll, 0)
         .unwrap();
     assert!(
-        !exceeds(&legacy_v),
-        "fee cap must be dormant on legacy, got {legacy_v:?}"
+        exceeds(&plain_v),
+        "expected FeeExceedsAssessment on any ruleset, got {plain_v:?}"
     );
 
     // Active on fee-cap-v3: the over-cap amount is rejected.

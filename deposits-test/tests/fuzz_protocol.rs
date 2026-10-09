@@ -1277,10 +1277,24 @@ fn gen_honest_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option<Ge
                 record_withdrawal: None,
             });
         }
-    } else if aux < 10 && has_pending {
-        // TransferFail: any pending transfer with reason=1 (timeout).
-        let pending_ids: Vec<[u8; 32]> =
-            op.ledger.state.pending_transfers.keys().copied().collect();
+    } else if aux < 10
+        && op
+            .ledger
+            .state
+            .pending_transfers
+            .values()
+            .any(|p| p.timeout_height <= sim.block_height)
+    {
+        // TransferFail: a pending transfer whose timeout has passed, reason=1 (timeout).
+        // Failing one before its timeout_height is refused (FINDINGS L6).
+        let pending_ids: Vec<[u8; 32]> = op
+            .ledger
+            .state
+            .pending_transfers
+            .iter()
+            .filter(|(_, p)| p.timeout_height <= sim.block_height)
+            .map(|(k, _)| *k)
+            .collect();
         let tid = pending_ids[rng.range(pending_ids.len() as u64) as usize];
         let mut block_hash = [0u8; 32];
         block_hash[..4].copy_from_slice(&sim.block_height.to_le_bytes());

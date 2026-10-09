@@ -1,0 +1,11 @@
+# DEP-07 FeeCollect cap: fees due for one deposit (shared cl-deposits / deposits-rust).
+# A FeeCollect at HEIGHT conforms only if HEIGHT >= last + frequency_blocks and amount <= due.
+# balance_msat annualized_msats annualized_bps frequency_blocks last_fee_assessment height due_msat
+100000000 0 100 144 1000 1144 2739
+100000000 52560000 0 144 1000 1144 144000
+100000000 52560000 250 144 1000 2000 150849
+100000000 52560000 250 144 1000 1143 0
+10000000000000000 0 10000 52560 0 52560 10000000000000000
+5000000 1000 50 0 900 900 0
+5000000 1000 50 0 900 901 0
+777777 123456 7 10 5 100 23

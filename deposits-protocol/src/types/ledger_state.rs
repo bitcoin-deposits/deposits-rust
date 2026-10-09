@@ -1469,6 +1469,17 @@ impl LedgerState {
                 deposit_id,
                 ..
             } => {
+                // FINDINGS L6: only an open invoice lock of this deposit can fail.
+                if next
+                    .open_invoice_locks
+                    .get(payment_id)
+                    .is_none_or(|l| l.deposit_id != *deposit_id)
+                {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "invoice_fail".to_string(),
+                        details: "names no open invoice lock of this deposit".to_string(),
+                    });
+                }
                 // Release the full locked budget (amount + fee), read from the
                 // open lock — the locked amount is authoritative state, not a
                 // settable field on the op (matching TransferFail/OnchainFail,
@@ -1504,6 +1515,18 @@ impl LedgerState {
                 amount,
                 ..
             } => {
+                // FINDINGS L6: an open invoice lock of this deposit, for its exact amount (the
+                // preimage is checked in check_conformance).
+                match next.open_invoice_locks.get(payment_id) {
+                    Some(l) if l.deposit_id == *deposit_id && l.amount == *amount => {}
+                    _ => {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "invoice_fulfill".to_string(),
+                            details: "names no open invoice lock of this deposit and amount"
+                                .to_string(),
+                        });
+                    }
+                }
                 // Keep-the-spread: consume amount+fee from the deposit; the
                 // `amount` funded the LN payment (left the system), and the
                 // `fee` becomes operator revenue (the operator paid the actual
@@ -1863,6 +1886,14 @@ impl LedgerState {
                 );
             }
             LedgerOperation::TransferComplete { transfer_id, .. } => {
+                // FINDINGS L6: an operator-only settlement; the witness is checked against the
+                // completion script in check_conformance, and an unknown transfer is refused.
+                if !next.pending_transfers.contains_key(transfer_id) {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "transfer_complete".to_string(),
+                        details: "no such pending transfer".to_string(),
+                    });
+                }
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
                     if let Some(source) = next.deposits.get_mut(&pending.source_deposit_id) {
@@ -1887,6 +1918,25 @@ impl LedgerState {
                 }
             }
             LedgerOperation::TransferFail { transfer_id, .. } => {
+                // FINDINGS L6: only a pending transfer, and only from its timeout_height (the
+                // update's block height, when applied under an update envelope).
+                let Some(timeout) = next
+                    .pending_transfers
+                    .get(transfer_id)
+                    .map(|p| p.timeout_height)
+                else {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "transfer_fail".to_string(),
+                        details: "no such pending transfer".to_string(),
+                    });
+                };
+                let h = apply_ctx().height;
+                if h > 0 && h < timeout {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "transfer_fail".to_string(),
+                        details: format!("block {} is before the lock's timeout {}", h, timeout),
+                    });
+                }
                 if let Some(pending) = next.pending_transfers.remove(transfer_id) {
                     let total = pending.total_locked();
                     let mut charged = 0u64;
@@ -2590,14 +2640,13 @@ impl LedgerState {
                     // (DEP-18): only ledgers upgraded to `fee-cap-v3` enforce it,
                     // so an upgraded node never retroactively faults a FeeCollect
                     // cosigned under an older ruleset.
-                    if ruleset_enforces_fee_cap(&pre.active_ruleset_name) {
-                        let max_due = deposit.calculate_fees_due(*block_height);
-                        if *amount > max_due {
-                            violations.push(ConformanceViolation::FeeExceedsAssessment {
-                                collected: *amount,
-                                max_due,
-                            });
-                        }
+                    // A rule of every ruleset (DEP-07; FINDINGS L6): ungated.
+                    let max_due = deposit.calculate_fees_due(*block_height);
+                    if *amount > max_due {
+                        violations.push(ConformanceViolation::FeeExceedsAssessment {
+                            collected: *amount,
+                            max_due,
+                        });
                     }
                 }
             }
