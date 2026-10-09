@@ -394,6 +394,8 @@ pub enum LedgerOperation {
         dormancy_accept: Option<Vec<u8>>,
         /// DEP-20 §8.3 (TLV 340): premium paid to the receiver, whole sats.
         premium: Option<u64>,
+        /// DEP-20 §8.3 (TLV 342, L4): the receiver's signed QuorumBegin governing the accept.
+        receiver_quorum_begin: Option<Vec<u8>>,
     },
     /// DEP-20 §8.3: the receiver accepts a dormancy migration (appended to its own ledger).
     DormancyAccept {

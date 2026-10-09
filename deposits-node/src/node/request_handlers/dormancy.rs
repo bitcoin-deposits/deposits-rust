@@ -16,6 +16,72 @@ fn err(msg: impl std::fmt::Display) -> Reply {
 }
 
 impl Node {
+    /// A receiver ledger's history, ascending: our replica if we hold one, else the relays'.
+    pub(crate) async fn receiver_history(
+        &self,
+        ledger_id: &str,
+    ) -> Vec<deposits_core::SignedLedgerUpdate> {
+        let local = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|arc| arc.read().unwrap().history.clone())
+        };
+        match local {
+            Some(h) => h,
+            None => {
+                self.fetch_ledger_updates_paginated_filtered(ledger_id, &[])
+                    .await
+            }
+        }
+    }
+
+    /// DEP-20 §8.3 (L4), a source cosigner: the accept is in the receiver's canonical history, the
+    /// carried QuorumBegin is the receiver's latest (its quorum is current), and that vault is
+    /// funded and unspent on chain.
+    pub(crate) async fn check_migration_receiver(
+        &self,
+        accept: &deposits_core::SignedLedgerUpdate,
+        qb: &deposits_core::SignedLedgerUpdate,
+    ) -> Result<(), String> {
+        use deposits_core::TlvDecode;
+        let hist = self.receiver_history(&hex::encode(accept.ledger_id)).await;
+        if !hist.iter().any(|u| {
+            u.sequence_number == accept.sequence_number && u.chain_hash() == accept.chain_hash()
+        }) {
+            return Err("the accept is not in the receiver's history".into());
+        }
+        let latest = hist.iter().rfind(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            )
+        });
+        if latest.map(|u| u.chain_hash()) != Some(qb.chain_hash()) {
+            return Err("the carried QuorumBegin is not the receiver's current one".into());
+        }
+        let Ok(LedgerOperation::QuorumBegin {
+            new_outpoint_txid,
+            new_outpoint_vout,
+            amount,
+            collateral_amount,
+            ..
+        }) = LedgerOperation::tlv_decode(&qb.message)
+        else {
+            return Err("receiver_quorum_begin is not a QuorumBegin".into());
+        };
+        match self.wallet.get_outpoint_value_and_confs(
+            bitcoin::Txid::from_byte_array(new_outpoint_txid),
+            new_outpoint_vout,
+        ) {
+            Ok(Some((sats, confs))) if confs > 0 && sats == (amount + collateral_amount) / 1000 => {
+                Ok(())
+            }
+            Ok(_) => Err("the receiver's vault is not funded and unspent on chain".into()),
+            Err(e) => Err(format!("the receiver's vault cannot be checked: {e}")),
+        }
+    }
+
     pub(crate) async fn process_dormancy_request(
         &self,
         request: &crate::nostr::LedgerRequest,
@@ -171,6 +237,30 @@ impl Node {
                     .get("accept")
                     .and_then(|v| v.as_str())
                     .and_then(|h| hex::decode(h).ok());
+                // L4: the receiver's governing QuorumBegin (the latest before the accept).
+                let receiver_quorum_begin =
+                    match &dormancy_accept {
+                        None => None,
+                        Some(b) => {
+                            use deposits_core::TlvDecode;
+                            let Ok(au) = deposits_core::SignedLedgerUpdate::tlv_decode(b) else {
+                                return err("accept does not decode");
+                            };
+                            let hist = self.receiver_history(&hex::encode(au.ledger_id)).await;
+                            match hist.iter().rfind(|u| {
+                                u.sequence_number < au.sequence_number
+                                    && matches!(
+                                        LedgerOperation::tlv_decode(&u.message),
+                                        Ok(LedgerOperation::QuorumBegin { .. })
+                                    )
+                            }) {
+                                Some(q) => Some(q.tlv_encode()),
+                                None => return err(
+                                    "the receiver's ledger has no QuorumBegin before the accept",
+                                ),
+                            }
+                        }
+                    };
                 let op = LedgerOperation::DormancyNotice {
                     rotation_height: rotation_height as u32,
                     migration_receiver: receiver,
@@ -178,6 +268,7 @@ impl Node {
                     migration_manifest,
                     dormancy_accept,
                     premium: p.get("premium_msats").and_then(|v| v.as_u64()),
+                    receiver_quorum_begin,
                 };
                 match self.commit_operation(&ledger_id, op).await {
                     Ok(h) => (

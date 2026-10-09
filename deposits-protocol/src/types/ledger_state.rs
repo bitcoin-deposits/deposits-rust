@@ -316,6 +316,74 @@ impl AcceptState {
     }
 }
 
+/// DEP-20 §8.3: the receiver operator's own offer-type addresses for a manifest: the P2WPKH of
+/// its key, and the P2TR with its x-only key internal and merkle root SHA256(manifest_hash).
+pub fn migration_exit_spks(receiver: &PublicKey, manifest_hash: &[u8; 32]) -> [Vec<u8>; 2] {
+    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+    let wpkh =
+        bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::CompressedPublicKey(*receiver).wpubkey_hash());
+    let root =
+        bitcoin::TapNodeHash::from_byte_array(sha256::Hash::hash(manifest_hash).to_byte_array());
+    let tr = bitcoin::ScriptBuf::new_p2tr(&secp, receiver.x_only_public_key().0, Some(root));
+    [wpkh.to_bytes(), tr.to_bytes()]
+}
+
+/// DEP-20 §8.3 (L4): `qb` is a QuorumBegin signed by `receiver` on the accept's ledger at a lower
+/// sequence, cosigned by a strict majority of its quorum_members, and `accept` carries valid
+/// cosignatures from a strict majority of those members.
+pub fn quorum_backed_accept(
+    accept: &crate::types::SignedLedgerUpdate,
+    qb: &crate::types::SignedLedgerUpdate,
+    receiver: &PublicKey,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    let Ok(LedgerOperation::QuorumBegin { quorum_members, .. }) =
+        LedgerOperation::tlv_decode(&qb.message)
+    else {
+        return Err("receiver_quorum_begin is not a QuorumBegin".into());
+    };
+    let members: Vec<PublicKey> = quorum_members.iter().map(|m| m.pubkey).collect();
+    if members.is_empty() {
+        return Err("receiver_quorum_begin is not a QuorumBegin".into());
+    }
+    if qb.operator_id != *receiver || qb.verify_operator_signature().is_err() {
+        return Err("receiver_quorum_begin is not signed by the receiver".into());
+    }
+    if qb.ledger_id != accept.ledger_id || qb.sequence_number >= accept.sequence_number {
+        return Err("receiver_quorum_begin is not an earlier update of the accept's ledger".into());
+    }
+    let majority = |u: &crate::types::SignedLedgerUpdate| {
+        use bitcoin::secp256k1::{schnorr::Signature, Message};
+        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+        let mut seen: Vec<PublicKey> = Vec::new();
+        for c in &u.cosignatures {
+            if !members.contains(&c.cosigner_pubkey) || seen.contains(&c.cosigner_pubkey) {
+                continue;
+            }
+            let ok = Signature::from_slice(&c.cosign_signature).is_ok_and(|sig| {
+                secp.verify_schnorr(
+                    &sig,
+                    &Message::from_digest(u.cosign_digest(&c.member_ledger_hash)),
+                    &c.cosigner_pubkey.x_only_public_key().0,
+                )
+                .is_ok()
+            });
+            if ok {
+                seen.push(c.cosigner_pubkey);
+            }
+        }
+        seen.len() > members.len() / 2
+    };
+    if !majority(qb) {
+        return Err("receiver_quorum_begin lacks its quorum's majority".into());
+    }
+    if !majority(accept) {
+        return Err("the accept lacks a majority of the receiver's quorum".into());
+    }
+    Ok(())
+}
+
 /// DEP-20 §8.3: the funding_address marker of a migration credit.
 pub fn migration_marker(manifest_hash: &[u8; 32]) -> String {
     format!("migration:{}", hex::encode(manifest_hash))
@@ -1022,6 +1090,7 @@ impl LedgerState {
                 migration_manifest,
                 dormancy_accept,
                 premium,
+                receiver_quorum_begin,
             } => {
                 let h = apply_ctx().height;
                 if next.dormancy_notice.is_some() {
@@ -1086,6 +1155,19 @@ impl LedgerState {
                         }
                         if premium.unwrap_or(0) % 1000 != 0 {
                             return Err(bad("premium_msats must be whole satoshis"));
+                        }
+                        // L4: an update of an existing, quorum-backed receiver ledger, paying its own key.
+                        let rqb = receiver_quorum_begin
+                            .as_ref()
+                            .ok_or_else(|| bad("the notice carries no receiver_quorum_begin"))?;
+                        let rqb =
+                            <crate::types::SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(rqb)
+                                .map_err(|_| bad("receiver_quorum_begin does not decode"))?;
+                        quorum_backed_accept(&u, &rqb, receiver).map_err(|e| bad(&e))?;
+                        if !migration_exit_spks(receiver, &digest).contains(&exit_address) {
+                            return Err(bad(
+                                "exit_address is not the receiver operator's own address for this manifest",
+                            ));
                         }
                         Some(MigrationNotice {
                             receiver: *receiver,

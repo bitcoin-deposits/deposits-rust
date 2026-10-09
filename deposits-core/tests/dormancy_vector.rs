@@ -224,6 +224,7 @@ fn dormancy_fold() {
         migration_manifest: Vec::new(),
         dormancy_accept: None,
         premium: None,
+        receiver_quorum_begin: None,
     };
     assert!(
         with_apply_ctx(at(10), || st.apply(&notice(12))).is_err(),
@@ -387,4 +388,35 @@ fn migration_receiver_fold() {
         next.dormancy_accept.is_none(),
         "the splice closes the accept"
     );
+}
+
+/// DEP-20 §8.3 (L4): the accept a notice carries must come from a quorum-backed receiver ledger
+/// (its signed QuorumBegin, majority-cosigned, and the accept majority-cosigned by those members)
+/// and pay the receiver operator's own address — the vector cl-deposits generates.
+#[test]
+fn migration_accept_vector_matches_cl() {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::{with_apply_ctx, ApplyCtx};
+    use deposits_core::TlvDecode;
+    let mut n = 0;
+    for line in include_str!("vectors/migration_accept.txt").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let w: Vec<&str> = line.split(' ').collect();
+        let op = LedgerOperation::tlv_decode(&hex::decode(w[3]).unwrap()).unwrap();
+        let st = state();
+        let at = ApplyCtx {
+            height: 100,
+            seq: 1,
+            hash: [0; 32],
+        };
+        let got = match with_apply_ctx(at, || st.apply(&op)) {
+            Ok(_) => "ok",
+            Err(_) => "refuse",
+        };
+        assert_eq!(got, w[2], "case {}", w[1]);
+        n += 1;
+    }
+    assert_eq!(n, 10);
 }

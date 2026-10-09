@@ -714,6 +714,32 @@ impl Node {
                             }
                         }
                     }
+                    // DEP-20 §8.3 (L4): a notice's receiver must be an existing, current, funded
+                    // quorum-backed ledger.
+                    if let LedgerOperation::DormancyNotice {
+                        migration_receiver: Some(_),
+                        dormancy_accept: Some(a),
+                        receiver_quorum_begin: Some(q),
+                        ..
+                    } = &operation
+                    {
+                        use deposits_core::TlvDecode;
+                        let decoded = (
+                            deposits_core::SignedLedgerUpdate::tlv_decode(a),
+                            deposits_core::SignedLedgerUpdate::tlv_decode(q),
+                        );
+                        let check = match decoded {
+                            (Ok(au), Ok(qu)) => self.check_migration_receiver(&au, &qu).await,
+                            _ => Err(
+                                "the notice's accept or receiver QuorumBegin does not decode"
+                                    .into(),
+                            ),
+                        };
+                        if let Err(msg) = check {
+                            tracing::warn!("Refusing cosign: {}", msg);
+                            return (false, None, Some(msg));
+                        }
+                    }
                     // DEP-20 §8.3: a receiver's DormancyAccept carries the manifest; it must hash
                     // to the accept's, and every deposit's fees must meet each member's floor.
                     if let LedgerOperation::DormancyAccept { manifest_hash, .. } = &operation {

@@ -171,6 +171,7 @@ mod ledger_op_tlv {
     pub const MIGRATION_VOUT: u64 = 290; // u32, QuorumBegin
     pub const DORMANCY_ACCEPT: u64 = 338; // signed update bytes, DormancyNotice
     pub const PREMIUM_MSATS: u64 = 340; // u64, DormancyNotice
+    pub const RECEIVER_QUORUM_BEGIN: u64 = 342; // signed update bytes, DormancyNotice (L4)
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -471,6 +472,7 @@ impl TlvEncode for LedgerOperation {
                 migration_manifest,
                 dormancy_accept,
                 premium,
+                receiver_quorum_begin,
             } => {
                 builder = builder.u32_field(ROTATION_HEIGHT, *rotation_height);
                 if let Some(r) = migration_receiver {
@@ -488,6 +490,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(p) = premium {
                     builder = builder.u64_field(PREMIUM_MSATS, *p);
+                }
+                if let Some(q) = receiver_quorum_begin {
+                    builder = builder.bytes_field(RECEIVER_QUORUM_BEGIN, q);
                 }
             }
             Self::DormancyAccept {
@@ -1067,6 +1072,9 @@ impl TlvDecode for LedgerOperation {
                 migration_manifest: read_manifest(reader.read_raw_opt(MIGRATION_MANIFEST))?,
                 dormancy_accept: reader.read_raw_opt(DORMANCY_ACCEPT).map(|b| b.to_vec()),
                 premium: reader.read_u64_opt(PREMIUM_MSATS)?,
+                receiver_quorum_begin: reader
+                    .read_raw_opt(RECEIVER_QUORUM_BEGIN)
+                    .map(|b| b.to_vec()),
             }),
             103 => Ok(Self::DormancyAccept {
                 premium_deposit: match reader.read_raw_opt(DEPOSIT_ID) {
