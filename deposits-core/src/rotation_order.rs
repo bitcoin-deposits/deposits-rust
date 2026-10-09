@@ -16,6 +16,22 @@ use crate::vault_spend::vault_spend_signers;
 /// The sequence of the `QuorumBegin` whose vault the next `QuorumBegin` rotates:
 /// the latest one with no `DisputeAcquire` after it (an acquisition's first
 /// `QuorumBegin` is funded by the lottery claim, not rotated).
+/// DEP-20 §3: every output of a rotation must relay — a standard type at or above its dust
+/// floor — or one bad exit makes the whole rotation unbroadcastable.
+pub fn check_relayable(tx: &Transaction) -> Result<(), String> {
+    for (i, o) in tx.output.iter().enumerate() {
+        if !deposits_protocol::types::standard_output(o.script_pubkey.as_bytes(), o.value.to_sat())
+        {
+            return Err(format!(
+                "rotation output {} ({} sats) would not relay: not a standard type at or above its dust floor",
+                i,
+                o.value.to_sat()
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn rotating_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<u64> {
     let mut ordered: Vec<&SignedLedgerUpdate> = history.iter().collect();
     ordered.sort_by_key(|u| u.sequence_number);
@@ -143,6 +159,7 @@ pub fn verify_rotation_tx(
     if stripped != ours {
         return Err("rotation_tx differs from the DEP-03 rotation we build".into());
     }
+    check_relayable(tx)?;
     let new_sats = tx.output[0].value.to_sat();
     if new_sats != (amount + collateral_amount) / 1000 {
         return Err("QuorumBegin amounts do not sum to the rotation's new vault".into());

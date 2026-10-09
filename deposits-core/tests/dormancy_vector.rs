@@ -302,7 +302,7 @@ fn migration_receiver_fold() {
     let hash = [9u8; 32];
     let accept = |total| LedgerOperation::DormancyAccept {
         premium_deposit: None,
-        exit_address: vec![0x51; 34],
+        exit_address: [vec![0x51, 0x20], vec![0x51; 32]].concat(),
         expires_at_height: 100,
         manifest_hash: hash,
         offer_event_id: [0; 32],

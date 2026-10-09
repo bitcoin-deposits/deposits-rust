@@ -1382,6 +1382,9 @@ impl Node {
                 Some("rotation tx differs from the DEP-03 rotation we build".to_string()),
             );
         }
+        if let Err(e) = deposits_core::rotation_order::check_relayable(&proposed_tx) {
+            return (false, None, Some(e));
+        }
 
         let signature_bytes = match self.handler.signer.bip340_sign(
             &SignContext::no_ledger(SigPurpose::OnchainSighash),

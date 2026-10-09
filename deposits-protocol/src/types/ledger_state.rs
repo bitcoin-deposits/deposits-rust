@@ -83,8 +83,50 @@ pub struct PendingExit {
 
 /// DEP-11 default `exit_cutoff_margin_blocks`.
 pub const EXIT_CUTOFF_MARGIN_BLOCKS: u32 = 144;
-/// DEP-20 §3: requests below 330 sats are carried, not settled.
+/// DEP-20 §3: requests below 330 sats are carried, not settled (the P2TR/P2WSH floor; see
+/// `dust_floor_sats` for every standard exit type).
 pub const EXIT_DUST_MSATS: u64 = 330_000;
+
+/// DEP-20 §3 exit addresses: the standard output types an exit, spin-out or migration may pay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitSpkType {
+    P2pkh,
+    P2sh,
+    P2wpkh,
+    P2wsh,
+    P2tr,
+}
+
+/// The standard type of `spk`, or `None` for anything else (bare scripts, other witness
+/// versions, OP_RETURN, malformed lengths), which would not relay.
+pub fn spk_type(spk: &[u8]) -> Option<ExitSpkType> {
+    match spk {
+        [0x76, 0xa9, 20, rest @ ..] if rest.len() == 22 && rest[20] == 0x88 && rest[21] == 0xac => {
+            Some(ExitSpkType::P2pkh)
+        }
+        [0xa9, 20, rest @ ..] if rest.len() == 21 && rest[20] == 0x87 => Some(ExitSpkType::P2sh),
+        [0x00, 20, rest @ ..] if rest.len() == 20 => Some(ExitSpkType::P2wpkh),
+        [0x00, 32, rest @ ..] if rest.len() == 32 => Some(ExitSpkType::P2wsh),
+        [0x51, 32, rest @ ..] if rest.len() == 32 => Some(ExitSpkType::P2tr),
+        _ => None,
+    }
+}
+
+/// DEP-20 §3: the smallest output to `spk` that relays — Bitcoin Core's dust threshold at the
+/// 3 sat/vB dust relay feerate: P2PKH 546, P2SH 540, P2WPKH 294, P2WSH 330, P2TR 330.
+pub fn dust_floor_sats(spk: &[u8]) -> Option<u64> {
+    Some(match spk_type(spk)? {
+        ExitSpkType::P2pkh => 546,
+        ExitSpkType::P2sh => 540,
+        ExitSpkType::P2wpkh => 294,
+        ExitSpkType::P2wsh | ExitSpkType::P2tr => 330,
+    })
+}
+
+/// `spk` is a standard exit type and `sats` clears its dust floor.
+pub fn standard_output(spk: &[u8], sats: u64) -> bool {
+    dust_floor_sats(spk).is_some_and(|f| sats >= f)
+}
 
 /// The update envelope an operation is applied under (block height, sequence, chain_hash):
 /// ExitRequest ids, expiry and the exit due set need it, and `apply_in_place` sees only the op.
@@ -566,8 +608,8 @@ impl LedgerState {
                 });
             }
         }
-        // Below the 330-sat dust floor the output would not relay: nothing migrates.
-        if out.is_empty() || (total + m.premium) / 1000 < 330 {
+        // Below its dust floor the output would not relay: nothing migrates.
+        if out.is_empty() || !standard_output(&m.spk, (total + m.premium) / 1000) {
             None
         } else {
             Some((out, m.spk.clone(), (total + m.premium) / 1000))
@@ -606,15 +648,18 @@ impl LedgerState {
     }
 
     /// DEP-20 §3 due set at `height` under `cutoff`: pending requests appended at block
-    /// height <= cutoff, at least the dust floor, unexpired, in append order.
+    /// height <= cutoff, at least its address type's dust floor after its own cost, unexpired,
+    /// in append order.
     pub fn due_exits(&self, height: u32, cutoff: u32) -> Vec<([u8; 32], PendingExit)> {
         let mut due: Vec<([u8; 32], PendingExit)> = self
             .pending_exits
             .iter()
             .filter(|(_, e)| {
                 e.block_height <= cutoff
-                    && (e.amount / 1000).saturating_sub(self.exit_cost(&e.exit_address))
-                        >= EXIT_DUST_MSATS / 1000
+                    && standard_output(
+                        &e.exit_address,
+                        (e.amount / 1000).saturating_sub(self.exit_cost(&e.exit_address)),
+                    )
                     && e.expires_at.is_none_or(|x| x > cutoff)
             })
             .map(|(k, e)| (*k, e.clone()))
@@ -1188,6 +1233,12 @@ impl LedgerState {
                 accepted_total,
                 ..
             } => {
+                if spk_type(exit_address).is_none() {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "dormancy_accept".to_string(),
+                        details: "migration address is not a standard output script".to_string(),
+                    });
+                }
                 let h = apply_ctx().height;
                 if next.dormancy_accept.as_ref().is_some_and(|a| a.live(h)) {
                     return Err(crate::DepositsError::ProtocolViolation {
@@ -1224,6 +1275,12 @@ impl LedgerState {
                 expiry,
                 ..
             } => {
+                if spk_type(exit_address).is_none() {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "exit_address".to_string(),
+                        details: "not a standard output script (DEP-20 §3)".to_string(),
+                    });
+                }
                 if *amount == 0 {
                     return Err(crate::DepositsError::ProtocolViolation {
                         violation_type: "exit_amount".to_string(),

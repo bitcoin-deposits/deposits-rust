@@ -47,6 +47,32 @@ pub(crate) fn current_vault(history: &[SignedLedgerUpdate]) -> Option<(OutPoint,
         .max_by_key(|(_, seq)| *seq)
 }
 
+/// The vaults of the newest two `QuorumBegin`s in `history`, newest first. A QuorumBegin is
+/// recorded before its rotation confirms (DEP-03), so the previous vault stays watched until
+/// it is spent by that rotation (authorised) or by anything else (theft under the old quorum).
+pub(crate) fn recent_vaults(history: &[SignedLedgerUpdate]) -> Vec<(OutPoint, u64)> {
+    let mut v: Vec<(OutPoint, u64)> = history
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid,
+                new_outpoint_vout,
+                ..
+            }) => Some((
+                OutPoint::new(
+                    bitcoin::Txid::from_byte_array(new_outpoint_txid),
+                    new_outpoint_vout,
+                ),
+                u.sequence_number,
+            )),
+            _ => None,
+        })
+        .collect();
+    v.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
+    v.truncate(2);
+    v
+}
+
 /// A theft found by the scan: which ledger's vault, the governing
 /// `QuorumBegin`, the spend, and the keys that signed it.
 #[derive(Debug)]
@@ -74,30 +100,30 @@ pub(crate) fn find_vault_thefts(
         if crate::node::fork_publish::fork_key_last_valid_seq(id).is_some() {
             continue;
         }
-        let Some((vault, seq)) = current_vault(history) else {
-            continue;
-        };
-        for spend in spends.iter().filter(|s| s.outpoint == vault) {
-            let txid = spend.tx.compute_txid().to_byte_array();
-            if reported.contains(&vault_spend_key(id, &spend.tx))
-                || known_confiscations.contains(&txid)
-                || authorised_spend_txids(history).contains(&txid)
-            {
-                continue;
+        'vaults: for (vault, seq) in recent_vaults(history) {
+            for spend in spends.iter().filter(|s| s.outpoint == vault) {
+                let txid = spend.tx.compute_txid().to_byte_array();
+                if reported.contains(&vault_spend_key(id, &spend.tx))
+                    || known_confiscations.contains(&txid)
+                    || authorised_spend_txids(history).contains(&txid)
+                {
+                    continue;
+                }
+                let Ok(signers) = vault_spend_signers(history, seq, &spend.tx, &spend.prevouts)
+                else {
+                    continue;
+                };
+                if signers.is_empty() {
+                    continue;
+                }
+                out.push(VaultTheft {
+                    ledger_id: id.clone(),
+                    governing_seq: seq,
+                    spend: spend.clone(),
+                    signers,
+                });
+                break 'vaults;
             }
-            let Ok(signers) = vault_spend_signers(history, seq, &spend.tx, &spend.prevouts) else {
-                continue;
-            };
-            if signers.is_empty() {
-                continue;
-            }
-            out.push(VaultTheft {
-                ledger_id: id.clone(),
-                governing_seq: seq,
-                spend: spend.clone(),
-                signers,
-            });
-            break;
         }
     }
     out
@@ -275,7 +301,7 @@ impl crate::Node {
         };
         let watched: HashSet<OutPoint> = histories
             .values()
-            .filter_map(|h| current_vault(h).map(|(o, _)| o))
+            .flat_map(|h| recent_vaults(h).into_iter().map(|(o, _)| o))
             .collect();
         if !watched.is_empty() {
             let scan = {

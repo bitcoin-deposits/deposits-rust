@@ -210,7 +210,7 @@ fn exit_fold_semantics() {
     let req = |amount, expires: Option<u32>, nonce| LedgerOperation::ExitRequest {
         deposit_id: dep,
         amount,
-        exit_address: vec![0x51, 0x20],
+        exit_address: [vec![0x51, 0x20], vec![0x77; 32]].concat(),
         expires_at_height: expires,
         nonce,
         expiry: 9999,
