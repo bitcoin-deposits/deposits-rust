@@ -1688,13 +1688,6 @@ impl Node {
             .ok_or_else(|| "reserves UTXO not found on-chain (already spent?)".to_string())?;
         let (reserves_outpoint, reserves_amount) = reserves_utxo;
 
-        if proposed_tx.input[0].previous_output != reserves_outpoint {
-            return Err(format!(
-                "input outpoint {} ≠ on-chain reserves UTXO {}",
-                proposed_tx.input[0].previous_output, reserves_outpoint
-            ));
-        }
-
         // 8. The fee is the DEP-03 rule, not the proposer's choice: every cosigner
         //    rebuilds the identical transaction.
         let fee = deposits_core::tapscript_reserves::confiscation_fee_sats(
@@ -1717,34 +1710,7 @@ impl Node {
         )
         .map_err(|e| format!("expected outputs: {}", e))?;
 
-        if proposed_tx.output.len() != expected_outputs.len() {
-            return Err(format!(
-                "output count: proposed={}, expected={}",
-                proposed_tx.output.len(),
-                expected_outputs.len()
-            ));
-        }
-        for (i, (proposed, expected)) in proposed_tx
-            .output
-            .iter()
-            .zip(expected_outputs.iter())
-            .enumerate()
-        {
-            if proposed.value != expected.value {
-                return Err(format!(
-                    "output[{}] value: proposed={}, expected={}",
-                    i, proposed.value, expected.value
-                ));
-            }
-            if proposed.script_pubkey != expected.script_pubkey {
-                return Err(format!(
-                    "output[{}] script: proposed={}, expected={}",
-                    i,
-                    hex::encode(proposed.script_pubkey.as_bytes()),
-                    hex::encode(expected.script_pubkey.as_bytes())
-                ));
-            }
-        }
+        check_confiscation_shape(&proposed_tx, reserves_outpoint, &expected_outputs)?;
 
         // 9. Re-derive the sighash from the proposed tx + reconstructed
         //    reserves prevout + tap leaf, then compare to the sighash
@@ -1854,4 +1820,128 @@ impl Node {
     // ========================================================================
     // Daemon-mediated CLI request handlers
     // ========================================================================
+}
+
+/// FINDINGS D2: a co-signer signs only the confiscation it rebuilds itself — one input
+/// spending the on-chain reserves, and exactly the DEP-03 outputs (value and script, in
+/// order).  The proposer's transaction is checked against the rebuild, never trusted.
+pub(crate) fn check_confiscation_shape(
+    proposed_tx: &bitcoin::Transaction,
+    reserves_outpoint: bitcoin::OutPoint,
+    expected_outputs: &[bitcoin::TxOut],
+) -> Result<(), String> {
+    if proposed_tx.input.len() != 1 {
+        return Err(format!(
+            "expected exactly 1 input, got {}",
+            proposed_tx.input.len()
+        ));
+    }
+    if proposed_tx.input[0].previous_output != reserves_outpoint {
+        return Err(format!(
+            "input outpoint {} ≠ on-chain reserves UTXO {}",
+            proposed_tx.input[0].previous_output, reserves_outpoint
+        ));
+    }
+    if proposed_tx.output.len() != expected_outputs.len() {
+        return Err(format!(
+            "output count: proposed={}, expected={}",
+            proposed_tx.output.len(),
+            expected_outputs.len()
+        ));
+    }
+    for (i, (proposed, expected)) in proposed_tx
+        .output
+        .iter()
+        .zip(expected_outputs.iter())
+        .enumerate()
+    {
+        if proposed.value != expected.value {
+            return Err(format!(
+                "output[{}] value: proposed={}, expected={}",
+                i, proposed.value, expected.value
+            ));
+        }
+        if proposed.script_pubkey != expected.script_pubkey {
+            return Err(format!(
+                "output[{}] script: proposed={}, expected={}",
+                i,
+                hex::encode(proposed.script_pubkey.as_bytes()),
+                hex::encode(expected.script_pubkey.as_bytes())
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod confiscation_shape_tests {
+    use super::check_confiscation_shape;
+    use bitcoin::{
+        absolute::LockTime, transaction::Version, Amount, OutPoint, ScriptBuf, Sequence,
+        Transaction, TxIn, TxOut, Witness,
+    };
+
+    fn tx(outpoint: OutPoint, outs: Vec<TxOut>) -> Transaction {
+        Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: outs,
+        }
+    }
+
+    fn p2tr(b: u8) -> ScriptBuf {
+        ScriptBuf::from_bytes([&[0x51u8, 0x20][..], &[b; 32]].concat())
+    }
+
+    #[test]
+    fn a_proposal_paying_the_proposer_is_refused() {
+        let reserves = OutPoint {
+            txid: "aa".repeat(32).parse().unwrap(),
+            vout: 0,
+        };
+        let lottery = TxOut {
+            value: Amount::from_sat(995_000),
+            script_pubkey: p2tr(7),
+        };
+        let theft = TxOut {
+            value: Amount::from_sat(995_000),
+            script_pubkey: p2tr(9),
+        };
+        assert!(check_confiscation_shape(
+            &tx(reserves, vec![lottery.clone()]),
+            reserves,
+            std::slice::from_ref(&lottery)
+        )
+        .is_ok());
+        assert!(check_confiscation_shape(
+            &tx(reserves, vec![theft]),
+            reserves,
+            std::slice::from_ref(&lottery)
+        )
+        .is_err());
+        let skim = TxOut {
+            value: Amount::from_sat(1_000),
+            script_pubkey: p2tr(1),
+        };
+        assert!(check_confiscation_shape(
+            &tx(reserves, vec![lottery.clone(), skim]),
+            reserves,
+            std::slice::from_ref(&lottery)
+        )
+        .is_err());
+        let other = OutPoint {
+            txid: "bb".repeat(32).parse().unwrap(),
+            vout: 0,
+        };
+        assert!(
+            check_confiscation_shape(&tx(other, vec![lottery.clone()]), reserves, &[lottery])
+                .is_err()
+        );
+    }
 }
