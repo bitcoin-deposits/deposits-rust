@@ -59,8 +59,8 @@ pub(crate) struct VaultTheft {
 
 /// Which of `spends` are thefts: they spend a ledger's vault, their txid is
 /// none of its recorded rotations nor a confiscation we know, and a tier
-/// witness on the vault input verifies. One per ledger; `reported` ledgers
-/// are skipped.
+/// witness on the vault input verifies. One per ledger per pass; spends whose
+/// `vault_spend_key` is in `reported` (owed or done) are skipped.
 pub(crate) fn find_vault_thefts(
     ledgers: &HashMap<String, Vec<SignedLedgerUpdate>>,
     spends: &[ScannedSpend],
@@ -71,8 +71,7 @@ pub(crate) fn find_vault_thefts(
     for (id, history) in ledgers {
         // A fork-branch replica (`<ledger_id>_<seq>_<pk>`) shares its ledger's vault: the main
         // replica reports the spend, under the ledger id a proof must name.
-        if reported.contains(id) || crate::node::fork_publish::fork_key_last_valid_seq(id).is_some()
-        {
+        if crate::node::fork_publish::fork_key_last_valid_seq(id).is_some() {
             continue;
         }
         let Some((vault, seq)) = current_vault(history) else {
@@ -80,7 +79,8 @@ pub(crate) fn find_vault_thefts(
         };
         for spend in spends.iter().filter(|s| s.outpoint == vault) {
             let txid = spend.tx.compute_txid().to_byte_array();
-            if known_confiscations.contains(&txid)
+            if reported.contains(&vault_spend_key(id, &spend.tx))
+                || known_confiscations.contains(&txid)
                 || authorised_spend_txids(history).contains(&txid)
             {
                 continue;
@@ -147,14 +147,113 @@ fn proof_against(
     }
 }
 
+/// One theft per (ledger, spending txid): a later theft on the same ledger is its own.
+pub(crate) fn vault_spend_key(ledger_id: &str, tx: &bitcoin::Transaction) -> String {
+    format!("{}:{}", ledger_id, tx.compute_txid())
+}
+
+/// Blocks after first seeing a theft during which we keep (re)publishing its proofs: to
+/// targets a relay error hid, and to ledgers its signers start advertising later.
+pub(crate) const VAULT_SPEND_PUBLISH_BLOCKS: u32 = 144;
+
+/// A theft we still owe proofs for, as persisted in `{data_dir}/vault_watch.json`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OwedTheft {
+    pub ledger_id: String,
+    pub governing_seq: u64,
+    pub outpoint: String,
+    pub tx_hex: String,
+    pub prevouts: Vec<(u64, String)>,
+    pub block_hash: String,
+    #[serde(default)]
+    pub height: u32,
+    pub signers: Vec<String>,
+    pub published: std::collections::BTreeSet<String>,
+    pub first_tip: u32,
+}
+
+impl OwedTheft {
+    pub(crate) fn from_theft(t: &VaultTheft, tip: u32) -> Self {
+        OwedTheft {
+            ledger_id: t.ledger_id.clone(),
+            governing_seq: t.governing_seq,
+            outpoint: t.spend.outpoint.to_string(),
+            tx_hex: hex::encode(bitcoin::consensus::serialize(&t.spend.tx)),
+            prevouts: t
+                .spend
+                .prevouts
+                .iter()
+                .map(|o| (o.value.to_sat(), hex::encode(o.script_pubkey.as_bytes())))
+                .collect(),
+            block_hash: t.spend.block_hash.to_string(),
+            height: t.spend.height,
+            signers: t
+                .signers
+                .iter()
+                .map(|x| hex::encode(x.serialize()))
+                .collect(),
+            published: Default::default(),
+            first_tip: tip,
+        }
+    }
+
+    pub(crate) fn theft(&self) -> Option<VaultTheft> {
+        use std::str::FromStr;
+        let tx: bitcoin::Transaction =
+            bitcoin::consensus::encode::deserialize(&hex::decode(&self.tx_hex).ok()?).ok()?;
+        let prevouts = self
+            .prevouts
+            .iter()
+            .map(|(v, spk)| {
+                Some(bitcoin::TxOut {
+                    value: bitcoin::Amount::from_sat(*v),
+                    script_pubkey: bitcoin::ScriptBuf::from_bytes(hex::decode(spk).ok()?),
+                })
+            })
+            .collect::<Option<Vec<_>>>()?;
+        Some(VaultTheft {
+            ledger_id: self.ledger_id.clone(),
+            governing_seq: self.governing_seq,
+            spend: ScannedSpend {
+                outpoint: OutPoint::from_str(&self.outpoint).ok()?,
+                tx,
+                prevouts,
+                block_hash: bitcoin::BlockHash::from_str(&self.block_hash).ok()?,
+                height: self.height,
+            },
+            signers: self
+                .signers
+                .iter()
+                .map(|h| bitcoin::secp256k1::XOnlyPublicKey::from_slice(&hex::decode(h).ok()?).ok())
+                .collect::<Option<Vec<_>>>()?,
+        })
+    }
+}
+
+/// The persisted vault watch: how far we scanned, what we still owe, what is done.
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VaultWatchState {
+    pub scanned: Option<u32>,
+    pub owed: std::collections::BTreeMap<String, OwedTheft>,
+    pub done: std::collections::BTreeSet<String>,
+}
+
 impl crate::Node {
     /// Scan the blocks that are now `VAULT_SPEND_GRACE_BLOCKS` deep for spends
     /// of any replicated ledger's vault, and report each theft found.
     pub(crate) async fn drive_vault_watch(&self) {
         let backend = self.wallet.chain_backend();
+        if !self
+            .vault_watch_loaded
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.load_vault_watch();
+        }
         let Ok(tip) = backend.get_tip_height() else {
             return;
         };
+        // Retry what we still owe even when there is nothing new to scan.
+        self.publish_owed_vault_spends(tip).await;
         let Some(to) = tip.checked_sub(VAULT_SPEND_GRACE_BLOCKS) else {
             return;
         };
@@ -195,12 +294,99 @@ impl crate::Node {
                 Err(_) => return,
             };
             let known = self.known_confiscation_txids.lock().unwrap().clone();
-            let reported = self.reported_vault_spends.lock().unwrap().clone();
-            for theft in find_vault_thefts(&histories, &spends, &known, &reported) {
-                self.report_vault_spend(&theft).await;
+            let mut skip = self.reported_vault_spends.lock().unwrap().clone();
+            skip.extend(self.owed_vault_spends.lock().unwrap().keys().cloned());
+            for theft in find_vault_thefts(&histories, &spends, &known, &skip) {
+                tracing::warn!(
+                    "VAULT SPEND: ledger {}'s reserves were spent by {}, which no rotation or \
+                     confiscation accounts for; {} signers",
+                    &theft.ledger_id[..8.min(theft.ledger_id.len())],
+                    &theft.spend.tx.compute_txid().to_string()[..16],
+                    theft.signers.len(),
+                );
+                // Owed BEFORE the scan height moves past its block: a publish failure or a
+                // restart can no longer lose it.
+                self.owed_vault_spends.lock().unwrap().insert(
+                    vault_spend_key(&theft.ledger_id, &theft.spend.tx),
+                    OwedTheft::from_theft(&theft, tip),
+                );
             }
         }
         *self.vault_scanned.lock().unwrap() = Some(to);
+        self.publish_owed_vault_spends(tip).await;
+        self.save_vault_watch();
+    }
+
+    fn vault_watch_path(&self) -> std::path::PathBuf {
+        self.data_dir.join("vault_watch.json")
+    }
+
+    pub(crate) fn save_vault_watch(&self) {
+        let state = VaultWatchState {
+            scanned: *self.vault_scanned.lock().unwrap(),
+            owed: self
+                .owed_vault_spends
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .collect(),
+            done: self
+                .reported_vault_spends
+                .lock()
+                .unwrap()
+                .iter()
+                .cloned()
+                .collect(),
+        };
+        let path = self.vault_watch_path();
+        let tmp = path.with_extension("json.tmp");
+        if let Ok(json) = serde_json::to_vec(&state) {
+            if std::fs::write(&tmp, json).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+
+    pub(crate) fn load_vault_watch(&self) {
+        let Ok(bytes) = std::fs::read(self.vault_watch_path()) else {
+            return;
+        };
+        let Ok(state) = serde_json::from_slice::<VaultWatchState>(&bytes) else {
+            return;
+        };
+        *self.vault_scanned.lock().unwrap() = state.scanned;
+        self.owed_vault_spends.lock().unwrap().extend(state.owed);
+        self.reported_vault_spends
+            .lock()
+            .unwrap()
+            .extend(state.done);
+    }
+
+    /// (Re)publish every owed theft's proofs not yet published. A theft is done only once
+    /// every target lookup succeeded and its publish window has passed.
+    async fn publish_owed_vault_spends(&self, tip: u32) {
+        let owed: Vec<(String, OwedTheft)> = self
+            .owed_vault_spends
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, mut entry) in owed {
+            let Some(theft) = entry.theft() else {
+                tracing::error!("vault spend {}: unreadable owed record dropped", key);
+                self.owed_vault_spends.lock().unwrap().remove(&key);
+                continue;
+            };
+            let complete = self.report_vault_spend(&theft, &mut entry.published).await;
+            if complete && tip > entry.first_tip + VAULT_SPEND_PUBLISH_BLOCKS {
+                self.owed_vault_spends.lock().unwrap().remove(&key);
+                self.reported_vault_spends.lock().unwrap().insert(key);
+            } else {
+                self.owed_vault_spends.lock().unwrap().insert(key, entry);
+            }
+        }
     }
 
     /// DEP-20 §8.3: for each ledger we hold whose latest rotation migrated deposits, once the
@@ -309,22 +495,17 @@ impl crate::Node {
         }
     }
 
-    async fn report_vault_spend(&self, theft: &VaultTheft) {
-        self.reported_vault_spends
-            .lock()
-            .unwrap()
-            .insert(theft.ledger_id.clone());
-        tracing::warn!(
-            "VAULT SPEND: ledger {}'s reserves were spent by {}, which no rotation or \
-             confiscation accounts for; {} signers",
-            &theft.ledger_id[..8.min(theft.ledger_id.len())],
-            &theft.spend.tx.compute_txid().to_string()[..16],
-            theft.signers.len(),
-        );
+    /// Publish `theft`'s proof to every target not in `published`; true when every target
+    /// lookup succeeded and every proof found was published.
+    async fn report_vault_spend(
+        &self,
+        theft: &VaultTheft,
+        published: &mut std::collections::BTreeSet<String>,
+    ) -> bool {
+        let mut complete = true;
         for x in &theft.signers {
             // The operated ledgers are advertised under the full key; the
             // witness gives only its x coordinate, so try both parities.
-            let mut targets: Vec<String> = Vec::new();
             for parity in [0x02u8, 0x03] {
                 let mut full = [parity; 33];
                 full[1..].copy_from_slice(&x.serialize());
@@ -334,22 +515,35 @@ impl crate::Node {
                 if pk == self.node_id {
                     continue;
                 }
-                for t in self.ledgers_operated_by(&pk).await {
-                    if !targets.contains(&t) {
-                        targets.push(t.clone());
-                        tracing::warn!(
-                            "vault spend: {} signed it; proof against its ledger {}",
-                            hex::encode(&x.serialize()[..4]),
-                            &t[..8.min(t.len())]
-                        );
-                        let b = proof_against(&pk, &t, theft);
-                        if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
-                            tracing::error!("vault spend: fraud broadcast failed: {}", e);
+                let (targets, ok) = self.ledgers_operated_by_checked(&pk).await;
+                complete &= ok;
+                for t in targets {
+                    let pkey = format!("{}:{}", hex::encode(pk.serialize()), t);
+                    if published.contains(&pkey) {
+                        continue;
+                    }
+                    tracing::warn!(
+                        "vault spend: {} signed it; proof against its ledger {}",
+                        hex::encode(&x.serialize()[..4]),
+                        &t[..8.min(t.len())]
+                    );
+                    let b = proof_against(&pk, &t, theft);
+                    match self.nostr.broadcast_fraud_proof(&b).await {
+                        Ok(_) => {
+                            published.insert(pkey);
+                        }
+                        Err(e) => {
+                            complete = false;
+                            tracing::error!(
+                                "vault spend: fraud broadcast failed (retrying): {}",
+                                e
+                            );
                         }
                     }
                 }
             }
         }
+        complete
     }
 }
 
@@ -560,7 +754,7 @@ mod tests {
     #[test]
     fn reports_each_ledger_once_and_ignores_unrelated_spends() {
         let (_, spend) = cl_theft();
-        let reported = HashSet::from([hex::encode(sha(&[2]))]);
+        let reported = HashSet::from([vault_spend_key(&hex::encode(sha(&[2])), &spend.tx)]);
         assert!(find_vault_thefts(
             &ledgers([9; 32]),
             std::slice::from_ref(&spend),
@@ -676,6 +870,51 @@ mod tests {
         assert_eq!(
             latest_quorum_begin_txid(&history([9; 32])),
             Some(sha(&[0xf0, 0x0d]))
+        );
+    }
+
+    /// D3: a theft is owed per (ledger, txid), survives a JSON round trip (restart) with what
+    /// was published, and a second theft on the same ledger is its own record.
+    #[test]
+    fn an_owed_theft_is_keyed_per_spend_and_survives_persistence() {
+        let (_, spend) = cl_theft();
+        let ts = find_vault_thefts(
+            &ledgers([9; 32]),
+            std::slice::from_ref(&spend),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        assert_eq!(ts.len(), 1);
+        let mut owed = OwedTheft::from_theft(&ts[0], 1000);
+        owed.published.insert("02ab:target".into());
+        let mut state = VaultWatchState::default();
+        state.scanned = Some(990);
+        state
+            .owed
+            .insert(vault_spend_key(&ts[0].ledger_id, &spend.tx), owed);
+        let back: VaultWatchState =
+            serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        assert_eq!(back.scanned, Some(990));
+        let (k, o) = back.owed.iter().next().unwrap();
+        assert!(k.ends_with(&spend.tx.compute_txid().to_string()));
+        assert!(o.published.contains("02ab:target"));
+        let t = o.theft().expect("rebuilds");
+        assert_eq!(t.spend.tx.compute_txid(), spend.tx.compute_txid());
+        assert_eq!(t.signers.len(), ts[0].signers.len());
+        // Owed (or done) spends are not found again; a different spend on the ledger would be.
+        let skip = HashSet::from([k.clone()]);
+        assert!(find_vault_thefts(
+            &ledgers([9; 32]),
+            std::slice::from_ref(&spend),
+            &HashSet::new(),
+            &skip
+        )
+        .is_empty());
+        let other_key = format!("{}:{}", ts[0].ledger_id, "00".repeat(32));
+        let skip = HashSet::from([other_key]);
+        assert_eq!(
+            find_vault_thefts(&ledgers([9; 32]), &[spend], &HashSet::new(), &skip).len(),
+            1
         );
     }
 }

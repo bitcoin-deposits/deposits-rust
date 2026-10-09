@@ -560,6 +560,16 @@ impl Node {
         &self,
         operator: &bitcoin::secp256k1::PublicKey,
     ) -> Vec<String> {
+        self.ledgers_operated_by_checked(operator).await.0
+    }
+
+    /// As `ledgers_operated_by`, and whether the advertisement query succeeded (false: the
+    /// list may be incomplete, so a caller that must reach every ledger retries later).
+    pub(crate) async fn ledgers_operated_by_checked(
+        &self,
+        operator: &bitcoin::secp256k1::PublicKey,
+    ) -> (Vec<String>, bool) {
+        let mut ok = true;
         let advertised = self
             .nostr
             .fetch_ledger_ids_operated_by(&hex::encode(operator.serialize()))
@@ -570,6 +580,7 @@ impl Node {
                     &hex::encode(&operator.serialize()[..8]),
                     e
                 );
+                ok = false;
                 Vec::new()
             });
         let held: Vec<String> = {
@@ -580,7 +591,7 @@ impl Node {
                 .map(|(id, _)| id.clone())
                 .collect()
         };
-        merge_ledger_ids(advertised, held)
+        (merge_ledger_ids(advertised, held), ok)
     }
 
     /// Contagion (DEP-19 §5–6): everyone who signed the non-conforming

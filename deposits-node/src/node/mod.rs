@@ -556,6 +556,10 @@ pub struct Node {
     pub(crate) vault_scanned: Mutex<Option<u32>>,
     /// Ledgers whose vault theft we already reported: once each.
     pub(crate) reported_vault_spends: Mutex<std::collections::HashSet<String>>,
+    /// Thefts (`ledger:txid`) whose proofs we still owe; persisted with the scan height.
+    pub(crate) vault_watch_loaded: std::sync::atomic::AtomicBool,
+    pub(crate) owed_vault_spends:
+        Mutex<std::collections::HashMap<String, crate::node::vault_watch::OwedTheft>>,
     /// DEP-20 §8.3: migrations ("ledger:seq") settled — proved against, or fully credited.
     pub(crate) migrations_done: Mutex<std::collections::HashSet<String>>,
     /// Txids of confiscations we built, which spend a vault legitimately
