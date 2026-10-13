@@ -484,6 +484,7 @@ fn invariant_s1_dispute_state_gate() {
             reason: "test".into(),
             anchor_block_hash: None,
             anchor_block_height: None,
+            fraud_proof_hash: None,
         })
         .unwrap();
 
@@ -864,6 +865,7 @@ fn invariant_l2_lottery_liveness() {
             reason: "test".into(),
             anchor_block_hash: None,
             anchor_block_height: None,
+            fraud_proof_hash: None,
         })
         .unwrap();
     net.op_mut("alice").add_quorum_member(&bob_snap, "lid");

@@ -50,6 +50,7 @@ fn dispute_armed_with_replacement_collateral_applies_cleanly() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -117,6 +118,7 @@ fn dispute_armed_legacy_none_still_applies() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -156,6 +158,7 @@ fn dispute_armed_replacement_collateral_survives_fork_rebuild() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -230,6 +233,7 @@ fn dispute_armed_partial_amount_is_distinct() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger

@@ -796,6 +796,10 @@ pub enum LedgerOperation {
         anchor_block_hash: Option<[u8; 32]>,
         /// Companion to `anchor_block_hash`. Both Some or both None.
         anchor_block_height: Option<u32>,
+        /// The proof hash of the fraud proof this dispute acts on (DEP-19 §6). It
+        /// discloses the proof on the defrauded ledger and anchors when it was known:
+        /// a co-member's dereliction is measured from it. Absent on expiry disputes.
+        fraud_proof_hash: Option<[u8; 32]>,
     },
 
     /// Signal readiness for custody competition. This is a PRE-COMMITMENT that
@@ -1730,6 +1734,7 @@ impl BinaryCodec for LedgerOperation {
                 reason,
                 anchor_block_hash: _,
                 anchor_block_height: _,
+                fraud_proof_hash: _,
             } => {
                 // Legacy binary format doesn't encode the optional
                 // anchor fields — they're TLV-only. Replays through the
@@ -2180,6 +2185,7 @@ impl BinaryCodec for LedgerOperation {
                 reason: read_string(r)?,
                 anchor_block_hash: None,
                 anchor_block_height: None,
+                fraud_proof_hash: None,
             }),
             // DisputeAcquire (55)
             55 => Ok(Self::DisputeAcquire {

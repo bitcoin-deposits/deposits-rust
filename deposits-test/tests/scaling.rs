@@ -173,6 +173,7 @@ fn scaling_dispute_state_gate() {
                 reason: "test".into(),
                 anchor_block_hash: None,
                 anchor_block_height: None,
+                fraud_proof_hash: None,
             })
             .unwrap();
 

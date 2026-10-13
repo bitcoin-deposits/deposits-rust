@@ -73,6 +73,7 @@ fn enter(last_valid: u64) -> LedgerOperation {
         reason: "test".into(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     }
 }
 

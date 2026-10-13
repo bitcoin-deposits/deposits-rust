@@ -407,6 +407,7 @@ fn custody_dispute() {
         reason: "hash_chain_broken".into(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     });
 }
 

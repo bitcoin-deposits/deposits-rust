@@ -1376,11 +1376,16 @@ impl Node {
             }
             deposits_core::fraud::FraudEvidence::StaleCosign {
                 member_ledger_id, ..
-            }
-            | deposits_core::fraud::FraudEvidence::DisputeDereliction {
-                member_ledger_id, ..
             } => {
                 needed.insert(member_ledger_id.clone());
+            }
+            deposits_core::fraud::FraudEvidence::DisputeDereliction {
+                member_ledger_id,
+                original_proof,
+                ..
+            } => {
+                needed.insert(member_ledger_id.clone());
+                needed.insert(original_proof.ledger_id.clone());
             }
             _ => {}
         }
@@ -1421,6 +1426,17 @@ impl Node {
                 ledgers
                     .get(ledger_id)
                     .map(|arc| arc.read().unwrap().history.clone())
+            }
+            fn ledger_forks(
+                &self,
+                ledger_id: &str,
+            ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .iter()
+                    .filter(|(k, _)| k.as_str() != ledger_id && k.starts_with(ledger_id))
+                    .flat_map(|(_, arc)| arc.read().unwrap().history.clone())
+                    .collect()
             }
         }
         // `confirms_block` fails closed (None on unknown / not-best-chain /
@@ -1650,7 +1666,10 @@ impl Node {
 
         // 6. Auto-arm for dispute
         let reason = format!("fraud_proof:{:?}", broadcast.proof.proof_type);
-        match self.auto_arm_for_dispute(ledger_id, last_valid_seq).await {
+        match self
+            .auto_arm_for_dispute_on_proof(ledger_id, last_valid_seq, broadcast.proof.proof_hash())
+            .await
+        {
             Ok(()) => {
                 tracing::warn!("Successfully armed for dispute based on fraud proof");
 
@@ -1667,14 +1686,7 @@ impl Node {
                         deposits_core::fraud::FraudProofType::DisputeDereliction
                     )
                 {
-                    if let Some(visible_block_hash) = self.dereliction_visible_block_hash(broadcast)
-                    {
-                        self.register_dereliction_watch(
-                            ledger_id,
-                            broadcast.proof.proof_hash(),
-                            visible_block_hash,
-                        );
-                    }
+                    self.register_dereliction_watch(ledger_id, broadcast.proof.clone());
                 }
 
                 // Also broadcast a dispute event referencing the fraud proof.

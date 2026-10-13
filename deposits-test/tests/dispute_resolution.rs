@@ -44,6 +44,7 @@ fn dispute_enter_changes_state() {
         reason: "test dispute".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -84,6 +85,7 @@ fn dispute_arm_after_enter_succeeds() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -130,6 +132,7 @@ fn dispute_acquire_returns_to_normal() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -181,6 +184,7 @@ fn dispute_yield_tombstones_ledger() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -228,6 +232,7 @@ fn normal_operations_rejected_during_dispute() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger

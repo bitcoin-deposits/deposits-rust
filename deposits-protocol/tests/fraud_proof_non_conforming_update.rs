@@ -976,6 +976,7 @@ fn taken_over() -> Vec<SignedLedgerUpdate> {
             reason: "fraud_proof".into(),
             anchor_block_hash: None,
             anchor_block_height: None,
+            fraud_proof_hash: None,
         },
         LedgerOperation::DisputeArmed {
             armed_block: 100,

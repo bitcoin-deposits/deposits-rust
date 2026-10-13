@@ -282,27 +282,27 @@ pub enum FraudEvidence {
         member_ledger_id: String,
     },
 
-    /// Quorum member was active but didn't act on fraud.
+    /// Quorum member saw a disclosed fraud and stayed active without acting
+    /// (DEP-19 §6). Every element is signed or on chain: no embedding.
     DisputeDereliction {
-        /// Hash of the original fraud proof that was ignored.
+        /// The fraud proof the member ignored, carried whole and verified
+        /// against the defrauded ledger (`original_proof.ledger_id`).
+        original_proof: Box<FraudProof>,
+        /// Its proof hash (hex); must equal `original_proof.proof_hash()`.
         original_fraud_hash: String,
-        /// Block hash anchoring when the original fraud proof became
-        /// knowable (e.g. the block_hash of the update where the
-        /// proof_hash was embedded). The verifier confirms this hash is
-        /// in its own confirmed chain — the block height alone is not
-        /// trusted, only its presence in the chain.
-        ///
-        /// Hex on the wire (`serde_32_hex`) to match cl-deposits, which
-        /// serializes every 32-byte evidence field as a hex string; the
-        /// deserializer still accepts the reference's older byte-array form.
-        #[serde(with = "crate::types::serde_32_hex")]
-        original_fraud_block_hash: [u8; 32],
-        required_response_blocks: u32,
-        /// The inactive member's collateral ledger.
+        /// A seated co-member's signed `DisputeEnter` on the defrauded ledger
+        /// whose `fraud_proof_hash` is the proof's: its block is the anchor.
+        disclosure_update: String,
+        /// The defrauded ledger's `QuorumBegin` governing at the disclosure's
+        /// `last_valid_sequence`, seating both the discloser and the member.
+        quorum_begin_update: String,
+        /// An update of the defrauded ledger, at or after the anchor, carrying
+        /// the member's cosignature: it had seen the ledger since.
+        visibility_update: String,
+        /// The member's ledger the proof is presented on (slashed).
         member_ledger_id: String,
-        /// Member was active after the window (proving they were online).
-        /// The block_hash for this update is read directly off the
-        /// referenced SignedLedgerUpdate and confirmed by the verifier.
+        /// An update the member signed there, at least its own
+        /// `dispute_response_blocks` after the visibility update.
         member_active_sequence: u64,
         member_pubkey: String,
     },
@@ -803,95 +803,231 @@ pub fn verify_uncredited_lightning(
     Ok(())
 }
 
-/// Verify an `DisputeDereliction` claim.
+/// DEP-11's default `dispute_response_blocks` when a member declared none.
+pub const DEFAULT_DISPUTE_RESPONSE_BLOCKS: u32 = 144;
+
+/// Verify a `DisputeDereliction` claim (DEP-19 §6, FINDINGS D1).
 ///
-/// The accusation: member was online (their ledger has updates) past
-/// the required response window after a fraud proof was knowable, but
-/// failed to act on it.
-///
-/// Checks:
-///   1. `original_fraud_block_hash` is in the verifier's confirmed chain.
-///      The verifier's `BlockOracle` returns its height — the proof
-///      doesn't trust any height claimed by the proof creator.
-///   2. The member's ledger has a SignedLedgerUpdate at
-///      `member_active_sequence`. Its `block_hash` is also confirmed
-///      via the oracle.
-///   3. `member_active_height - original_fraud_height >= required_response_blocks`.
-///      The member was demonstrably online past the deadline.
-///   4. The update at `member_active_sequence` is signed by
-///      `member_pubkey` (operator_id of that update). Without this,
-///      anyone could plant an update on a third party's ledger and
-///      blame the wrong member.
+/// The proof must bind to a real fraud (the original proof, verified against
+/// the defrauded ledger), a real disclosure (a seated co-member's signed
+/// `DisputeEnter` citing its hash: the anchor), the member's seat (the
+/// governing `QuorumBegin`), and the member having seen the ledger since (its
+/// own cosignature there, at or after the anchor). The window is the member's
+/// own recorded `dispute_response_blocks`; no carried value is used. A
+/// `DisputeEnter` (not an expiry) or `DisputeArmed` the member signed on that
+/// ledger within the window rebuts it. `defrauded_updates` is every update the
+/// verifier holds of the defrauded ledger, its own chain and any forks; with
+/// none, the proof fails closed.
 pub fn verify_inactive_quorum_member(
     proof: &FraudProof,
     member_history: &[crate::types::SignedLedgerUpdate],
+    defrauded_updates: &[crate::types::SignedLedgerUpdate],
     block_oracle: &dyn BlockOracle,
+    authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::{TlvDecode, TlvEncode};
+    use crate::types::SignedLedgerUpdate;
     use std::str::FromStr;
 
     let FraudEvidence::DisputeDereliction {
-        original_fraud_hash: _,
-        original_fraud_block_hash,
-        required_response_blocks,
-        member_ledger_id: _,
+        original_proof,
+        original_fraud_hash,
+        disclosure_update,
+        quorum_begin_update,
+        visibility_update,
         member_active_sequence,
-        member_pubkey,
+        ..
     } = &proof.evidence
     else {
         return Err("verify_inactive_quorum_member: wrong evidence type".into());
     };
+    let decode = |h: &str, what: &str| -> Result<(SignedLedgerUpdate, LedgerOperation), String> {
+        let u =
+            SignedLedgerUpdate::tlv_decode(&hex::decode(h).map_err(|e| format!("{what}: {e}"))?)
+                .map_err(|e| format!("{what}: {e:?}"))?;
+        let op = LedgerOperation::tlv_decode(&u.message).map_err(|e| format!("{what}: {e:?}"))?;
+        Ok((u, op))
+    };
+    // A signed header dates an update when it names a block; one with no block
+    // hash (cl's, so far) is dated by its signed block_height alone.
+    let confirmed_at = |u: &SignedLedgerUpdate| {
+        u.block_hash == [0u8; 32] || block_oracle.confirms(&u.block_hash) == Some(u.block_height)
+    };
+    let is_qb = |u: &SignedLedgerUpdate| {
+        matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::QuorumBegin { .. })
+        )
+    };
 
-    // (1) original-fraud block confirmed by the verifier.
-    let original_height = block_oracle
-        .confirms(original_fraud_block_hash)
-        .ok_or_else(|| {
-            format!(
-                "original_fraud_block_hash {} not in verifier's confirmed chain",
-                hex::encode(&original_fraud_block_hash[..8])
-            )
-        })?;
+    let h = original_proof.proof_hash();
+    if !original_fraud_hash.eq_ignore_ascii_case(&hex::encode(h)) {
+        return Err("original_fraud_hash is not the carried proof's hash".into());
+    }
+    if matches!(
+        original_proof.proof_type,
+        FraudProofType::QuorumExpired | FraudProofType::DisputeDereliction
+    ) {
+        return Err("the original proof is not a punitive fraud proof".into());
+    }
+    let mk = bitcoin::secp256k1::PublicKey::from_str(&proof.accused)
+        .map_err(|e| format!("invalid accused: {e}"))?;
+    let accused_op = bitcoin::secp256k1::PublicKey::from_str(&original_proof.accused)
+        .map_err(|e| format!("invalid original accused: {e}"))?;
+    let d_id: [u8; 32] = hex::decode(&original_proof.ledger_id)
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or("invalid original ledger_id")?;
 
-    // (2) member-active update exists, and its block_hash is confirmed.
-    let member_update = member_history
+    // The defrauded ledger's own chain: its operator's updates, one per sequence.
+    let mut by_seq: std::collections::BTreeMap<u64, SignedLedgerUpdate> = Default::default();
+    for u in defrauded_updates {
+        if u.ledger_id == d_id
+            && u.operator_id == accused_op
+            && u.verify_operator_signature().is_ok()
+        {
+            by_seq.entry(u.sequence_number).or_insert_with(|| u.clone());
+        }
+    }
+    let chain: Vec<SignedLedgerUpdate> = by_seq.into_values().collect();
+    if chain.is_empty() {
+        return Err("we hold none of the defrauded ledger's updates".into());
+    }
+    let d_hex = original_proof.ledger_id.clone();
+    let chain_for = chain.clone();
+    let provider = move |lid: &str| -> Option<Vec<SignedLedgerUpdate>> {
+        (lid == d_hex).then(|| chain_for.clone())
+    };
+    verify_fraud_evidence(original_proof, &provider, block_oracle, authorizer)
+        .map_err(|e| format!("the original proof does not verify: {e}"))?;
+
+    let (disc, disc_op) = decode(disclosure_update, "disclosure")?;
+    let LedgerOperation::DisputeEnter {
+        last_valid_sequence: lvs,
+        fraud_proof_hash: Some(cited),
+        ..
+    } = disc_op
+    else {
+        return Err("the disclosure is not a DisputeEnter citing a proof".into());
+    };
+    if disc.ledger_id != d_id || disc.verify_operator_signature().is_err() || cited != h {
+        return Err(
+            "the disclosure is not a signed DisputeEnter on the defrauded ledger citing the proof"
+                .into(),
+        );
+    }
+    if !confirmed_at(&disc) {
+        return Err("the disclosure's block is not on our chain at its height".into());
+    }
+    let anchor = disc.block_height;
+
+    let (qb, qb_op) = decode(quorum_begin_update, "QuorumBegin")?;
+    let LedgerOperation::QuorumBegin { quorum_members, .. } = qb_op else {
+        return Err("the QuorumBegin is not one".into());
+    };
+    let qb_in_chain = chain
+        .iter()
+        .any(|u| u.sequence_number == qb.sequence_number && u.tlv_encode() == qb.tlv_encode());
+    let later_qb = chain
+        .iter()
+        .any(|u| u.sequence_number > qb.sequence_number && u.sequence_number <= lvs && is_qb(u));
+    if qb.ledger_id != d_id
+        || qb.operator_id != accused_op
+        || !qb_in_chain
+        || qb.sequence_number > lvs
+        || later_qb
+    {
+        return Err(
+            "the QuorumBegin is not the one governing the defrauded ledger at the fault".into(),
+        );
+    }
+    if !quorum_members.iter().any(|m| m.pubkey == mk) {
+        return Err("the accused held no seat on the defrauded ledger's quorum".into());
+    }
+    if !quorum_members.iter().any(|m| m.pubkey == disc.operator_id) {
+        return Err("the disclosure is not by a member of that quorum".into());
+    }
+    if disc.operator_id == mk {
+        return Err("the accused disclosed it: it acted".into());
+    }
+
+    let (vis, _) = decode(visibility_update, "visibility")?;
+    let cosigned = vis.cosignatures.iter().any(|c| {
+        c.cosigner_pubkey == mk && {
+            let digest = vis.cosign_digest(&c.member_ledger_hash);
+            bitcoin::secp256k1::schnorr::Signature::from_slice(&c.cosign_signature)
+                .ok()
+                .map(|sig| {
+                    bitcoin::secp256k1::Secp256k1::verification_only()
+                        .verify_schnorr(
+                            &sig,
+                            &bitcoin::secp256k1::Message::from_digest(digest),
+                            &mk.x_only_public_key().0,
+                        )
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        }
+    });
+    if vis.ledger_id != d_id || vis.block_height < anchor || !confirmed_at(&vis) || !cosigned {
+        return Err(
+            "no cosignature by the accused on the defrauded ledger at or after the anchor".into(),
+        );
+    }
+
+    let active = member_history
         .iter()
         .find(|u| u.sequence_number == *member_active_sequence)
-        .ok_or_else(|| {
-            format!(
-                "member_active_sequence {} not in member history",
-                member_active_sequence
-            )
-        })?;
-
-    let member_height = block_oracle
-        .confirms(&member_update.block_hash)
-        .ok_or_else(|| {
-            format!(
-                "member-active update's block_hash {} not in verifier's confirmed chain",
-                hex::encode(&member_update.block_hash[..8])
-            )
-        })?;
-
-    // (3) member was online past the deadline.
-    let elapsed = member_height.saturating_sub(original_height);
-    if elapsed < *required_response_blocks {
-        return Err(format!(
-            "member-active block {} only {} blocks past original-fraud block {}; need {}",
-            member_height, elapsed, original_height, required_response_blocks
-        ));
+        .ok_or("member-active update not in the member's history")?;
+    if active.operator_id != mk
+        || active.verify_operator_signature().is_err()
+        || !confirmed_at(active)
+    {
+        return Err(
+            "member-active update not signed by the accused at a block on our chain".into(),
+        );
     }
 
-    // (4) the member-active update is signed by the accused member.
-    let claimed_pk = bitcoin::secp256k1::PublicKey::from_str(member_pubkey)
-        .map_err(|e| format!("invalid member_pubkey: {}", e))?;
-    if member_update.operator_id != claimed_pk {
+    // The member's own window, from its latest QuorumAddMember at or before the QuorumBegin.
+    let required = chain
+        .iter()
+        .filter(|u| u.sequence_number <= qb.sequence_number)
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumAddMember {
+                quorum_member,
+                dispute_response_blocks,
+                ..
+            }) if quorum_member == mk => Some(dispute_response_blocks),
+            _ => None,
+        })
+        .flatten()
+        .unwrap_or(DEFAULT_DISPUTE_RESPONSE_BLOCKS);
+    let deadline = vis.block_height.saturating_add(required);
+    if active.block_height < deadline {
         return Err(format!(
-            "member-active update at seq {} signed by {} not member_pubkey {}",
-            member_active_sequence,
-            hex::encode(&member_update.operator_id.serialize()[..8]),
-            hex::encode(&claimed_pk.serialize()[..8])
+            "member-active block only {} past visibility; its window is {}",
+            active.block_height.saturating_sub(vis.block_height),
+            required
         ));
     }
-
+    let acted = defrauded_updates.iter().any(|u| {
+        u.operator_id == mk
+            && u.ledger_id == d_id
+            && u.block_height <= deadline
+            && u.verify_operator_signature().is_ok()
+            && match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::DisputeArmed { .. }) => true,
+                Ok(LedgerOperation::DisputeEnter { reason, .. }) => {
+                    reason.replace('-', "_") != "quorum_expired"
+                }
+                _ => false,
+            }
+    });
+    if acted {
+        return Err("the accused disputed within its window".into());
+    }
     Ok(())
 }
 
@@ -2168,32 +2304,20 @@ pub fn contagion_proofs(
 }
 
 /// Build a `DisputeDereliction` fraud broadcast (DEP-19 §6 / DEP-11
-/// §Dispute Participation).
-///
-/// The accusation: `member_pubkey` kept operating its own collateral ledger
-/// (`member_ledger_id`) past the response window without acting on a prior,
-/// valid punitive fraud proof. `original_fraud_hash` identifies that proof;
-/// `original_fraud_block_hash` anchors when it became visible (the verifier
-/// confirms this block in its own chain and reads its height). The member's
-/// own ledger carries an update it signed at `member_active_sequence` whose
-/// block confirms at least `required_response_blocks` after that — proof it
-/// was online past the deadline. Presented against the member's own ledger,
-/// which the proof slashes.
-///
-/// Self-evident: no embedding or causal chain (see
-/// [`FraudProofType::requires_embedding`]).
-///
-/// Mirrors cl-deposits' `make-dispute-dereliction-proof`. The canonical
-/// proof hash binds `original_fraud_hash`, `original_fraud_block_hash`,
-/// `member_ledger_id` and `member_pubkey` (the other two evidence fields are
-/// elided from the hash), so a proof built here hashes identically to cl's
-/// for the same fields.
+/// §Dispute Participation): `member_pubkey`, seated by `quorum_begin`, saw the
+/// fraud `original` disclosed by `disclosure` (a co-member's `DisputeEnter`
+/// citing it) — it cosigned `visibility` of that ledger at or after the anchor —
+/// and stayed active on `member_ledger_id` (update `member_active_sequence`)
+/// past its own window without disputing. Presented on `member_ledger_id`.
+/// Self-evident: no embedding. Mirrors cl-deposits'
+/// `make-dispute-dereliction-proof`, which hashes identically.
 pub fn make_dispute_dereliction_proof(
     member_pubkey: &bitcoin::secp256k1::PublicKey,
     member_ledger_id: &[u8; 32],
-    original_fraud_hash: &[u8; 32],
-    original_fraud_block_hash: [u8; 32],
-    required_response_blocks: u32,
+    original: &FraudProof,
+    disclosure: &crate::types::SignedLedgerUpdate,
+    quorum_begin: &crate::types::SignedLedgerUpdate,
+    visibility: &crate::types::SignedLedgerUpdate,
     member_active_sequence: u64,
 ) -> FraudBroadcast {
     let member_pubkey_hex = hex::encode(member_pubkey.serialize());
@@ -2204,9 +2328,11 @@ pub fn make_dispute_dereliction_proof(
             accused: member_pubkey_hex.clone(),
             ledger_id: member_ledger_id_hex.clone(),
             evidence: FraudEvidence::DisputeDereliction {
-                original_fraud_hash: hex::encode(original_fraud_hash),
-                original_fraud_block_hash,
-                required_response_blocks,
+                original_proof: Box::new(original.clone()),
+                original_fraud_hash: hex::encode(original.proof_hash()),
+                disclosure_update: hex::encode(crate::tlv::TlvEncode::tlv_encode(disclosure)),
+                quorum_begin_update: hex::encode(crate::tlv::TlvEncode::tlv_encode(quorum_begin)),
+                visibility_update: hex::encode(crate::tlv::TlvEncode::tlv_encode(visibility)),
                 member_ledger_id: member_ledger_id_hex,
                 member_active_sequence,
                 member_pubkey: member_pubkey_hex,
@@ -2913,6 +3039,11 @@ pub struct CausalLink {
 /// a test mock). Lookups return `None` for unknown ledger IDs.
 pub trait LedgerProvider {
     fn ledger_history(&self, ledger_id: &str) -> Option<Vec<crate::types::SignedLedgerUpdate>>;
+    /// Updates of every fork of `ledger_id` the verifier holds (disputants'
+    /// branches). Used where a member's own dispute action matters (DEP-19 §6).
+    fn ledger_forks(&self, _ledger_id: &str) -> Vec<crate::types::SignedLedgerUpdate> {
+        Vec::new()
+    }
 }
 
 impl<F> LedgerProvider for F
@@ -3053,7 +3184,9 @@ pub fn verify_fraud_evidence(
         }
         FraudProofType::DisputeDereliction => {
             let FraudEvidence::DisputeDereliction {
-                member_ledger_id, ..
+                member_ledger_id,
+                original_proof,
+                ..
             } = &proof.evidence
             else {
                 return Err("DisputeDereliction: wrong evidence type".into());
@@ -3064,7 +3197,17 @@ pub fn verify_fraud_evidence(
                     &member_ledger_id[..16.min(member_ledger_id.len())]
                 )
             })?;
-            verify_inactive_quorum_member(proof, &member_history, block_oracle)?;
+            let mut defrauded = ledgers
+                .ledger_history(&original_proof.ledger_id)
+                .unwrap_or_default();
+            defrauded.extend(ledgers.ledger_forks(&original_proof.ledger_id));
+            verify_inactive_quorum_member(
+                proof,
+                &member_history,
+                &defrauded,
+                block_oracle,
+                authorizer,
+            )?;
         }
         FraudProofType::UncreditedOnchainPayment => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
@@ -3315,15 +3458,21 @@ impl FraudEvidence {
             }
             Self::DisputeDereliction {
                 original_fraud_hash,
-                original_fraud_block_hash,
+                disclosure_update,
+                quorum_begin_update,
+                visibility_update,
                 member_ledger_id,
                 member_pubkey,
+                member_active_sequence,
                 ..
             } => {
                 out.extend_from_slice(original_fraud_hash.as_bytes());
-                out.extend_from_slice(original_fraud_block_hash);
+                out.extend_from_slice(disclosure_update.as_bytes());
+                out.extend_from_slice(quorum_begin_update.as_bytes());
+                out.extend_from_slice(visibility_update.as_bytes());
                 out.extend_from_slice(member_ledger_id.as_bytes());
                 out.extend_from_slice(member_pubkey.as_bytes());
+                out.extend_from_slice(&member_active_sequence.to_le_bytes());
             }
             Self::NonConforming {
                 sequence,

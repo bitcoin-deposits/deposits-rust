@@ -565,6 +565,24 @@ impl Node {
             .await
     }
 
+    /// Dispute on a verified fraud proof: the `DisputeEnter` cites its hash,
+    /// disclosing it on the ledger and anchoring co-members' windows (DEP-19 §6).
+    pub(crate) async fn auto_arm_for_dispute_on_proof(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+        proof_hash: [u8; 32],
+    ) -> Result<(), Error> {
+        self.arm_dispute(
+            ledger_id,
+            last_valid_seq,
+            None,
+            Some(proof_hash),
+            &crate::chain_backend::ScanRetry::quick(),
+        )
+        .await
+    }
+
     /// Periodic: scan ledgers we cosign for, fire QuorumExpired
     /// auto-disputes on any whose `quorum_expiry` has been passed by
     /// the current chain tip.
@@ -750,6 +768,7 @@ impl Node {
                     &ledger_id,
                     last_valid_seq,
                     None,
+                    None,
                     &crate::chain_backend::ScanRetry::default(),
                 )
                 .await
@@ -782,6 +801,7 @@ impl Node {
             ledger_id,
             last_valid_seq,
             anchor,
+            None,
             &crate::chain_backend::ScanRetry::quick(),
         )
         .await
@@ -792,6 +812,7 @@ impl Node {
         ledger_id: &str,
         last_valid_seq: u64,
         anchor: Option<([u8; 32], u32)>,
+        fraud_proof_hash: Option<[u8; 32]>,
         scan_retry: &crate::chain_backend::ScanRetry,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{hash160, Hash};
@@ -865,6 +886,7 @@ impl Node {
                     },
                     anchor_block_hash,
                     anchor_block_height,
+                    fraud_proof_hash,
                 };
 
                 fork_ledger
@@ -3891,6 +3913,7 @@ mod recovery_chaining_tests {
                 reason: "auto_dispute".to_string(),
                 anchor_block_hash: None,
                 anchor_block_height: None,
+                fraud_proof_hash: None,
             },
             u0.chain_hash(),
         );

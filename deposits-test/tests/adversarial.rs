@@ -218,6 +218,7 @@ fn attack_operate_during_dispute() {
         reason: "non-conforming".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger
@@ -277,6 +278,7 @@ fn attack_false_custody_claim() {
         reason: "test".to_string(),
         anchor_block_hash: None,
         anchor_block_height: None,
+        fraud_proof_hash: None,
     };
     net.op_mut("alice")
         .ledger

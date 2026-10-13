@@ -364,6 +364,7 @@ mod tests {
             reason: "quorum_expired".to_string(),
             anchor_block_hash: Some([7; 32]),
             anchor_block_height: Some(8160),
+            fraud_proof_hash: None,
         }
         .tlv_encode();
         let history = vec![
