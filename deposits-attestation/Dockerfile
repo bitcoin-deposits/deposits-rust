@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 # Workspace root + real sources for this crate AND its real path-deps.
-COPY Cargo.toml Cargo.lock ./
+# Cargo.lock is not committed: copy it when present (the glob matches nothing otherwise).
+COPY Cargo.toml Cargo.lock* ./
 # Vendored miniscript fork — referenced by `[patch.crates-io]` in
 # the workspace Cargo.toml.
 COPY third_party          ./third_party

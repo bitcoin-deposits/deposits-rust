@@ -10,7 +10,8 @@ RUN apt-get update && \
 
 WORKDIR /build
 
-COPY Cargo.toml Cargo.lock ./
+# Cargo.lock is not committed: copy it when present (the glob matches nothing otherwise).
+COPY Cargo.toml Cargo.lock* ./
 # Vendored miniscript fork — referenced by `[patch.crates-io]` in
 # the workspace Cargo.toml.
 COPY third_party ./third_party
