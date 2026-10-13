@@ -58,13 +58,16 @@ pub(crate) fn collect_acting_members(updates: &[SignedLedgerUpdate]) -> HashSet<
     acted
 }
 
-/// Decide which co-members of a disputed ledger are derelict and build one
-/// `DisputeDereliction` for each (DEP-19 §6). Pure: every replica / relay
-/// access is injected. A member yields a proof iff it is not us, did not act
-/// (`acted`), is seated by the QuorumBegin governing at the disclosure, cosigned
-/// the faulted ledger (`chain`) at or after the disclosure's block, and signed
-/// an update on its own ledger at least its `dispute_response_blocks` after
-/// that — and the built proof passes `verify` (the same verifier receivers run).
+/// Decide which co-members of a disputed ledger are derelict and build a
+/// `DisputeDereliction` against each on every ledger it operates (DEP-19 §6:
+/// one accusation, every vault it runs, as contagion). Pure: every replica /
+/// relay access is injected; `operated` gives the ledgers a member operates
+/// that we hold, with their histories. A member is derelict iff it is not us,
+/// did not act (`acted`), is seated by the QuorumBegin governing at the
+/// disclosure, and cosigned the faulted ledger (`chain`) at or after the
+/// disclosure's block; a ledger it operates is accused iff it signed an update
+/// there at least its `dispute_response_blocks` after that, and the built proof
+/// passes `verify` (the same verifier receivers run).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn plan_dereliction_proofs(
     members: &[QuorumMember],
@@ -72,7 +75,7 @@ pub(crate) fn plan_dereliction_proofs(
     watch: &DerelictionWatch,
     chain: &[SignedLedgerUpdate],
     acted: &HashSet<PublicKey>,
-    own_history: &dyn Fn(&str) -> Option<Vec<SignedLedgerUpdate>>,
+    operated: &dyn Fn(&PublicKey) -> Vec<(String, Vec<SignedLedgerUpdate>)>,
     already_reported: &dyn Fn(&str) -> bool,
     verify: &dyn Fn(&FraudBroadcast, &[SignedLedgerUpdate]) -> Result<(), String>,
 ) -> Vec<FraudBroadcast> {
@@ -103,21 +106,16 @@ pub(crate) fn plan_dereliction_proofs(
         }
         _ => return out,
     };
-    let mut seen_member_ledgers: HashSet<String> = HashSet::new();
+    let mut seen_members: HashSet<PublicKey> = HashSet::new();
 
     for m in members {
-        if m.pubkey == *our_key || acted.contains(&m.pubkey) || !seated.contains(&m.pubkey) {
+        if m.pubkey == *our_key
+            || acted.contains(&m.pubkey)
+            || !seated.contains(&m.pubkey)
+            || !seen_members.insert(m.pubkey)
+        {
             continue;
         }
-        if !seen_member_ledgers.insert(m.ledger_id.clone()) || already_reported(&m.ledger_id) {
-            continue;
-        }
-        let Some(member_ledger_bytes) = decode_ledger_id(&m.ledger_id) else {
-            continue;
-        };
-        let Some(history) = own_history(&m.ledger_id) else {
-            continue;
-        };
         let Some(vis) = ascending.iter().find(|u| {
             u.block_height >= anchor && u.cosignatures.iter().any(|c| c.cosigner_pubkey == m.pubkey)
         }) else {
@@ -125,29 +123,38 @@ pub(crate) fn plan_dereliction_proofs(
         };
         let required = m.dispute_response_blocks.unwrap_or(144);
         let deadline = vis.block_height.saturating_add(required);
-        let Some(active) = history
-            .iter()
-            .filter(|u| u.operator_id == m.pubkey && u.block_height >= deadline)
-            .max_by_key(|u| u.sequence_number)
-        else {
-            continue;
-        };
-        let broadcast = make_dispute_dereliction_proof(
-            &m.pubkey,
-            &member_ledger_bytes,
-            &watch.original,
-            &watch.disclosure,
-            qb,
-            vis,
-            active.sequence_number,
-        );
-        match verify(&broadcast, &history) {
-            Ok(()) => out.push(broadcast),
-            Err(e) => tracing::info!(
-                "not reporting {}: our own dereliction proof does not verify: {}",
-                hex::encode(&m.pubkey.serialize()[..8]),
-                e
-            ),
+        for (target, history) in operated(&m.pubkey) {
+            if already_reported(&target) {
+                continue;
+            }
+            let Some(target_bytes) = decode_ledger_id(&target) else {
+                continue;
+            };
+            let Some(active) = history
+                .iter()
+                .filter(|u| u.operator_id == m.pubkey && u.block_height >= deadline)
+                .max_by_key(|u| u.sequence_number)
+            else {
+                continue;
+            };
+            let broadcast = make_dispute_dereliction_proof(
+                &m.pubkey,
+                &target_bytes,
+                &watch.original,
+                &watch.disclosure,
+                qb,
+                vis,
+                active.sequence_number,
+            );
+            match verify(&broadcast, &history) {
+                Ok(()) => out.push(broadcast),
+                Err(e) => tracing::info!(
+                    "not reporting {} on {}: our own dereliction proof does not verify: {}",
+                    hex::encode(&m.pubkey.serialize()[..8]),
+                    &target[..16.min(target.len())],
+                    e
+                ),
+            }
         }
     }
     out
@@ -232,12 +239,28 @@ impl crate::Node {
             let mut all = chain.clone();
             all.extend(updates.iter().cloned());
             let hash_hex = hex::encode(watch.original.proof_hash());
-            let own_history = |lid: &str| -> Option<Vec<SignedLedgerUpdate>> {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(lid)
-                    .map(|arc| arc.read().unwrap().history.clone())
-            };
+            // Every ledger each member operates that we hold (advertisements +
+            // replicas, as contagion finds them), with its history.
+            let mut operated_by: std::collections::HashMap<
+                PublicKey,
+                Vec<(String, Vec<SignedLedgerUpdate>)>,
+            > = Default::default();
+            for m in &members {
+                let ids = self.ledgers_operated_by(&m.pubkey).await;
+                let held: Vec<(String, Vec<SignedLedgerUpdate>)> = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    ids.into_iter()
+                        .filter_map(|id| {
+                            let h = ledgers
+                                .get(&id)
+                                .map(|arc| arc.read().unwrap().history.clone())?;
+                            Some((id, h))
+                        })
+                        .collect()
+                };
+                operated_by.insert(m.pubkey, held);
+            }
+            let operated = |pk: &PublicKey| operated_by.get(pk).cloned().unwrap_or_default();
             let already_reported = |lid: &str| {
                 self.reported_derelictions
                     .lock()
@@ -267,7 +290,7 @@ impl crate::Node {
                 &watch,
                 &chain,
                 &acted,
-                &own_history,
+                &operated,
                 &already_reported,
                 &verify,
             );
@@ -323,6 +346,163 @@ mod tests {
         let secp = Secp256k1::new();
         let sk = SecretKey::from_slice(&[byte; 32]).unwrap();
         PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    fn blank_member(pubkey: PublicKey, ledger_id: String) -> QuorumMember {
+        QuorumMember {
+            min_collateral_bps: None,
+            dormancy_blocks: None,
+            dormancy_notice_blocks: None,
+            pubkey,
+            ledger_id,
+            min_fee_bps: None,
+            min_fee_fixed: None,
+            max_fee_period: None,
+            membership_until: None,
+            dispute_response_blocks: Some(5),
+            dispute_arm_blocks: None,
+            service_response_blocks: None,
+            max_transfer_timeout_blocks: None,
+            max_descriptor_bytes: None,
+            compensation_bps: None,
+            compensation_deposit_id: None,
+            compensation_frequency_blocks: None,
+            supported_rulesets: vec![],
+        }
+    }
+
+    /// DEP-19 §6 scope: a derelict member is accused on every ledger it
+    /// operates. From the shared cl vector (deposits-core/tests/vectors): d is
+    /// reported on both ledgers it runs — the same signed history under a second
+    /// id stands in for a second ledger; receivers fetch each ledger's own — and
+    /// c, which disputed in time, on none.
+    #[test]
+    fn accuses_on_every_ledger_the_member_operates() {
+        use deposits_core::fraud::{BlockOracle, FraudEvidence};
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../deposits-core/tests/vectors/dereliction.json"
+        ))
+        .unwrap();
+        let decode = |x: &serde_json::Value| {
+            SignedLedgerUpdate::tlv_decode(&hex::decode(x.as_str().unwrap()).unwrap()).unwrap()
+        };
+        let case = |name: &str| {
+            v["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"] == name)
+                .unwrap()
+                .clone()
+        };
+        let valid = case("valid");
+        let rebutted = case("rebutted: the accused disputed within its window");
+        let proof: FraudProof = serde_json::from_value(valid["proof"].clone()).unwrap();
+        let rproof: FraudProof = serde_json::from_value(rebutted["proof"].clone()).unwrap();
+        let FraudEvidence::DisputeDereliction {
+            original_proof,
+            disclosure_update,
+            ..
+        } = &proof.evidence
+        else {
+            panic!("not a dereliction")
+        };
+        let watch = DerelictionWatch {
+            original: (**original_proof).clone(),
+            disclosure: SignedLedgerUpdate::tlv_decode(&hex::decode(disclosure_update).unwrap())
+                .unwrap(),
+        };
+        let all: Vec<SignedLedgerUpdate> = v["defrauded_updates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(decode)
+            .collect();
+        let accused_op: PublicKey = original_proof.accused.parse().unwrap();
+        let chain: Vec<SignedLedgerUpdate> = all
+            .iter()
+            .filter(|u| u.operator_id == accused_op)
+            .cloned()
+            .collect();
+        let d: PublicKey = proof.accused.parse().unwrap();
+        let c: PublicKey = rproof.accused.parse().unwrap();
+        let d_hist: Vec<SignedLedgerUpdate> = valid["member_ledger"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(decode)
+            .collect();
+        let c_hist: Vec<SignedLedgerUpdate> = rebutted["member_ledger"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(decode)
+            .collect();
+        let second = "ee".repeat(32);
+        let members = vec![
+            blank_member(d, proof.ledger_id.clone()),
+            blank_member(c, rproof.ledger_id.clone()),
+        ];
+        let operated = |pk: &PublicKey| {
+            if *pk == d {
+                vec![
+                    (proof.ledger_id.clone(), d_hist.clone()),
+                    (second.clone(), d_hist.clone()),
+                ]
+            } else if *pk == c {
+                vec![(rproof.ledger_id.clone(), c_hist.clone())]
+            } else {
+                vec![]
+            }
+        };
+        struct O(std::collections::HashMap<[u8; 32], u32>);
+        impl BlockOracle for O {
+            fn confirms(&self, h: &[u8; 32]) -> Option<u32> {
+                self.0.get(h).copied()
+            }
+        }
+        let oracle = O(v["blocks"]
+            .as_object()
+            .unwrap()
+            .iter()
+            .map(|(k, h)| {
+                (
+                    <[u8; 32]>::try_from(hex::decode(k).unwrap()).unwrap(),
+                    h.as_u64().unwrap() as u32,
+                )
+            })
+            .collect());
+        let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+        let verify = |b: &FraudBroadcast, history: &[SignedLedgerUpdate]| {
+            deposits_core::fraud::verify_inactive_quorum_member(
+                &b.proof,
+                history,
+                &all,
+                &oracle,
+                &authorizer,
+            )
+        };
+        let out = plan_dereliction_proofs(
+            &members,
+            &pk(99),
+            &watch,
+            &chain,
+            &collect_acting_members(&all),
+            &operated,
+            &|_| false,
+            &verify,
+        );
+        let mut got: Vec<(String, String)> = out
+            .iter()
+            .map(|b| (b.proof.accused.clone(), b.proof.ledger_id.clone()))
+            .collect();
+        got.sort();
+        let mut want = vec![
+            (proof.accused.clone(), proof.ledger_id.clone()),
+            (proof.accused.clone(), second),
+        ];
+        want.sort();
+        assert_eq!(got, want);
     }
 
     #[test]
