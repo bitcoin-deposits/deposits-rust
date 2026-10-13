@@ -2828,6 +2828,7 @@ mod tests {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),

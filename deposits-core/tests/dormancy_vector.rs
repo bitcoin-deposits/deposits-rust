@@ -146,8 +146,9 @@ fn dormancy_vector_matches_cl() {
                         spk: hex::decode(&kv["receiver_spk"]).unwrap(),
                         total: w[1].parse().unwrap(),
                         premium: kv["premium"].parse().unwrap(),
+                        expires: u32::MAX,
                     });
-                    let (sats, entries) = match st.dormancy_migration(1050) {
+                    let (sats, entries) = match st.dormancy_migration(1050, 1050) {
                         Some((e, _, s)) => (s, e),
                         None => (0, Vec::new()),
                     };
@@ -255,6 +256,7 @@ fn dormancy_fold() {
         migration_manifest: Vec::new(),
         migration_receiver: None,
         migration_vout: None,
+        consumed_notice: None,
     };
     let e = with_apply_ctx(at(14), || st.apply(&qb(Vec::new()))).unwrap_err();
     assert!(
@@ -280,12 +282,12 @@ fn dormancy_fold() {
     }
 }
 
-/// DEP-20 §8.3 receiver fold: one outstanding accept within capacity, migration credits draw on
-/// its reservation at one outpoint, and the next rotating QuorumBegin must splice that outpoint.
+/// DEP-20 §8.3 receiver fold: one outstanding accept within capacity, ordinary credits cannot eat
+/// its reservation, and the receiver may not rotate while it is outstanding (until expiry + 6).
 #[test]
 fn migration_receiver_fold() {
     use deposits_core::messages::LedgerOperation;
-    use deposits_core::types::{migration_marker, with_apply_ctx, ApplyCtx};
+    use deposits_core::types::{with_apply_ctx, ApplyCtx};
     let mut st = state();
     st.vault_current = true;
     st.reserves_amount = 10_000_000;
@@ -299,12 +301,11 @@ fn migration_receiver_fold() {
         seq: 1,
         hash: [0; 32],
     };
-    let hash = [9u8; 32];
     let accept = |total| LedgerOperation::DormancyAccept {
         premium_deposit: None,
-        exit_address: [vec![0x51, 0x20], vec![0x51; 32]].concat(),
+        exit_address: hex::decode(format!("5120{}", "ab".repeat(32))).unwrap(),
         expires_at_height: 100,
-        manifest_hash: hash,
+        manifest_hash: [9u8; 32],
         offer_event_id: [0; 32],
         accepted_total: total,
     };
@@ -317,50 +318,19 @@ fn migration_receiver_fold() {
         with_apply_ctx(at(11), || st.apply(&accept(1_000))).is_err(),
         "one outstanding"
     );
-    let credit = |amount, vout, addr: String| LedgerOperation::OnchainCredit {
+    let credit = |amount| LedgerOperation::OnchainCredit {
         txid: [3; 32],
-        vout,
+        vout: 0,
         deposit_id: id,
         amount,
-        funding_address: addr,
+        funding_address: "bcrt1qother".into(),
         commitment: None,
     };
     assert!(
-        with_apply_ctx(at(12), || st.apply(&credit(
-            4_000_001,
-            0,
-            "bc1qother".into()
-        )))
-        .is_err(),
+        with_apply_ctx(at(12), || st.apply(&credit(4_000_001))).is_err(),
         "an ordinary credit cannot eat the reservation"
     );
-    assert!(
-        with_apply_ctx(at(12), || st.apply(&credit(
-            6_000_001,
-            1,
-            migration_marker(&hash)
-        )))
-        .is_err(),
-        "migration credits are capped by the accepted total"
-    );
-    st = with_apply_ctx(at(12), || {
-        st.apply(&credit(5_000_000, 1, migration_marker(&hash)))
-    })
-    .unwrap();
-    assert!(
-        with_apply_ctx(at(12), || st.apply(&credit(
-            1_000,
-            2,
-            migration_marker(&hash)
-        )))
-        .is_err(),
-        "one outpoint"
-    );
-    assert_eq!(
-        st.dormancy_accept.as_ref().unwrap().outpoint,
-        Some(([3; 32], 1))
-    );
-    let qb = |splice| LedgerOperation::QuorumBegin {
+    let qb = LedgerOperation::QuorumBegin {
         reserves_id: "x".into(),
         spending_txid: [0; 32],
         new_outpoint_txid: [0; 32],
@@ -373,21 +343,24 @@ fn migration_receiver_fold() {
         protocol_version: Some("cltv-offset-v2".into()),
         exit_cutoff_height: Some(20),
         exit_outputs: Vec::new(),
-        splice_in_outpoint: splice,
-        splice_in_amount: splice.map(|_| 5_000_000),
+        splice_in_outpoint: None,
+        splice_in_amount: None,
         reference_feerate: None,
         dormancy_outputs: Vec::new(),
         migration_manifest: Vec::new(),
         migration_receiver: None,
         migration_vout: None,
+        consumed_notice: None,
     };
-    let e = with_apply_ctx(at(20), || st.apply(&qb(None))).unwrap_err();
-    assert!(format!("{e:?}").contains("migration_splice"), "{e:?}");
-    let next = with_apply_ctx(at(20), || st.apply(&qb(Some(([3; 32], 1))))).unwrap();
+    let e = with_apply_ctx(at(20), || st.apply(&qb)).unwrap_err();
+    assert!(format!("{e:?}").contains("migration_freeze"), "{e:?}");
+    // Past expires + 6 the accept lapses: the freeze lifts and the reservation frees.
+    let r = with_apply_ctx(at(106), || st.apply(&qb));
     assert!(
-        next.dormancy_accept.is_none(),
-        "the splice closes the accept"
+        !format!("{r:?}").contains("migration_freeze"),
+        "the freeze lifts after expiry: {r:?}"
     );
+    assert!(with_apply_ctx(at(106), || st.apply(&credit(4_000_001))).is_ok());
 }
 
 /// DEP-20 §8.3 (L4): the accept a notice carries must come from a quorum-backed receiver ledger
@@ -418,5 +391,58 @@ fn migration_accept_vector_matches_cl() {
         assert_eq!(got, w[2], "case {}", w[1]);
         n += 1;
     }
-    assert_eq!(n, 10);
+    assert_eq!(n, 11);
+}
+
+/// DEP-20 §8.3 MigrationCredit (op 105): the source's signed notice and the QuorumBegin that
+/// consumed it resolve the receiver's accept, crediting exactly what migrated — cl's vector.
+#[test]
+fn migration_credit_vector_matches_cl() {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::{with_apply_ctx, ApplyCtx};
+    use deposits_core::TlvDecode;
+    let at = |h| ApplyCtx {
+        height: h,
+        seq: 1,
+        hash: [0; 32],
+    };
+    let mut kv = std::collections::HashMap::new();
+    let mut n = 0;
+    for line in include_str!("vectors/migration_credit.txt").lines() {
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let w: Vec<&str> = line.split(' ').collect();
+        if w[0] != "case" {
+            kv.insert(w[0].to_string(), w[1].to_string());
+            continue;
+        }
+        let operator =
+            bitcoin::secp256k1::PublicKey::from_slice(&hex::decode(&kv["operator"]).unwrap())
+                .unwrap();
+        let mut st = LedgerState::new(operator, String::new(), 0);
+        st.ledger_id = hex::decode(&kv["ledger"]).unwrap().try_into().unwrap();
+        st.reserves_amount = kv["reserves"].parse().unwrap();
+        let accept = LedgerOperation::tlv_decode(&hex::decode(&kv["accept"]).unwrap()).unwrap();
+        st = with_apply_ctx(at(100), || st.apply(&accept)).unwrap();
+        let credit = LedgerOperation::tlv_decode(&hex::decode(w[3]).unwrap()).unwrap();
+        let r = with_apply_ctx(at(160), || st.apply(&credit));
+        assert_eq!(
+            if r.is_ok() { "ok" } else { "refuse" },
+            w[2],
+            "case {}: {:?}",
+            w[1],
+            r.as_ref().err()
+        );
+        if let Ok(next) = r {
+            for b in &w[4..] {
+                let (id, amt) = b.split_once(':').unwrap();
+                let id: [u8; 16] = hex::decode(id).unwrap().try_into().unwrap();
+                let bal = next.deposits.get(&id).map_or(0, |d| d.balance);
+                assert_eq!(bal.to_string(), amt, "case {} balance", w[1]);
+            }
+        }
+        n += 1;
+    }
+    assert_eq!(n, 8);
 }

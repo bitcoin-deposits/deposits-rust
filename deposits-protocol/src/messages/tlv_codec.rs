@@ -172,6 +172,9 @@ mod ledger_op_tlv {
     pub const DORMANCY_ACCEPT: u64 = 338; // signed update bytes, DormancyNotice
     pub const PREMIUM_MSATS: u64 = 340; // u64, DormancyNotice
     pub const RECEIVER_QUORUM_BEGIN: u64 = 342; // signed update bytes, DormancyNotice (L4)
+    pub const CONSUMED_NOTICE: u64 = 344; // [u8; 32], QuorumBegin (DEP-20 §8.3)
+    pub const SOURCE_NOTICE_UPDATE: u64 = 346; // MigrationCredit
+    pub const SOURCE_QB_UPDATE: u64 = 348; // MigrationCredit
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -288,6 +291,7 @@ impl TlvEncode for LedgerOperation {
                 migration_manifest,
                 migration_receiver,
                 migration_vout,
+                consumed_notice,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -366,6 +370,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(v) = migration_vout {
                     builder = builder.u32_field(MIGRATION_VOUT, *v);
+                }
+                if let Some(c) = consumed_notice {
+                    builder = builder.bytes_field(CONSUMED_NOTICE, c);
                 }
             }
             Self::DepositOpen {
@@ -495,6 +502,14 @@ impl TlvEncode for LedgerOperation {
                 if let Some(q) = receiver_quorum_begin {
                     builder = builder.bytes_field(RECEIVER_QUORUM_BEGIN, q);
                 }
+            }
+            Self::MigrationCredit {
+                source_notice_update,
+                source_qb_update,
+            } => {
+                builder = builder
+                    .bytes_field(SOURCE_NOTICE_UPDATE, source_notice_update)
+                    .bytes_field(SOURCE_QB_UPDATE, source_qb_update);
             }
             Self::DormancyAccept {
                 premium_deposit,
@@ -1026,6 +1041,7 @@ impl TlvDecode for LedgerOperation {
                         MIGRATION_RECEIVER,
                     )?,
                     migration_vout: reader.read_u32_opt(MIGRATION_VOUT)?,
+                    consumed_notice: reader.read_bytes_opt(CONSUMED_NOTICE)?,
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -1080,6 +1096,10 @@ impl TlvDecode for LedgerOperation {
                 receiver_quorum_begin: reader
                     .read_raw_opt(RECEIVER_QUORUM_BEGIN)
                     .map(|b| b.to_vec()),
+            }),
+            105 => Ok(Self::MigrationCredit {
+                source_notice_update: reader.read_raw(SOURCE_NOTICE_UPDATE)?.to_vec(),
+                source_qb_update: reader.read_raw(SOURCE_QB_UPDATE)?.to_vec(),
             }),
             103 => Ok(Self::DormancyAccept {
                 premium_deposit: match reader.read_raw_opt(DEPOSIT_ID) {

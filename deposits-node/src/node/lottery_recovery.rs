@@ -1057,6 +1057,7 @@ mod tests {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             reserves_id: "r".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0; 32],

@@ -317,6 +317,7 @@ impl Node {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             reserves_id: taproot_output.address.to_string(),
             spending_txid: *outpoint.txid.as_ref(),
             new_outpoint_txid: *rotate_txid.as_ref(),
@@ -1284,7 +1285,11 @@ impl Node {
                     .saturating_sub(dorm_cost);
                 // DEP-20 §4: the spliced value goes to collateral; §8.4: spin-outs' costs out of it.
                 let premium = cutoff.map_or(0, |c| {
-                    deposits_core::rotation_order::migration_premium_sats(&l.state, c)
+                    deposits_core::rotation_order::migration_premium_sats(
+                        &l.state,
+                        c,
+                        self.wallet.get_block_height().unwrap_or(0),
+                    )
                 });
                 let collateral =
                     deposits_core::rotation_order::rotation_collateral(&l.state, vault_sats, fee)
@@ -1333,6 +1338,7 @@ impl Node {
                         let m = deposits_core::rotation_order::migration_entries(
                             st,
                             cutoff,
+                            height,
                             e.len(),
                             d.len(),
                         );
@@ -1366,6 +1372,7 @@ impl Node {
             migration_manifest: migration.0,
             migration_receiver: migration.1,
             migration_vout: migration.2,
+            consumed_notice: None,
             reserves_id: result.address.to_string(),
             spending_txid: txid_bytes,
             new_outpoint_txid: txid_bytes,
@@ -1597,9 +1604,13 @@ impl Node {
                     .splice_prevout(stxid, svout)
                     .map_err(Error::Protocol)?;
                 let ours = bitcoin::CompressedPublicKey(operator_key);
-                if prevout.script_pubkey != bitcoin::ScriptBuf::new_p2wpkh(&ours.wpubkey_hash()) {
+                // DEP-20 §8.3: a migration output sits at the vault's own script.
+                if prevout.script_pubkey != bitcoin::ScriptBuf::new_p2wpkh(&ours.wpubkey_hash())
+                    && prevout.script_pubkey != prev_script_pubkey
+                {
                     return Err(Error::Protocol(
-                        "splice-in must pay the operator key's P2WPKH".to_string(),
+                        "splice-in must pay the operator key's P2WPKH or the vault's script"
+                            .to_string(),
                     ));
                 }
                 Some((stxid, svout, prevout))
@@ -1619,6 +1630,9 @@ impl Node {
                         p.value.to_sat(),
                     )
                 }),
+                splice_vault: splice
+                    .as_ref()
+                    .is_some_and(|(_, _, p)| p.script_pubkey == prev_script_pubkey),
                 extra_outputs: exit_outputs,
             },
         )
@@ -1647,6 +1661,24 @@ impl Node {
         )
         .map_err(|e| Error::Wallet(format!("compute rotation sighash: {:?}", e)))?;
         let sighash_bytes: [u8; 32] = *sighash.as_ref();
+        // DEP-03: a vault-script splice-in is spent through the same tier: a second sighash.
+        let splice_vault = splice
+            .as_ref()
+            .is_some_and(|(_, _, p)| p.script_pubkey == prev_script_pubkey);
+        let sighash1_bytes: Option<[u8; 32]> = if splice_vault {
+            let h = ReservesSpendBuilder::compute_sighash_with(
+                &rotation_tx,
+                1,
+                existing.amount,
+                &prev_script_pubkey,
+                &leaf_script,
+                &more_prevouts,
+            )
+            .map_err(|e| Error::Wallet(format!("compute splice sighash: {:?}", e)))?;
+            Some(*h.as_ref())
+        } else {
+            None
+        };
 
         // Operator signs first.
         let our_sig = self
@@ -1661,6 +1693,16 @@ impl Node {
         let mut sigs: std::collections::HashMap<PublicKey, [u8; 64]> =
             std::collections::HashMap::new();
         sigs.insert(operator_key, our_sig);
+        let mut sigs1: std::collections::HashMap<PublicKey, [u8; 64]> =
+            std::collections::HashMap::new();
+        if let Some(h1) = sighash1_bytes {
+            let s1 = self
+                .handler
+                .signer
+                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), &h1)
+                .map_err(|e| Error::Protocol(format!("operator splice sighash sign: {}", e)))?;
+            sigs1.insert(operator_key, s1);
+        }
 
         // Tier-aware cosigner threshold. Tier 3 (operator-alone) needs
         // zero cosigner sigs — we short-circuit the multicast entirely
@@ -1683,6 +1725,7 @@ impl Node {
             "splice_in_outpoint": splice.as_ref().map(|(t, v, _)| format!("{}:{}", hex::encode(t), v)),
             "exit_cutoff_height": exit_cutoff,
             "sighash": hex::encode(sighash_bytes),
+            "splice_sighash": sighash1_bytes.map(hex::encode),
             "unsigned_tx": unsigned_tx_hex,
             "tier_index": tier_index,
             // Operator's own ledger_hash + new_first_expiry so the cosigner
@@ -1808,6 +1851,20 @@ impl Node {
                     };
                     let mut arr = [0u8; 64];
                     arr.copy_from_slice(&sig_bytes);
+                    if sighash1_bytes.is_some() {
+                        // A vault-script splice needs the member's signature on input 1 too.
+                        let Some(s1) = result
+                            .get("splice_signature")
+                            .and_then(|v| v.as_str())
+                            .and_then(|h| hex::decode(h).ok())
+                            .filter(|b| b.len() == 64)
+                        else {
+                            continue;
+                        };
+                        let mut a1 = [0u8; 64];
+                        a1.copy_from_slice(&s1);
+                        sigs1.insert(signer_pk, a1);
+                    }
                     sigs.insert(signer_pk, arr);
                     tracing::info!(
                         "auto_rotation: collected sig from {}... ({}/{})",
@@ -1878,7 +1935,32 @@ impl Node {
 
         let mut signed_tx = rotation_tx;
         signed_tx.input[0].witness = witness;
-        if let Some((stxid, svout, prevout)) = &splice {
+        if splice_vault {
+            // Input 1 at the vault's script: the same tier witness, its own signatures.
+            let mut w1 = Witness::new();
+            for x_only in cur_voter_set.sorted_x_only_pubkeys().iter().rev() {
+                match sigs1
+                    .iter()
+                    .find(|(pk, _)| pk.x_only_public_key().0 == *x_only)
+                {
+                    Some((_, sig)) => w1.push(sig),
+                    None => w1.push([] as [u8; 0]),
+                }
+            }
+            w1.push(leaf_script.as_bytes());
+            w1.push(control_block.serialize());
+            signed_tx.input[1].witness = w1;
+            if let Some((stxid, svout, prevout)) = &splice {
+                self.handler
+                    .pending_rotation_splices
+                    .lock()
+                    .unwrap()
+                    .insert(
+                        ledger_id.to_string(),
+                        (*stxid, *svout, prevout.value.to_sat()),
+                    );
+            }
+        } else if let Some((stxid, svout, prevout)) = &splice {
             use bitcoin::sighash::{EcdsaSighashType, SighashCache};
             let h = SighashCache::new(&signed_tx)
                 .p2wpkh_signature_hash(

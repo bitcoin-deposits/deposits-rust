@@ -6,7 +6,6 @@
 use super::super::*;
 use bitcoin::hashes::{sha256, Hash};
 use deposits_core::messages::{decode_manifest, encode_manifest, LedgerOperation};
-use deposits_core::types::migration_marker;
 use deposits_core::TlvEncode;
 
 type Reply = (bool, Option<String>, Option<String>);
@@ -144,10 +143,15 @@ impl Node {
                     return err("total_msats required");
                 };
                 let hash = sha256::Hash::hash(&bytes).to_byte_array();
-                // Ruling 1: the address type of a DEP-10 offer — our operator key's P2WPKH.
-                let spk = bitcoin::ScriptBuf::new_p2wpkh(
-                    &bitcoin::CompressedPublicKey(self.node_id).wpubkey_hash(),
-                );
+                // DEP-20 §8.3: the migration pays our current vault script.
+                let Some(spk) = state
+                    .reserves_key
+                    .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                    .ok()
+                    .map(|a| a.assume_checked().script_pubkey())
+                else {
+                    return err("no current vault to name");
+                };
                 let offer_event_id: [u8; 32] = p
                     .get("offer_event_id")
                     .and_then(|v| v.as_str())
@@ -280,73 +284,43 @@ impl Node {
                 }
             }
             "dormancy_credit" => {
-                let (_, manifest) = match manifest_param() {
-                    Ok(x) => x,
-                    Err(e) => return err(e),
-                };
+                // Positive evidence: the source's notice carrying our accept and the QuorumBegin
+                // that consumed it (MigrationCredit); the fold credits exactly what migrated.
+                use deposits_core::TlvDecode;
                 let Some(accept) = state.dormancy_accept.clone() else {
-                    return err("no outstanding accept");
+                    return err("no accept to resolve");
                 };
-                // Display txid, as bitcoind prints it; the ledger names the internal order.
-                let Some(txid) = p
-                    .get("txid")
-                    .and_then(|v| v.as_str())
-                    .and_then(|s| s.parse::<bitcoin::Txid>().ok())
-                    .map(|t| t.to_byte_array())
-                else {
-                    return err("txid required");
+                let Some(source) = p.get("source").and_then(|v| v.as_str()) else {
+                    return err("source (the source ledger id) required");
                 };
-                let Some(vout) = p.get("vout").and_then(|v| v.as_u64()) else {
-                    return err("vout required");
+                let hist = self.receiver_history(source).await;
+                let nu = hist.iter().rev().find(|u| {
+                    matches!(LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::DormancyNotice { manifest_hash: Some(h), .. }) if h == accept.manifest_hash)
+                });
+                let Some(nu) = nu.cloned() else {
+                    return err("the source has no notice for this accept");
                 };
-                let marker = migration_marker(&accept.manifest_hash);
-                let mut credits: Vec<(deposits_core::types::DepositId, u64)> =
-                    manifest.iter().map(|e| (e.deposit_id, e.amount)).collect();
-                let premium = p.get("premium_msats").and_then(|v| v.as_u64()).unwrap_or(0);
-                if premium > 0 {
-                    if let Some(d) = accept.premium_deposit {
-                        credits.push((d, premium));
-                    }
+                let id: [u8; 32] = sha256::Hash::hash(&nu.message).to_byte_array();
+                let qu = hist.iter().find(|u| {
+                    matches!(LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::QuorumBegin { consumed_notice: Some(c), .. }) if c == id)
+                });
+                let Some(qu) = qu.cloned() else {
+                    return err("the source has not yet consumed the notice");
+                };
+                let op = LedgerOperation::MigrationCredit {
+                    source_notice_update: nu.tlv_encode(),
+                    source_qb_update: qu.tlv_encode(),
+                };
+                match self.commit_operation(&ledger_id, op).await {
+                    Ok(_) => (
+                        true,
+                        Some(serde_json::json!({"credited": true}).to_string()),
+                        None,
+                    ),
+                    Err(e) => err(format!("dormancy_credit failed: {e}")),
                 }
-                for e in &manifest {
-                    if !state.deposits.contains_key(&e.deposit_id) {
-                        let op = LedgerOperation::DepositOpen {
-                            deposit_id: e.deposit_id,
-                            descriptor: e.descriptor.clone(),
-                            fees: Some(e.fees.clone()),
-                            transfer_fees: None,
-                            payment_hash: None,
-                            invoice: None,
-                            cosigner_guarantee_signature: None,
-                            receive_requires_sig: false,
-                            fee_change_after_blocks: None,
-                            fee_change_notice_blocks: None,
-                            fee_change_limit_bps: None,
-                            commitment: None,
-                        };
-                        if let Err(e) = self.commit_operation(&ledger_id, op).await {
-                            return err(format!("dormancy_credit: DepositOpen failed: {e}"));
-                        }
-                    }
-                }
-                for (deposit_id, amount) in credits {
-                    let op = LedgerOperation::OnchainCredit {
-                        txid,
-                        vout: vout as u32,
-                        deposit_id,
-                        amount,
-                        funding_address: marker.clone(),
-                        commitment: None,
-                    };
-                    if let Err(e) = self.commit_operation(&ledger_id, op).await {
-                        return err(format!("dormancy_credit: OnchainCredit failed: {e}"));
-                    }
-                }
-                (
-                    true,
-                    Some(serde_json::json!({"credited": true}).to_string()),
-                    None,
-                )
             }
             a => err(format!("unknown dormancy action {a}")),
         }

@@ -414,6 +414,7 @@ mod tests {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             reserves_id: "bcrt1pdummy".to_string(),
             amount: 100_000_000,
             collateral_amount: 100_000_000,

@@ -818,11 +818,21 @@ pub fn confiscation_fee_sats(voters: usize, feerate_sat_vb: u64) -> u64 {
 }
 
 /// DEP-03 §"Rotation transaction": the deterministic vsize bound from its outputs,
-/// `46 + 30 × voters + Σ (9 + len(spk)) + 68 × [splice-in]`.
-pub fn rotation_vsize(voters: usize, output_spk_lens: &[usize], splice_in: bool) -> u64 {
+/// `46 + 30 × voters + Σ (9 + len(spk)) + splice_vsize`, the splice term 68 for a key-path or
+/// P2WPKH splice-in and `41 + 30 × voters` for one at the vault's own script (same tier).
+pub fn rotation_vsize(
+    voters: usize,
+    output_spk_lens: &[usize],
+    splice_in: bool,
+    splice_vault: bool,
+) -> u64 {
     46 + 30 * voters as u64
         + output_spk_lens.iter().map(|l| 9 + *l as u64).sum::<u64>()
-        + if splice_in { 68 } else { 0 }
+        + match (splice_in, splice_vault) {
+            (false, _) => 0,
+            (true, true) => 41 + 30 * voters as u64,
+            (true, false) => 68,
+        }
 }
 
 /// The inputs DEP-03 §"Rotation transaction" fixes the rotation from.
@@ -837,6 +847,8 @@ pub struct RotationTxParams {
     pub lock_time: u32,
     pub new_vault_spk: ScriptBuf,
     pub splice_in: Option<(bitcoin::OutPoint, u64)>,
+    /// DEP-20 §8.3: the splice-in sits at the vault's own script (spent through the same tier).
+    pub splice_vault: bool,
     /// Exit outputs in recorded order, then the migration output, as (spk, sats).
     pub extra_outputs: Vec<(ScriptBuf, u64)>,
 }
@@ -865,9 +877,12 @@ pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
     }
     let mut lens = vec![p.new_vault_spk.len()];
     lens.extend(p.extra_outputs.iter().map(|(spk, _)| spk.len()));
-    let fee =
-        p.feerate_sat_vb
-            .saturating_mul(rotation_vsize(p.voters, &lens, p.splice_in.is_some()));
+    let fee = p.feerate_sat_vb.saturating_mul(rotation_vsize(
+        p.voters,
+        &lens,
+        p.splice_in.is_some(),
+        p.splice_vault,
+    ));
     let paid_out: u64 = p.extra_outputs.iter().map(|(_, v)| *v).sum();
     let total = p.vault_sats + p.splice_in.map(|(_, v)| v).unwrap_or(0);
     let new_vault = total.checked_sub(paid_out)?.checked_sub(fee)?;

@@ -2704,10 +2704,11 @@ pub fn governing_service_response_blocks(
         .unwrap_or(DEFAULT_SERVICE_RESPONSE_BLOCKS)
 }
 
-/// Every entry `migrated` has an OnchainCredit (deposit, exact amount, `txid`:`vout`) in
-/// `history` at or before `upto_seq`.
+/// `history` resolves the migration with a `MigrationCredit` (DEP-20 §8.3) naming a source
+/// QuorumBegin of the same rotation (`txid`) and `migration_vout` (`vout`) at or before
+/// `upto_seq`; the fold credits exactly the migrated entries.
 pub fn migration_credited(
-    migrated: &[crate::messages::ManifestEntry],
+    _migrated: &[crate::messages::ManifestEntry],
     history: &[crate::types::SignedLedgerUpdate],
     upto_seq: u64,
     txid: [u8; 32],
@@ -2715,35 +2716,21 @@ pub fn migration_credited(
 ) -> bool {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
-    fn walk(
-        op: &LedgerOperation,
-        txid: [u8; 32],
-        vout: u32,
-        out: &mut std::collections::HashSet<(crate::types::DepositId, u64)>,
-    ) {
-        match op {
-            LedgerOperation::OnchainCredit {
-                txid: t,
-                vout: v,
-                deposit_id,
-                amount,
-                ..
-            } if *t == txid && *v == vout => {
-                out.insert((*deposit_id, *amount));
-            }
-            LedgerOperation::Batch(inner) => inner.iter().for_each(|o| walk(o, txid, vout, out)),
-            _ => {}
-        }
-    }
-    let mut credited = std::collections::HashSet::new();
-    for u in history.iter().filter(|u| u.sequence_number <= upto_seq) {
-        if let Ok(op) = LedgerOperation::tlv_decode(&u.message) {
-            walk(&op, txid, vout, &mut credited);
-        }
-    }
-    migrated
+    history
         .iter()
-        .all(|m| credited.contains(&(m.deposit_id, m.amount)))
+        .filter(|u| u.sequence_number <= upto_seq)
+        .any(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::MigrationCredit {
+                source_qb_update, ..
+            }) => crate::types::SignedLedgerUpdate::tlv_decode(&source_qb_update)
+                .ok()
+                .and_then(|q| LedgerOperation::tlv_decode(&q.message).ok())
+                .is_some_and(|op| {
+                    matches!(op, LedgerOperation::QuorumBegin { new_outpoint_txid, migration_vout, .. }
+                        if new_outpoint_txid == txid && migration_vout == Some(vout))
+                }),
+            _ => false,
+        })
 }
 
 /// DEP-20 §8.3 producer: an `UncreditedOnchainPayment` (migration evidence) against the receiver

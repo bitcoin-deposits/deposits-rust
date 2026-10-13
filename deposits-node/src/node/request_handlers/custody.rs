@@ -1372,6 +1372,9 @@ impl Node {
                         p.value.to_sat(),
                     )
                 }),
+                splice_vault: splice
+                    .as_ref()
+                    .is_some_and(|(_, _, p)| p.script_pubkey == reserves_script),
                 extra_outputs: exit_extras,
             },
         );
@@ -1394,10 +1397,50 @@ impl Node {
             Err(e) => return (false, None, Some(format!("rotation sighash sign: {}", e))),
         };
 
+        // DEP-03: a splice-in at the vault's own script is signed through the same tier.
+        let splice_signature = if splice
+            .as_ref()
+            .is_some_and(|(_, _, p)| p.script_pubkey == reserves_script)
+        {
+            let h1: [u8; 32] = match ReservesSpendBuilder::compute_sighash_with(
+                &proposed_tx,
+                1,
+                reserves_amount,
+                &reserves_script,
+                &leaf_script,
+                &more_prevouts,
+            ) {
+                Ok(s) => *AsRef::<[u8; 32]>::as_ref(&s),
+                Err(e) => return (false, None, Some(format!("splice sighash: {:?}", e))),
+            };
+            let claimed = request
+                .params
+                .get("splice_sighash")
+                .and_then(|v| v.as_str())
+                .and_then(|h| hex::decode(h).ok());
+            if claimed.as_deref() != Some(&h1[..]) {
+                return (
+                    false,
+                    None,
+                    Some("splice_sighash is not the rotation's input-1 sighash".to_string()),
+                );
+            }
+            match self
+                .handler
+                .signer
+                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), &h1)
+            {
+                Ok(s) => Some(hex::encode(s)),
+                Err(e) => return (false, None, Some(format!("splice sighash sign: {}", e))),
+            }
+        } else {
+            None
+        };
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature_bytes),
             "sighash": sighash_hex,
+            "splice_signature": splice_signature,
         });
 
         tracing::info!(

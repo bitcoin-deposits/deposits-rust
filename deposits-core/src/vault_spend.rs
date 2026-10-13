@@ -84,6 +84,18 @@ pub fn vault_spend_signers(
     tx: &Transaction,
     prevouts: &[TxOut],
 ) -> Result<Vec<XOnlyPublicKey>, String> {
+    tier_signers_at(spent_history, governing_quorumbegin_seq, tx, prevouts, None)
+}
+
+/// As [`vault_spend_signers`], for input `idx` (or, with `None`, the input spending the vault
+/// outpoint): DEP-20 §8.3 a migration output at the vault's script is spent through a tier too.
+pub fn tier_signers_at(
+    spent_history: &[SignedLedgerUpdate],
+    governing_quorumbegin_seq: u64,
+    tx: &Transaction,
+    prevouts: &[TxOut],
+    input: Option<usize>,
+) -> Result<Vec<XOnlyPublicKey>, String> {
     if prevouts.len() != tx.input.len() {
         return Err("prevouts do not match the inputs".into());
     }
@@ -127,14 +139,18 @@ pub fn vault_spend_signers(
     let output = builder.build().map_err(|e| e.to_string())?;
 
     // The input spending the vault, and its witness [sig_{n-1}..sig_0, leaf, control].
-    let idx = tx
-        .input
-        .iter()
-        .position(|i| {
-            i.previous_output.txid.to_byte_array() == new_outpoint_txid
-                && i.previous_output.vout == new_outpoint_vout
-        })
-        .ok_or("the spend does not spend the vault outpoint")?;
+    let idx = match input {
+        Some(i) if i < tx.input.len() => i,
+        Some(_) => return Err("no such input".into()),
+        None => tx
+            .input
+            .iter()
+            .position(|i| {
+                i.previous_output.txid.to_byte_array() == new_outpoint_txid
+                    && i.previous_output.vout == new_outpoint_vout
+            })
+            .ok_or("the spend does not spend the vault outpoint")?,
+    };
     let stack: Vec<&[u8]> = tx.input[idx].witness.iter().collect();
     let n = stack.len();
     if n < 3 {

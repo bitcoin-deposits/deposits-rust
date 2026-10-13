@@ -129,10 +129,19 @@ pub fn verify_rotation_tx(
             Some((OutPoint::new(Txid::from_byte_array(*stxid), *svout), sp))
         }
     };
+    let vault_script = prevout.script_pubkey.clone();
+    let splice_vault = splice
+        .as_ref()
+        .is_some_and(|(_, sp)| sp.script_pubkey == vault_script);
     let mut prevouts = vec![prevout];
     if let Some((_, sp)) = &splice {
         prevouts.push(sp.clone());
-        verify_simple_input(tx, 1, &prevouts)?;
+        if splice_vault {
+            // DEP-20 §8.3: a migration output at the vault's script, spent through a tier.
+            crate::vault_spend::tier_signers_at(history, gov, tx, &prevouts, Some(1))?;
+        } else {
+            verify_simple_input(tx, 1, &prevouts)?;
+        }
     }
     vault_spend_signers(history, gov, tx, &prevouts)?;
     let new_vault_spk: ScriptBuf = reserves_id
@@ -149,6 +158,7 @@ pub fn verify_rotation_tx(
         lock_time: tx.lock_time.to_consensus_u32(),
         new_vault_spk,
         splice_in: splice.as_ref().map(|(o, sp)| (*o, sp.value.to_sat())),
+        splice_vault,
         extra_outputs: settlement_outputs(state, height, *exit_cutoff_height).0,
     })
     .ok_or("the DEP-03 rotation leaves the vault below dust")?;
@@ -176,7 +186,7 @@ pub fn verify_rotation_tx(
     let c = exit_cutoff_height
         .unwrap_or(height.saturating_sub(crate::types::EXIT_CUTOFF_MARGIN_BLOCKS));
     let c0 = rotation_collateral(state, vault_sats, fee)
-        .saturating_sub((dorm_cost + migration_premium_sats(state, c)) * 1000);
+        .saturating_sub((dorm_cost + migration_premium_sats(state, c, height)) * 1000);
     if *collateral_amount < c0 || *collateral_amount > c0 + added * 1000 {
         return Err("QuorumBegin collateral is not the DEP-20 §3-4 share".into());
     }
@@ -383,7 +393,7 @@ pub fn settlement_outputs(
     let mut dorm_cost = spins.len() as u64 * state.dormancy_cost();
     extras.extend(spins.into_iter().map(|(_, bal, spk)| (spk, bal / 1000)));
     // DEP-20 §8.3: the migration output, after the spin-outs; its own cost is a fee like theirs.
-    if let Some((_, spk, sats)) = state.dormancy_migration(c) {
+    if let Some((_, spk, sats)) = state.dormancy_migration(c, height) {
         dorm_cost += state.exit_cost(&spk);
         extras.push((ScriptBuf::from_bytes(spk), sats));
     }
@@ -391,8 +401,8 @@ pub fn settlement_outputs(
 }
 
 /// DEP-20 §8.3: the premium (sats) the migration output carries; collateral pays it (not a fee).
-pub fn migration_premium_sats(state: &crate::types::LedgerState, cutoff: u32) -> u64 {
-    match (state.dormancy_migration(cutoff), &state.migration) {
+pub fn migration_premium_sats(state: &crate::types::LedgerState, cutoff: u32, height: u32) -> u64 {
+    match (state.dormancy_migration(cutoff, height), &state.migration) {
         (Some(_), Some(m)) => m.premium / 1000,
         _ => 0,
     }
@@ -403,6 +413,7 @@ pub fn migration_premium_sats(state: &crate::types::LedgerState, cutoff: u32) ->
 pub fn migration_entries(
     state: &crate::types::LedgerState,
     cutoff: u32,
+    height: u32,
     nexits: usize,
     nspins: usize,
 ) -> (
@@ -410,7 +421,7 @@ pub fn migration_entries(
     Option<bitcoin::secp256k1::PublicKey>,
     Option<u32>,
 ) {
-    match state.dormancy_migration(cutoff) {
+    match state.dormancy_migration(cutoff, height) {
         Some((entries, _, _)) => (
             entries,
             state.migration.as_ref().map(|m| m.receiver),

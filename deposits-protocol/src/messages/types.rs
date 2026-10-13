@@ -368,6 +368,8 @@ pub enum LedgerOperation {
         migration_receiver: Option<PublicKey>,
         /// DEP-20 §8.3 (TLV 290): the migration output's vout.
         migration_vout: Option<u32>,
+        /// DEP-20 §8.3 (TLV 344): SHA256 of the consumed DormancyNotice's operation encoding.
+        consumed_notice: Option<[u8; 32]>,
     },
 
     // ========== Settlement (DEP-20) ==========
@@ -396,6 +398,12 @@ pub enum LedgerOperation {
         premium: Option<u64>,
         /// DEP-20 §8.3 (TLV 342, L4): the receiver's signed QuorumBegin governing the accept.
         receiver_quorum_begin: Option<Vec<u8>>,
+    },
+    /// DEP-20 §8.3: the receiver resolves its accept with positive evidence — the source's
+    /// signed notice and the QuorumBegin that consumed it; the fold credits exactly what migrated.
+    MigrationCredit {
+        source_notice_update: Vec<u8>,
+        source_qb_update: Vec<u8>,
     },
     /// DEP-20 §8.3: the receiver accepts a dormancy migration (appended to its own ledger).
     DormancyAccept {
@@ -948,6 +956,7 @@ impl LedgerOperation {
             Self::ExitCancel { .. } => 101,
             Self::DormancyNotice { .. } => 102,
             Self::DormancyAccept { .. } => 103,
+            Self::MigrationCredit { .. } => 105,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -1009,7 +1018,8 @@ impl LedgerOperation {
             Self::ExitRequest { .. }
             | Self::ExitCancel { .. }
             | Self::DormancyNotice { .. }
-            | Self::DormancyAccept { .. } => consts::LEDGER_UPDATE,
+            | Self::DormancyAccept { .. }
+            | Self::MigrationCredit { .. } => consts::LEDGER_UPDATE,
             Self::LedgerClose => consts::LEDGER_CLOSE,
             Self::Batch(_) => consts::BATCH,
         }
@@ -1050,7 +1060,7 @@ impl LedgerOperation {
             46 => consts::QUORUM_JOIN,
             45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
-            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 | 103 => consts::LEDGER_UPDATE,
+            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 | 103 | 105 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
             70 => consts::TRANSFER_LOCK,
             71 => consts::TRANSFER_COMPLETE,
@@ -1362,6 +1372,7 @@ impl BinaryCodec for LedgerOperation {
                 migration_manifest: _,
                 migration_receiver: _,
                 migration_vout: _,
+                consumed_notice: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1778,7 +1789,8 @@ impl BinaryCodec for LedgerOperation {
             Self::ExitRequest { .. }
             | Self::ExitCancel { .. }
             | Self::DormancyNotice { .. }
-            | Self::DormancyAccept { .. } => {
+            | Self::DormancyAccept { .. }
+            | Self::MigrationCredit { .. } => {
                 return Err(CodecError::InvalidData(
                     "DEP-20 exits have no legacy encoding; use TLV".into(),
                 ));
@@ -1865,6 +1877,7 @@ impl BinaryCodec for LedgerOperation {
                     migration_manifest: Vec::new(),
                     migration_receiver: None,
                     migration_vout: None,
+                    consumed_notice: None,
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,

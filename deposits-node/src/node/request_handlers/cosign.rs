@@ -742,7 +742,31 @@ impl Node {
                     }
                     // DEP-20 §8.3: a receiver's DormancyAccept carries the manifest; it must hash
                     // to the accept's, and every deposit's fees must meet each member's floor.
-                    if let LedgerOperation::DormancyAccept { manifest_hash, .. } = &operation {
+                    if let LedgerOperation::DormancyAccept {
+                        manifest_hash,
+                        exit_address,
+                        ..
+                    } = &operation
+                    {
+                        // DEP-20 §8.3: the accept names our current vault script.
+                        let vault_spk = {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            ledgers.get(&request.ledger_id).and_then(|arc| {
+                                arc.read()
+                                    .unwrap()
+                                    .state
+                                    .reserves_key
+                                    .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                                    .ok()
+                                    .map(|a| a.assume_checked().script_pubkey().to_bytes())
+                            })
+                        };
+                        if vault_spk.as_ref() != Some(exit_address) {
+                            let msg =
+                                "the accept does not name our current vault script".to_string();
+                            tracing::warn!("Refusing cosign: {}", msg);
+                            return (false, None, Some(msg));
+                        }
                         let manifest = request
                             .params
                             .get("migration_manifest")

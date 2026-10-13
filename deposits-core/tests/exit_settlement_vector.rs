@@ -261,6 +261,7 @@ fn exit_fold_semantics() {
         migration_manifest: Vec::new(),
         migration_receiver: None,
         migration_vout: None,
+        consumed_notice: None,
     };
     let wrong = apply(&mut st.clone(), ctx(103, 7, 7), qb(103, Vec::new()));
     assert!(

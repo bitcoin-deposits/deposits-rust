@@ -2334,6 +2334,7 @@ mod quorum_expired_verifier {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             reserves_id: "rid".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0x11; 32],

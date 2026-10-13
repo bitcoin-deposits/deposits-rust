@@ -421,6 +421,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::ExitCancel { .. } => "ExitCancel",
         LedgerOperation::DormancyNotice { .. } => "DormancyNotice",
         LedgerOperation::DormancyAccept { .. } => "DormancyAccept",
+        LedgerOperation::MigrationCredit { .. } => "MigrationCredit",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFail { .. } => "InvoiceFail",

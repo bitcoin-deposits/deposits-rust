@@ -1835,6 +1835,11 @@ fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> 
             None,
             format!("dormancy bucket settles at block {}", rotation_height),
         ),
+        L::MigrationCredit { .. } => row(
+            "MigrationCredit",
+            None,
+            "dormancy migration credited".to_string(),
+        ),
         L::DormancyAccept { accepted_total, .. } => row(
             "DormancyAccept",
             None,

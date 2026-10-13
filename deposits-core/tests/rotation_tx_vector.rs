@@ -30,6 +30,7 @@ fn cases() -> Vec<(&'static str, RotationTxParams)> {
         lock_time: 0,
         new_vault_spk: p2tr(0xb2),
         splice_in: None,
+        splice_vault: false,
         extra_outputs: vec![],
     };
     vec![
@@ -45,7 +46,17 @@ fn cases() -> Vec<(&'static str, RotationTxParams)> {
             "splice_in",
             RotationTxParams {
                 splice_in: Some((outpoint(0xd5, 3), 7_500_000)),
+                splice_vault: false,
                 feerate_sat_vb: 5,
+                ..base.clone()
+            },
+        ),
+        (
+            "splice_in_vault",
+            RotationTxParams {
+                splice_in: Some((outpoint(0xd6, 2), 400_000)),
+                splice_vault: true,
+                feerate_sat_vb: 3,
                 ..base.clone()
             },
         ),
@@ -74,6 +85,9 @@ fn render() -> String {
         out += &format!("new_vault_spk {}\n", p.new_vault_spk.to_hex_string());
         if let Some((op, sats)) = p.splice_in {
             out += &format!("splice {}:{} {}\n", op.txid, op.vout, sats);
+        }
+        if p.splice_vault {
+            out += "splice_vault 1\n";
         }
         for (spk, sats) in &p.extra_outputs {
             out += &format!("out {} {}\n", spk.to_hex_string(), sats);

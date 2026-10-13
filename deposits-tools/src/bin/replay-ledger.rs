@@ -212,6 +212,7 @@ fn format_op(op: &LedgerOperation) -> String {
         LedgerOperation::DormancyNotice {
             rotation_height, ..
         } => format!("DormancyNotice  at={}", rotation_height),
+        LedgerOperation::MigrationCredit { .. } => "MigrationCredit".to_string(),
         LedgerOperation::DormancyAccept { accepted_total, .. } => {
             format!("DormancyAccept  total={}", accepted_total)
         }
@@ -1504,6 +1505,7 @@ fn discriminant_name(disc: u8) -> &'static str {
         101 => "ExitCancel",
         102 => "DormancyNotice",
         103 => "DormancyAccept",
+        105 => "MigrationCredit",
         30 => "InvoiceCredit",
         31 => "InvoiceLock",
         32 => "InvoiceFail",

@@ -130,6 +130,7 @@ fn prefix() -> Vec<SignedLedgerUpdate> {
             migration_manifest: Vec::new(),
             migration_receiver: None,
             migration_vout: None,
+            consumed_notice: None,
             reserves_id: "bcrt1qreserves".to_string(),
             spending_txid: [0; 32],
             new_outpoint_txid: [1; 32],

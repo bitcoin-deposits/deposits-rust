@@ -326,6 +326,10 @@ pub struct LedgerState {
     /// DEP-20 §8.3 receiver: our outstanding DormancyAccept.
     #[serde(default)]
     pub dormancy_accept: Option<AcceptState>,
+    /// DEP-20 §8.3: SHA256 of the outstanding notice's operation encoding (what the consuming
+    /// QuorumBegin records as consumed_notice).
+    #[serde(default)]
+    pub notice_id: Option<[u8; 32]>,
 }
 
 /// DEP-20 §8.3: what a source's DormancyNotice commits to migrate.
@@ -337,6 +341,9 @@ pub struct MigrationNotice {
     pub spk: Vec<u8>,
     pub total: u64,
     pub premium: u64,
+    /// The accept's expires_at_height: nothing migrates at or past it.
+    #[serde(default)]
+    pub expires: u32,
 }
 
 /// DEP-20 §8.3: a receiver's accept, its reservation and (after the first credit) the outpoint.
@@ -347,27 +354,21 @@ pub struct AcceptState {
     pub total: u64,
     pub expires: u32,
     pub premium_deposit: Option<DepositId>,
-    pub credited: u64,
+    /// Resolved by a MigrationCredit (positive evidence from the source).
+    #[serde(default)]
+    pub resolved: bool,
     pub outpoint: Option<([u8; 32], u32)>,
 }
 
-impl AcceptState {
-    /// Still reserving capacity at `height`: credited (awaiting its splice) or unexpired.
-    pub fn live(&self, height: u32) -> bool {
-        self.outpoint.is_some() || self.expires > height
-    }
-}
+/// DEP-20 §8.3: an accept stays outstanding to `expires_at_height + 6`.
+pub const ACCEPT_GRACE_BLOCKS: u32 = 6;
 
-/// DEP-20 §8.3: the receiver operator's own offer-type addresses for a manifest: the P2WPKH of
-/// its key, and the P2TR with its x-only key internal and merkle root SHA256(manifest_hash).
-pub fn migration_exit_spks(receiver: &PublicKey, manifest_hash: &[u8; 32]) -> [Vec<u8>; 2] {
-    let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-    let wpkh =
-        bitcoin::ScriptBuf::new_p2wpkh(&bitcoin::CompressedPublicKey(*receiver).wpubkey_hash());
-    let root =
-        bitcoin::TapNodeHash::from_byte_array(sha256::Hash::hash(manifest_hash).to_byte_array());
-    let tr = bitcoin::ScriptBuf::new_p2tr(&secp, receiver.x_only_public_key().0, Some(root));
-    [wpkh.to_bytes(), tr.to_bytes()]
+impl AcceptState {
+    /// Outstanding at `height`: unresolved and below `expires + 6` — it reserves capacity and
+    /// freezes the receiver's rotation.
+    pub fn outstanding(&self, height: u32) -> bool {
+        !self.resolved && height < self.expires.saturating_add(ACCEPT_GRACE_BLOCKS)
+    }
 }
 
 /// DEP-20 §8.3 (L4): `qb` is a QuorumBegin signed by `receiver` on the accept's ledger at a lower
@@ -424,11 +425,6 @@ pub fn quorum_backed_accept(
         return Err("the accept lacks a majority of the receiver's quorum".into());
     }
     Ok(())
-}
-
-/// DEP-20 §8.3: the funding_address marker of a migration credit.
-pub fn migration_marker(manifest_hash: &[u8; 32]) -> String {
-    format!("migration:{}", hex::encode(manifest_hash))
 }
 
 pub const DORMANCY_BLOCKS_DEFAULT: u32 = 26280;
@@ -514,6 +510,7 @@ impl LedgerState {
             dormancy_notice: None,
             migration: None,
             dormancy_accept: None,
+            notice_id: None,
         }
     }
 
@@ -568,10 +565,12 @@ impl LedgerState {
     pub fn dormancy_migration(
         &self,
         cutoff: u32,
+        height: u32,
     ) -> Option<(Vec<crate::messages::ManifestEntry>, Vec<u8>, u64)> {
         let (notice_height, rotation_height) = self.dormancy_notice?;
         let m = self.migration.as_ref()?;
-        if !self.vault_current || cutoff < rotation_height {
+        // Nothing migrates at or past the accept's expiry.
+        if !self.vault_current || cutoff < rotation_height || height >= m.expires {
             return None;
         }
         let bound = notice_height.saturating_sub(self.dormancy_blocks);
@@ -900,6 +899,7 @@ impl LedgerState {
                 migration_receiver,
                 migration_vout,
                 splice_in_outpoint,
+                consumed_notice,
                 ..
             } => {
                 // DEP-20 §8.2: dormancy_outputs must be exactly the spin-outs (pre-state), a
@@ -927,7 +927,7 @@ impl LedgerState {
                     });
                 }
                 // DEP-20 §8.3 source: the migration must be exactly the rule's (pre-state).
-                let mig = next.dormancy_migration(qb_cutoff);
+                let mig = next.dormancy_migration(qb_cutoff, apply_ctx().height);
                 let mig_ok = match &mig {
                     None => migration_manifest.is_empty(),
                     Some((entries, _, _)) => {
@@ -948,6 +948,35 @@ impl LedgerState {
                             mig.as_ref().map_or(0, |(e, _, _)| e.len()),
                             migration_manifest.len()
                         ),
+                    });
+                }
+                // DEP-20 §8.3 source: a QuorumBegin consuming a notice names it.
+                let consumes =
+                    next.vault_current && next.dormancy_notice.is_some_and(|(_, r)| qb_cutoff >= r);
+                let expected_notice = if consumes { next.notice_id } else { None };
+                if *consumed_notice != expected_notice {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "consumed_notice".to_string(),
+                        details: if expected_notice.is_some() {
+                            "a QuorumBegin consuming a notice must record consumed_notice"
+                                .to_string()
+                        } else {
+                            "consumed_notice names no notice this QuorumBegin consumes".to_string()
+                        },
+                    });
+                }
+                // DEP-20 §8.3 receiver: no rotation while an accept is outstanding.
+                if next.vault_current
+                    && next
+                        .dormancy_accept
+                        .as_ref()
+                        .is_some_and(|a| a.outstanding(apply_ctx().height))
+                {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "migration_freeze".to_string(),
+                        details:
+                            "a receiver may not rotate while its DormancyAccept is outstanding"
+                                .to_string(),
                     });
                 }
                 // DEP-20 §8.3 receiver: a credited migration must be spliced in at this rotation.
@@ -1106,6 +1135,8 @@ impl LedgerState {
                 if consumes_notice {
                     next.dormancy_notice = None;
                     next.migration = None;
+                    next.notice_id = None;
+                    next.notice_id = None;
                 }
                 // DEP-20 §3 Expiry: a rotating QuorumBegin releases expired requests after it
                 // settles (the caller skipped the pre-op release).
@@ -1209,9 +1240,18 @@ impl LedgerState {
                             <crate::types::SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(rqb)
                                 .map_err(|_| bad("receiver_quorum_begin does not decode"))?;
                         quorum_backed_accept(&u, &rqb, receiver).map_err(|e| bad(&e))?;
-                        if !migration_exit_spks(receiver, &digest).contains(&exit_address) {
+                        // The migration pays the receiver's current vault script.
+                        let vault_spk =
+                            match <LedgerOperation as crate::TlvDecode>::tlv_decode(&rqb.message) {
+                                Ok(LedgerOperation::QuorumBegin { reserves_id, .. }) => reserves_id
+                                    .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                                    .ok()
+                                    .map(|a| a.assume_checked().script_pubkey().to_bytes()),
+                                _ => None,
+                            };
+                        if vault_spk.as_ref() != Some(&exit_address) {
                             return Err(bad(
-                                "exit_address is not the receiver operator's own address for this manifest",
+                                "exit_address is not the receiver's current vault script",
                             ));
                         }
                         Some(MigrationNotice {
@@ -1220,10 +1260,14 @@ impl LedgerState {
                             spk: exit_address,
                             total: accepted_total,
                             premium: premium.unwrap_or(0),
+                            expires: expires_at_height,
                         })
                     }
                 };
                 next.dormancy_notice = Some((h, *rotation_height));
+                next.notice_id = Some(
+                    sha256::Hash::hash(&crate::TlvEncode::tlv_encode(operation)).to_byte_array(),
+                );
             }
             LedgerOperation::DormancyAccept {
                 premium_deposit,
@@ -1240,7 +1284,11 @@ impl LedgerState {
                     });
                 }
                 let h = apply_ctx().height;
-                if next.dormancy_accept.as_ref().is_some_and(|a| a.live(h)) {
+                if next
+                    .dormancy_accept
+                    .as_ref()
+                    .is_some_and(|a| a.outpoint.is_some() || a.outstanding(h))
+                {
                     return Err(crate::DepositsError::ProtocolViolation {
                         violation_type: "dormancy_accept".to_string(),
                         details: "another migration is outstanding".to_string(),
@@ -1262,9 +1310,114 @@ impl LedgerState {
                     total: *accepted_total,
                     expires: *expires_at_height,
                     premium_deposit: *premium_deposit,
-                    credited: 0,
+                    resolved: false,
                     outpoint: None,
                 });
+            }
+            LedgerOperation::MigrationCredit {
+                source_notice_update,
+                source_qb_update,
+            } => {
+                use crate::types::SignedLedgerUpdate;
+                let bad = |d: &str| crate::DepositsError::ProtocolViolation {
+                    violation_type: "migration_credit".to_string(),
+                    details: d.to_string(),
+                };
+                let a = next
+                    .dormancy_accept
+                    .clone()
+                    .ok_or_else(|| bad("no DormancyAccept to resolve"))?;
+                if a.resolved {
+                    return Err(bad("the accept is already resolved"));
+                }
+                let (Ok(nu), Ok(qu)) = (
+                    <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(source_notice_update),
+                    <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(source_qb_update),
+                ) else {
+                    return Err(bad("the source updates do not decode"));
+                };
+                let (Ok(notice), Ok(qb)) = (
+                    <LedgerOperation as crate::TlvDecode>::tlv_decode(&nu.message),
+                    <LedgerOperation as crate::TlvDecode>::tlv_decode(&qu.message),
+                ) else {
+                    return Err(bad("the source updates do not decode"));
+                };
+                let LedgerOperation::DormancyNotice {
+                    dormancy_accept: Some(acc_bytes),
+                    manifest_hash: Some(nhash),
+                    premium,
+                    ..
+                } = notice
+                else {
+                    return Err(bad("the notice does not carry this ledger's accept"));
+                };
+                let acc = <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(&acc_bytes).ok();
+                if nu.verify_operator_signature().is_err()
+                    || acc.map(|x| x.ledger_id) != Some(next.ledger_id)
+                    || nhash != a.manifest_hash
+                {
+                    return Err(bad("the notice does not carry this ledger's accept"));
+                }
+                let notice_id: [u8; 32] = sha256::Hash::hash(&nu.message).to_byte_array();
+                let LedgerOperation::QuorumBegin {
+                    consumed_notice,
+                    migration_manifest,
+                    migration_receiver,
+                    migration_vout,
+                    new_outpoint_txid,
+                    ..
+                } = qb
+                else {
+                    return Err(bad("the QuorumBegin did not consume that notice"));
+                };
+                if qu.verify_operator_signature().is_err()
+                    || qu.operator_id != nu.operator_id
+                    || qu.ledger_id != nu.ledger_id
+                    || qu.sequence_number <= nu.sequence_number
+                    || consumed_notice != Some(notice_id)
+                {
+                    return Err(bad("the QuorumBegin did not consume that notice"));
+                }
+                if !migration_manifest.is_empty()
+                    && migration_receiver == Some(next.operator_key)
+                    && qu.block_height < a.expires
+                {
+                    let sum: u64 = migration_manifest.iter().map(|e| e.amount).sum();
+                    let premium = premium.unwrap_or(0);
+                    if sum + premium > a.total {
+                        return Err(bad("the migration exceeds the accepted total"));
+                    }
+                    let h = apply_ctx().height;
+                    for e in &migration_manifest {
+                        if !next.deposits.contains_key(&e.deposit_id) {
+                            let mut d = Deposit::new(e.descriptor.clone(), None);
+                            d.deposit_id = e.deposit_id;
+                            d.fees = e.fees.clone();
+                            d.last_signed_activity = h;
+                            next.deposits.insert(e.deposit_id, d);
+                        }
+                        let d = next.deposits.get_mut(&e.deposit_id).unwrap();
+                        let before = d.balance;
+                        d.credit(e.amount);
+                        let after = d.balance;
+                        next.add_balance_delta(before, after);
+                    }
+                    if premium > 0 {
+                        if let Some(d) = a.premium_deposit.and_then(|id| next.deposits.get_mut(&id))
+                        {
+                            let before = d.balance;
+                            d.credit(premium);
+                            let after = d.balance;
+                            next.add_balance_delta(before, after);
+                        }
+                    }
+                    let st = next.dormancy_accept.as_mut().unwrap();
+                    st.resolved = true;
+                    st.outpoint = Some((new_outpoint_txid, migration_vout.unwrap_or(0)));
+                } else {
+                    // Consumed without migrating to us: resolved, nothing credited.
+                    next.dormancy_accept = None;
+                }
             }
             LedgerOperation::ExitRequest {
                 deposit_id,
@@ -1548,45 +1701,20 @@ impl LedgerState {
                 next.add_balance_delta(before, after);
             }
             LedgerOperation::OnchainCredit {
-                deposit_id,
-                amount,
-                txid,
-                vout,
-                funding_address,
-                ..
+                deposit_id, amount, ..
             } => {
+                // An outstanding DormancyAccept reserves its total (DEP-20 §8.3).
                 let h = apply_ctx().height;
                 let room = next
                     .reserves_amount
                     .saturating_sub(next.total_deposit_balance());
-                match next.dormancy_accept.as_mut() {
-                    // DEP-20 §8.3: a migration credit draws on the accept's reservation, one outpoint.
-                    Some(a) if *funding_address == migration_marker(&a.manifest_hash) => {
-                        if a.credited + amount > a.total {
-                            return Err(crate::DepositsError::ProtocolViolation {
-                                violation_type: "over_obligation".to_string(),
-                                details: "migration credits exceed the accepted total".to_string(),
-                            });
-                        }
-                        if a.outpoint.is_some_and(|o| o != (*txid, *vout)) {
-                            return Err(crate::DepositsError::ProtocolViolation {
-                                violation_type: "over_obligation".to_string(),
-                                details: "migration credits name another outpoint".to_string(),
-                            });
-                        }
-                        a.credited += amount;
-                        a.outpoint = Some((*txid, *vout));
+                if let Some(a) = next.dormancy_accept.as_ref().filter(|a| a.outstanding(h)) {
+                    if amount.saturating_add(a.total) > room {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "over_obligation".to_string(),
+                            details: "the credit would eat a migration's reservation".to_string(),
+                        });
                     }
-                    Some(a) if a.live(h) => {
-                        if amount.saturating_add(a.total - a.credited) > room {
-                            return Err(crate::DepositsError::ProtocolViolation {
-                                violation_type: "over_obligation".to_string(),
-                                details: "the credit would eat a migration's reservation"
-                                    .to_string(),
-                            });
-                        }
-                    }
-                    _ => {}
                 }
                 let deposit = next
                     .deposits
@@ -1833,6 +1961,7 @@ impl LedgerState {
                 next.vault_current = false;
                 next.dormancy_notice = None;
                 next.migration = None;
+                next.notice_id = None;
                 next.operator_key = *new_custodian;
                 next.parent_pubkey = *new_custodian;
                 next.dispute_state = DisputeState::Normal;

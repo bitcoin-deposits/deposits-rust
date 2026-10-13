@@ -54,6 +54,7 @@ fn qb(members: &[u8]) -> LedgerOperation {
         migration_manifest: Vec::new(),
         migration_receiver: None,
         migration_vout: None,
+        consumed_notice: None,
     }
 }
 

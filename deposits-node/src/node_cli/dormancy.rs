@@ -3,7 +3,7 @@
 //!   offer                                   the manifest a notice now would migrate
 //!   accept  --manifest HEX --total-msats N [--offer-event-id HEX] [--expiry-blocks N] [--premium-deposit HEX]
 //!   notice  --rotation-height N [--receiver PUBKEY --manifest HEX --accept HEX [--premium-msats N]]
-//!   credit  --manifest HEX --txid TXID --vout N [--premium-msats N]
+//!   credit  --source SOURCE_LEDGER_ID   (MigrationCredit from the source's notice and QuorumBegin)
 
 use super::{parse_config, send_daemon_request};
 use crate::Node;
@@ -20,6 +20,7 @@ const PARAMS: &[(&str, &str, bool)] = &[
     ("--premium-msats", "premium_msats", true),
     ("--txid", "txid", false),
     ("--vout", "vout", true),
+    ("--source", "source", false),
 ];
 
 pub async fn dormancy_command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
