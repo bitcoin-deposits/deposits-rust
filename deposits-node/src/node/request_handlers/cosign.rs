@@ -1200,9 +1200,23 @@ impl Node {
 
         // Canonical signing message lives in
         // `deposits_protocol::offer_cosign_signing_message`.
+        let Some(deposit_id) = request
+            .params
+            .get("deposit_id")
+            .and_then(|v| v.as_str())
+            .and_then(|h| hex::decode(h).ok())
+            .and_then(|b| <[u8; 16]>::try_from(b).ok())
+        else {
+            return (
+                false,
+                None,
+                Some("an offer names its deposit_id (DEP-10)".to_string()),
+            );
+        };
         let msg_hash = deposits_core::signature_utils::offer_cosign_signing_message(
             &request.ledger_id,
             &offer_id,
+            &deposit_id,
             &operator_id,
             &funding_address,
             deadline_block,

@@ -750,6 +750,8 @@ impl Node {
         // Create request parameters
         let params = serde_json::json!({
             "offer_id": hex::encode(offer.offer_id),
+            // DEP-10: the cosignature binds the deposit the offer funds.
+            "deposit_id": hex::encode(offer.deposit_id),
             "operator_id": offer.operator_id.to_string(),
             "funding_address": offer.funding_address,
             "deadline_block": offer.deadline_block,

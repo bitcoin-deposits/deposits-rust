@@ -160,6 +160,7 @@ fn confiscation_obligations_match_cl() {
 
 #[test]
 fn unhonoured_obligation_matches_cl() {
+    use deposits_core::fraud::verify_uncredited_onchain;
     let mut kv: HashMap<String, String> = HashMap::new();
     let mut history: Vec<SignedLedgerUpdate> = Vec::new();
     let mut n = 0;
@@ -184,56 +185,120 @@ fn unhonoured_obligation_matches_cl() {
         let conf = || -> bitcoin::Transaction {
             bitcoin::consensus::deserialize(&hex::decode(&kv["confiscation"]).unwrap()).unwrap()
         };
+        let oracle = |h: &[SignedLedgerUpdate], b: &[u8; 32]| {
+            h.iter()
+                .find(|u| &u.block_hash == b)
+                .map(|u| u.block_height)
+        };
         match w[0] {
             "update" => history.push(dec(w[1])),
+            "payment" => {
+                kv.insert("payment".into(), line[8..].to_string());
+            }
+            "offer" => {
+                let json = &line[line.find(" json ").unwrap() + 6..];
+                let p: FraudProof = serde_json::from_str(json).unwrap();
+                assert_eq!(hex::encode(p.proof_hash()), w[5], "offer {} hash", w[1]);
+                let pre: Vec<SignedLedgerUpdate> = history
+                    .iter()
+                    .filter(|u| u.sequence_number <= 5)
+                    .cloned()
+                    .collect();
+                let o = |b: &[u8; 32]| oracle(&history, b);
+                let v = verify_uncredited_onchain(&p, &pre, &o);
+                assert_eq!(v.is_ok(), w[3] == "1", "offer {}: {v:?}", w[1]);
+                n += 1;
+            }
+            "record" => {
+                let pre: Vec<&SignedLedgerUpdate> =
+                    history.iter().filter(|u| u.sequence_number <= 6).collect();
+                let open = LedgerOperation::tlv_decode(&pre[0].message).unwrap();
+                let LedgerOperation::LedgerOpen {
+                    operator_id,
+                    reserves_id,
+                    genesis_block,
+                    ..
+                } = open
+                else {
+                    panic!("seq 0")
+                };
+                let mut st = LedgerState::new(operator_id, reserves_id, genesis_block);
+                for u in &pre {
+                    st.apply_update_in_place(u).unwrap();
+                }
+                let op = LedgerOperation::tlv_decode(&hex::decode(w[3]).unwrap()).unwrap();
+                let got = if with_apply_ctx(at(172), || st.apply(&op)).is_ok() {
+                    "ok"
+                } else {
+                    "refuse"
+                };
+                assert_eq!(got, w[2], "payment ObligationRecord {}", w[1]);
+                n += 1;
+            }
             "produce" => {
-                let upto: u64 = w[1].parse().unwrap();
+                let upto: u64 = w[2].parse().unwrap();
                 let h: Vec<SignedLedgerUpdate> = history
                     .iter()
                     .filter(|u| u.sequence_number <= upto)
                     .cloned()
                     .collect();
-                let p = unhonoured_obligation_proof(
-                    &h,
-                    &acquire(),
-                    &conf(),
-                    &dec(&kv["notice"]),
-                    &dec(&kv["qb"]),
-                );
+                let (nu, qu) = (dec(&kv["notice"]), dec(&kv["qb"]));
+                let p = if w[1] == "migration" {
+                    unhonoured_obligation_proof(&h, &acquire(), &conf(), Some(&nu), Some(&qu), None)
+                } else {
+                    unhonoured_obligation_proof(
+                        &h,
+                        &acquire(),
+                        &conf(),
+                        None,
+                        None,
+                        Some(&kv["payment"]),
+                    )
+                };
                 let got = p.map_or("none".to_string(), |p| match p.evidence {
                     FraudEvidence::UnhonouredObligation { proof_update, .. } => {
                         dec(&proof_update).sequence_number.to_string()
                     }
                     _ => "other".into(),
                 });
-                assert_eq!(got, w[2], "{line}");
+                assert_eq!(got, w[3], "{line}");
                 n += 1;
             }
             "proof" => {
-                let seq: u64 = w[1].parse().unwrap();
+                let mig = w[1] == "migration";
+                let seq: u64 = w[2].parse().unwrap();
                 let pu = history.iter().find(|u| u.sequence_number == seq).unwrap();
                 let proof = FraudProof {
                     proof_type: FraudProofType::UnhonouredObligation,
                     accused: kv["accused"].clone(),
                     ledger_id: kv["ledger"].clone(),
                     evidence: FraudEvidence::UnhonouredObligation {
-                        source_notice_update: kv["notice"].clone(),
-                        source_qb_update: kv["qb"].clone(),
+                        source_notice_update: if mig {
+                            kv["notice"].clone()
+                        } else {
+                            String::new()
+                        },
+                        source_qb_update: if mig { kv["qb"].clone() } else { String::new() },
+                        uncredited_proof: if mig {
+                            String::new()
+                        } else {
+                            kv["payment"].clone()
+                        },
                         acquire_update: hex::encode(acquire().tlv_encode()),
                         confiscation_tx: kv["confiscation"].clone(),
                         proof_update: hex::encode(pu.tlv_encode()),
                     },
                 };
-                assert_eq!(hex::encode(proof.proof_hash()), w[5], "hash at {seq}");
+                assert_eq!(
+                    hex::encode(proof.proof_hash()),
+                    w[6],
+                    "{} hash at {seq}",
+                    w[1]
+                );
                 assert!(!proof.requires_embedding());
-                let oracle = |b: &[u8; 32]| {
-                    history
-                        .iter()
-                        .find(|u| &u.block_hash == b)
-                        .map(|u| u.block_height)
-                };
-                let v = verify_unhonoured_obligation(&proof, &history, &oracle);
-                assert_eq!(v.is_ok(), w[3] == "1", "verdict at {seq}: {v:?}");
+                let o = |b: &[u8; 32]| oracle(&history, b);
+                let v = verify_unhonoured_obligation(&proof, &history, &o);
+                assert_eq!(v.is_ok(), w[4] == "1", "{} verdict at {seq}: {v:?}", w[1]);
                 n += 1;
             }
             k => {
@@ -241,5 +306,5 @@ fn unhonoured_obligation_matches_cl() {
             }
         }
     }
-    assert_eq!(n, 6);
+    assert_eq!(n, 20);
 }

@@ -140,6 +140,7 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
     let msg_hash = deposits_protocol::signature_utils::offer_cosign_signing_message(
         &accused_ledger,
         &offer_id,
+        &deposits_protocol::types::compute_deposit_id("test-descriptor"),
         &accused_operator_pubkey,
         &funding_address,
         deadline_block,
@@ -162,6 +163,10 @@ fn fraud_proof_uncredited_onchain_triggers_confiscation() {
         ledger_id: accused_ledger.clone(),
         evidence: FraudEvidence::UncreditedOnchain {
             offer_id: hex::encode(offer_id),
+            deposit_id: hex::encode(deposits_protocol::types::compute_deposit_id(
+                "test-descriptor",
+            )),
+            descriptor: "test-descriptor".to_string(),
             funding_address,
             accused_operator_pubkey: hex::encode(accused_operator_pubkey.serialize()),
             deadline_block,

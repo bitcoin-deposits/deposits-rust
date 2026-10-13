@@ -33,10 +33,14 @@ fn offer_cosign_vector_is_pinned() {
             .to_string(),
     ];
     for (name, offer_id, op, addr, deadline, mlh) in cases {
-        let d = offer_cosign_signing_message(&ledger, &offer_id, &op, addr, deadline, &mlh);
+        // DEP-10: the offer binds the deposit it funds.
+        let deposit = [offer_id[0] ^ 0x5a; 16];
+        let d =
+            offer_cosign_signing_message(&ledger, &offer_id, &deposit, &op, addr, deadline, &mlh);
         out.push(format!(
-            "case {name}\nledger {ledger}\noffer {}\noperator {}\naddress {addr}\ndeadline {deadline}\nmember_ledger_hash {}\ndigest {}",
+            "case {name}\nledger {ledger}\noffer {}\ndeposit {}\noperator {}\naddress {addr}\ndeadline {deadline}\nmember_ledger_hash {}\ndigest {}",
             hex::encode(offer_id),
+            hex::encode(deposit),
             hex::encode(op.serialize()),
             hex::encode(mlh),
             hex::encode(d)

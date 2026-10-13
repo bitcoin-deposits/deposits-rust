@@ -21,6 +21,10 @@ fn make_onchain_proof() -> FraudProof {
         ledger_id: make_ledger_id(),
         evidence: FraudEvidence::UncreditedOnchain {
             offer_id: "bb".repeat(16),
+            deposit_id: hex::encode(deposits_protocol::types::compute_deposit_id(
+                "test-descriptor",
+            )),
+            descriptor: "test-descriptor".to_string(),
             funding_address: "bcrt1qtest".to_string(),
             accused_operator_pubkey: "02".to_string() + &"ab".repeat(32),
             deadline_block: 600,
@@ -738,6 +742,7 @@ mod dispatch {
         let msg_hash = deposits_protocol::offer_cosign_signing_message(
             ledger_id,
             offer_id,
+            &deposits_protocol::types::compute_deposit_id("test-descriptor"),
             accused_op,
             funding_address,
             deadline_block,
@@ -1089,6 +1094,10 @@ mod dispatch {
             ledger_id: ledger_id_hex.clone(),
             evidence: FraudEvidence::UncreditedOnchain {
                 offer_id: hex::encode(offer_id),
+                deposit_id: hex::encode(deposits_protocol::types::compute_deposit_id(
+                    "test-descriptor",
+                )),
+                descriptor: "test-descriptor".to_string(),
                 funding_address: funding_address.into(),
                 accused_operator_pubkey: hex::encode(accused_op.serialize()),
                 deadline_block,
@@ -1787,6 +1796,7 @@ mod uncredited_onchain {
         let msg_hash = deposits_protocol::offer_cosign_signing_message(
             ledger_id,
             offer_id,
+            &deposits_protocol::types::compute_deposit_id("test-descriptor"),
             accused_pk,
             funding_address,
             deadline_block,
@@ -1834,6 +1844,10 @@ mod uncredited_onchain {
             ledger_id,
             evidence: FraudEvidence::UncreditedOnchain {
                 offer_id: hex::encode(offer_id),
+                deposit_id: hex::encode(deposits_protocol::types::compute_deposit_id(
+                    "test-descriptor",
+                )),
+                descriptor: "test-descriptor".to_string(),
                 funding_address: funding_address.to_string(),
                 accused_operator_pubkey: accused_hex,
                 deadline_block,

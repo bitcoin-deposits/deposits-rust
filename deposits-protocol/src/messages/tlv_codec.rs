@@ -178,6 +178,7 @@ mod ledger_op_tlv {
     pub const CONFISCATION_TX: u64 = 350; // MigrationCredit (after a custody change)
     pub const CONFISCATION_TXID: u64 = 352; // DisputeAcquire
     pub const SOURCE_LEDGER_ID: u64 = 354; // DormancyAccept
+    pub const UNCREDITED_PROOF: u64 = 356; // ObligationRecord (payment form)
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -521,10 +522,17 @@ impl TlvEncode for LedgerOperation {
             Self::ObligationRecord {
                 source_notice_update,
                 source_qb_update,
+                uncredited_proof,
             } => {
-                builder = builder
-                    .bytes_field(SOURCE_NOTICE_UPDATE, source_notice_update)
-                    .bytes_field(SOURCE_QB_UPDATE, source_qb_update);
+                if let Some(b) = source_notice_update {
+                    builder = builder.bytes_field(SOURCE_NOTICE_UPDATE, b);
+                }
+                if let Some(b) = source_qb_update {
+                    builder = builder.bytes_field(SOURCE_QB_UPDATE, b);
+                }
+                if let Some(b) = uncredited_proof {
+                    builder = builder.bytes_field(UNCREDITED_PROOF, b);
+                }
             }
             Self::DormancyAccept {
                 premium_deposit,
@@ -1126,8 +1134,11 @@ impl TlvDecode for LedgerOperation {
                 confiscation_tx: reader.read_raw_opt(CONFISCATION_TX).map(|b| b.to_vec()),
             }),
             106 => Ok(Self::ObligationRecord {
-                source_notice_update: reader.read_raw(SOURCE_NOTICE_UPDATE)?.to_vec(),
-                source_qb_update: reader.read_raw(SOURCE_QB_UPDATE)?.to_vec(),
+                source_notice_update: reader
+                    .read_raw_opt(SOURCE_NOTICE_UPDATE)
+                    .map(|b| b.to_vec()),
+                source_qb_update: reader.read_raw_opt(SOURCE_QB_UPDATE).map(|b| b.to_vec()),
+                uncredited_proof: reader.read_raw_opt(UNCREDITED_PROOF).map(|b| b.to_vec()),
             }),
             103 => Ok(Self::DormancyAccept {
                 premium_deposit: match reader.read_raw_opt(DEPOSIT_ID) {

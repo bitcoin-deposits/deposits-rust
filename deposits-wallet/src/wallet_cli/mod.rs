@@ -459,6 +459,7 @@ pub fn save_deposit_key_index(
 pub fn verify_offer_cosignature(
     ledger_id: &str,
     offer_id: &[u8; 32],
+    deposit_id: &[u8; 16],
     operator_id: &PublicKey,
     funding_address: &str,
     deadline_block: u32,
@@ -471,6 +472,7 @@ pub fn verify_offer_cosignature(
     let msg_hash = deposits_core::signature_utils::offer_cosign_signing_message(
         ledger_id,
         offer_id,
+        deposit_id,
         operator_id,
         funding_address,
         deadline_block,

@@ -411,8 +411,11 @@ pub enum LedgerOperation {
     /// DEP-06 §Confiscation obligations: on a disputing fork, before arming, the source's signed
     /// notice and consuming QuorumBegin of a migration dangling on the disputed ledger.
     ObligationRecord {
-        source_notice_update: Vec<u8>,
-        source_qb_update: Vec<u8>,
+        /// Migration form: the source's notice and consuming QuorumBegin.
+        source_notice_update: Option<Vec<u8>>,
+        source_qb_update: Option<Vec<u8>>,
+        /// Payment form (TLV 356): an UncreditedOnchainPayment proof with offer evidence (JSON).
+        uncredited_proof: Option<Vec<u8>>,
     },
     /// DEP-20 §8.3: the receiver accepts a dormancy migration (appended to its own ledger).
     DormancyAccept {

@@ -1519,20 +1519,34 @@ impl LedgerState {
             LedgerOperation::ObligationRecord {
                 source_notice_update,
                 source_qb_update,
+                uncredited_proof,
             } => {
                 // DEP-06 §Confiscation obligations: on a disputing fork, before arming.
+                let bad = |d: String| crate::DepositsError::ProtocolViolation {
+                    violation_type: "obligation_record".to_string(),
+                    details: d,
+                };
                 if next.dispute_state != DisputeState::Disputed {
-                    return Err(crate::DepositsError::ProtocolViolation {
-                        violation_type: "obligation_record".to_string(),
-                        details: "an obligation is recorded on a disputing fork before arming"
-                            .to_string(),
-                    });
+                    return Err(bad(
+                        "an obligation is recorded on a disputing fork before arming".into(),
+                    ));
                 }
-                migration_evidence(&next.ledger_id, source_notice_update, source_qb_update)
-                    .map_err(|e| crate::DepositsError::ProtocolViolation {
-                        violation_type: "obligation_record".to_string(),
-                        details: e,
-                    })?;
+                match (source_notice_update, source_qb_update, uncredited_proof) {
+                    (None, None, Some(json)) => {
+                        let members: Vec<PublicKey> =
+                            next.quorum_members.iter().map(|m| m.pubkey).collect();
+                        crate::fraud::check_uncredited_record(&next.ledger_id, &members, json)
+                            .map_err(bad)?;
+                    }
+                    (Some(n), Some(q), None) => {
+                        migration_evidence(&next.ledger_id, n, q).map_err(bad)?;
+                    }
+                    _ => {
+                        return Err(bad(
+                            "an ObligationRecord carries a migration or a payment".into()
+                        ))
+                    }
+                }
             }
             LedgerOperation::ExitRequest {
                 deposit_id,

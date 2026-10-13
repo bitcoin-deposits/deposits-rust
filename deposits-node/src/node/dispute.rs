@@ -1104,11 +1104,63 @@ impl Node {
                         | Ok(LedgerOperation::DisputeArmed { .. })
                 )
             });
-            match &fork_ledger.state.dormancy_accept {
-                Some(a) if !a.resolved && !recorded => a.source.map(|s| (s, a.manifest_hash)),
-                _ => None,
+            if recorded {
+                None
+            } else {
+                Some(match &fork_ledger.state.dormancy_accept {
+                    Some(a) if !a.resolved => a.source.map(|s| (s, a.manifest_hash)),
+                    _ => None,
+                })
             }
         };
+        // DEP-06: proven-uncredited offer payments are owed too: record each before arming.
+        if pending_obligation.is_some() {
+            let (ledger_id_hex, operator_history) = {
+                let fork_ledger = fork_arc.read().unwrap();
+                let id = hex::encode(fork_ledger.state.ledger_id);
+                let op = fork_ledger.history.first().map(|u| u.operator_id);
+                (
+                    id,
+                    fork_ledger
+                        .history
+                        .iter()
+                        .filter(|u| Some(u.operator_id) == op)
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            };
+            for json in self
+                .fetch_uncredited_payment_proofs(&ledger_id_hex, &operator_history)
+                .await
+            {
+                let op = LedgerOperation::ObligationRecord {
+                    source_notice_update: None,
+                    source_qb_update: None,
+                    uncredited_proof: Some(json),
+                };
+                let appended = {
+                    let mut fork_ledger = fork_arc.write().unwrap();
+                    match fork_ledger.append_operation_with_block(op, current_block, block_hash) {
+                        Ok(_) => {
+                            if let Some(update) = fork_ledger.history.last_mut() {
+                                update.operator_id = our_pubkey;
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!("payment ObligationRecord not appended: {:?}", e);
+                            false
+                        }
+                    }
+                };
+                if appended {
+                    self.sign_last_update(&fork_key)?;
+                    added_new_operations = true;
+                    tracing::info!("Recorded an uncredited payment on our fork (DEP-06)");
+                }
+            }
+        }
+        let pending_obligation = pending_obligation.flatten();
         if let Some((source, manifest_hash)) = pending_obligation {
             use deposits_core::TlvEncode;
             let hist = self.receiver_history(&hex::encode(source)).await;
@@ -1126,8 +1178,9 @@ impl Node {
             });
             if let (Some(nu), Some(qu)) = (nu, qu) {
                 let op = LedgerOperation::ObligationRecord {
-                    source_notice_update: nu.tlv_encode(),
-                    source_qb_update: qu.tlv_encode(),
+                    source_notice_update: Some(nu.tlv_encode()),
+                    source_qb_update: Some(qu.tlv_encode()),
+                    uncredited_proof: None,
                 };
                 let appended = {
                     let mut fork_ledger = fork_arc.write().unwrap();
@@ -2195,6 +2248,54 @@ impl Node {
     ///
     /// Returns `None` if no broadcast is on the relay or none decode
     /// cleanly. Callers fall back to punitive shape in that case.
+    /// DEP-06: the proven-uncredited offer payments against `ledger_id` on the relays whose
+    /// evidence verifies against `history` (the operator's), as proof JSON — owed at confiscation.
+    pub(crate) async fn fetch_uncredited_payment_proofs(
+        &self,
+        ledger_id: &str,
+        history: &[deposits_core::SignedLedgerUpdate],
+    ) -> Vec<Vec<u8>> {
+        use deposits_core::fraud::{FraudBroadcast, FraudEvidence};
+        use nostr_sdk::{Filter, Kind};
+        let filter = Filter::new()
+            .kind(Kind::Custom(deposits_nostr::KIND_FRAUD_PROOF))
+            .custom_tag(
+                deposits_nostr::TAG_LEDGER_ID,
+                [deposits_nostr::ledger_tag(ledger_id)],
+            )
+            .limit(200);
+        let Ok(events) = self
+            .nostr
+            .fetch_client()
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+            .await
+        else {
+            return Vec::new();
+        };
+        let wallet = &self.wallet;
+        let oracle = |b: &[u8; 32]| wallet.confirms_block(b);
+        let mut out: Vec<Vec<u8>> = Vec::new();
+        let mut seen: Vec<(String, u32)> = Vec::new();
+        for e in events.iter() {
+            let Ok(b) = serde_json::from_str::<FraudBroadcast>(&e.content) else {
+                continue;
+            };
+            let FraudEvidence::UncreditedOnchain { txid, vout, .. } = &b.proof.evidence else {
+                continue;
+            };
+            if b.proof.ledger_id != ledger_id || seen.contains(&(txid.clone(), *vout)) {
+                continue;
+            }
+            if deposits_core::fraud::verify_uncredited_onchain(&b.proof, history, &oracle).is_ok() {
+                seen.push((txid.clone(), *vout));
+                if let Ok(j) = serde_json::to_vec(&b.proof) {
+                    out.push(j);
+                }
+            }
+        }
+        out
+    }
+
     pub(crate) async fn fetch_fraud_proof_type_for_ledger(
         &self,
         ledger_id: &str,

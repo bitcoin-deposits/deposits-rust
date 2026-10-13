@@ -537,31 +537,30 @@ impl crate::Node {
         use deposits_core::fraud::{
             unhonoured_obligation_proof, verify_unhonoured_obligation, FraudBroadcast,
         };
-        let candidates: Vec<(
+        type Cand = (
             String,
             Vec<SignedLedgerUpdate>,
             [u8; 32],
-            [u8; 32],
-            [u8; 32],
-        )> = {
+            Option<([u8; 32], [u8; 32])>,
+        );
+        let candidates: Vec<Cand> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .iter()
                 .filter_map(|(id, arc)| {
                     let l = arc.read().unwrap();
-                    let a = l.state.dormancy_accept.as_ref()?;
-                    let source = a.source?;
                     let conf = l.state.confiscation_txid?;
-                    (!a.resolved && id.len() == 64)
-                        .then(|| (id.clone(), l.history.clone(), conf, source, a.manifest_hash))
+                    let migration = l
+                        .state
+                        .dormancy_accept
+                        .as_ref()
+                        .filter(|a| !a.resolved)
+                        .and_then(|a| a.source.map(|s| (s, a.manifest_hash)));
+                    (id.len() == 64).then(|| (id.clone(), l.history.clone(), conf, migration))
                 })
                 .collect()
         };
-        for (id, history, conf_txid, source, manifest_hash) in candidates {
-            let key = format!("obligation:{id}");
-            if self.migrations_done.lock().unwrap().contains(&key) {
-                continue;
-            }
+        for (id, history, conf_txid, migration) in candidates {
             let Some(acquire) = history
                 .iter()
                 .rev()
@@ -581,53 +580,88 @@ impl crate::Node {
             else {
                 continue;
             };
-            let src = self.receiver_history(&hex::encode(source)).await;
-            let Some(nu) = src.iter().rev().find(|u| {
-                matches!(LedgerOperation::tlv_decode(&u.message),
-                    Ok(LedgerOperation::DormancyNotice { manifest_hash: Some(h), .. }) if h == manifest_hash)
-            }) else {
-                continue;
-            };
-            let notice_id: [u8; 32] =
-                bitcoin::hashes::sha256::Hash::hash(&nu.message).to_byte_array();
-            let Some(qu) = src.iter().find(|u| {
-                matches!(LedgerOperation::tlv_decode(&u.message),
-                    Ok(LedgerOperation::QuorumBegin { consumed_notice: Some(c), .. }) if c == notice_id)
-            }) else {
-                continue;
-            };
-            let Some(proof) = unhonoured_obligation_proof(&history, &acquire, &conf, nu, qu) else {
-                continue;
-            };
-            // Each update names its block: confirm it is ours at that height.
-            let wallet = &self.wallet;
-            let oracle = |b: &[u8; 32]| {
-                history
-                    .iter()
-                    .find(|u| &u.block_hash == b)
-                    .map(|u| u.block_height)
-                    .filter(|h| wallet.block_hash_at(*h).as_ref() == Some(b))
-            };
-            if let Err(e) = verify_unhonoured_obligation(&proof, &history, &oracle) {
-                tracing::warn!(
-                    "unhonoured-obligation proof on {} does not verify: {}",
-                    &id[..8],
-                    e
-                );
-                continue;
+            // (key, notice, qb, payment json) for each obligation the custody change left owed
+            let mut owed: Vec<(
+                String,
+                Option<(SignedLedgerUpdate, SignedLedgerUpdate)>,
+                Option<String>,
+            )> = Vec::new();
+            if let Some((source, manifest_hash)) = migration {
+                let src = self.receiver_history(&hex::encode(source)).await;
+                let nu = src.iter().rev().find(|u| {
+                    matches!(LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::DormancyNotice { manifest_hash: Some(h), .. }) if h == manifest_hash)
+                });
+                if let Some(nu) = nu {
+                    let notice_id: [u8; 32] =
+                        bitcoin::hashes::sha256::Hash::hash(&nu.message).to_byte_array();
+                    if let Some(qu) = src.iter().find(|u| {
+                        matches!(LedgerOperation::tlv_decode(&u.message),
+                            Ok(LedgerOperation::QuorumBegin { consumed_notice: Some(c), .. }) if c == notice_id)
+                    }) {
+                        owed.push((
+                            format!("obligation:{id}:migration"),
+                            Some((nu.clone(), qu.clone())),
+                            None,
+                        ));
+                    }
+                }
             }
-            tracing::warn!(
-                "UNHONOURED OBLIGATION: {}'s new operator left a migration's residue uncredited; proof broadcast",
-                &id[..8]
-            );
-            self.migrations_done.lock().unwrap().insert(key);
-            let b = FraudBroadcast {
-                proof,
-                embedding: None,
-                causal_chain: Vec::new(),
-            };
-            if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
-                tracing::error!("obligation watch: fraud broadcast failed: {}", e);
+            for u in history
+                .iter()
+                .filter(|u| u.sequence_number < acquire.sequence_number)
+            {
+                if let Ok(LedgerOperation::ObligationRecord {
+                    uncredited_proof: Some(json),
+                    ..
+                }) = LedgerOperation::tlv_decode(&u.message)
+                {
+                    let key = format!(
+                        "obligation:{id}:{}",
+                        hex::encode(bitcoin::hashes::sha256::Hash::hash(&json).to_byte_array())
+                    );
+                    owed.push((key, None, String::from_utf8(json).ok()));
+                }
+            }
+            for (key, mig, payment) in owed {
+                if self.migrations_done.lock().unwrap().contains(&key) {
+                    continue;
+                }
+                let proof = unhonoured_obligation_proof(
+                    &history,
+                    &acquire,
+                    &conf,
+                    mig.as_ref().map(|(n, _)| n),
+                    mig.as_ref().map(|(_, q)| q),
+                    payment.as_deref(),
+                );
+                let Some(proof) = proof else {
+                    continue;
+                };
+                // Each update names its block: confirm it is ours at that height.
+                let wallet = &self.wallet;
+                let oracle = |b: &[u8; 32]| wallet.confirms_block(b);
+                if let Err(e) = verify_unhonoured_obligation(&proof, &history, &oracle) {
+                    tracing::warn!(
+                        "unhonoured-obligation proof on {} does not verify: {}",
+                        &id[..8],
+                        e
+                    );
+                    continue;
+                }
+                tracing::warn!(
+                    "UNHONOURED OBLIGATION: {}'s new operator left an obligation's residue uncredited; proof broadcast",
+                    &id[..8]
+                );
+                self.migrations_done.lock().unwrap().insert(key);
+                let b = FraudBroadcast {
+                    proof,
+                    embedding: None,
+                    causal_chain: Vec::new(),
+                };
+                if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
+                    tracing::error!("obligation watch: fraud broadcast failed: {}", e);
+                }
             }
         }
     }

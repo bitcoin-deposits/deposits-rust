@@ -62,6 +62,7 @@ pub fn invoice_cosign_signing_message(
 pub fn offer_cosign_signing_message(
     ledger_id: &str,
     offer_id: &[u8; 32],
+    deposit_id: &[u8; 16],
     operator_id: &PublicKey,
     funding_address: &str,
     deadline_block: u32,
@@ -71,6 +72,8 @@ pub fn offer_cosign_signing_message(
     let mut data = Vec::with_capacity(32 + 32 + 32 + 1 + addr_bytes.len() + 4);
     data.extend_from_slice(ledger_id.as_bytes());
     data.extend_from_slice(offer_id);
+    // DEP-10: the deposit the offer funds, so a proven-uncredited payment names its owner.
+    data.extend_from_slice(deposit_id);
     data.extend_from_slice(&operator_id.serialize()[1..]); // x-only
     data.push(addr_bytes.len() as u8);
     data.extend_from_slice(addr_bytes);

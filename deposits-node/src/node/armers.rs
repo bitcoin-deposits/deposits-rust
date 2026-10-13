@@ -225,8 +225,9 @@ pub fn confiscation_obligations(
                 u.operator_id == p.key && u.sequence_number > lvs && u.sequence_number < p.arm_seq
             }) {
                 let Ok(LedgerOperation::ObligationRecord {
-                    source_notice_update,
-                    source_qb_update,
+                    source_notice_update: Some(source_notice_update),
+                    source_qb_update: Some(source_qb_update),
+                    ..
                 }) = LedgerOperation::tlv_decode(&u.message)
                 else {
                     continue;
@@ -266,11 +267,101 @@ pub fn confiscation_obligations(
             }
         }
     }
+    // DEP-06: proven-uncredited offer payments recorded on the participants' forks are owed too
+    // (paid from the vault: the payment itself sits at the operator's offer address).
+    let canonical_all: Vec<SignedLedgerUpdate> = updates
+        .iter()
+        .filter(|u| u.operator_id == operator)
+        .cloned()
+        .collect();
+    let oracle = |b: &[u8; 32]| {
+        chain
+            .get_block_height_if_in_best_chain(&bitcoin::BlockHash::from_byte_array(*b))
+            .ok()
+            .flatten()
+    };
+    let mut paid: Vec<([u8; 32], u32)> = Vec::new();
+    for p in &set.participants {
+        for u in updates.iter().filter(|u| {
+            u.operator_id == p.key && u.sequence_number > lvs && u.sequence_number < p.arm_seq
+        }) {
+            let Ok(LedgerOperation::ObligationRecord {
+                uncredited_proof: Some(json),
+                ..
+            }) = LedgerOperation::tlv_decode(&u.message)
+            else {
+                continue;
+            };
+            let Ok(proof) = serde_json::from_slice::<deposits_core::fraud::FraudProof>(&json)
+            else {
+                continue;
+            };
+            let deposits_core::fraud::FraudEvidence::UncreditedOnchain {
+                deposit_id,
+                descriptor,
+                txid,
+                vout,
+                amount_sats,
+                ..
+            } = &proof.evidence
+            else {
+                continue;
+            };
+            let (Ok(t), Ok(d)) = (hex::decode(txid), hex::decode(deposit_id)) else {
+                continue;
+            };
+            let (Ok(t), Ok(d)) = (<[u8; 32]>::try_from(t), <[u8; 16]>::try_from(d)) else {
+                continue;
+            };
+            if paid.contains(&(t, *vout))
+                || proof.ledger_id != hex::encode(state.ledger_id)
+                || deposits_core::fraud::verify_uncredited_onchain(&proof, &canonical_all, &oracle)
+                    .is_err()
+                || onchain_credited(&canonical_all, lvs, t, *vout)
+            {
+                continue;
+            }
+            paid.push((t, *vout));
+            let e = deposits_core::messages::ManifestEntry {
+                deposit_id: d,
+                amount: amount_sats * 1000,
+                fees: Default::default(),
+                descriptor: descriptor.clone(),
+            };
+            match deposits_core::types::owed_spk_sats(&e) {
+                Some((spk, v)) => outs.push((d, spk, v)),
+                None => out.residue_sats += e.amount / 1000,
+            }
+        }
+    }
     out.swept
         .sort_by_key(|(o, _)| (o.txid.to_byte_array(), o.vout));
     outs.sort_by_key(|(id, _, _)| *id);
     out.splice_outs = outs.into_iter().map(|(_, spk, v)| (spk, v)).collect();
     Ok(out)
+}
+
+/// An OnchainCredit of `txid`:`vout` in `history` at or before `upto_seq`.
+fn onchain_credited(
+    history: &[SignedLedgerUpdate],
+    upto_seq: u64,
+    txid: [u8; 32],
+    vout: u32,
+) -> bool {
+    fn hit(op: &LedgerOperation, txid: [u8; 32], vout: u32) -> bool {
+        match op {
+            LedgerOperation::OnchainCredit {
+                txid: t, vout: v, ..
+            } => *t == txid && *v == vout,
+            LedgerOperation::Batch(inner) => inner.iter().any(|o| hit(o, txid, vout)),
+            _ => false,
+        }
+    }
+    history
+        .iter()
+        .filter(|u| u.sequence_number <= upto_seq)
+        .filter_map(|u| LedgerOperation::tlv_decode(&u.message).ok())
+        .any(|op| hit(&op, txid, vout))
 }
 
 /// E: the highest signed-header height among the armers' latest arms.
