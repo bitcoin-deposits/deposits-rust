@@ -1136,7 +1136,7 @@ mod dispatch {
 
     #[test]
     fn dispatch_accepts_genuine_uncredited_onchain() {
-        let (broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
+        let (broadcast, histories, blocks) = uncredited_onchain_scenario(80, 6);
         verify_fraud_broadcast(
             &broadcast,
             &provider_from(histories),
@@ -1161,7 +1161,7 @@ mod dispatch {
 
     #[test]
     fn dispatch_rejects_uncredited_onchain_with_tampered_offer() {
-        let (mut broadcast, histories, blocks) = uncredited_onchain_scenario(10, 6);
+        let (mut broadcast, histories, blocks) = uncredited_onchain_scenario(80, 6);
         // Tamper with deadline_block — invalidates cosig.
         if let FraudEvidence::UncreditedOnchain { deadline_block, .. } =
             &mut broadcast.proof.evidence
@@ -1868,9 +1868,22 @@ mod uncredited_onchain {
 
     #[test]
     fn accepts_genuine_uncredited_onchain() {
-        // Operator's update is 10 blocks past funding; required = 6.
-        let (proof, history, oracle, _) = fixture(10, 6);
+        // Operator's update is 80 blocks past funding: past the ledger's terms (72 by default).
+        let (proof, history, oracle, _) = fixture(80, 6);
         verify_uncredited_onchain(&proof, &history, &oracle).unwrap();
+    }
+
+    #[test]
+    fn a_lowered_carried_deadline_is_ignored() {
+        // DEP-06: a forger claiming required_confirmations 0 cannot frame an operator whose
+        // update came only 10 blocks after the payment: the ledger's terms (72) decide.
+        let (proof, history, oracle, _) = fixture(10, 0);
+        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
+        assert!(
+            err.contains("the ledger's terms need 72"),
+            "wrong error: {}",
+            err
+        );
     }
 
     #[test]
@@ -1887,7 +1900,7 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_unconfirmed_funding_block() {
-        let (mut proof, history, _, _) = fixture(10, 6);
+        let (mut proof, history, _, _) = fixture(80, 6);
         if let FraudEvidence::UncreditedOnchain {
             confirmed_at_block_hash,
             ..
@@ -1908,7 +1921,7 @@ mod uncredited_onchain {
     fn rejects_unconfirmed_proof_sequence_block() {
         // Build the genuine fixture, then drop the proof-block entry
         // from the oracle so only the funding block is confirmed.
-        let (proof, history, oracle, _) = fixture(10, 6);
+        let (proof, history, oracle, _) = fixture(80, 6);
         let funding_block_hash = if let FraudEvidence::UncreditedOnchain {
             confirmed_at_block_hash,
             ..
@@ -1931,7 +1944,7 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_when_onchain_credit_present() {
-        let (proof, _hist, oracle, txid_bytes) = fixture(10, 6);
+        let (proof, _hist, oracle, txid_bytes) = fixture(80, 6);
         let credit_op = LedgerOperation::OnchainCredit {
             txid: txid_bytes,
             vout: 0,
@@ -1950,7 +1963,7 @@ mod uncredited_onchain {
 
     #[test]
     fn ignores_credit_for_different_outpoint() {
-        let (proof, _hist, oracle, _) = fixture(10, 6);
+        let (proof, _hist, oracle, _) = fixture(80, 6);
         // OnchainCredit exists but for a different (txid, vout).
         let credit_op = LedgerOperation::OnchainCredit {
             txid: [0x00; 32],
@@ -1969,7 +1982,7 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_when_proof_sequence_missing() {
-        let (proof, _, oracle, _) = fixture(10, 6);
+        let (proof, _, oracle, _) = fixture(80, 6);
         let history: Vec<SignedLedgerUpdate> = vec![]; // no update at seq 50
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
         assert!(
@@ -1981,7 +1994,7 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_wrong_evidence_type() {
-        let (mut proof, history, oracle, _) = fixture(10, 6);
+        let (mut proof, history, oracle, _) = fixture(80, 6);
         proof.evidence = FraudEvidence::NonConforming {
             sequence: 1,
             update_b64: "AA==".to_string(),
@@ -1994,7 +2007,7 @@ mod uncredited_onchain {
     #[test]
     fn rejects_offer_signature_over_wrong_message() {
         // Tamper with deadline_block after the cosig was made.
-        let (mut proof, history, oracle, _) = fixture(10, 6);
+        let (mut proof, history, oracle, _) = fixture(80, 6);
         if let FraudEvidence::UncreditedOnchain { deadline_block, .. } = &mut proof.evidence {
             *deadline_block = 999_999;
         }
@@ -2008,7 +2021,7 @@ mod uncredited_onchain {
 
     #[test]
     fn rejects_offer_signature_with_swapped_funding_address() {
-        let (mut proof, history, oracle, _) = fixture(10, 6);
+        let (mut proof, history, oracle, _) = fixture(80, 6);
         if let FraudEvidence::UncreditedOnchain {
             funding_address, ..
         } = &mut proof.evidence

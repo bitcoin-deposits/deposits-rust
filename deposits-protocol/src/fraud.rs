@@ -2626,12 +2626,16 @@ pub fn verify_uncredited_onchain(
             )
         })?;
 
-    // (3) operator saw at least required_confirmations confs before signing.
+    // (3) the deadline is the ledger's own terms (governing service_response_blocks at
+    //     proof_sequence), never the carried required_confirmations (DEP-06: a carried value
+    //     let anyone lower it and frame an honest operator).
+    let _ = required_confirmations;
+    let deadline = governing_service_response_blocks(accused_history, *proof_sequence);
     let elapsed = proof_height.saturating_sub(confirmed_height);
-    if elapsed < *required_confirmations {
+    if elapsed < deadline {
         return Err(format!(
-            "proof_sequence block {} only {} blocks past funding block {}; need {} confs",
-            proof_height, elapsed, confirmed_height, required_confirmations
+            "proof_sequence block {} only {} blocks past funding block {}; the ledger's terms need {}",
+            proof_height, elapsed, confirmed_height, deadline
         ));
     }
 
