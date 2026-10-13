@@ -784,14 +784,30 @@ impl Node {
                     deposits_core::messages::LedgerOperation::tlv_decode(&inbound.update.message)
                         .ok()
                         .filter(|op| {
-                            let h = self.wallet.get_block_height().unwrap_or(0);
-                            !l.state
-                                .check_speculative(
-                                    op,
-                                    &deposits_core::dep16::Dep16Authorizer::new(),
+                            // DEP-02: judged at the update's signed block_height, as its
+                            // cosigners checked it and as a proof verifier will; our tip
+                            // may lag or lead it (an exit cutoff "outside the window").
+                            let h = inbound.update.block_height;
+                            let violations = l.state.check_speculative_at(
+                                op,
+                                &deposits_core::dep16::Dep16Authorizer::new(),
+                                h,
+                                h,
+                            );
+                            if !violations.is_empty() {
+                                tracing::warn!(
+                                    "conformance of {}... seq {} at height {}: {}",
+                                    &inbound.ledger_id[..16.min(inbound.ledger_id.len())],
+                                    inbound.update.sequence_number,
                                     h,
-                                )
-                                .is_empty()
+                                    violations
+                                        .iter()
+                                        .map(|v| v.to_string())
+                                        .collect::<Vec<_>>()
+                                        .join("; ")
+                                );
+                            }
+                            !violations.is_empty()
                         })
                         .map(|_| {
                             deposits_core::fraud::governing_quorum_begin_seq(

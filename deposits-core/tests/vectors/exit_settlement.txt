@@ -31,6 +31,14 @@ feerate 2
 due a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1 1000000 938
 due a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4a4 500000 438
 due a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5 900000 838
+case judge_height
+# DEP-02: a judge folds an update at its signed block_height, never at its own tip. The
+# due_set ledger's rotating QuorumBegin (that case's cutoff and due outputs, vouts 1..) signed
+# at update_height settles; folded at either tip it is refused (exit_cutoff), so a replica
+# reading its own tip would accuse an honest quorum.
+update_height 5000
+tip 4985 exit_cutoff
+tip 5200 exit_cutoff
 case collateral
 reserves 30000000 collateral 20000000 vault 50000 fee 1000 new_collateral 19600000
 reserves 15600000 collateral 23400000 vault 39000 fee 380 new_collateral 23172000

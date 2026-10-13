@@ -654,14 +654,14 @@ impl Node {
                         // `apply_signed`) has already been blessed for
                         // conformance.
                         //
-                        // `current_block_height` (from
-                        // `self.wallet.get_block_height()` above) is
-                        // the cosigner's view of the tip; the verifier
-                        // uses it for descriptor `after()` checks.
+                        // DEP-02: every rule, signature windows included,
+                        // reads the update's signed block_height (already
+                        // bounded to 6 blocks from our tip above), so the
+                        // verdict is the one every replica reaches folding it.
                         let violations = ledger.state.check_speculative_at(
                             &operation,
                             &deposits_core::dep16::Dep16Authorizer::new(),
-                            current_block_height,
+                            fields.block_height,
                             fields.block_height,
                         );
                         if !violations.is_empty() {

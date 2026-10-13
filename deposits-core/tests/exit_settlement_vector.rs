@@ -314,3 +314,90 @@ fn quorum_begin_with_splice_round_trips() {
     assert_eq!(splice_in_amount, Some(70_000_000));
     assert_eq!(op.tlv_encode(), tlv);
 }
+
+/// DEP-02: a judge folds an update at its signed block_height, never at its own tip. The
+/// due_set ledger's rotating QuorumBegin settles at update_height and is refused
+/// (exit_cutoff) at either tip the vector names: a replica judging at its tip would accuse
+/// an honest quorum.
+#[test]
+fn judge_height_matches_cl() {
+    use deposits_core::messages::ExitOutput;
+    use deposits_core::types::{with_apply_ctx, ApplyCtx};
+    let (_, ds) = cases().into_iter().find(|(n, _)| n == "due_set").unwrap();
+    let (_, jh) = cases()
+        .into_iter()
+        .find(|(n, _)| n == "judge_height")
+        .unwrap();
+    let mut st = state();
+    st.vault_current = true;
+    for l in ds.iter().filter_map(|l| l.strip_prefix("pending ")) {
+        let f: Vec<&str> = l.split(' ').collect();
+        let id: [u8; 32] = hex::decode(f[0]).unwrap().try_into().unwrap();
+        st.pending_exits.insert(
+            id,
+            PendingExit {
+                deposit_id: id[..16].try_into().unwrap(),
+                amount: f[1].parse().unwrap(),
+                exit_address: hex::decode(f[5]).unwrap(),
+                expires_at: (f[4] != "-").then(|| f[4].parse().unwrap()),
+                block_height: f[2].parse().unwrap(),
+                seq: f[3].parse().unwrap(),
+            },
+        );
+    }
+    let outs: Vec<ExitOutput> = ds
+        .iter()
+        .filter_map(|l| l.strip_prefix("due "))
+        .enumerate()
+        .map(|(i, l)| {
+            let f: Vec<&str> = l.split(' ').collect();
+            let id = hex::decode(f[0]).unwrap();
+            ExitOutput {
+                deposit_id: id[..16].try_into().unwrap(),
+                amount: f[1].parse().unwrap(),
+                vout: i as u32 + 1,
+            }
+        })
+        .collect();
+    let qb = LedgerOperation::QuorumBegin {
+        reserves_id: "x".into(),
+        spending_txid: [0; 32],
+        new_outpoint_txid: [0; 32],
+        new_outpoint_vout: 0,
+        amount: 45_000_000,
+        quorum_expiry: 9000,
+        ledger_hash: [0; 32],
+        quorum_members: Vec::new(),
+        collateral_amount: 20_000_000,
+        protocol_version: Some("cltv-offset-v2".into()),
+        exit_cutoff_height: Some(field(&ds, "cutoff").parse().unwrap()),
+        exit_outputs: outs,
+        splice_in_outpoint: None,
+        splice_in_amount: None,
+        reference_feerate: None,
+        dormancy_outputs: Vec::new(),
+        migration_manifest: Vec::new(),
+        migration_receiver: None,
+        migration_vout: None,
+        consumed_notice: None,
+    };
+    let fold = |height: u32| {
+        let ctx = ApplyCtx {
+            height,
+            seq: 1,
+            hash: [7; 32],
+        };
+        with_apply_ctx(ctx, || st.clone().apply_in_place(&qb)).map_err(|e| format!("{e:?}"))
+    };
+    // A bare state may refuse the QuorumBegin later for other reasons; the exit settlement
+    // runs first, so its verdict is what this asserts.
+    let uh: u32 = field(&jh, "update_height").parse().unwrap();
+    if let Err(e) = fold(uh) {
+        assert!(!e.contains("exit_"), "settles at its signed height: {e}");
+    }
+    for l in jh.iter().filter_map(|l| l.strip_prefix("tip ")) {
+        let (tip, kind) = l.split_once(' ').unwrap();
+        let e = fold(tip.parse().unwrap()).expect_err("refused at a foreign tip");
+        assert!(e.contains(kind), "tip {tip}: {e}");
+    }
+}
