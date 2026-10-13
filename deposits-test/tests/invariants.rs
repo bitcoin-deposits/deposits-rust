@@ -888,6 +888,7 @@ fn invariant_l2_lottery_liveness() {
             new_custodian: bob_snap.public_key,
             claim_txid: [0xCC; 32],
             new_reserves_address: "bcrt1q".into(),
+            confiscation_txid: None,
         })
         .is_ok();
     // Don't actually apply — just test it's structurally valid

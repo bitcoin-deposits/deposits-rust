@@ -1840,6 +1840,11 @@ fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> 
             None,
             "dormancy migration credited".to_string(),
         ),
+        L::ObligationRecord { .. } => row(
+            "ObligationRecord",
+            None,
+            "dangling migration recorded".to_string(),
+        ),
         L::DormancyAccept { accepted_total, .. } => row(
             "DormancyAccept",
             None,

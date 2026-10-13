@@ -308,6 +308,7 @@ fn migration_receiver_fold() {
         manifest_hash: [9u8; 32],
         offer_event_id: [0; 32],
         accepted_total: total,
+        source_ledger_id: None,
     };
     assert!(
         with_apply_ctx(at(10), || st.apply(&accept(10_000_001))).is_err(),

@@ -989,6 +989,7 @@ fn taken_over() -> Vec<SignedLedgerUpdate> {
             new_custodian: pubkey(SUCCESSOR),
             claim_txid: [9; 32],
             new_reserves_address: "bcrt1qnew".into(),
+            confiscation_txid: None,
         },
     ];
     for op in ops {

@@ -159,6 +159,7 @@ fn dispute_acquire_returns_to_normal() {
         new_custodian: net.op("bob").public_key,
         claim_txid: [0xCC; 32],
         new_reserves_address: "bcrt1q_bob_new".to_string(),
+        confiscation_txid: None,
     };
     net.op_mut("alice")
         .ledger

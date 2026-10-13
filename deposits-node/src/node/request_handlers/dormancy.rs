@@ -174,6 +174,11 @@ impl Node {
                     manifest_hash: hash,
                     offer_event_id,
                     accepted_total: total,
+                    source_ledger_id: p
+                        .get("source")
+                        .and_then(|v| v.as_str())
+                        .and_then(|h| hex::decode(h).ok())
+                        .and_then(|b| b.try_into().ok()),
                 };
                 self.handler
                     .pending_migration_manifests
@@ -312,6 +317,7 @@ impl Node {
                 let op = LedgerOperation::MigrationCredit {
                     source_notice_update: nu.tlv_encode(),
                     source_qb_update: qu.tlv_encode(),
+                    confiscation_tx: None,
                 };
                 match self.commit_operation(&ledger_id, op).await {
                     Ok(_) => (

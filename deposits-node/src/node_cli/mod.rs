@@ -1405,6 +1405,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     rotation_height, ..
                 } => ("DormancyNotice", format!("at:{}", rotation_height)),
                 LedgerOperation::MigrationCredit { .. } => ("MigrationCredit", String::new()),
+                LedgerOperation::ObligationRecord { .. } => ("ObligationRecord", String::new()),
                 LedgerOperation::DormancyAccept { accepted_total, .. } => {
                     ("DormancyAccept", format!("total:{}", accepted_total))
                 }

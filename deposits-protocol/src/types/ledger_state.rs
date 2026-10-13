@@ -330,6 +330,9 @@ pub struct LedgerState {
     /// QuorumBegin records as consumed_notice).
     #[serde(default)]
     pub notice_id: Option<[u8; 32]>,
+    /// DEP-06: the confiscation a custody change followed (DisputeAcquire, TLV 352).
+    #[serde(default)]
+    pub confiscation_txid: Option<[u8; 32]>,
 }
 
 /// DEP-20 §8.3: what a source's DormancyNotice commits to migrate.
@@ -354,10 +357,126 @@ pub struct AcceptState {
     pub total: u64,
     pub expires: u32,
     pub premium_deposit: Option<DepositId>,
+    /// DEP-20 §8.3 (TLV 354): the source ledger, so members can find its notice.
+    #[serde(default)]
+    pub source: Option<[u8; 32]>,
     /// Resolved by a MigrationCredit (positive evidence from the source).
     #[serde(default)]
     pub resolved: bool,
     pub outpoint: Option<([u8; 32], u32)>,
+}
+
+/// The confiscation's feerate (both implementations build it at the DEP-03 default).
+pub const CONFISCATION_FEERATE_SAT_VB: u64 = 2;
+
+/// DEP-06 §Confiscation obligations: the splice-out a confiscation pays an owed entry — its
+/// `pk(K)` key-path script and `floor(amount/1000) − feerate × 43` when that is at least 330;
+/// `None` (residue) otherwise.
+pub fn owed_spk_sats(e: &crate::messages::ManifestEntry) -> Option<(bitcoin::ScriptBuf, u64)> {
+    let spk = pk_key_path_spk(&e.descriptor)?;
+    let sats = (e.amount / 1000).checked_sub(CONFISCATION_FEERATE_SAT_VB * 43)?;
+    (sats >= 330).then_some((spk, sats))
+}
+
+/// DEP-06: the `entries` no output of `tx` pays (the splice-out rule's script and value).
+pub fn unpaid_entries(
+    entries: &[crate::messages::ManifestEntry],
+    tx: &bitcoin::Transaction,
+) -> Vec<crate::messages::ManifestEntry> {
+    entries
+        .iter()
+        .filter(|e| match owed_spk_sats(e) {
+            Some((spk, sats)) => !tx
+                .output
+                .iter()
+                .any(|o| o.script_pubkey == spk && o.value.to_sat() == sats),
+            None => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// DEP-20 §8.3 / DEP-06: a source's signed notice carrying an accept of a ledger and the source
+/// QuorumBegin that consumed it.
+#[derive(Clone, Debug)]
+pub struct MigrationEvidence {
+    pub manifest_hash: [u8; 32],
+    pub premium: Option<u64>,
+    pub qb_update: crate::types::SignedLedgerUpdate,
+    /// The QuorumBegin migrates to the accept's signer.
+    pub to_us: bool,
+    pub migrated: Vec<crate::messages::ManifestEntry>,
+    pub txid: [u8; 32],
+    pub vout: u32,
+}
+
+/// Validate a source's notice and consuming QuorumBegin against `ledger_id` (the accept's
+/// ledger): both operator-signed by one operator on one ledger, the QuorumBegin later and naming
+/// the notice. Mirrors cl-deposits' `migration-evidence`.
+pub fn migration_evidence(
+    ledger_id: &[u8; 32],
+    notice_bytes: &[u8],
+    qb_bytes: &[u8],
+) -> Result<MigrationEvidence, String> {
+    use crate::messages::LedgerOperation;
+    use crate::types::SignedLedgerUpdate;
+    use crate::TlvDecode;
+    let (Ok(nu), Ok(qu)) = (
+        SignedLedgerUpdate::tlv_decode(notice_bytes),
+        SignedLedgerUpdate::tlv_decode(qb_bytes),
+    ) else {
+        return Err("the source updates do not decode".into());
+    };
+    let (Ok(notice), Ok(qb)) = (
+        LedgerOperation::tlv_decode(&nu.message),
+        LedgerOperation::tlv_decode(&qu.message),
+    ) else {
+        return Err("the source updates do not decode".into());
+    };
+    let LedgerOperation::DormancyNotice {
+        dormancy_accept: Some(acc_bytes),
+        manifest_hash: Some(manifest_hash),
+        premium,
+        ..
+    } = notice
+    else {
+        return Err("the notice does not carry this ledger's accept".into());
+    };
+    let acc = SignedLedgerUpdate::tlv_decode(&acc_bytes)
+        .map_err(|_| "the notice does not carry this ledger's accept".to_string())?;
+    if nu.verify_operator_signature().is_err() || acc.ledger_id != *ledger_id {
+        return Err("the notice does not carry this ledger's accept".into());
+    }
+    let notice_id: [u8; 32] = sha256::Hash::hash(&nu.message).to_byte_array();
+    let LedgerOperation::QuorumBegin {
+        consumed_notice,
+        migration_manifest,
+        migration_receiver,
+        migration_vout,
+        new_outpoint_txid,
+        ..
+    } = qb
+    else {
+        return Err("the QuorumBegin did not consume that notice".into());
+    };
+    if qu.verify_operator_signature().is_err()
+        || qu.operator_id != nu.operator_id
+        || qu.ledger_id != nu.ledger_id
+        || qu.sequence_number <= nu.sequence_number
+        || consumed_notice != Some(notice_id)
+    {
+        return Err("the QuorumBegin did not consume that notice".into());
+    }
+    let to_us = !migration_manifest.is_empty() && migration_receiver == Some(acc.operator_id);
+    Ok(MigrationEvidence {
+        manifest_hash,
+        premium,
+        qb_update: qu,
+        to_us,
+        migrated: migration_manifest,
+        txid: new_outpoint_txid,
+        vout: migration_vout.unwrap_or(0),
+    })
 }
 
 /// DEP-20 §8.3: an accept stays outstanding to `expires_at_height + 6`.
@@ -511,6 +630,7 @@ impl LedgerState {
             migration: None,
             dormancy_accept: None,
             notice_id: None,
+            confiscation_txid: None,
         }
     }
 
@@ -1275,6 +1395,7 @@ impl LedgerState {
                 expires_at_height,
                 manifest_hash,
                 accepted_total,
+                source_ledger_id,
                 ..
             } => {
                 if spk_type(exit_address).is_none() {
@@ -1310,6 +1431,7 @@ impl LedgerState {
                     total: *accepted_total,
                     expires: *expires_at_height,
                     premium_deposit: *premium_deposit,
+                    source: *source_ledger_id,
                     resolved: false,
                     outpoint: None,
                 });
@@ -1317,8 +1439,8 @@ impl LedgerState {
             LedgerOperation::MigrationCredit {
                 source_notice_update,
                 source_qb_update,
+                confiscation_tx,
             } => {
-                use crate::types::SignedLedgerUpdate;
                 let bad = |d: &str| crate::DepositsError::ProtocolViolation {
                     violation_type: "migration_credit".to_string(),
                     details: d.to_string(),
@@ -1330,65 +1452,38 @@ impl LedgerState {
                 if a.resolved {
                     return Err(bad("the accept is already resolved"));
                 }
-                let (Ok(nu), Ok(qu)) = (
-                    <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(source_notice_update),
-                    <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(source_qb_update),
-                ) else {
-                    return Err(bad("the source updates do not decode"));
-                };
-                let (Ok(notice), Ok(qb)) = (
-                    <LedgerOperation as crate::TlvDecode>::tlv_decode(&nu.message),
-                    <LedgerOperation as crate::TlvDecode>::tlv_decode(&qu.message),
-                ) else {
-                    return Err(bad("the source updates do not decode"));
-                };
-                let LedgerOperation::DormancyNotice {
-                    dormancy_accept: Some(acc_bytes),
-                    manifest_hash: Some(nhash),
-                    premium,
-                    ..
-                } = notice
-                else {
-                    return Err(bad("the notice does not carry this ledger's accept"));
-                };
-                let acc = <SignedLedgerUpdate as crate::TlvDecode>::tlv_decode(&acc_bytes).ok();
-                if nu.verify_operator_signature().is_err()
-                    || acc.map(|x| x.ledger_id) != Some(next.ledger_id)
-                    || nhash != a.manifest_hash
-                {
+                let ev =
+                    migration_evidence(&next.ledger_id, source_notice_update, source_qb_update)
+                        .map_err(|e| bad(&e))?;
+                if ev.manifest_hash != a.manifest_hash {
                     return Err(bad("the notice does not carry this ledger's accept"));
                 }
-                let notice_id: [u8; 32] = sha256::Hash::hash(&nu.message).to_byte_array();
-                let LedgerOperation::QuorumBegin {
-                    consumed_notice,
-                    migration_manifest,
-                    migration_receiver,
-                    migration_vout,
-                    new_outpoint_txid,
-                    ..
-                } = qb
-                else {
-                    return Err(bad("the QuorumBegin did not consume that notice"));
-                };
-                if qu.verify_operator_signature().is_err()
-                    || qu.operator_id != nu.operator_id
-                    || qu.ledger_id != nu.ledger_id
-                    || qu.sequence_number <= nu.sequence_number
-                    || consumed_notice != Some(notice_id)
-                {
-                    return Err(bad("the QuorumBegin did not consume that notice"));
-                }
-                if !migration_manifest.is_empty()
-                    && migration_receiver == Some(next.operator_key)
-                    && qu.block_height < a.expires
-                {
-                    let sum: u64 = migration_manifest.iter().map(|e| e.amount).sum();
-                    let premium = premium.unwrap_or(0);
+                if ev.to_us && ev.qb_update.block_height < a.expires {
+                    let sum: u64 = ev.migrated.iter().map(|e| e.amount).sum();
+                    let premium = ev.premium.unwrap_or(0);
                     if sum + premium > a.total {
                         return Err(bad("the migration exceeds the accepted total"));
                     }
+                    // DEP-06: after a custody change only what the confiscation did not pay.
+                    let entries = match next.confiscation_txid {
+                        None => ev.migrated.clone(),
+                        Some(txid) => {
+                            let bytes = confiscation_tx.as_ref().ok_or_else(|| {
+                                bad("after a custody change a MigrationCredit carries the confiscation")
+                            })?;
+                            let tx: bitcoin::Transaction =
+                                bitcoin::consensus::deserialize(bytes)
+                                    .map_err(|_| bad("confiscation_tx does not decode"))?;
+                            if tx.compute_txid().to_byte_array() != txid {
+                                return Err(bad(
+                                    "confiscation_tx is not the recorded confiscation",
+                                ));
+                            }
+                            unpaid_entries(&ev.migrated, &tx)
+                        }
+                    };
                     let h = apply_ctx().height;
-                    for e in &migration_manifest {
+                    for e in &entries {
                         if !next.deposits.contains_key(&e.deposit_id) {
                             let mut d = Deposit::new(e.descriptor.clone(), None);
                             d.deposit_id = e.deposit_id;
@@ -1402,7 +1497,7 @@ impl LedgerState {
                         let after = d.balance;
                         next.add_balance_delta(before, after);
                     }
-                    if premium > 0 {
+                    if premium > 0 && next.confiscation_txid.is_none() {
                         if let Some(d) = a.premium_deposit.and_then(|id| next.deposits.get_mut(&id))
                         {
                             let before = d.balance;
@@ -1411,13 +1506,33 @@ impl LedgerState {
                             next.add_balance_delta(before, after);
                         }
                     }
+                    let swept = next.confiscation_txid.is_some();
                     let st = next.dormancy_accept.as_mut().unwrap();
                     st.resolved = true;
-                    st.outpoint = Some((new_outpoint_txid, migration_vout.unwrap_or(0)));
+                    // a confiscation swept the output: nothing left to splice
+                    st.outpoint = (!swept).then_some((ev.txid, ev.vout));
                 } else {
                     // Consumed without migrating to us: resolved, nothing credited.
                     next.dormancy_accept = None;
                 }
+            }
+            LedgerOperation::ObligationRecord {
+                source_notice_update,
+                source_qb_update,
+            } => {
+                // DEP-06 §Confiscation obligations: on a disputing fork, before arming.
+                if next.dispute_state != DisputeState::Disputed {
+                    return Err(crate::DepositsError::ProtocolViolation {
+                        violation_type: "obligation_record".to_string(),
+                        details: "an obligation is recorded on a disputing fork before arming"
+                            .to_string(),
+                    });
+                }
+                migration_evidence(&next.ledger_id, source_notice_update, source_qb_update)
+                    .map_err(|e| crate::DepositsError::ProtocolViolation {
+                        violation_type: "obligation_record".to_string(),
+                        details: e,
+                    })?;
             }
             LedgerOperation::ExitRequest {
                 deposit_id,
@@ -1957,7 +2072,12 @@ impl LedgerState {
             LedgerOperation::DisputeArmed { .. } => {
                 next.dispute_state = DisputeState::Armed;
             }
-            LedgerOperation::DisputeAcquire { new_custodian, .. } => {
+            LedgerOperation::DisputeAcquire {
+                new_custodian,
+                confiscation_txid,
+                ..
+            } => {
+                next.confiscation_txid = *confiscation_txid;
                 next.vault_current = false;
                 next.dormancy_notice = None;
                 next.migration = None;

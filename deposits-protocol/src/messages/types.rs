@@ -404,6 +404,15 @@ pub enum LedgerOperation {
     MigrationCredit {
         source_notice_update: Vec<u8>,
         source_qb_update: Vec<u8>,
+        /// DEP-06 (TLV 350): after a custody change, the confiscation — only what it did not
+        /// pay is credited.
+        confiscation_tx: Option<Vec<u8>>,
+    },
+    /// DEP-06 §Confiscation obligations: on a disputing fork, before arming, the source's signed
+    /// notice and consuming QuorumBegin of a migration dangling on the disputed ledger.
+    ObligationRecord {
+        source_notice_update: Vec<u8>,
+        source_qb_update: Vec<u8>,
     },
     /// DEP-20 §8.3: the receiver accepts a dormancy migration (appended to its own ledger).
     DormancyAccept {
@@ -413,6 +422,8 @@ pub enum LedgerOperation {
         manifest_hash: [u8; 32],
         offer_event_id: [u8; 32],
         accepted_total: u64,
+        /// DEP-20 §8.3 (TLV 354): the source ledger, so members can find its notice.
+        source_ledger_id: Option<[u8; 32]>,
     },
     /// DEP-20 §3: withdraw a pending ExitRequest (named by SHA256 of its operation).
     ExitCancel {
@@ -862,6 +873,8 @@ pub enum LedgerOperation {
         /// New reserves address (where the lottery output's value now
         /// resides — the winner's `target_reserves` from `DisputeArmed`).
         new_reserves_address: String,
+        /// DEP-06 (TLV 352): the confiscation this custody change follows; its residue is owed.
+        confiscation_txid: Option<[u8; 32]>,
     },
 
     /// Yield custody claim after not being selected. Tombstones this branch.
@@ -957,6 +970,7 @@ impl LedgerOperation {
             Self::DormancyNotice { .. } => 102,
             Self::DormancyAccept { .. } => 103,
             Self::MigrationCredit { .. } => 105,
+            Self::ObligationRecord { .. } => 106,
             Self::InvoiceCredit { .. } => 30,
             Self::InvoiceLock { .. } => 31,
             Self::InvoiceFail { .. } => 32,
@@ -1019,7 +1033,8 @@ impl LedgerOperation {
             | Self::ExitCancel { .. }
             | Self::DormancyNotice { .. }
             | Self::DormancyAccept { .. }
-            | Self::MigrationCredit { .. } => consts::LEDGER_UPDATE,
+            | Self::MigrationCredit { .. }
+            | Self::ObligationRecord { .. } => consts::LEDGER_UPDATE,
             Self::LedgerClose => consts::LEDGER_CLOSE,
             Self::Batch(_) => consts::BATCH,
         }
@@ -1060,7 +1075,7 @@ impl LedgerOperation {
             46 => consts::QUORUM_JOIN,
             45 => consts::QUORUM_UPGRADE,
             50 => consts::MAINTENANCE_FEE_COLLECT,
-            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 | 103 | 105 => consts::LEDGER_UPDATE,
+            54 | 55 | 56 | 57 | 80 | 100 | 101 | 102 | 103 | 105 | 106 => consts::LEDGER_UPDATE,
             60 => consts::LEDGER_CLOSE,
             70 => consts::TRANSFER_LOCK,
             71 => consts::TRANSFER_COMPLETE,
@@ -1781,6 +1796,7 @@ impl BinaryCodec for LedgerOperation {
                 new_custodian,
                 claim_txid,
                 new_reserves_address,
+                ..
             } => {
                 write_pubkey(w, new_custodian)?;
                 write_32(w, claim_txid)?;
@@ -1790,7 +1806,8 @@ impl BinaryCodec for LedgerOperation {
             | Self::ExitCancel { .. }
             | Self::DormancyNotice { .. }
             | Self::DormancyAccept { .. }
-            | Self::MigrationCredit { .. } => {
+            | Self::MigrationCredit { .. }
+            | Self::ObligationRecord { .. } => {
                 return Err(CodecError::InvalidData(
                     "DEP-20 exits have no legacy encoding; use TLV".into(),
                 ));
@@ -2205,6 +2222,7 @@ impl BinaryCodec for LedgerOperation {
                 new_custodian: read_pubkey(r)?,
                 claim_txid: read_32(r)?,
                 new_reserves_address: read_string(r)?,
+                confiscation_txid: None,
             }),
             // DisputeYield (56)
             56 => Ok(Self::DisputeYield),

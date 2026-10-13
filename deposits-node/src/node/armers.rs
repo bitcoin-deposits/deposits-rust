@@ -48,6 +48,8 @@ pub struct Armer {
     pub participant: LotteryParticipant,
     /// Signed-header `block_height` of the armer's latest `DisputeArmed`.
     pub arm_height: u32,
+    /// Sequence of that `DisputeArmed` on the armer's fork.
+    pub arm_seq: u64,
     pub collateral: Option<ReplacementCollateral>,
 }
 
@@ -121,6 +123,7 @@ pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
                 target_reserves,
             ),
             arm_height: u.block_height,
+            arm_seq: u.sequence_number,
             collateral: replacement_collateral,
         };
         match latest.get(&u.operator_id) {
@@ -133,6 +136,141 @@ pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
     let mut out: Vec<Armer> = latest.into_values().map(|(_, a)| a).collect();
     out.sort_by_key(|a| a.xonly().serialize());
     out
+}
+
+/// An output confirmed at or before `snapshot` and unspent through it: its sats.
+pub fn outpoint_at_snapshot(
+    chain: &dyn ChainBackend,
+    txid: Txid,
+    vout: u32,
+    snapshot: u32,
+) -> Result<Option<u64>, String> {
+    let e = |x: crate::error::Error| x.to_string();
+    match chain.get_tx_block_height(&txid).map_err(e)? {
+        Some(h) if h <= snapshot => {}
+        _ => return Ok(None),
+    }
+    let Some(tx) = chain.get_tx(&txid).map_err(e)? else {
+        return Ok(None);
+    };
+    let Some(output) = tx.output.get(vout as usize).cloned() else {
+        return Ok(None);
+    };
+    match chain
+        .confirmed_spend(
+            &OutPoint::new(txid, vout),
+            &output.script_pubkey,
+            snapshot + 1,
+        )
+        .map_err(e)?
+    {
+        ConfirmedSpend::Unspent => Ok(Some(output.value.to_sat())),
+        ConfirmedSpend::SpentAt(h) if h > snapshot => Ok(Some(output.value.to_sat())),
+        _ => Ok(None),
+    }
+}
+
+/// DEP-06 §Confiscation obligations: what a confiscation sweeps and splices out.
+#[derive(Clone, Debug, Default)]
+pub struct ConfiscationObligations {
+    /// Migration outputs at the vault's script, ascending (txid, vout), with their sats.
+    pub swept: Vec<(OutPoint, u64)>,
+    /// Splice-outs ascending by deposit id.
+    pub splice_outs: Vec<(bitcoin::ScriptBuf, u64)>,
+    /// Owed entries no splice-out pays (sats).
+    pub residue_sats: u64,
+}
+
+/// The obligations of a confiscation (mirrors cl-deposits' `confiscation-obligations`): from the
+/// ledger at the fork point (replayed from `updates`) and the `ObligationRecord`s on `set`'s
+/// participants' forks below their `DisputeArmed`, at the snapshot E.
+pub fn confiscation_obligations(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    set: &ArmerSet,
+) -> Result<ConfiscationObligations, String> {
+    use bitcoin::hashes::Hash;
+    let Some(operator) = original_operator(updates) else {
+        return Ok(ConfiscationObligations::default());
+    };
+    let lvs = dispute_last_valid_sequence(updates).unwrap_or(u64::MAX);
+    let mut canonical: Vec<&SignedLedgerUpdate> = updates
+        .iter()
+        .filter(|u| u.operator_id == operator && u.sequence_number <= lvs)
+        .collect();
+    canonical.sort_by_key(|u| u.sequence_number);
+    let mut state = deposits_core::types::LedgerState::new(operator, String::new(), 0);
+    for u in &canonical {
+        let op = LedgerOperation::tlv_decode(&u.message).map_err(|e| e.to_string())?;
+        state = state
+            .apply_for(u, &op)
+            .map_err(|e| format!("replay seq {}: {:?}", u.sequence_number, e))?;
+    }
+    let mut out = ConfiscationObligations::default();
+    let Some(a) = state.dormancy_accept.clone() else {
+        return Ok(out);
+    };
+    if let Some((t, v)) = a.outpoint {
+        if let Some(sats) = outpoint_at_snapshot(chain, Txid::from_byte_array(t), v, set.snapshot)?
+        {
+            out.swept
+                .push((OutPoint::new(Txid::from_byte_array(t), v), sats));
+        }
+    }
+    let mut outs: Vec<(deposits_core::types::DepositId, bitcoin::ScriptBuf, u64)> = Vec::new();
+    if !a.resolved {
+        let mut seen: Vec<([u8; 32], u32)> = Vec::new();
+        for p in &set.participants {
+            for u in updates.iter().filter(|u| {
+                u.operator_id == p.key && u.sequence_number > lvs && u.sequence_number < p.arm_seq
+            }) {
+                let Ok(LedgerOperation::ObligationRecord {
+                    source_notice_update,
+                    source_qb_update,
+                }) = LedgerOperation::tlv_decode(&u.message)
+                else {
+                    continue;
+                };
+                let Ok(ev) = deposits_core::types::migration_evidence(
+                    &state.ledger_id,
+                    &source_notice_update,
+                    &source_qb_update,
+                ) else {
+                    continue;
+                };
+                if !ev.to_us
+                    || ev.manifest_hash != a.manifest_hash
+                    || ev.qb_update.block_height >= a.expires
+                    || seen.contains(&(ev.txid, ev.vout))
+                {
+                    continue;
+                }
+                let Some(sats) = outpoint_at_snapshot(
+                    chain,
+                    Txid::from_byte_array(ev.txid),
+                    ev.vout,
+                    set.snapshot,
+                )?
+                else {
+                    continue;
+                };
+                seen.push((ev.txid, ev.vout));
+                out.swept
+                    .push((OutPoint::new(Txid::from_byte_array(ev.txid), ev.vout), sats));
+                for e in &ev.migrated {
+                    match deposits_core::types::owed_spk_sats(e) {
+                        Some((spk, v)) => outs.push((e.deposit_id, spk, v)),
+                        None => out.residue_sats += e.amount / 1000,
+                    }
+                }
+            }
+        }
+    }
+    out.swept
+        .sort_by_key(|(o, _)| (o.txid.to_byte_array(), o.vout));
+    outs.sort_by_key(|(id, _, _)| *id);
+    out.splice_outs = outs.into_iter().map(|(_, spk, v)| (spk, v)).collect();
+    Ok(out)
 }
 
 /// E: the highest signed-header height among the armers' latest arms.
@@ -459,6 +597,7 @@ mod tests {
             key,
             participant: LotteryParticipant::new(key.x_only_public_key().0, [seed; 20], "t".into()),
             arm_height,
+            arm_seq: 0,
             collateral: rc,
         }
     }

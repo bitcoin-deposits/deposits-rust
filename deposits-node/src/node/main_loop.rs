@@ -1841,6 +1841,7 @@ impl Node {
                                     let _done = Done;
                                     node.drive_vault_watch().await;
                                     node.drive_migration_watch().await;
+                                    node.drive_obligation_watch().await;
                                     node.rebroadcast_inflight_rotations().await;
                                 });
                             }

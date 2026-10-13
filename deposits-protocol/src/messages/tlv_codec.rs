@@ -174,7 +174,10 @@ mod ledger_op_tlv {
     pub const RECEIVER_QUORUM_BEGIN: u64 = 342; // signed update bytes, DormancyNotice (L4)
     pub const CONSUMED_NOTICE: u64 = 344; // [u8; 32], QuorumBegin (DEP-20 §8.3)
     pub const SOURCE_NOTICE_UPDATE: u64 = 346; // MigrationCredit
-    pub const SOURCE_QB_UPDATE: u64 = 348; // MigrationCredit
+    pub const SOURCE_QB_UPDATE: u64 = 348; // MigrationCredit, ObligationRecord
+    pub const CONFISCATION_TX: u64 = 350; // MigrationCredit (after a custody change)
+    pub const CONFISCATION_TXID: u64 = 352; // DisputeAcquire
+    pub const SOURCE_LEDGER_ID: u64 = 354; // DormancyAccept
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -506,6 +509,18 @@ impl TlvEncode for LedgerOperation {
             Self::MigrationCredit {
                 source_notice_update,
                 source_qb_update,
+                confiscation_tx,
+            } => {
+                builder = builder
+                    .bytes_field(SOURCE_NOTICE_UPDATE, source_notice_update)
+                    .bytes_field(SOURCE_QB_UPDATE, source_qb_update);
+                if let Some(t) = confiscation_tx {
+                    builder = builder.bytes_field(CONFISCATION_TX, t);
+                }
+            }
+            Self::ObligationRecord {
+                source_notice_update,
+                source_qb_update,
             } => {
                 builder = builder
                     .bytes_field(SOURCE_NOTICE_UPDATE, source_notice_update)
@@ -518,6 +533,7 @@ impl TlvEncode for LedgerOperation {
                 manifest_hash,
                 offer_event_id,
                 accepted_total,
+                source_ledger_id,
             } => {
                 if let Some(d) = premium_deposit {
                     builder = builder.deposit_id_field(DEPOSIT_ID, d);
@@ -528,6 +544,9 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(MANIFEST_HASH, manifest_hash)
                     .bytes_field(OFFER_EVENT_ID, offer_event_id)
                     .u64_field(ACCEPTED_TOTAL, *accepted_total);
+                if let Some(s) = source_ledger_id {
+                    builder = builder.bytes_field(SOURCE_LEDGER_ID, s);
+                }
             }
             Self::ExitCancel {
                 deposit_id,
@@ -900,11 +919,15 @@ impl TlvEncode for LedgerOperation {
                 new_custodian,
                 claim_txid,
                 new_reserves_address,
+                confiscation_txid,
             } => {
                 builder = builder
                     .pubkey_field(NEW_CUSTODIAN, new_custodian)
                     .bytes_field(CLAIM_TXID, claim_txid)
                     .string_field(NEW_RESERVES_ADDRESS, new_reserves_address);
+                if let Some(t) = confiscation_txid {
+                    builder = builder.bytes_field(CONFISCATION_TXID, t);
+                }
             }
             Self::DeliveryEmbed {
                 request_hash,
@@ -1100,6 +1123,11 @@ impl TlvDecode for LedgerOperation {
             105 => Ok(Self::MigrationCredit {
                 source_notice_update: reader.read_raw(SOURCE_NOTICE_UPDATE)?.to_vec(),
                 source_qb_update: reader.read_raw(SOURCE_QB_UPDATE)?.to_vec(),
+                confiscation_tx: reader.read_raw_opt(CONFISCATION_TX).map(|b| b.to_vec()),
+            }),
+            106 => Ok(Self::ObligationRecord {
+                source_notice_update: reader.read_raw(SOURCE_NOTICE_UPDATE)?.to_vec(),
+                source_qb_update: reader.read_raw(SOURCE_QB_UPDATE)?.to_vec(),
             }),
             103 => Ok(Self::DormancyAccept {
                 premium_deposit: match reader.read_raw_opt(DEPOSIT_ID) {
@@ -1114,6 +1142,7 @@ impl TlvDecode for LedgerOperation {
                 manifest_hash: reader.read_bytes(MANIFEST_HASH)?,
                 offer_event_id: reader.read_bytes(OFFER_EVENT_ID)?,
                 accepted_total: reader.read_u64(ACCEPTED_TOTAL)?,
+                source_ledger_id: reader.read_bytes_opt(SOURCE_LEDGER_ID)?,
             }),
             101 => Ok(Self::ExitCancel {
                 deposit_id: reader.read_deposit_id(DEPOSIT_ID)?,
@@ -1274,6 +1303,7 @@ impl TlvDecode for LedgerOperation {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,
                 claim_txid: reader.read_bytes(CLAIM_TXID)?,
                 new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
+                confiscation_txid: reader.read_bytes_opt(CONFISCATION_TXID)?,
             }),
             56 => Ok(Self::DisputeYield),
             57 => {

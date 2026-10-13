@@ -328,21 +328,24 @@ impl Node {
         // reshape outputs to drain the UTXO into their own pubkey while
         // claiming the dispute resolved respectfully. Refuses (and
         // surfaces a structured reason) on any mismatch.
-        if let Err(reason) = self
+        let sweep_sighashes = match self
             .verify_proposed_confiscation_tx(request, &sighash_bytes)
             .await
         {
-            tracing::warn!(
-                "Refusing confiscation_sign for ledger {}: tx-shape verification failed: {}",
-                ledger_prefix,
-                reason
-            );
-            return (
-                false,
-                None,
-                Some(format!("confiscation tx verification: {}", reason)),
-            );
-        }
+            Ok(s) => s,
+            Err(reason) => {
+                tracing::warn!(
+                    "Refusing confiscation_sign for ledger {}: tx-shape verification failed: {}",
+                    ledger_prefix,
+                    reason
+                );
+                return (
+                    false,
+                    None,
+                    Some(format!("confiscation tx verification: {}", reason)),
+                );
+            }
+        };
 
         // Sign the sighash via the Signer (confiscation tx Tapscript script-spend).
         use deposits_signer_api::{SigPurpose, SignContext};
@@ -367,9 +370,22 @@ impl Node {
             self.known_confiscation_txids.lock().unwrap().insert(txid);
         }
 
+        // DEP-06: one signature per swept migration output (inputs 1..).
+        let mut sweep_signatures = Vec::new();
+        for h in &sweep_sighashes {
+            match self
+                .handler
+                .signer
+                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
+            {
+                Ok(s) => sweep_signatures.push(hex::encode(s)),
+                Err(e) => return (false, None, Some(format!("sweep sighash sign: {}", e))),
+            }
+        }
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature_bytes),
+            "sweep_signatures": sweep_signatures,
         });
 
         tracing::info!(
@@ -1528,7 +1544,7 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
         expected_sighash: &[u8; 32],
-    ) -> Result<(), String> {
+    ) -> Result<Vec<[u8; 32]>, String> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use bitcoin::taproot::{LeafVersion, TapLeafHash};
@@ -1550,17 +1566,8 @@ impl Node {
         let proposed_tx: Transaction = bitcoin::consensus::encode::deserialize(&tx_bytes)
             .map_err(|e| format!("unsigned_tx parse: {}", e))?;
 
-        if proposed_tx.input.len() != 1 {
-            return Err(format!(
-                "expected exactly 1 input, got {}",
-                proposed_tx.input.len()
-            ));
-        }
-        if proposed_tx.output.is_empty() || proposed_tx.output.len() > 2 {
-            return Err(format!(
-                "expected 1 or 2 outputs, got {}",
-                proposed_tx.output.len()
-            ));
+        if proposed_tx.input.is_empty() || proposed_tx.output.is_empty() {
+            return Err("a confiscation spends the vault into the lottery output".to_string());
         }
 
         // 2. is_respectful from authoritative deadline evidence. Two
@@ -1684,9 +1691,15 @@ impl Node {
         let obligations_sats = state.total_deposit_balance() / 1000;
 
         // 6. Lottery participants: the DEP-03 eligibility cut.
-        let participants: Vec<LotteryParticipant> =
-            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?
-                .lottery_participants();
+        let armer_set =
+            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?;
+        let participants: Vec<LotteryParticipant> = armer_set.lottery_participants();
+        // DEP-06 §Confiscation obligations: the swept inputs and splice-outs every builder adds.
+        let obligations = crate::node::armers::confiscation_obligations(
+            &*self.wallet.chain_backend(),
+            &updates,
+            &armer_set,
+        )?;
         if participants.is_empty() {
             return Err(format!(
                 "only {} DisputeArmed participants found",
@@ -1745,18 +1758,35 @@ impl Node {
             deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
         );
 
-        let expected_outputs = crate::node::dispute::build_expected_confiscation_outputs(
-            lottery_output.script_pubkey(),
-            original_operator,
-            self.wallet.network(),
-            reserves_amount,
-            fee,
-            is_respectful,
-            obligations_sats,
-        )
-        .map_err(|e| format!("expected outputs: {}", e))?;
-
-        check_confiscation_shape(&proposed_tx, reserves_outpoint, &expected_outputs)?;
+        let _ = fee;
+        // DEP-03: sign only a byte-identical rebuild (lock_time is checked against the tier below).
+        let rebuilt = deposits_core::tapscript_reserves::build_confiscation_tx(
+            &deposits_core::tapscript_reserves::ConfiscationTxParams {
+                vault: (reserves_outpoint, reserves_amount),
+                swept: obligations.swept.clone(),
+                lottery_spk: lottery_output.script_pubkey(),
+                voters: qb_members
+                    .iter()
+                    .filter(|pk| **pk != original_operator)
+                    .count()
+                    + 1,
+                lock_time: proposed_tx.lock_time.to_consensus_u32(),
+                respectful: is_respectful,
+                obligations_sats,
+                residue_sats: obligations.residue_sats,
+                splice_outs: obligations.splice_outs.clone(),
+                operator: original_operator,
+            },
+        );
+        if rebuilt != proposed_tx {
+            return Err(format!(
+                "the proposed confiscation is not the one we rebuild (inputs {} vs {}, outputs {} vs {})",
+                rebuilt.input.len(),
+                proposed_tx.input.len(),
+                rebuilt.output.len(),
+                proposed_tx.output.len()
+            ));
+        }
 
         // 9. Re-derive the sighash from the proposed tx + reconstructed
         //    reserves prevout + tap leaf, then compare to the sighash
@@ -1810,12 +1840,28 @@ impl Node {
             .map_err(|e| format!("rebuild leaf script: {:?}", e))?;
         let leaf_hash = TapLeafHash::from_script(&leaf_script, LeafVersion::TapScript);
 
-        let prevouts = vec![TxOut {
+        let mut prevouts = vec![TxOut {
             value: Amount::from_sat(reserves_amount),
-            script_pubkey: reserves_script,
+            script_pubkey: reserves_script.clone(),
         }];
+        prevouts.extend(obligations.swept.iter().map(|(_, sats)| TxOut {
+            value: Amount::from_sat(*sats),
+            script_pubkey: reserves_script.clone(),
+        }));
 
         let mut sighash_cache = SighashCache::new(&proposed_tx);
+        let mut sweep_sighashes: Vec<[u8; 32]> = Vec::new();
+        for i in 1..proposed_tx.input.len() {
+            let h = sighash_cache
+                .taproot_script_spend_signature_hash(
+                    i,
+                    &bitcoin::sighash::Prevouts::All(&prevouts),
+                    leaf_hash,
+                    TapSighashType::Default,
+                )
+                .map_err(|e| format!("compute sweep sighash: {}", e))?;
+            sweep_sighashes.push(h.to_byte_array());
+        }
         let derived_sighash = sighash_cache
             .taproot_script_spend_signature_hash(
                 0,
@@ -1834,7 +1880,7 @@ impl Node {
             ));
         }
 
-        Ok(())
+        Ok(sweep_sighashes)
     }
 
     pub(crate) async fn process_custodian_query_request(

@@ -1020,6 +1020,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 new_custodian: pk(),
                 claim_txid: h32(),
                 new_reserves_address: "bcrt1qnew".into(),
+                confiscation_txid: None,
             },
         ),
         ("DisputeYield", LedgerOperation::DisputeYield),

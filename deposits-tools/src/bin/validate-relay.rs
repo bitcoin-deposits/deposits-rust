@@ -422,6 +422,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DormancyNotice { .. } => "DormancyNotice",
         LedgerOperation::DormancyAccept { .. } => "DormancyAccept",
         LedgerOperation::MigrationCredit { .. } => "MigrationCredit",
+        LedgerOperation::ObligationRecord { .. } => "ObligationRecord",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFail { .. } => "InvoiceFail",

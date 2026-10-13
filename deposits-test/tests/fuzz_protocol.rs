@@ -653,6 +653,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DormancyNotice { .. } => "DormancyNotice",
         LedgerOperation::DormancyAccept { .. } => "DormancyAccept",
         LedgerOperation::MigrationCredit { .. } => "MigrationCredit",
+        LedgerOperation::ObligationRecord { .. } => "ObligationRecord",
         LedgerOperation::InvoiceCredit { .. } => "InvoiceCredit",
         LedgerOperation::InvoiceLock { .. } => "InvoiceLock",
         LedgerOperation::InvoiceFulfill { .. } => "InvoiceFulfill",
@@ -949,6 +950,7 @@ impl ProtocolSim {
                     new_custodian: self.operators[branch.disputer].public_key,
                     claim_txid,
                     new_reserves_address: format!("bcrt1q_new_{}", branch.disputer),
+                    confiscation_txid: None,
                 };
                 let _ = (entropy_height, entropy_block_hash); // unused after lottery rework
                 let replica = self.operators[branch.disputer].replicas[&victim].clone();
@@ -1931,6 +1933,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                     t
                 },
                 new_reserves_address: format!("bcrt1q_adv_self_{}", proposer),
+                confiscation_txid: None,
             },
             _ => LedgerOperation::DisputeYield,
         };
@@ -2485,6 +2488,7 @@ fn adv_majority_quorum_can_take_over_honest_ledger() {
         new_custodian: attacker_pk,
         claim_txid: [0x33; 32],
         new_reserves_address: format!("bcrt1q_attacker_{}", attacker),
+        confiscation_txid: None,
     };
     assert_eq!(
         sim.adversary_propose_on_victim(victim, attacker, acquire),

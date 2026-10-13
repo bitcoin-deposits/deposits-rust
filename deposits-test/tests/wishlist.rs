@@ -573,6 +573,7 @@ fn tier3_3_lottery_griefing() {
                 new_custodian: charlie_pk,
                 claim_txid: [0xCC; 32],
                 new_reserves_address: "bcrt1qcharlie".into(),
+                confiscation_txid: None,
             });
 
     let can_proceed = acquire_result.is_ok();

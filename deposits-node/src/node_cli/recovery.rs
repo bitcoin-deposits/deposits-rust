@@ -2704,6 +2704,7 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             new_custodian: our_pubkey,
             claim_txid: entropy_block_hash,
             new_reserves_address: String::new(),
+            confiscation_txid: None,
         };
 
         let message_bytes = operation.tlv_encode();
@@ -5114,6 +5115,10 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         new_custodian: our_pubkey,
         claim_txid: claim_txid_bytes,
         new_reserves_address: winner_participant.target_reserves.clone(),
+        confiscation_txid: Some({
+            use bitcoin::hashes::Hash;
+            claim_tx.input[0].previous_output.txid.to_byte_array()
+        }),
     };
 
     let message_bytes = operation.tlv_encode();
@@ -6360,7 +6365,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
         .verify_proposed_confiscation_tx(&mock_request, &sighash_bytes)
         .await
     {
-        Ok(()) => {
+        Ok(_) => {
             println!("  ✓ verifier accepts this plan");
         }
         Err(e) => {

@@ -316,6 +316,7 @@ fn attack_false_custody_claim() {
         new_custodian: net.op("alice").public_key, // alice claims for herself
         claim_txid: [0xCC; 32],
         new_reserves_address: "bcrt1qalice_steals".to_string(),
+        confiscation_txid: None,
     };
 
     // This is a protocol-layer test — apply() doesn't validate entropy winner.

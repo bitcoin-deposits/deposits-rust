@@ -442,6 +442,7 @@ fn custody_acquire() {
         new_custodian: pk(),
         claim_txid: h32(),
         new_reserves_address: "bcrt1qnew".into(),
+        confiscation_txid: None,
     });
 }
 

@@ -20,6 +20,30 @@ use super::*;
 /// The dust-fallback bridge: when `obligations + fee` would leave under
 /// `P2WPKH_DUST_LIMIT_SATS` for the operator, we collapse to a single
 /// lottery output rather than emit unspendable change.
+/// A tier-leaf witness: [sig_{n-1} .. sig_0 (empty where absent), leaf, control block].
+pub(crate) fn tier_witness(
+    voter_set: &deposits_core::VoterSet,
+    sigs: &std::collections::HashMap<bitcoin::secp256k1::PublicKey, [u8; 64]>,
+    leaf_script: &bitcoin::ScriptBuf,
+    control_block: &bitcoin::taproot::ControlBlock,
+) -> bitcoin::Witness {
+    let mut witness = bitcoin::Witness::new();
+    for x_only in voter_set.sorted_x_only_pubkeys().iter().rev() {
+        match voter_set
+            .all_voters()
+            .into_iter()
+            .find(|v| v.x_only_public_key().0 == *x_only)
+            .and_then(|v| sigs.get(&v))
+        {
+            Some(sig) => witness.push(sig),
+            None => witness.push([] as [u8; 0]),
+        }
+    }
+    witness.push(leaf_script.as_bytes());
+    witness.push(control_block.serialize());
+    witness
+}
+
 pub fn build_expected_confiscation_outputs(
     lottery_script: bitcoin::ScriptBuf,
     original_operator: bitcoin::secp256k1::PublicKey,
@@ -1070,6 +1094,64 @@ impl Node {
             }
         }
 
+        // 2b. DEP-06 §Confiscation obligations: record a dangling migration before arming.
+        let pending_obligation = {
+            let fork_ledger = fork_arc.read().unwrap();
+            let recorded = fork_ledger.history.iter().any(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::ObligationRecord { .. })
+                        | Ok(LedgerOperation::DisputeArmed { .. })
+                )
+            });
+            match &fork_ledger.state.dormancy_accept {
+                Some(a) if !a.resolved && !recorded => a.source.map(|s| (s, a.manifest_hash)),
+                _ => None,
+            }
+        };
+        if let Some((source, manifest_hash)) = pending_obligation {
+            use deposits_core::TlvEncode;
+            let hist = self.receiver_history(&hex::encode(source)).await;
+            let nu = hist.iter().rev().find(|u| {
+                matches!(LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DormancyNotice { manifest_hash: Some(h), .. }) if h == manifest_hash)
+            });
+            let qu = nu.and_then(|nu| {
+                use bitcoin::hashes::{sha256, Hash};
+                let id = sha256::Hash::hash(&nu.message).to_byte_array();
+                hist.iter().find(|u| {
+                    matches!(LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::QuorumBegin { consumed_notice: Some(c), .. }) if c == id)
+                })
+            });
+            if let (Some(nu), Some(qu)) = (nu, qu) {
+                let op = LedgerOperation::ObligationRecord {
+                    source_notice_update: nu.tlv_encode(),
+                    source_qb_update: qu.tlv_encode(),
+                };
+                let appended = {
+                    let mut fork_ledger = fork_arc.write().unwrap();
+                    match fork_ledger.append_operation_with_block(op, current_block, block_hash) {
+                        Ok(_) => {
+                            if let Some(update) = fork_ledger.history.last_mut() {
+                                update.operator_id = our_pubkey;
+                            }
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!("ObligationRecord not appended to fork: {:?}", e);
+                            false
+                        }
+                    }
+                };
+                if appended {
+                    self.sign_last_update(&fork_key)?;
+                    added_new_operations = true;
+                    tracing::info!("Recorded the dangling migration on our fork (DEP-06)");
+                }
+            }
+        }
+
         // 3. Publish DisputeArmed with preimage commitment on the fork.
         //
         // 3a. Under a read lock: is there a prior arm, and what floor must
@@ -1885,6 +1967,11 @@ impl Node {
             new_custodian: our_pubkey,
             claim_txid: claim_txid_bytes,
             new_reserves_address: winner_participant.target_reserves.clone(),
+            // DEP-06: the claim spends the confiscation's lottery output (vout 0).
+            confiscation_txid: Some({
+                use bitcoin::hashes::Hash;
+                claim_tx.input[0].previous_output.txid.to_byte_array()
+            }),
         };
 
         let message_bytes = operation.tlv_encode();
@@ -2535,11 +2622,24 @@ impl Node {
                                     if let (Ok(signer), Ok(sig_bytes)) =
                                         (signer_hex.parse::<PublicKey>(), hex::decode(sig_hex))
                                     {
+                                        let sweeps: Vec<[u8; 64]> = result
+                                            .get("sweep_signatures")
+                                            .and_then(|v| v.as_array())
+                                            .map(|a| {
+                                                a.iter()
+                                                    .filter_map(|x| x.as_str())
+                                                    .filter_map(|h| hex::decode(h).ok())
+                                                    .filter_map(|b| b.try_into().ok())
+                                                    .collect()
+                                            })
+                                            .unwrap_or_default();
                                         if sig_bytes.len() == 64
                                             && !pc.signatures.contains_key(&signer)
+                                            && sweeps.len() + 1 == pc.confiscation_tx.input.len()
                                         {
                                             let mut sig_arr = [0u8; 64];
                                             sig_arr.copy_from_slice(&sig_bytes);
+                                            pc.sweep_signatures.insert(signer, sweeps);
                                             pc.signatures.insert(signer, sig_arr);
                                             tracing::info!("  Confiscation {}: received signature from {}... ({}/{})",
                                                 &prefix, &signer.to_string()[..16], pc.signatures.len(), required_sigs);
@@ -2606,6 +2706,17 @@ impl Node {
 
         let mut confiscation_tx = pc.confiscation_tx;
         confiscation_tx.input[0].witness = witness;
+        for i in 1..confiscation_tx.input.len() {
+            confiscation_tx.input[i].witness = tier_witness(
+                &pc.voter_set,
+                &pc.sweep_signatures
+                    .iter()
+                    .filter_map(|(k, v)| v.get(i - 1).map(|s| (*k, *s)))
+                    .collect(),
+                &pc.leaf_script,
+                &control_block,
+            );
+        }
 
         // Broadcast
         tracing::info!("  Broadcasting confiscation transaction...");
@@ -2846,6 +2957,7 @@ impl Node {
 
             // DEP-03 eligibility cut: armers whose replacement collateral
             // fails are excluded from the lottery rather than stalling it.
+            let armer_set: super::armers::ArmerSet;
             let participants: Vec<LotteryParticipant> = match super::armers::eligible_armers(
                 &*self.wallet.chain_backend(),
                 &paginated_updates,
@@ -2868,6 +2980,7 @@ impl Node {
                             .collect::<Vec<_>>()
                             .join(", ")
                     );
+                    armer_set = set.clone();
                     set.lottery_participants()
                 }
                 Ok(set) => {
@@ -3004,54 +3117,34 @@ impl Node {
                     .unwrap_or(0)
             };
 
-            let outputs: Vec<TxOut> = match build_expected_confiscation_outputs(
-                lottery_output.script_pubkey(),
-                original_operator,
-                self.wallet.network(),
-                reserves_amount,
-                fee,
-                is_respectful,
-                obligations_sats,
+            // DEP-06 §Confiscation obligations: sweep the migration outputs at the vault's
+            // script and splice out the owed entries (the lottery output stays output 0).
+            let obligations = match super::armers::confiscation_obligations(
+                &*self.wallet.chain_backend(),
+                &paginated_updates,
+                &armer_set,
             ) {
-                Ok(o) => {
-                    if o.len() == 2 {
-                        tracing::info!(
-                            "  Bifurcated confiscation: lottery={} sats, operator change={} sats \
-                             (obligations={} sats, fee={} sats, total={} sats)",
-                            o[0].value.to_sat(),
-                            o[1].value.to_sat(),
-                            obligations_sats,
-                            fee,
-                            reserves_amount
-                        );
-                    }
-                    o
-                }
+                Ok(o) => o,
                 Err(e) => {
-                    tracing::error!(
-                        "Failed to build confiscation outputs for {}: {}",
-                        ledger_prefix,
-                        e
-                    );
+                    tracing::error!("Confiscation obligations for {}: {}", ledger_prefix, e);
                     continue;
                 }
             };
-
-            // Provisional TX shape; lock_time is patched below once we
-            // know which lifecycle tier we're spending under (degraded
-            // tiers carry an absolute CLTV target the spending TX must
-            // honour via nLockTime).
-            let mut confiscation_tx = Transaction {
-                version: bitcoin::transaction::Version::TWO,
-                lock_time: bitcoin::absolute::LockTime::ZERO,
-                input: vec![TxIn {
-                    previous_output: reserves_outpoint,
-                    script_sig: bitcoin::ScriptBuf::new(),
-                    sequence: bitcoin::Sequence::ENABLE_RBF_NO_LOCKTIME,
-                    witness: Witness::default(),
-                }],
-                output: outputs,
-            };
+            let _ = fee;
+            let mut confiscation_tx = deposits_core::tapscript_reserves::build_confiscation_tx(
+                &deposits_core::tapscript_reserves::ConfiscationTxParams {
+                    vault: (reserves_outpoint, reserves_amount),
+                    swept: obligations.swept.clone(),
+                    lottery_spk: lottery_output.script_pubkey(),
+                    voters: quorum_members.len() + 1,
+                    lock_time: 0,
+                    respectful: is_respectful,
+                    obligations_sats,
+                    residue_sats: obligations.residue_sats,
+                    splice_outs: obligations.splice_outs.clone(),
+                    operator: original_operator,
+                },
+            );
 
             // Build the Taproot reserves structure for signing using
             // the ruleset that the disputed ledger committed to in
@@ -3170,10 +3263,37 @@ impl Node {
                 bitcoin::taproot::LeafVersion::TapScript,
             );
 
-            let prevouts = vec![TxOut {
+            let mut prevouts = vec![TxOut {
                 value: Amount::from_sat(reserves_amount),
                 script_pubkey: reserves_addr.script_pubkey(),
             }];
+            prevouts.extend(obligations.swept.iter().map(|(_, sats)| TxOut {
+                value: Amount::from_sat(*sats),
+                script_pubkey: reserves_addr.script_pubkey(),
+            }));
+            // One sighash per swept input (inputs 1..), same leaf.
+            let sweep_sighashes: Vec<[u8; 32]> = {
+                let mut c = SighashCache::new(&confiscation_tx);
+                let mut v = Vec::new();
+                for i in 1..confiscation_tx.input.len() {
+                    match c.taproot_script_spend_signature_hash(
+                        i,
+                        &bitcoin::sighash::Prevouts::All(&prevouts),
+                        leaf_hash,
+                        TapSighashType::Default,
+                    ) {
+                        Ok(h) => v.push(*h.as_ref()),
+                        Err(e) => {
+                            tracing::error!("Failed to compute sweep sighash: {}", e);
+                            break;
+                        }
+                    }
+                }
+                v
+            };
+            if sweep_sighashes.len() + 1 != confiscation_tx.input.len() {
+                continue;
+            }
 
             let mut sighash_cache = SighashCache::new(&confiscation_tx);
             let sighash = match sighash_cache.taproot_script_spend_signature_hash(
@@ -3205,6 +3325,21 @@ impl Node {
 
             let mut signatures: HashMap<PublicKey, [u8; 64]> = HashMap::new();
             signatures.insert(our_pubkey, our_signature);
+            let mut sweep_signatures: HashMap<PublicKey, Vec<[u8; 64]>> = HashMap::new();
+            {
+                let mut ours = Vec::new();
+                for h in &sweep_sighashes {
+                    match self
+                        .handler
+                        .signer
+                        .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
+                    {
+                        Ok(s) => ours.push(s),
+                        Err(e) => tracing::error!("Sweep sighash sign failed: {}", e),
+                    }
+                }
+                sweep_signatures.insert(our_pubkey, ours);
+            }
 
             tracing::info!("  Signed with our key");
 
@@ -3247,6 +3382,17 @@ impl Node {
 
                 let mut confiscation_tx = confiscation_tx;
                 confiscation_tx.input[0].witness = witness;
+                for i in 1..confiscation_tx.input.len() {
+                    confiscation_tx.input[i].witness = super::dispute::tier_witness(
+                        &voter_set,
+                        &sweep_signatures
+                            .iter()
+                            .filter_map(|(k, v)| v.get(i - 1).map(|s| (*k, *s)))
+                            .collect(),
+                        &leaf_script,
+                        &control_block,
+                    );
+                }
 
                 tracing::info!("  Broadcasting confiscation transaction (enough sigs locally)...");
                 // See note at finalize_confiscation: an "already in
@@ -3300,6 +3446,8 @@ impl Node {
                 // first-non-tie-breaker-tier-with-threshold>1 fallback
                 // and miss when we're rotating at a degraded tier.
                 "tier_index": tier_index,
+                // DEP-06: one signature per swept migration output (inputs 1..)
+                "sweep_sighashes": sweep_sighashes.iter().map(hex::encode).collect::<Vec<_>>(),
             });
 
             let request_id = match self
@@ -3326,6 +3474,7 @@ impl Node {
                 confiscation_tx,
                 sighash_bytes,
                 signatures,
+                sweep_signatures,
                 required_sigs,
                 voter_set,
                 tier_index,
@@ -3751,6 +3900,7 @@ mod recovery_chaining_tests {
             new_custodian,
             claim_txid: [3u8; 32],
             new_reserves_address: "bcrt1qwinner".to_string(),
+            confiscation_txid: None,
         }
     }
 

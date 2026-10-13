@@ -905,6 +905,89 @@ pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
     })
 }
 
+/// The inputs DEP-03 §"Confiscation fee" and DEP-06 §Confiscation obligations fix the
+/// confiscation from.
+#[derive(Clone, Debug)]
+pub struct ConfiscationTxParams {
+    /// The vault (input 0) and its sats.
+    pub vault: (bitcoin::OutPoint, u64),
+    /// Swept migration outputs at the vault's script, ascending (txid, vout), with their sats.
+    pub swept: Vec<(bitcoin::OutPoint, u64)>,
+    pub lottery_spk: ScriptBuf,
+    /// Keys of the vault (members and operator).
+    pub voters: usize,
+    pub lock_time: u32,
+    pub respectful: bool,
+    /// The ledger's obligations (sats) at the fork point.
+    pub obligations_sats: u64,
+    /// Owed entries no splice-out pays (sats).
+    pub residue_sats: u64,
+    /// Obligation splice-outs, ascending by deposit id: (spk, sats).
+    pub splice_outs: Vec<(ScriptBuf, u64)>,
+    pub operator: bitcoin::secp256k1::PublicKey,
+}
+
+/// The unsigned confiscation (DEP-03 / DEP-06): version 2, nLockTime the tier's CLTV; input 0 the
+/// vault, then the swept outputs, all `0xfffffffd`; output 0 the lottery (punitive: inputs − fee −
+/// splice-outs; respectful: `max(obligations + residue, 330)` and the rest to the operator's
+/// P2WPKH unless that is under 294), then the splice-outs. Fee `2 × (120 + 30 × voters +
+/// |swept| × (41 + 30 × voters))`. Mirrors cl-deposits' `confiscation-tx`.
+pub fn build_confiscation_tx(p: &ConfiscationTxParams) -> bitcoin::Transaction {
+    use bitcoin::{
+        absolute::LockTime, transaction::Version, Amount, Sequence, TxIn, TxOut, Witness,
+    };
+    let v = p.voters as u64;
+    let fee =
+        CONFISCATION_DEFAULT_FEERATE_SAT_VB * (120 + 30 * v + p.swept.len() as u64 * (41 + 30 * v));
+    let inputs: u64 = p.vault.1 + p.swept.iter().map(|(_, s)| *s).sum::<u64>();
+    let paid: u64 = p.splice_outs.iter().map(|(_, s)| *s).sum();
+    let reserves = inputs.saturating_sub(paid);
+    let punitive = vec![TxOut {
+        value: Amount::from_sat(reserves.saturating_sub(fee)),
+        script_pubkey: p.lottery_spk.clone(),
+    }];
+    let mut output = if !p.respectful {
+        punitive
+    } else {
+        let lottery = (p.obligations_sats + p.residue_sats).max(330);
+        let change = reserves.saturating_sub(lottery).saturating_sub(fee);
+        if change < 294 {
+            punitive
+        } else {
+            let wpkh = bitcoin::CompressedPublicKey(p.operator).wpubkey_hash();
+            vec![
+                TxOut {
+                    value: Amount::from_sat(lottery),
+                    script_pubkey: p.lottery_spk.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(change),
+                    script_pubkey: ScriptBuf::new_p2wpkh(&wpkh),
+                },
+            ]
+        }
+    };
+    output.extend(p.splice_outs.iter().map(|(spk, s)| TxOut {
+        value: Amount::from_sat(*s),
+        script_pubkey: spk.clone(),
+    }));
+    let input = std::iter::once(p.vault.0)
+        .chain(p.swept.iter().map(|(o, _)| *o))
+        .map(|previous_output| TxIn {
+            previous_output,
+            script_sig: ScriptBuf::new(),
+            sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+            witness: Witness::new(),
+        })
+        .collect();
+    bitcoin::Transaction {
+        version: Version::TWO,
+        lock_time: LockTime::from_consensus(p.lock_time),
+        input,
+        output,
+    }
+}
+
 /// DEP-03 `claim_fee_floor` with no `reference_feerate_sat_vb` recorded: the lottery
 /// claim's fee, and the padding every replacement-collateral declaration must cover.
 pub const CLAIM_FEE_FLOOR_SATS: u64 = 5_000;

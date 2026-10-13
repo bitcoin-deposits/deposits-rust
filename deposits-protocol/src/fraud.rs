@@ -117,6 +117,9 @@ pub enum FraudProofType {
     /// transaction are the evidence. Discriminant 10 (the spec's own
     /// numbering collides with the implementations' 1–9).
     UnauthorizedVaultSpend,
+    /// DEP-06 §Confiscation obligations: after a custody change the new operator left the residue
+    /// of a dangling migration uncredited past the ledger's service_response_blocks.
+    UnhonouredObligation,
 }
 
 impl FraudProofType {
@@ -181,6 +184,7 @@ impl FraudProofType {
             | Self::Equivocation
             | Self::NonConformingCosignature
             | Self::UnauthorizedVaultSpend
+            | Self::UnhonouredObligation
             | Self::StaleCosignature
             | Self::QuorumExpired
             | Self::WinnerCollateralDeviation => false,
@@ -244,6 +248,18 @@ pub enum FraudEvidence {
         confirmed_at_block_hash: [u8; 32],
         /// The receiver's signed update (TLV hex) its own `service_response_blocks` or more
         /// after that block; the deadline is never carried (the verifier reads the receiver's terms).
+        proof_update: String,
+    },
+
+    /// DEP-06 §Confiscation obligations (proof 11).
+    UnhonouredObligation {
+        source_notice_update: String,
+        source_qb_update: String,
+        /// The accused's DisputeAcquire update (TLV hex), naming the confiscation.
+        acquire_update: String,
+        /// The confiscation transaction (hex, unsigned form).
+        confiscation_tx: String,
+        /// The accused's update past the deadline (TLV hex).
         proof_update: String,
     },
 
@@ -2789,6 +2805,230 @@ pub fn uncredited_migration_proof(
     })
 }
 
+/// DEP-06: a MigrationCredit after `after_seq`, at or before `upto_seq`, resolving the migration
+/// `txid`:`vout`.
+fn residue_credited(
+    history: &[crate::types::SignedLedgerUpdate],
+    after_seq: u64,
+    upto_seq: u64,
+    txid: [u8; 32],
+    vout: u32,
+) -> bool {
+    let window: Vec<crate::types::SignedLedgerUpdate> = history
+        .iter()
+        .filter(|u| u.sequence_number > after_seq)
+        .cloned()
+        .collect();
+    migration_credited(&[], &window, upto_seq, txid, vout)
+}
+
+/// Shared by the producer and verifier of `UnhonouredObligation`: the ledger replayed before the
+/// acquire, and the source evidence checked against it (the migration dangled at the custody
+/// change). Returns (evidence, prefix).
+fn obligation_context(
+    history: &[crate::types::SignedLedgerUpdate],
+    acquire: &crate::types::SignedLedgerUpdate,
+    notice_bytes: &[u8],
+    qb_bytes: &[u8],
+) -> Result<
+    (
+        crate::types::MigrationEvidence,
+        Vec<crate::types::SignedLedgerUpdate>,
+    ),
+    String,
+> {
+    let mut prefix: Vec<crate::types::SignedLedgerUpdate> = history
+        .iter()
+        .filter(|u| u.sequence_number < acquire.sequence_number)
+        .cloned()
+        .collect();
+    prefix.sort_by_key(|u| u.sequence_number);
+    let refs: Vec<&crate::types::SignedLedgerUpdate> = prefix.iter().collect();
+    let l = replay_canonical(&refs)?;
+    let a = l
+        .dormancy_accept
+        .clone()
+        .ok_or("no accept before the custody change")?;
+    let ev = crate::types::migration_evidence(&l.ledger_id, notice_bytes, qb_bytes)?;
+    if !(ev.to_us
+        && ev.manifest_hash == a.manifest_hash
+        && !a.resolved
+        && ev.qb_update.block_height < a.expires)
+    {
+        return Err("the migration was not dangling at the custody change".into());
+    }
+    Ok((ev, prefix))
+}
+
+/// DEP-06 producer: an `UnhonouredObligation` against the new operator (`acquire`'s custodian)
+/// whose `history` (ascending) has an update its governing service_response_blocks past the
+/// acquire without crediting the residue of the dangling migration (`notice`, `qb`) that
+/// `confiscation_tx` did not pay. Mirrors cl-deposits' `unhonoured-obligation-proof`.
+pub fn unhonoured_obligation_proof(
+    history: &[crate::types::SignedLedgerUpdate],
+    acquire: &crate::types::SignedLedgerUpdate,
+    confiscation_tx: &bitcoin::Transaction,
+    notice: &crate::types::SignedLedgerUpdate,
+    qb: &crate::types::SignedLedgerUpdate,
+) -> Option<FraudProof> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::{TlvDecode, TlvEncode};
+    let (ev, _) =
+        obligation_context(history, acquire, &notice.tlv_encode(), &qb.tlv_encode()).ok()?;
+    if crate::types::unpaid_entries(&ev.migrated, confiscation_tx).is_empty() {
+        return None;
+    }
+    let srb = governing_service_response_blocks(history, acquire.sequence_number);
+    let pu = history
+        .iter()
+        .rfind(|u| u.block_height >= acquire.block_height.saturating_add(srb))?;
+    if residue_credited(
+        history,
+        acquire.sequence_number,
+        pu.sequence_number,
+        ev.txid,
+        ev.vout,
+    ) {
+        return None;
+    }
+    let Ok(LedgerOperation::DisputeAcquire { new_custodian, .. }) =
+        LedgerOperation::tlv_decode(&acquire.message)
+    else {
+        return None;
+    };
+    Some(FraudProof {
+        proof_type: FraudProofType::UnhonouredObligation,
+        accused: hex::encode(new_custodian.serialize()),
+        ledger_id: hex::encode(acquire.ledger_id),
+        evidence: FraudEvidence::UnhonouredObligation {
+            source_notice_update: hex::encode(notice.tlv_encode()),
+            source_qb_update: hex::encode(qb.tlv_encode()),
+            acquire_update: hex::encode(acquire.tlv_encode()),
+            confiscation_tx: bitcoin::consensus::encode::serialize_hex(confiscation_tx),
+            proof_update: hex::encode(pu.tlv_encode()),
+        },
+    })
+}
+
+/// Verify an `UnhonouredObligation` (DEP-06 §Confiscation obligations): the accused took custody
+/// (a DisputeAcquire naming the confiscation), a dangling migration's residue was not paid by
+/// that confiscation, and the accused signed `proof_update` its governing
+/// service_response_blocks after the acquire without crediting it.
+pub fn verify_unhonoured_obligation(
+    proof: &FraudProof,
+    history: &[crate::types::SignedLedgerUpdate],
+    block_oracle: &dyn BlockOracle,
+) -> Result<(), String> {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    use crate::types::SignedLedgerUpdate;
+    let FraudEvidence::UnhonouredObligation {
+        source_notice_update,
+        source_qb_update,
+        acquire_update,
+        confiscation_tx,
+        proof_update,
+    } = &proof.evidence
+    else {
+        return Err("verify_unhonoured_obligation: wrong evidence type".into());
+    };
+    let dec = |h: &str, what: &str| -> Result<SignedLedgerUpdate, String> {
+        SignedLedgerUpdate::tlv_decode(&hex::decode(h).map_err(|e| format!("{what}: {e}"))?)
+            .map_err(|e| format!("{what}: {e:?}"))
+    };
+    let au = dec(acquire_update, "acquire_update")?;
+    let pu = dec(proof_update, "proof_update")?;
+    let tx: bitcoin::Transaction = bitcoin::consensus::deserialize(
+        &hex::decode(confiscation_tx).map_err(|e| format!("confiscation_tx: {e}"))?,
+    )
+    .map_err(|e| format!("confiscation_tx: {e}"))?;
+    let in_history = |u: &SignedLedgerUpdate| {
+        history
+            .iter()
+            .any(|h| h.sequence_number == u.sequence_number && h.chain_hash() == u.chain_hash())
+    };
+    let Ok(LedgerOperation::DisputeAcquire {
+        new_custodian,
+        confiscation_txid,
+        ..
+    }) = LedgerOperation::tlv_decode(&au.message)
+    else {
+        return Err(
+            "acquire_update is not the accused's custody change naming this confiscation".into(),
+        );
+    };
+    use bitcoin::hashes::Hash;
+    if !in_history(&au)
+        || hex::encode(new_custodian.serialize()) != proof.accused
+        || confiscation_txid != Some(tx.compute_txid().to_byte_array())
+    {
+        return Err(
+            "acquire_update is not the accused's custody change naming this confiscation".into(),
+        );
+    }
+    let (ev, prefix) = obligation_context(
+        history,
+        &au,
+        &hex::decode(source_notice_update).map_err(|e| e.to_string())?,
+        &hex::decode(source_qb_update).map_err(|e| e.to_string())?,
+    )?;
+    let vault = prefix
+        .iter()
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid,
+                new_outpoint_vout,
+                ..
+            }) => Some((new_outpoint_txid, new_outpoint_vout)),
+            _ => None,
+        });
+    let in0 = tx.input.first().ok_or("confiscation_tx has no input")?;
+    if vault
+        != Some((
+            in0.previous_output.txid.to_byte_array(),
+            in0.previous_output.vout,
+        ))
+    {
+        return Err("confiscation_tx does not spend the ledger's vault".into());
+    }
+    if crate::types::unpaid_entries(&ev.migrated, &tx).is_empty() {
+        return Err("the confiscation paid every entry: no residue".into());
+    }
+    if pu.verify_operator_signature().is_err()
+        || hex::encode(pu.operator_id.serialize()) != proof.accused
+        || pu.ledger_id != au.ledger_id
+        || !in_history(&pu)
+    {
+        return Err("proof_update is not the accused's update in its history".into());
+    }
+    let (Some(ah), Some(ph)) = (
+        block_oracle.confirms(&au.block_hash),
+        block_oracle.confirms(&pu.block_hash),
+    ) else {
+        return Err("the updates' blocks are not on the verifier's chain".into());
+    };
+    if ph != pu.block_height {
+        return Err("the updates' blocks are not on the verifier's chain".into());
+    }
+    let srb = governing_service_response_blocks(history, au.sequence_number);
+    if ph.saturating_sub(ah) < srb {
+        return Err(format!(
+            "the proof update is fewer than {srb} blocks after the custody change"
+        ));
+    }
+    if residue_credited(
+        history,
+        au.sequence_number,
+        pu.sequence_number,
+        ev.txid,
+        ev.vout,
+    ) {
+        return Err("the residue was credited: not fraud".into());
+    }
+    Ok(())
+}
+
 /// Verify an `UncreditedOnchainPayment` claim with DEP-20 §8.3 migration evidence.
 ///
 /// Checks: the notice and the QuorumBegin are the same source operator's signed updates on one
@@ -3223,6 +3463,15 @@ pub fn verify_fraud_evidence(
             })?;
             verify_non_conforming_update(proof, &accused_history, authorizer)?;
         }
+        FraudProofType::UnhonouredObligation => {
+            let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
+                format!(
+                    "accused ledger {} not available",
+                    &proof.ledger_id[..16.min(proof.ledger_id.len())]
+                )
+            })?;
+            verify_unhonoured_obligation(proof, &accused_history, block_oracle)?;
+        }
         FraudProofType::QuorumExpired => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
                 format!(
@@ -3385,6 +3634,7 @@ impl FraudProofType {
             Self::Equivocation => 8,
             Self::NonConformingCosignature => 9,
             Self::UnauthorizedVaultSpend => 10,
+            Self::UnhonouredObligation => 11,
         }
     }
 }
@@ -3394,6 +3644,23 @@ impl FraudEvidence {
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         match self {
+            Self::UnhonouredObligation {
+                source_notice_update,
+                source_qb_update,
+                acquire_update,
+                confiscation_tx,
+                proof_update,
+            } => {
+                for p in [
+                    source_notice_update,
+                    source_qb_update,
+                    acquire_update,
+                    confiscation_tx,
+                    proof_update,
+                ] {
+                    out.extend_from_slice(p.as_bytes());
+                }
+            }
             Self::UncreditedMigration {
                 source_notice_update,
                 source_qb_update,

@@ -297,6 +297,8 @@ struct PendingConfiscation {
     sighash_bytes: [u8; 32],
     /// Signatures collected so far (signer pubkey -> 64-byte Schnorr sig)
     signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, [u8; 64]>,
+    /// DEP-06: each signer's signatures on the swept inputs (1..), in input order.
+    sweep_signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, Vec<[u8; 64]>>,
     /// Number of signatures required
     required_sigs: usize,
     /// The VoterSet for building the witness
