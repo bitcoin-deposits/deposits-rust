@@ -1,0 +1,65 @@
+{
+  "description": "DEP-03 re-arm on one armer's fork: a later DisputeArmed must repeat the commitment_hash and must declare replacement collateral; a fresh pledge (collateral after collateral) is allowed. Shared by cl-deposits (inspect/rotation-test.lisp) and deposits-rust (deposits-core ledger tests).",
+  "cases": [
+    {
+      "name": "a fresh pledge under the same commitment",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "ok": true
+    },
+    {
+      "name": "collateral added to an arm that had none",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": false
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "ok": true
+    },
+    {
+      "name": "a changed commitment",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true
+      },
+      "ok": false
+    },
+    {
+      "name": "a re-arm declaring no collateral",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": false
+      },
+      "ok": false
+    },
+    {
+      "name": "no collateral after no collateral",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": false
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": false
+      },
+      "ok": false
+    }
+  ]
+}

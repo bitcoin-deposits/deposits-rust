@@ -2337,11 +2337,10 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
 
     // A prior DisputeArmed on our fork (the daemon's auto-arm, or an earlier
     // `recovery arm`) fixes the lottery commitment: a re-arm must repeat its
-    // commitment_hash, and may only upgrade a None collateral declaration to
-    // Some (`Ledger::validate_operation`, "dispute_armed_commitment_changed"
-    // / "already_collateralized" / "no_upgrade"). The daemon's
-    // `auto_rearm_disputes` does this upgrade on its own once the
-    // operator-key P2WPKH is funded.
+    // commitment_hash and must declare replacement collateral, a fresh pledge
+    // included (`Ledger::validate_operation`, "dispute_armed_commitment_changed"
+    // / "no_upgrade"; DEP-03). The daemon's `auto_rearm_disputes` adds the
+    // collateral on its own once the operator-key P2WPKH is funded.
     let prior_arm =
         our_updates
             .iter()

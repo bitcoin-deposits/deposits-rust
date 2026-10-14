@@ -1504,34 +1504,26 @@ impl Ledger {
                     });
                 }
 
-                // Re-arm rules. `dispute_state == Armed` means there
-                // is already a DisputeArmed on this chain; the
-                // discriminant allow-list in
-                // `DisputeState::allows_operation` permits it as a
-                // collateral-upgrade re-arm, but two adversarial
-                // shapes still need rejecting at this layer:
-                //  - changing `commitment_hash` would let a disputant
-                //    grind for a winning lottery commit after seeing
-                //    the entropy block,
-                //  - re-arming when the prior arm already declared a
-                //    `replacement_collateral` (i.e., not the
-                //    None-fallback) gains nothing and would let a
-                //    disputant swap UTXOs after the cosigners have
-                //    already verified one.
+                // Re-arm rules (DEP-03, vector dispute_rearm.json). `dispute_state
+                // == Armed` means there is already a DisputeArmed on this fork. A
+                // re-arm must repeat its `commitment_hash` (changing it would let a
+                // disputant grind for a winning lottery commit after seeing the
+                // entropy block) and must declare replacement collateral. A fresh
+                // pledge after a failed one (collateral after collateral) is a valid
+                // re-arm: DEP-03's eligibility cut counts an armer's first four
+                // arms; the fold does not bound them.
                 if self.state.dispute_state == deposits_protocol::DisputeState::Armed {
                     use crate::tlv::TlvDecode;
-                    let prior: Option<([u8; 20], Option<crate::messages::ReplacementCollateral>)> =
-                        self.history.iter().rev().find_map(|u| {
-                            match crate::messages::LedgerOperation::tlv_decode(&u.message) {
-                                Ok(crate::messages::LedgerOperation::DisputeArmed {
-                                    commitment_hash,
-                                    replacement_collateral,
-                                    ..
-                                }) => Some((commitment_hash, replacement_collateral)),
-                                _ => None,
-                            }
-                        });
-                    if let Some((prior_commit, prior_rc)) = prior {
+                    let prior: Option<[u8; 20]> = self.history.iter().rev().find_map(|u| {
+                        match crate::messages::LedgerOperation::tlv_decode(&u.message) {
+                            Ok(crate::messages::LedgerOperation::DisputeArmed {
+                                commitment_hash,
+                                ..
+                            }) => Some(commitment_hash),
+                            _ => None,
+                        }
+                    });
+                    if let Some(prior_commit) = prior {
                         if *commitment_hash != prior_commit {
                             return Err(DepositsError::ProtocolViolation {
                                 violation_type: "dispute_armed_commitment_changed".to_string(),
@@ -1540,19 +1532,11 @@ impl Ledger {
                                     .to_string(),
                             });
                         }
-                        if prior_rc.is_some() {
-                            return Err(DepositsError::ProtocolViolation {
-                                violation_type: "dispute_armed_already_collateralized".to_string(),
-                                details: "Re-arm rejected: prior arm already declared \
-                                     replacement_collateral. Only None→Some upgrade is allowed."
-                                    .to_string(),
-                            });
-                        }
                         if replacement_collateral.is_none() {
                             return Err(DepositsError::ProtocolViolation {
                                 violation_type: "dispute_armed_no_upgrade".to_string(),
-                                details: "Re-arm rejected: new arm must declare \
-                                     replacement_collateral. None→None is a no-op."
+                                details: "Re-arm rejected: a re-arm must declare \
+                                     replacement_collateral."
                                     .to_string(),
                             });
                         }
@@ -2371,6 +2355,55 @@ mod tests {
         let secp = bitcoin::secp256k1::Secp256k1::new();
         let sk = bitcoin::secp256k1::SecretKey::from_slice(&[2u8; 32]).unwrap();
         PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    /// DEP-03 re-arm shape, against the vector shared with cl-deposits.
+    #[test]
+    fn rearm_vector() {
+        use crate::tlv::TlvEncode;
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/vectors/dispute_rearm.json")).unwrap();
+        let arm = |c: &serde_json::Value| LedgerOperation::DisputeArmed {
+            armed_block: 100,
+            commitment_hash: hex::decode(c["commitment"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+            target_reserves: "t".into(),
+            replacement_collateral: c["collateral"].as_bool().unwrap().then_some(
+                crate::messages::ReplacementCollateral {
+                    txid: [3; 32],
+                    vout: 0,
+                    amount: 50_000,
+                },
+            ),
+        };
+        for case in v["cases"].as_array().unwrap() {
+            let mut ledger = Ledger::new_as_operator(test_pubkey(), test_pubkey_2().to_string(), 0);
+            ledger.state.quorum_state = QuorumState::Active;
+            ledger.state.dispute_state = deposits_protocol::DisputeState::Armed;
+            ledger.history = vec![SignedLedgerUpdate {
+                message: arm(&case["prior"]).tlv_encode(),
+                message_type: 1,
+                operator_id: test_pubkey(),
+                ledger_id: [9u8; 32],
+                sequence_number: 5,
+                previous_hash: [0u8; 32],
+                content_hash: [5u8; 32],
+                block_height: 100,
+                block_hash: [0u8; 32],
+                operator_signature: [7u8; 64],
+                cosignatures: Vec::new(),
+            }];
+            let got = ledger.validate_operation(&arm(&case["next"]));
+            assert_eq!(
+                got.is_ok(),
+                case["ok"].as_bool().unwrap(),
+                "{}: {:?}",
+                case["name"],
+                got
+            );
+        }
     }
 
     #[test]

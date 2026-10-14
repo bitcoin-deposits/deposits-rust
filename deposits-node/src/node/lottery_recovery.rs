@@ -300,7 +300,7 @@ impl Node {
                 &candidates,
                 &voters,
                 threshold,
-                set.snapshot,
+                super::armers::first_arm_height(&updates).unwrap_or(set.snapshot),
             ) {
                 participants = landed;
             }
@@ -466,7 +466,7 @@ impl Node {
     ) -> Option<Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>> {
         let (vault, _) = super::vault_watch::current_vault(updates)?;
         let backend = self.wallet.chain_backend();
-        let spk = landed_spender_spk(&*backend, &vault, floor)?;
+        let (spk, _) = landed_spender(&*backend, &vault, floor)?;
         match_landed_set(
             &spk,
             current,
@@ -870,21 +870,35 @@ impl Node {
 /// `gettxout`. (Walking every block from the vault's creation to the tip on
 /// every pass of the 10 s claim task, for every armed fork, took ~60 s on
 /// bitcoind and stalled the lottery for good.)
-fn landed_spender_spk(
+/// The block the dispute's confiscation confirmed in: the confirmed spend of the vault the
+/// ledger's latest `QuorumBegin` names, searched from the dispute's first arm. `None` while
+/// the vault is unspent (or the search has not reached the spend yet).
+pub(crate) fn confiscation_height(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    updates: &[deposits_core::SignedLedgerUpdate],
+) -> Option<u32> {
+    let (vault, _) = super::vault_watch::current_vault(updates)?;
+    let floor = super::armers::first_arm_height(updates)?;
+    landed_spender(backend, &vault, floor).map(|(_, h)| h)
+}
+
+/// The landed spender of `vault` (its first output's script) and the block it confirmed
+/// in, searched from `floor` a chunk per call, progress remembered.
+fn landed_spender(
     backend: &dyn crate::chain_backend::ChainBackend,
     vault: &OutPoint,
     floor: u32,
-) -> Option<bitcoin::ScriptBuf> {
+) -> Option<(bitcoin::ScriptBuf, u32)> {
     use std::sync::{Mutex, OnceLock};
     const LANDED_SCAN_CHUNK: u32 = 50;
     enum Progress {
         ScannedTo(u32),
-        Found(bitcoin::ScriptBuf),
+        Found(bitcoin::ScriptBuf, u32),
     }
     static CACHE: OnceLock<Mutex<HashMap<OutPoint, Progress>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let start = match cache.lock().unwrap().get(vault) {
-        Some(Progress::Found(spk)) => return Some(spk.clone()),
+        Some(Progress::Found(spk, h)) => return Some((spk.clone(), *h)),
         Some(Progress::ScannedTo(h)) => h + 1,
         None => {
             let created = backend.get_tx_block_height(&vault.txid).ok().flatten()?;
@@ -933,8 +947,8 @@ fn landed_spender_spk(
     cache
         .lock()
         .unwrap()
-        .insert(*vault, Progress::Found(spk.clone()));
-    Some(spk)
+        .insert(*vault, Progress::Found(spk.clone(), height));
+    Some((spk, height))
 }
 
 #[cfg(test)]

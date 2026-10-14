@@ -223,6 +223,50 @@
         "snapshot": 501,
         "participants": []
       }
+    },
+    {
+      "name": "the set is final at the confiscation: an arm after it does not move E",
+      "required_sats": 10000,
+      "confiscation_height": 120,
+      "armers": [
+        {
+          "id": "a",
+          "arm_height": 100,
+          "declared": 50000,
+          "pledge": {
+            "created": 90,
+            "value": 50000,
+            "spent_at": null
+          }
+        },
+        {
+          "id": "b",
+          "arm_height": 104,
+          "declared": 50000,
+          "pledge": {
+            "created": 95,
+            "value": 50000,
+            "spent_at": 130
+          }
+        },
+        {
+          "id": "d",
+          "arm_height": 150,
+          "declared": 50000,
+          "pledge": {
+            "created": 140,
+            "value": 50000,
+            "spent_at": null
+          }
+        }
+      ],
+      "expect": {
+        "snapshot": 104,
+        "participants": [
+          "a",
+          "b"
+        ]
+      }
     }
   ]
 }

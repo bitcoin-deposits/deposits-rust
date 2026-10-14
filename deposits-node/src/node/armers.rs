@@ -91,6 +91,13 @@ pub fn original_operator(updates: &[SignedLedgerUpdate]) -> Option<PublicKey> {
 /// Each armer's latest `DisputeArmed` (highest sequence; a re-arm replaces
 /// the declaration), excluding the original operator, sorted by x-only key.
 pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
+    collect_armers_until(updates, None)
+}
+
+/// [`collect_armers`] as of the block the confiscation confirmed in (DEP-03 "When the set
+/// is final"): an arm whose signed header is above `until` does not count, so each armer's
+/// latest arm at or below it is its arm.
+pub fn collect_armers_until(updates: &[SignedLedgerUpdate], until: Option<u32>) -> Vec<Armer> {
     let operator = original_operator(updates);
     // Each armer's first `MAX_ARMS` arms, by sequence; the latest of them counts.
     let mut by_seq: Vec<&SignedLedgerUpdate> = updates.iter().collect();
@@ -98,7 +105,7 @@ pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
     let mut seen_arms: HashMap<PublicKey, usize> = HashMap::new();
     let mut latest: HashMap<PublicKey, (u64, Armer)> = HashMap::new();
     for u in by_seq {
-        if Some(u.operator_id) == operator {
+        if Some(u.operator_id) == operator || until.is_some_and(|c| u.block_height > c) {
             continue;
         }
         let Ok(LedgerOperation::DisputeArmed {
@@ -492,6 +499,21 @@ pub fn split(
     armers: Vec<Armer>,
     required: u64,
 ) -> Result<ArmerSet, String> {
+    split_at(chain, armers, required, None)
+}
+
+/// [`split`] once the confiscation has confirmed in block `confiscated_at`: an arm above it
+/// does not count (DEP-03 "When the set is final"); it neither moves E nor joins.
+pub fn split_at(
+    chain: &dyn ChainBackend,
+    armers: Vec<Armer>,
+    required: u64,
+    confiscated_at: Option<u32>,
+) -> Result<ArmerSet, String> {
+    let armers: Vec<Armer> = armers
+        .into_iter()
+        .filter(|a| confiscated_at.is_none_or(|c| a.arm_height <= c))
+        .collect();
     let snapshot = snapshot_height(&armers);
     let mut set = ArmerSet {
         snapshot,
@@ -525,8 +547,53 @@ pub fn eligible_armers(
     updates: &[SignedLedgerUpdate],
     last_valid_sequence: Option<u64>,
 ) -> Result<ArmerSet, String> {
+    eligible_armers_at(chain, updates, last_valid_sequence, None)
+}
+
+/// [`eligible_armers`] once the confiscation has confirmed in block `confiscated_at`.
+pub fn eligible_armers_at(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: Option<u64>,
+    confiscated_at: Option<u32>,
+) -> Result<ArmerSet, String> {
     let required = required_sats(updates, last_valid_sequence)?;
-    split(chain, collect_armers(updates), required)
+    split_at(
+        chain,
+        collect_armers_until(updates, confiscated_at),
+        required,
+        confiscated_at,
+    )
+}
+
+/// Whether `vault` is spent on the confirmed chain: `Some(true)` spent, `Some(false)` unspent,
+/// `None` unknown (not confirmed, or the chain did not answer). A dispute whose vault is spent
+/// is over (DEP-03 "When the set is final"): no member enters or arms it again.
+pub fn vault_spent_on_chain(chain: &dyn ChainBackend, vault: &OutPoint) -> Option<bool> {
+    chain.get_tx_block_height(&vault.txid).ok()??;
+    match chain
+        .confirmed_spend(vault, bitcoin::Script::new(), u32::MAX)
+        .ok()?
+    {
+        crate::chain_backend::ConfirmedSpend::Unspent => Some(false),
+        _ => Some(true),
+    }
+}
+
+/// The signed-header height of the dispute's first arm: no confiscation can precede it, so
+/// the search for the landed one starts here, not at E (which later arms may have lifted
+/// past it; DEP-03 "When the set is final").
+pub fn first_arm_height(updates: &[SignedLedgerUpdate]) -> Option<u32> {
+    updates
+        .iter()
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeArmed { .. })
+            )
+        })
+        .map(|u| u.block_height)
+        .min()
 }
 
 /// For the CLI: the armer set from relay events (base64 TLV updates).
@@ -600,7 +667,10 @@ impl crate::node::Node {
         }
         let chain = self.wallet.chain_backend();
         let t = std::time::Instant::now();
-        let set = eligible_armers(&*chain, &updates, None)?;
+        // DEP-03 "When the set is final": once the confiscation confirmed, arms above its
+        // block do not count (a restarted member's late re-arm moved E past it).
+        let confiscated_at = super::lottery_recovery::confiscation_height(&*chain, &updates);
+        let set = eligible_armers_at(&*chain, &updates, None, confiscated_at)?;
         if t.elapsed().as_millis() >= 1000 {
             tracing::warn!(
                 "lottery {}: eligibility took {} ms",
@@ -870,6 +940,27 @@ mod tests {
             None
         );
     }
+    /// A restarted member must not reopen a dispute whose vault the confiscation spent.
+    #[test]
+    fn a_spent_vault_ends_the_dispute() {
+        let (live, gone) = (tx(1_000, 1), tx(1_000, 2));
+        let chain = Chain {
+            tip: 500,
+            txs: HashMap::from([
+                (live.compute_txid(), (100, live.clone(), None)),
+                (gone.compute_txid(), (100, gone.clone(), Some(300))),
+            ]),
+        };
+        let op = |t: &Transaction| OutPoint::new(t.compute_txid(), 0);
+        assert_eq!(vault_spent_on_chain(&chain, &op(&live)), Some(false));
+        assert_eq!(vault_spent_on_chain(&chain, &op(&gone)), Some(true));
+        assert_eq!(
+            vault_spent_on_chain(&chain, &op(&tx(1_000, 3))),
+            None,
+            "an unknown vault proves nothing"
+        );
+    }
+
     /// The cross-implementation vector (cl-deposits checks the same file).
     #[test]
     fn eligibility_vector() {
@@ -905,7 +996,13 @@ mod tests {
                 armers.push(ar);
             }
             let chain = Chain { tip: 1000, txs };
-            let set = split(&chain, armers, case["required_sats"].as_u64().unwrap()).unwrap();
+            let set = split_at(
+                &chain,
+                armers,
+                case["required_sats"].as_u64().unwrap(),
+                case["confiscation_height"].as_u64().map(|c| c as u32),
+            )
+            .unwrap();
             let mut got: Vec<String> = set
                 .participants
                 .iter()

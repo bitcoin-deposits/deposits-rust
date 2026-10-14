@@ -864,6 +864,20 @@ impl Node {
             );
         }
 
+        // DEP-03 "When the set is final": a dispute whose vault is already spent on the
+        // confirmed chain is over. Entering or arming it again (after a restart, on a fork
+        // DisputeEnter the relay replays, or on a pledge the confiscation itself spent)
+        // only moved E, and with it every member's view of the set.
+        if self.dispute_vault_spent(ledger_id).await == Some(true) {
+            if logged_once(ledger_id) {
+                tracing::info!(
+                    "Dispute on {}: its vault is spent on the confirmed chain; not entering or arming",
+                    &ledger_id[..16.min(ledger_id.len())]
+                );
+            }
+            return Ok(());
+        }
+
         // 0. Create a fork of the disputed ledger (or reuse existing one)
         let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
 
@@ -4452,6 +4466,40 @@ pub(crate) fn dispute_base(requested: u64, first_non_conforming: Option<u64>) ->
     match first_non_conforming {
         Some(fault) if fault <= requested => fault.saturating_sub(1),
         _ => requested,
+    }
+}
+
+/// True the first time per ledger (for once-only log lines).
+fn logged_once(ledger_id: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(ledger_id.to_string())
+}
+
+impl Node {
+    /// Whether the vault of `ledger_id`'s latest `QuorumBegin` (as our replica holds it) is
+    /// spent on the confirmed chain: `Some(true)` spent, `Some(false)` unspent, `None`
+    /// unknown (no vault in the replica, the vault not confirmed, or the chain slow: the
+    /// caller proceeds as before). Bounded, on the blocking pool.
+    pub(crate) async fn dispute_vault_spent(&self, ledger_id: &str) -> Option<bool> {
+        let vault = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers.get(ledger_id)?.clone();
+            drop(ledgers);
+            let l = arc.read().unwrap();
+            super::vault_watch::current_vault(&l.history)?.0
+        };
+        let chain = self.wallet.chain_backend();
+        let check = tokio::task::spawn_blocking(move || {
+            super::armers::vault_spent_on_chain(&*chain, &vault)
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(4), check)
+            .await
+            .ok()?
+            .ok()?
     }
 }
 
