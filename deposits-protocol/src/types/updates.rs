@@ -1466,12 +1466,14 @@ mod tests {
         assert!(!DisputeState::Normal.allows_operation(56)); // DisputeYield
         assert!(!DisputeState::Normal.allows_operation(57)); // DisputeArmed
 
-        // Disputed state - only QuorumAddMember(43) and DisputeArmed(57)
+        // Disputed state - QuorumAddMember(43), DisputeArmed(57), ObligationRecord(106)
         assert!(DisputeState::Disputed.allows_operations());
         assert!(DisputeState::Disputed.allows_operation(43)); // QuorumAddMember
         assert!(DisputeState::Disputed.allows_operation(57)); // DisputeArmed
         assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked
         assert!(!DisputeState::Disputed.allows_operation(55)); // DisputeAcquire
+        assert!(DisputeState::Disputed.allows_operation(106)); // ObligationRecord (before arming)
+        assert!(!DisputeState::Armed.allows_operation(106)); // ...and not after
 
         // Armed state - QuorumAddMember(43), DisputeAcquire(55), DisputeYield(56), DisputeArmed(57) re-arm
         assert!(DisputeState::Armed.allows_operations());

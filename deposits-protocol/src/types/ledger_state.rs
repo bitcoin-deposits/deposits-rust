@@ -1533,8 +1533,13 @@ impl LedgerState {
                 }
                 match (source_notice_update, source_qb_update, uncredited_proof) {
                     (None, None, Some(json)) => {
-                        let members: Vec<PublicKey> =
-                            next.quorum_members.iter().map(|m| m.pubkey).collect();
+                        // DEP-06: the quorum at the fork point.
+                        let at_fork = if next.quorum_at_fork.is_empty() {
+                            &next.quorum_members
+                        } else {
+                            &next.quorum_at_fork
+                        };
+                        let members: Vec<PublicKey> = at_fork.iter().map(|m| m.pubkey).collect();
                         crate::fraud::check_uncredited_record(&next.ledger_id, &members, json)
                             .map_err(bad)?;
                     }

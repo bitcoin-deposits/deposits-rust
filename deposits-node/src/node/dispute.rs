@@ -3148,7 +3148,10 @@ impl Node {
             };
 
             let script_pubkey = reserves_addr.script_pubkey();
-            let utxo = match self.wallet.find_utxo_for_script(&script_pubkey) {
+            let utxo = match self.wallet.vault_utxo(
+                deposits_core::rotation_order::vault_at_fork(&paginated_updates),
+                &script_pubkey,
+            ) {
                 Ok(Some(u)) => u,
                 Ok(None) => {
                     tracing::debug!("No unspent reserves UTXO found");

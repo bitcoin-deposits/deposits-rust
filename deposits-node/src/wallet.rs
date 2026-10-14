@@ -542,6 +542,22 @@ impl Wallet {
         Ok(txid)
     }
 
+    /// DEP-03: the vault's UTXO. With the replica's recorded outpoint, that outpoint if unspent
+    /// (a migration output can sit at the same script, DEP-20 §8.3); without one (no
+    /// `QuorumBegin` yet), the UTXO at the script.
+    pub fn vault_utxo(
+        &self,
+        recorded: Option<OutPoint>,
+        script: &bitcoin::ScriptBuf,
+    ) -> Result<Option<(OutPoint, u64)>, Error> {
+        match recorded {
+            Some(o) => Ok(self
+                .get_outpoint_value_and_confs(o.txid, o.vout)?
+                .map(|(sats, _)| (o, sats))),
+            None => self.find_utxo_for_script(script),
+        }
+    }
+
     /// Find an unspent UTXO for a given script pubkey
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.

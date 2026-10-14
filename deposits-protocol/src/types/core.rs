@@ -818,8 +818,8 @@ impl DisputeState {
                 !matches!(operation_discriminant, 55..=57) // DisputeArmed, DisputeAcquire, DisputeYield
             }
             DisputeState::Disputed => {
-                // Only QuorumAddMember and DisputeArmed allowed
-                matches!(operation_discriminant, 43 | 57) // QuorumAddMember, DisputeArmed
+                // QuorumAddMember, DisputeArmed, and ObligationRecord (DEP-06: recorded before arming)
+                matches!(operation_discriminant, 43 | 57 | 106)
             }
             DisputeState::Armed => {
                 // DisputeAcquire (55), DisputeYield (56) — terminal

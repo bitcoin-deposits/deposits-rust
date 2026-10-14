@@ -1114,8 +1114,10 @@ impl Node {
             Err(e) => return (false, None, Some(format!("network mismatch: {}", e))),
         };
         let reserves_script = reserves_addr.script_pubkey();
+        let recorded = crate::node::vault_watch::current_vault(&ledger_arc.read().unwrap().history)
+            .map(|(o, _)| o);
         let (reserves_outpoint, reserves_amount) =
-            match self.wallet.find_utxo_for_script(&reserves_script) {
+            match self.wallet.vault_utxo(recorded, &reserves_script) {
                 Ok(Some(u)) => u,
                 Ok(None) => {
                     return (
@@ -1742,7 +1744,10 @@ impl Node {
         let reserves_script = reserves_addr.script_pubkey();
         let reserves_utxo = self
             .wallet
-            .find_utxo_for_script(&reserves_script)
+            .vault_utxo(
+                deposits_core::rotation_order::vault_at_fork(&updates),
+                &reserves_script,
+            )
             .map_err(|e| format!("esplora reserves lookup: {}", e))?
             .ok_or_else(|| "reserves UTXO not found on-chain (already spent?)".to_string())?;
         let (reserves_outpoint, reserves_amount) = reserves_utxo;

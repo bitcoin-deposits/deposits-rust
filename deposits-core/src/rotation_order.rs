@@ -378,6 +378,40 @@ pub fn lottery_recovery_voters(
     Some((voters, t))
 }
 
+/// DEP-06: the vault a confiscation spends, the outpoint of the original operator's newest
+/// `QuorumBegin` at or before the fork point. Never "a UTXO at the vault script": migration
+/// outputs sit at that script too (DEP-20 §8.3).
+pub fn vault_at_fork(updates: &[SignedLedgerUpdate]) -> Option<OutPoint> {
+    let operator = updates.iter().find(|u| u.sequence_number == 0)?.operator_id;
+    let fork_point = updates
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some(last_valid_sequence),
+            _ => None,
+        })
+        .min()
+        .unwrap_or(u64::MAX);
+    updates
+        .iter()
+        .filter(|u| u.operator_id == operator && u.sequence_number <= fork_point)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                new_outpoint_txid,
+                new_outpoint_vout,
+                ..
+            }) => Some((
+                u.sequence_number,
+                OutPoint::new(Txid::from_byte_array(new_outpoint_txid), new_outpoint_vout),
+            )),
+            _ => None,
+        })
+        .max_by_key(|(s, _)| *s)
+        .map(|(_, o)| o)
+}
+
 /// Every DEP-20 output a rotation at `height` pays after the new vault: the due exits (each
 /// less its own cost), then the dormancy spin-outs (full balance). (extras, exits' own cost,
 /// spin-outs' cost paid from collateral).
