@@ -585,12 +585,29 @@ impl crate::node::Node {
         if let Some(set) = ledger_cache().lock().unwrap().get(ledger_id) {
             return Ok(set.clone());
         }
+        let t = std::time::Instant::now();
         let updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        if t.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                "lottery {}: fetching {} updates took {} ms",
+                &ledger_id[..16.min(ledger_id.len())],
+                updates.len(),
+                t.elapsed().as_millis()
+            );
+        }
         if updates.is_empty() {
             return Err("failed to fetch ledger updates from relay".into());
         }
         let chain = self.wallet.chain_backend();
+        let t = std::time::Instant::now();
         let set = eligible_armers(&*chain, &updates, None)?;
+        if t.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                "lottery {}: eligibility took {} ms",
+                &ledger_id[..16.min(ledger_id.len())],
+                t.elapsed().as_millis()
+            );
+        }
         let tip = chain.get_tip_height().map_err(|e| e.to_string())?;
         if !set.participants.is_empty() && tip >= set.snapshot.saturating_add(BURIED) {
             ledger_cache()

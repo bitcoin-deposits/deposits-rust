@@ -71,6 +71,11 @@ impl BitcoindRpcBackend {
     ) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
+            // No idle keep-alive: bitcoind closes an idle RPC connection after
+            // -rpcservertimeout (30 s), and a request sent on that stale socket
+            // waited out the whole 60 s timeout. A fresh local connection per
+            // call is cheap.
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
         Ok(Self {
@@ -90,6 +95,11 @@ impl BitcoindRpcBackend {
     ) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
+            // No idle keep-alive: bitcoind closes an idle RPC connection after
+            // -rpcservertimeout (30 s), and a request sent on that stale socket
+            // waited out the whole 60 s timeout. A fresh local connection per
+            // call is cheap.
+            .pool_max_idle_per_host(0)
             .build()
             .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
         Ok(Self {
@@ -159,7 +169,16 @@ impl BitcoindRpcBackend {
             .basic_auth(user, Some(pass))
             .json(&req)
             .send()
-            .map_err(|e| Error::Wallet(format!("bitcoind {}: {}", method, e)))?;
+            .map_err(|e| {
+                // reqwest's Display hides the cause (timeout, refused, reset).
+                let mut msg = format!("bitcoind {}: {}", method, e);
+                let mut src = std::error::Error::source(&e);
+                while let Some(c) = src {
+                    msg.push_str(&format!(": {}", c));
+                    src = c.source();
+                }
+                Error::Wallet(msg)
+            })?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();

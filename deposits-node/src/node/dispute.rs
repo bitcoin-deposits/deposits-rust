@@ -1706,6 +1706,7 @@ impl Node {
 
         for ledger_id in armed_ledger_ids {
             let ledger_prefix = ledger_id[..16.min(ledger_id.len())].to_string();
+            let started = std::time::Instant::now();
 
             // Check if we've already claimed/yielded (completed marker)
             let completed_marker = self
@@ -1729,6 +1730,14 @@ impl Node {
                     tracing::warn!("Lottery claim/yield for {} failed: {}", ledger_prefix, e);
                 }
             }
+            let ms = started.elapsed().as_millis();
+            if ms >= 1000 {
+                tracing::warn!(
+                    "lottery {}: claim-or-yield pass took {} ms",
+                    ledger_prefix,
+                    ms
+                );
+            }
         }
     }
 
@@ -1751,10 +1760,16 @@ impl Node {
             .clone()
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
         let lottery = ctx.build_lottery(self.wallet.network())?;
-        let confirmations = self
-            .locate_lottery_output(&lottery)?
-            .map(|(_, _, c)| c)
-            .unwrap_or(0);
+        let t_locate = std::time::Instant::now();
+        let located = self.locate_lottery_output(&lottery)?;
+        if t_locate.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                "lottery {}: locate_lottery_output took {} ms",
+                &ledger_id[..16.min(ledger_id.len())],
+                t_locate.elapsed().as_millis()
+            );
+        }
+        let confirmations = located.map(|(_, _, c)| c).unwrap_or(0);
 
         let (subset, ordered_preimages, winner_index) =
             match lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS) {

@@ -249,7 +249,16 @@ impl Node {
         // Only the operations the lottery is built from (LedgerOpen,
         // QuorumBegin, DisputeArmed): a handful of events, not a deep
         // ledger's whole chain inside the claim task's 10 s periodic.
+        let pfx = &ledger_id[..16.min(ledger_id.len())];
+        let t0 = std::time::Instant::now();
+        let slow = |phase: &str, t: std::time::Instant| {
+            let ms = t.elapsed().as_millis();
+            if ms >= 1000 {
+                tracing::warn!("lottery {}: {} took {} ms", pfx, phase, ms);
+            }
+        };
         let updates = self.fetch_lottery_updates(ledger_id).await;
+        slow("fetch_lottery_updates", t0);
 
         let mut our_armed = None;
         let mut has_ledger_open = false;
@@ -266,10 +275,13 @@ impl Node {
         // at or below E changes the cut without moving E, so once a confiscation has
         // landed its set is final: the one its lottery output commits to (DEP-03
         // §"Replacement collateral declaration"), whatever our view says now.
+        let t1 = std::time::Instant::now();
         let set = self
             .lottery_armer_set(ledger_id)
             .await
             .map_err(Error::Protocol)?;
+        slow("lottery_armer_set", t1);
+        let t1 = std::time::Instant::now();
         let mut participants: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = set
             .participants
             .iter()
@@ -282,9 +294,14 @@ impl Node {
                 .chain(set.excluded.iter().map(|(a, _)| a))
                 .map(|a| (a.key, a.participant.clone()))
                 .collect();
-            if let Some(landed) =
-                self.landed_lottery_set(&updates, &participants, &candidates, &voters, threshold)
-            {
+            if let Some(landed) = self.landed_lottery_set(
+                &updates,
+                &participants,
+                &candidates,
+                &voters,
+                threshold,
+                set.snapshot,
+            ) {
                 participants = landed;
             }
         }
@@ -300,7 +317,10 @@ impl Node {
         // key committed in DisputeArmed. The commitment hash is the
         // authorless, cryptographically-bound link, so a preimage from any
         // source can be trusted once it matches.
+        slow("landed_lottery_set", t1);
+        let t2 = std::time::Instant::now();
         let revealed = self.revealed_lottery_preimages(ledger_id, &updates).await;
+        slow("revealed_lottery_preimages", t2);
         let preimages = match_revealed_preimages(&participants, &revealed);
 
         // Recovery voters MUST come from the latest QuorumBegin (minus
@@ -442,15 +462,11 @@ impl Node {
         candidates: &[(bitcoin::secp256k1::PublicKey, LotteryParticipant)],
         voters: &[XOnlyPublicKey],
         threshold: usize,
+        floor: u32,
     ) -> Option<Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>> {
         let (vault, _) = super::vault_watch::current_vault(updates)?;
         let backend = self.wallet.chain_backend();
-        let from = backend.get_tx_block_height(&vault.txid).ok().flatten()?;
-        let spender = backend
-            .find_spending_tx(&vault, bitcoin::Script::new(), from)
-            .ok()
-            .flatten()?;
-        let spk = spender.output.first()?.script_pubkey.clone();
+        let spk = landed_spender_spk(&*backend, &vault, floor)?;
         match_landed_set(
             &spk,
             current,
@@ -844,6 +860,81 @@ impl Node {
         }
         Ok(sighash)
     }
+}
+
+/// The first output script of the transaction that spent `vault`, once it has.
+/// A spend is final, so once found it is cached. The search starts at `floor`
+/// (a confiscation cannot precede the arms it pays) and advances at most
+/// `LANDED_SCAN_CHUNK` blocks per pass, remembering how far it got, so one slow
+/// or failed RPC costs a pass, not the whole walk; an unspent vault costs one
+/// `gettxout`. (Walking every block from the vault's creation to the tip on
+/// every pass of the 10 s claim task, for every armed fork, took ~60 s on
+/// bitcoind and stalled the lottery for good.)
+fn landed_spender_spk(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    vault: &OutPoint,
+    floor: u32,
+) -> Option<bitcoin::ScriptBuf> {
+    use std::sync::{Mutex, OnceLock};
+    const LANDED_SCAN_CHUNK: u32 = 50;
+    enum Progress {
+        ScannedTo(u32),
+        Found(bitcoin::ScriptBuf),
+    }
+    static CACHE: OnceLock<Mutex<HashMap<OutPoint, Progress>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let start = match cache.lock().unwrap().get(vault) {
+        Some(Progress::Found(spk)) => return Some(spk.clone()),
+        Some(Progress::ScannedTo(h)) => h + 1,
+        None => {
+            let created = backend.get_tx_block_height(&vault.txid).ok().flatten()?;
+            created.max(floor)
+        }
+    };
+    let tip = backend.get_tip_height().ok()?;
+    if start > tip {
+        return None;
+    }
+    let end = tip.min(start.saturating_add(LANDED_SCAN_CHUNK - 1));
+    let height = match backend.spent_within(vault, bitcoin::Script::new(), start, end) {
+        Ok(Some(h)) => h,
+        Ok(None) => {
+            // Unspent (spent_within returns None after one gettxout without
+            // walking), or not in start..=end: either way nothing below end+1.
+            if backend
+                .is_output_unspent(&vault.txid, vault.vout)
+                .ok()
+                .flatten()
+                != Some(true)
+            {
+                cache
+                    .lock()
+                    .unwrap()
+                    .insert(*vault, Progress::ScannedTo(end));
+            }
+            return None;
+        }
+        Err(e) => {
+            tracing::warn!(
+                "landed spender {}: scan {}..={} failed: {}",
+                vault,
+                start,
+                end,
+                e
+            );
+            return None;
+        }
+    };
+    let spender = backend
+        .find_spending_tx(vault, bitcoin::Script::new(), height)
+        .ok()
+        .flatten()?;
+    let spk = spender.output.first()?.script_pubkey.clone();
+    cache
+        .lock()
+        .unwrap()
+        .insert(*vault, Progress::Found(spk.clone()));
+    Some(spk)
 }
 
 #[cfg(test)]
