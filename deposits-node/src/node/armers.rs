@@ -15,7 +15,7 @@ use deposits_core::{SignedLedgerUpdate, TlvDecode};
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
-use crate::chain_backend::{ChainBackend, ConfirmedSpend};
+use crate::chain_backend::ChainBackend;
 
 /// DEP-03 `claim_fee_floor` when the governing `QuorumBegin` records no
 /// reference feerate (this implementation never records one).
@@ -146,10 +146,10 @@ pub fn outpoint_at_snapshot(
     snapshot: u32,
 ) -> Result<Option<u64>, String> {
     let e = |x: crate::error::Error| x.to_string();
-    match chain.get_tx_block_height(&txid).map_err(e)? {
-        Some(h) if h <= snapshot => {}
+    let created = match chain.get_tx_block_height(&txid).map_err(e)? {
+        Some(h) if h <= snapshot => h,
         _ => return Ok(None),
-    }
+    };
     let Some(tx) = chain.get_tx(&txid).map_err(e)? else {
         return Ok(None);
     };
@@ -157,16 +157,16 @@ pub fn outpoint_at_snapshot(
         return Ok(None);
     };
     match chain
-        .confirmed_spend(
+        .spent_within(
             &OutPoint::new(txid, vout),
             &output.script_pubkey,
-            snapshot + 1,
+            created,
+            snapshot,
         )
         .map_err(e)?
     {
-        ConfirmedSpend::Unspent => Ok(Some(output.value.to_sat())),
-        ConfirmedSpend::SpentAt(h) if h > snapshot => Ok(Some(output.value.to_sat())),
-        _ => Ok(None),
+        None => Ok(Some(output.value.to_sat())),
+        Some(_) => Ok(None),
     }
 }
 
@@ -465,19 +465,16 @@ fn pledge_failure_uncached(
         )));
     }
     let outpoint = OutPoint::new(txid, rc.vout);
+    // Only blocks created..=snapshot decide it, a fixed range: walking to the
+    // tip grew every block and starved the lottery claim's 10 s periodic.
     match chain
-        .confirmed_spend(&outpoint, &output.script_pubkey, snapshot + 1)
+        .spent_within(&outpoint, &output.script_pubkey, created, snapshot)
         .map_err(e)?
     {
-        ConfirmedSpend::Unspent => Ok(None),
-        ConfirmedSpend::SpentAt(h) if h > snapshot => Ok(None),
-        ConfirmedSpend::SpentAt(h) => Ok(Some(format!(
+        None => Ok(None),
+        Some(h) => Ok(Some(format!(
             "pledge spent at {}, at or before the snapshot {}",
             h, snapshot
-        ))),
-        ConfirmedSpend::SpentBefore(_) => Ok(Some(format!(
-            "pledge spent at or before the snapshot {}",
-            snapshot
         ))),
     }
 }
@@ -608,6 +605,7 @@ impl crate::node::Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chain_backend::ConfirmedSpend;
     use crate::chain_backend::UnspentOutput;
     use crate::error::Error;
     use bitcoin::{
@@ -753,6 +751,107 @@ mod tests {
             None
         );
         assert_eq!(pledge_failure_uncached(&after, id, &rc, 120).unwrap(), None);
+    }
+    /// The eligibility cut never asks the chain about blocks past the snapshot:
+    /// walking to the tip for a pledge spent after it (the winner's, by design)
+    /// grew every block and starved the lottery claim's 10 s periodic task.
+    #[test]
+    fn pledge_lookup_stays_within_the_snapshot() {
+        use bitcoin::hashes::Hash as _;
+        struct Bounded(Chain);
+        impl ChainBackend for Bounded {
+            fn get_tip_height(&self) -> Result<u32, Error> {
+                self.0.get_tip_height()
+            }
+            fn get_block_hash(&self, h: u32) -> Result<BlockHash, Error> {
+                self.0.get_block_hash(h)
+            }
+            fn get_block_height_if_in_best_chain(
+                &self,
+                b: &BlockHash,
+            ) -> Result<Option<u32>, Error> {
+                self.0.get_block_height_if_in_best_chain(b)
+            }
+            fn get_tx(&self, t: &Txid) -> Result<Option<Transaction>, Error> {
+                self.0.get_tx(t)
+            }
+            fn get_tx_block_height(&self, t: &Txid) -> Result<Option<u32>, Error> {
+                self.0.get_tx_block_height(t)
+            }
+            fn is_output_unspent(&self, _: &Txid, _: u32) -> Result<Option<bool>, Error> {
+                unimplemented!()
+            }
+            fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+                unimplemented!()
+            }
+            fn find_spending_tx(
+                &self,
+                _: &OutPoint,
+                _: &Script,
+                _: u32,
+            ) -> Result<Option<Transaction>, Error> {
+                panic!("eligibility must not walk to the tip")
+            }
+            fn confirmed_spend(
+                &self,
+                _: &OutPoint,
+                _: &Script,
+                _: u32,
+            ) -> Result<ConfirmedSpend, Error> {
+                panic!("eligibility must not walk to the tip")
+            }
+            fn spent_within(
+                &self,
+                o: &OutPoint,
+                _: &Script,
+                from: u32,
+                to: u32,
+            ) -> Result<Option<u32>, Error> {
+                assert!(
+                    to <= 120,
+                    "asked about blocks past the snapshot: {from}..={to}"
+                );
+                Ok(self
+                    .0
+                    .txs
+                    .get(&o.txid)
+                    .and_then(|x| x.2)
+                    .filter(|h| (from..=to).contains(h)))
+            }
+            fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+                unimplemented!()
+            }
+        }
+        let t = tx(60_000, 11);
+        let id = t.compute_txid();
+        let rc = ReplacementCollateral {
+            txid: id.to_byte_array(),
+            vout: 0,
+            amount: 60_000,
+        };
+        let spent_after = Bounded(Chain {
+            tip: 5_000,
+            txs: HashMap::from([(id, (90, t.clone(), Some(4_000)))]),
+        });
+        assert_eq!(
+            pledge_failure_uncached(&spent_after, id, &rc, 120).unwrap(),
+            None
+        );
+        assert_eq!(
+            outpoint_at_snapshot(&spent_after, id, 0, 120).unwrap(),
+            Some(60_000)
+        );
+        let spent_before = Bounded(Chain {
+            tip: 5_000,
+            txs: HashMap::from([(id, (90, t, Some(110)))]),
+        });
+        assert!(pledge_failure_uncached(&spent_before, id, &rc, 120)
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            outpoint_at_snapshot(&spent_before, id, 0, 120).unwrap(),
+            None
+        );
     }
     /// The cross-implementation vector (cl-deposits checks the same file).
     #[test]

@@ -157,6 +157,24 @@ pub trait ChainBackend: Send + Sync {
         }
     }
 
+    /// The height of a confirmed spend of `outpoint` in blocks `from..=to`, or
+    /// `None` (unspent, mempool-only, or spent after `to`). The answer for a
+    /// fixed range never changes, so a caller asking "spent at or before a
+    /// snapshot?" never needs to look past the snapshot (DEP-03 eligibility).
+    fn spent_within(
+        &self,
+        outpoint: &OutPoint,
+        script: &Script,
+        from: u32,
+        to: u32,
+    ) -> Result<Option<u32>, Error> {
+        match self.confirmed_spend(outpoint, script, from)? {
+            ConfirmedSpend::SpentAt(h) if h <= to => Ok(Some(h)),
+            ConfirmedSpend::SpentBefore(h) => Ok(Some(h)),
+            _ => Ok(None),
+        }
+    }
+
     /// Broadcast a signed transaction. Returns the txid on success.
     /// Backends propagate to mempool; whether the broadcast actually
     /// reaches the rest of the network depends on the backend's peer

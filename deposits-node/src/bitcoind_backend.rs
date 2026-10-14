@@ -494,6 +494,42 @@ impl ChainBackend for BitcoindRpcBackend {
         }
     }
 
+    fn spent_within(
+        &self,
+        outpoint: &bitcoin::OutPoint,
+        _script: &bitcoin::Script,
+        from: u32,
+        to: u32,
+    ) -> Result<Option<u32>, Error> {
+        // Walk only `from..=min(to, tip)`: a bounded, fixed range, unlike
+        // find_spending_tx's walk to the tip (which grows every block).
+        let confirmed: Option<GetTxOut> = self.call(
+            "gettxout",
+            serde_json::json!([outpoint.txid.to_string(), outpoint.vout, false]),
+        )?;
+        if confirmed.is_some() {
+            return Ok(None);
+        }
+        let end = to.min(self.get_tip_height()?);
+        for height in from..=end {
+            let hash = self.get_block_hash(height)?;
+            let block_hex: String =
+                self.call("getblock", serde_json::json!([hash.to_string(), 0]))?;
+            let block_bytes = hex::decode(&block_hex)
+                .map_err(|e| Error::Wallet(format!("bitcoind block hex: {}", e)))?;
+            let block: bitcoin::Block = bitcoin::consensus::deserialize(&block_bytes)
+                .map_err(|e| Error::Wallet(format!("bitcoind block consensus decode: {}", e)))?;
+            if block
+                .txdata
+                .iter()
+                .any(|tx| tx.input.iter().any(|i| i.previous_output == *outpoint))
+            {
+                return Ok(Some(height));
+            }
+        }
+        Ok(None)
+    }
+
     fn scan_outpoint_spends(
         &self,
         from: u32,
