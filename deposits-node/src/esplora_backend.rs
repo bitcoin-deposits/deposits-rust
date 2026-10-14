@@ -106,23 +106,27 @@ impl ChainBackend for EsploraBackend {
         let script_hash_hex = hex::encode(script_hash.to_byte_array());
         let url = format!("{}/scripthash/{}/txs", self.url, script_hash_hex);
 
-        let http = reqwest::blocking::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| Error::Wallet(format!("esplora HTTP client: {}", e)))?;
-        let response = http
-            .get(&url)
-            .send()
-            .map_err(|e| Error::Wallet(format!("esplora GET {}: {}", url, e)))?;
-        if !response.status().is_success() {
-            return Err(Error::Wallet(format!(
-                "esplora returned status {} for scripthash scan",
-                response.status()
-            )));
-        }
-        let txs: Vec<bdk_esplora::esplora_client::Tx> = response
-            .json()
-            .map_err(|e| Error::Wallet(format!("esplora parse scripthash response: {}", e)))?;
+        // reqwest::blocking off tokio's coop budget: see chain_backend::off_budget.
+        let txs: Vec<bdk_esplora::esplora_client::Tx> =
+            crate::chain_backend::off_budget(|| -> Result<_, Error> {
+                let http = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| Error::Wallet(format!("esplora HTTP client: {}", e)))?;
+                let response = http
+                    .get(&url)
+                    .send()
+                    .map_err(|e| Error::Wallet(format!("esplora GET {}: {}", url, e)))?;
+                if !response.status().is_success() {
+                    return Err(Error::Wallet(format!(
+                        "esplora returned status {} for scripthash scan",
+                        response.status()
+                    )));
+                }
+                response
+                    .json()
+                    .map_err(|e| Error::Wallet(format!("esplora parse scripthash response: {}", e)))
+            })?;
         let client = self.client();
         for tx in &txs {
             for (vout, output) in tx.vout.iter().enumerate() {

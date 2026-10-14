@@ -62,6 +62,18 @@ enum AuthSource {
 }
 
 impl BitcoindRpcBackend {
+    fn http_client(timeout: Duration) -> Result<reqwest::blocking::Client, Error> {
+        reqwest::blocking::Client::builder()
+            .timeout(timeout)
+            // Keep connections alive and reuse them, and drop an idle one before
+            // bitcoind's -rpcservertimeout (30 s) does. A fresh connection per call
+            // (thousands a minute in a block walk) piles up TIME_WAIT sockets until
+            // connects to the RPC port stall and requests time out unsent.
+            .pool_idle_timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))
+    }
+
     /// Build from explicit config. See [`Self::from_env`] for env-driven
     /// construction.
     pub fn new(
@@ -69,15 +81,7 @@ impl BitcoindRpcBackend {
         user: impl Into<String>,
         pass: impl Into<String>,
     ) -> Result<Self, Error> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            // Keep connections alive and reuse them, and drop an idle one before
-            // bitcoind's -rpcservertimeout (30 s) does. A fresh connection per call
-            // (thousands a minute in a block walk) piles up TIME_WAIT sockets until
-            // connects to the RPC port stall and requests time out unsent.
-            .pool_idle_timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
+        let client = Self::http_client(Duration::from_secs(60))?;
         Ok(Self {
             url: url.into(),
             auth: AuthSource::UserPass {
@@ -93,15 +97,7 @@ impl BitcoindRpcBackend {
         url: impl Into<String>,
         cookie_file: impl Into<std::path::PathBuf>,
     ) -> Result<Self, Error> {
-        let client = reqwest::blocking::Client::builder()
-            .timeout(Duration::from_secs(60))
-            // Keep connections alive and reuse them, and drop an idle one before
-            // bitcoind's -rpcservertimeout (30 s) does. A fresh connection per call
-            // (thousands a minute in a block walk) piles up TIME_WAIT sockets until
-            // connects to the RPC port stall and requests time out unsent.
-            .pool_idle_timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
+        let client = Self::http_client(Duration::from_secs(60))?;
         Ok(Self {
             url: url.into(),
             auth: AuthSource::CookieFile(cookie_file.into()),
@@ -151,23 +147,34 @@ impl BitcoindRpcBackend {
 
     /// Issue a single JSON-RPC call. Returns the parsed `result` field or
     /// surfaces the bitcoind error.
-    fn call<P: serde::Serialize, R: for<'de> serde::Deserialize<'de>>(
+    fn call<P: serde::Serialize, R: for<'de> serde::Deserialize<'de> + Send>(
         &self,
         method: &str,
         params: P,
     ) -> Result<R, Error> {
-        let (user, pass) = self.current_auth()?;
         let req = serde_json::json!({
             "jsonrpc": "1.0",
             "id": "deposits-node",
             "method": method,
             "params": params,
         });
+        // Off tokio's coop budget: see `off_budget` (a block walk's 129th call
+        // otherwise waits out the whole timeout for an answer already in).
+        let envelope = crate::chain_backend::off_budget(|| self.exchange(method, &req))?;
+        decode_envelope(method, envelope)
+    }
+
+    fn exchange<R: for<'de> serde::Deserialize<'de>>(
+        &self,
+        method: &str,
+        req: &serde_json::Value,
+    ) -> Result<BitcoindRpcResponse<R>, Error> {
+        let (user, pass) = self.current_auth()?;
         let resp = self
             .client
             .post(&self.url)
             .basic_auth(user, Some(pass))
-            .json(&req)
+            .json(req)
             .send()
             .map_err(|e| {
                 // reqwest's Display hides the cause (timeout, refused, reset).
@@ -187,10 +194,8 @@ impl BitcoindRpcBackend {
                 method, status, body
             )));
         }
-        let envelope: BitcoindRpcResponse<R> = resp
-            .json()
-            .map_err(|e| Error::Wallet(format!("bitcoind parse {}: {}", method, e)))?;
-        decode_envelope(method, envelope)
+        resp.json()
+            .map_err(|e| Error::Wallet(format!("bitcoind parse {}: {}", method, e)))
     }
 }
 
@@ -708,6 +713,107 @@ mod tests {
     /// Cookie file format: `__cookie__:<random hex>`. Splitter must
     /// handle that AND `user:pass` form (some operators put a real
     /// rpcuser in bitcoin.conf and ignore the cookie).
+    /// A stub JSON-RPC server answering every request at once, keep-alive.
+    fn stub_rpc() -> String {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    conn.set_nodelay(true).unwrap();
+                    let mut r = BufReader::new(conn.try_clone().unwrap());
+                    let mut w = conn;
+                    loop {
+                        let mut len = 0usize;
+                        loop {
+                            let mut line = String::new();
+                            if r.read_line(&mut line).unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let l = line.to_ascii_lowercase();
+                            if let Some(v) = l.strip_prefix("content-length:") {
+                                len = v.trim().parse().unwrap();
+                            }
+                            if line == "\r\n" {
+                                break;
+                            }
+                        }
+                        let mut body = vec![0; len];
+                        r.read_exact(&mut body).unwrap();
+                        let out = r#"{"result":42,"error":null,"id":"deposits-node"}"#;
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                            out.len(),
+                            out
+                        );
+                        let _ = w.write_all(resp.as_bytes());
+                    }
+                });
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    /// Many synchronous calls inside one async task poll (a block walk run from
+    /// a periodic task). reqwest::blocking's response oneshot spends the task's
+    /// coop budget; past 128 the wake is deferred to a yield that never comes,
+    /// and each later call sat out the whole timeout (the claim pass's
+    /// "getblock times out every minute"). `call` runs off the budget.
+    #[test]
+    fn a_block_walk_in_one_task_poll_does_not_stall() {
+        let url = stub_rpc();
+        let mk = || {
+            std::sync::Arc::new(BitcoindRpcBackend {
+                url: url.clone(),
+                auth: AuthSource::UserPass {
+                    user: "u".into(),
+                    pass: "p".into(),
+                },
+                client: BitcoindRpcBackend::http_client(Duration::from_secs(2)).unwrap(),
+            })
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        // The hazard: the bare exchange, in one task poll, stalls once the budget is spent.
+        let raw = mk();
+        let r = raw.clone();
+        let stalled = rt.block_on(rt.spawn(async move {
+            (0..300).find_map(|i| {
+                let req = serde_json::json!({"method": "getblockcount", "params": []});
+                r.exchange::<u32>("getblockcount", &req)
+                    .err()
+                    .map(|e| (i, e))
+            })
+        }));
+        let (i, e) = stalled
+            .unwrap()
+            .expect("the bare exchange stalls inside one task poll");
+        assert!(
+            i >= 100,
+            "only once the coop budget is spent (call {i}): {e}"
+        );
+        // The fix: the same walk through `call` finishes, and quickly.
+        let b = mk();
+        let b2 = b.clone();
+        let took = rt
+            .block_on(rt.spawn(async move {
+                let t = std::time::Instant::now();
+                for _ in 0..300 {
+                    assert_eq!(b2.get_tip_height().unwrap(), 42);
+                }
+                t.elapsed()
+            }))
+            .unwrap();
+        assert!(took < Duration::from_secs(2), "300 calls took {took:?}");
+        // reqwest's blocking client must be dropped outside the runtime.
+        drop(rt);
+        drop((raw, b));
+    }
+
     #[test]
     fn cookie_split() {
         let cookie = "__cookie__:abcdef1234567890\n";

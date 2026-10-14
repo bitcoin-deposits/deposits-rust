@@ -408,12 +408,30 @@ pub fn find_unspent_output_retrying_blocking(
 }
 
 fn sleep_blocking(d: std::time::Duration) {
+    off_budget(|| std::thread::sleep(d))
+}
+
+/// Run blocking I/O from wherever a synchronous chain call happens to be made,
+/// including inside an async task, without tokio's cooperative budget.
+///
+/// `reqwest::blocking` hands each request to its own runtime and waits on a
+/// `tokio::sync::oneshot`. Polled on a tokio worker, that oneshot spends the
+/// calling task's coop budget (128 a poll). A task that makes more synchronous
+/// calls than that in one poll (a block walk) finds the budget spent: the
+/// receiver returns Pending and *defers* its wake-up until the task yields to
+/// the scheduler. It never yields (it is parked inside reqwest), so a request
+/// bitcoind already answered sits out reqwest's whole 60 s timeout. That was
+/// the claim pass's "getblock times out every minute" (regtest 2026-10-14).
+///
+/// On a multi-threaded runtime `block_in_place` runs `f` outside any task
+/// budget (and moves the worker's other tasks elsewhere meanwhile); on a
+/// current-thread runtime `f` runs on a scoped thread outside the runtime.
+pub(crate) fn off_budget<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     use tokio::runtime::{Handle, RuntimeFlavor};
-    match Handle::try_current() {
-        Ok(h) if h.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| std::thread::sleep(d))
-        }
-        _ => std::thread::sleep(d),
+    match Handle::try_current().map(|h| h.runtime_flavor()) {
+        Ok(RuntimeFlavor::MultiThread) => tokio::task::block_in_place(f),
+        Ok(_) => std::thread::scope(|s| s.spawn(f).join().expect("blocking I/O thread panicked")),
+        Err(_) => f(),
     }
 }
 

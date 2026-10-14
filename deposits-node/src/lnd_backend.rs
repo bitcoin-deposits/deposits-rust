@@ -113,7 +113,12 @@ impl LndBackend {
         Self::new(base_url, macaroon_hex, tls_cert_pem.as_deref(), insecure)
     }
 
-    fn get<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, Error> {
+    fn get<T: for<'de> Deserialize<'de> + Send>(&self, path: &str) -> Result<T, Error> {
+        // reqwest::blocking off tokio's coop budget: see chain_backend::off_budget.
+        crate::chain_backend::off_budget(|| self.get_inner(path))
+    }
+
+    fn get_inner<T: for<'de> Deserialize<'de>>(&self, path: &str) -> Result<T, Error> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self
             .client
@@ -126,7 +131,15 @@ impl LndBackend {
             .map_err(|e| Error::Wallet(format!("LND parse response from {}: {}", url, e)))
     }
 
-    fn post<B: Serialize, T: for<'de> Deserialize<'de>>(
+    fn post<B: Serialize + Sync, T: for<'de> Deserialize<'de> + Send>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> Result<T, Error> {
+        crate::chain_backend::off_budget(|| self.post_inner(path, body))
+    }
+
+    fn post_inner<B: Serialize, T: for<'de> Deserialize<'de>>(
         &self,
         path: &str,
         body: &B,
@@ -147,6 +160,10 @@ impl LndBackend {
     /// LND identifies invoices by `payment_addr`-less r_hash (the payment_hash
     /// in hex). Our trait's `payment_id` carries that same hex.
     fn lookup_invoice(&self, r_hash_hex: &str) -> Result<Option<LndInvoice>, Error> {
+        crate::chain_backend::off_budget(|| self.lookup_invoice_inner(r_hash_hex))
+    }
+
+    fn lookup_invoice_inner(&self, r_hash_hex: &str) -> Result<Option<LndInvoice>, Error> {
         // The /v1/invoice/{r_hash} path parameter is HEX — verified live
         // against LND v0.19 (URL-safe base64 here returns 500
         // "encoding/hex: invalid byte"). Validate the hex before
