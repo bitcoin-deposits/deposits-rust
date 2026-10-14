@@ -71,11 +71,11 @@ impl BitcoindRpcBackend {
     ) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
-            // No idle keep-alive: bitcoind closes an idle RPC connection after
-            // -rpcservertimeout (30 s), and a request sent on that stale socket
-            // waited out the whole 60 s timeout. A fresh local connection per
-            // call is cheap.
-            .pool_max_idle_per_host(0)
+            // Keep connections alive and reuse them, and drop an idle one before
+            // bitcoind's -rpcservertimeout (30 s) does. A fresh connection per call
+            // (thousands a minute in a block walk) piles up TIME_WAIT sockets until
+            // connects to the RPC port stall and requests time out unsent.
+            .pool_idle_timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
         Ok(Self {
@@ -95,11 +95,11 @@ impl BitcoindRpcBackend {
     ) -> Result<Self, Error> {
         let client = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(60))
-            // No idle keep-alive: bitcoind closes an idle RPC connection after
-            // -rpcservertimeout (30 s), and a request sent on that stale socket
-            // waited out the whole 60 s timeout. A fresh local connection per
-            // call is cheap.
-            .pool_max_idle_per_host(0)
+            // Keep connections alive and reuse them, and drop an idle one before
+            // bitcoind's -rpcservertimeout (30 s) does. A fresh connection per call
+            // (thousands a minute in a block walk) piles up TIME_WAIT sockets until
+            // connects to the RPC port stall and requests time out unsent.
+            .pool_idle_timeout(Duration::from_secs(20))
             .build()
             .map_err(|e| Error::Wallet(format!("build bitcoind http client: {}", e)))?;
         Ok(Self {
