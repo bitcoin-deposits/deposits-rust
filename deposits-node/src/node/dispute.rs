@@ -4480,17 +4480,44 @@ fn logged_once(ledger_id: &str) -> bool {
 }
 
 impl Node {
-    /// Whether the vault of `ledger_id`'s latest `QuorumBegin` (as our replica holds it) is
-    /// spent on the confirmed chain: `Some(true)` spent, `Some(false)` unspent, `None`
-    /// unknown (no vault in the replica, the vault not confirmed, or the chain slow: the
-    /// caller proceeds as before). Bounded, on the blocking pool.
+    /// Whether `ledger_id`'s dispute is over because its vault is gone: `Some(true)` when our
+    /// lottery for it completed (the durable marker) or the vault of its latest `QuorumBegin`
+    /// is spent on the confirmed chain, `Some(false)` unspent, `None` unknown (the caller
+    /// proceeds as before). The vault comes from the replica, else a fork of it, else the
+    /// relay: a restarted replica's in-memory history may have lost the QuorumBegin.
     pub(crate) async fn dispute_vault_spent(&self, ledger_id: &str) -> Option<bool> {
-        let vault = {
+        let prefix = &ledger_id[..16.min(ledger_id.len())];
+        if self
+            .data_dir
+            .join(format!("lottery_completed_{}.marker", prefix))
+            .exists()
+        {
+            return Some(true);
+        }
+        let from_ledgers = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let arc = ledgers.get(ledger_id)?.clone();
+            let arcs: Vec<_> = ledgers
+                .iter()
+                .filter(|(k, _)| k.starts_with(ledger_id))
+                .map(|(_, a)| a.clone())
+                .collect();
             drop(ledgers);
-            let l = arc.read().unwrap();
-            super::vault_watch::current_vault(&l.history)?.0
+            // The newest QuorumBegin any of them holds (a fork stops at its fork point).
+            arcs.iter()
+                .filter_map(|a| super::vault_watch::current_vault(&a.read().unwrap().history))
+                .max_by_key(|(_, seq)| *seq)
+        };
+        let vault = match from_ledgers {
+            Some((v, _)) => v,
+            None => {
+                let updates = tokio::time::timeout(
+                    std::time::Duration::from_secs(4),
+                    self.fetch_lottery_updates(ledger_id),
+                )
+                .await
+                .ok()?;
+                super::vault_watch::current_vault(&updates)?.0
+            }
         };
         let chain = self.wallet.chain_backend();
         let check = tokio::task::spawn_blocking(move || {
