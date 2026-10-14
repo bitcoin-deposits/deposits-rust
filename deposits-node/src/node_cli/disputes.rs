@@ -93,7 +93,8 @@ fn summarize_fork(
     // Combine local fork history with extra (relay-fetched) updates,
     // dedup by content_hash. The local JSONL may be truncated by a
     // prior disk-full event; the relay fetch fills the gaps.
-    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<([u8; 33], [u8; 32])> =
+        std::collections::HashSet::new();
     let chain: Vec<&deposits_core::types::SignedLedgerUpdate> = ledger
         .history
         .iter()
@@ -108,7 +109,7 @@ fn summarize_fork(
             if u.sequence_number < s.last_valid_seq {
                 return false;
             }
-            seen.insert(u.content_hash)
+            seen.insert((u.operator_id.serialize(), u.content_hash))
         })
         .collect();
 
@@ -177,7 +178,8 @@ async fn fetch_ledger_updates_from_relay(
 
     let client = node.nostr.fetch_client();
     let mut all_updates = Vec::new();
-    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<([u8; 33], [u8; 32])> =
+        std::collections::HashSet::new();
     let mut until_ts: Option<u64> = None;
     let mut pages = 0u32;
     let mut stalls = 0u32;
@@ -216,7 +218,7 @@ async fn fetch_ledger_updates_from_relay(
             }
             if let Ok(tlv) = BASE64.decode(&event.content) {
                 if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
-                    if seen.insert(u.content_hash) {
+                    if seen.insert((u.operator_id.serialize(), u.content_hash)) {
                         all_updates.push(u);
                         fresh += 1;
                     }

@@ -132,10 +132,10 @@ pub fn validate_ledger_chain(chain: &[SignedLedgerUpdate]) -> ChainValidation {
     // continuation, so a well-formed main chain folds and the alternates are
     // rejected at their divergence point (the caller splits forks out first).
     let mut ordered: Vec<SignedLedgerUpdate> = {
-        let mut seen: HashSet<[u8; 32]> = HashSet::new();
+        let mut seen: HashSet<([u8; 33], [u8; 32])> = HashSet::new();
         let mut v: Vec<SignedLedgerUpdate> = Vec::new();
         for u in chain {
-            if seen.insert(u.content_hash) {
+            if seen.insert((u.operator_id.serialize(), u.content_hash)) {
                 v.push(u.clone());
             }
         }
@@ -373,7 +373,7 @@ async fn fetch_updates_paginated(
 ) -> Vec<SignedLedgerUpdate> {
     let client = transport.fetch_client();
     let mut all: Vec<SignedLedgerUpdate> = Vec::new();
-    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    let mut seen: HashSet<([u8; 33], [u8; 32])> = HashSet::new();
     let mut until_ts: Option<u64> = None;
     let mut pages = 0u32;
     let mut stalls = 0u32;
@@ -409,7 +409,7 @@ async fn fetch_updates_paginated(
             }
             if let Ok(tlv) = BASE64.decode(&event.content) {
                 if let Ok(u) = SignedLedgerUpdate::tlv_decode(&tlv) {
-                    if seen.insert(u.content_hash) {
+                    if seen.insert((u.operator_id.serialize(), u.content_hash)) {
                         all.push(u);
                         fresh += 1;
                     }

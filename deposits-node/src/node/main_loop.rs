@@ -583,7 +583,12 @@ impl Node {
 
         let client = self.nostr.fetch_client();
         let mut all = Vec::new();
-        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        // Keyed by operator as well: disputants' fork DisputeEnters at one sequence, from one
+        // fork point, carry the same content and differ only in who signed them; deduplicated
+        // by content alone, all but one vanished and the rebuild lost their arms (DEP-06
+        // authorised confiscation, CI 2026-10-14).
+        let mut seen: std::collections::HashSet<([u8; 33], [u8; 32])> =
+            std::collections::HashSet::new();
         // Page created_at BACKWARDS so the ENTIRE chain comes back, including
         // the genesis / QuorumBegin (the OLDEST events). The old forward
         // `.since` cursor against a newest-first relay only ever returned the
@@ -635,7 +640,7 @@ impl Node {
                 }
                 if let Ok(tlv) = BASE64.decode(&event.content) {
                     if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
-                        if seen.insert(u.content_hash) {
+                        if seen.insert((u.operator_id.serialize(), u.content_hash)) {
                             all.push(u);
                             fresh += 1;
                         }
@@ -1308,7 +1313,8 @@ impl Node {
         // fix/pattern as `fetch_all_ledger_updates_paginated` /
         // `reimport_joined_ledger`; terminate on a stall, not on page size.
         let mut all_fetched: Vec<deposits_core::SignedLedgerUpdate> = Vec::new();
-        let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<([u8; 33], [u8; 32])> =
+            std::collections::HashSet::new();
         let mut until_ts: Option<u64> = None;
         let mut pages = 0u32;
         let mut stalls = 0u32;
@@ -1341,7 +1347,7 @@ impl Node {
                 }
                 if let Ok(b) = BASE64.decode(&event.content) {
                     if let Ok(u) = deposits_core::SignedLedgerUpdate::tlv_decode(&b) {
-                        if seen.insert(u.content_hash) {
+                        if seen.insert((u.operator_id.serialize(), u.content_hash)) {
                             all_fetched.push(u);
                             fresh += 1;
                         }

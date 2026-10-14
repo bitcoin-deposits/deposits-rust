@@ -201,6 +201,7 @@ pub fn rebuild_matching(
     }
     let n = armers.len();
     let mut tried = std::collections::HashSet::new();
+    let mut closest: Option<String> = None;
     for mask in (1u32..(1 << n)).rev() {
         let subset: Vec<_> = (0..n)
             .filter(|i| mask & (1 << i) != 0)
@@ -242,8 +243,65 @@ pub fn rebuild_matching(
         if rebuilt.compute_txid() == spend.compute_txid() {
             return Ok(());
         }
+        if closest.is_none() {
+            closest = Some(format!(
+                "{}; lottery {}",
+                describe_difference(&rebuilt, spend),
+                crate::node::dispute::lottery_inputs_line(
+                    &set.lottery_participants(),
+                    &recovery_voters,
+                    recovery_threshold
+                )
+            ));
+        }
     }
-    Err("no rebuild from public state is this transaction".into())
+    Err(format!(
+        "no rebuild from public state is this transaction (the full cut's: {})",
+        closest.unwrap_or_default()
+    ))
+}
+
+/// What differs between a rebuild and a spend, for the log.
+fn describe_difference(rebuilt: &Transaction, spend: &Transaction) -> String {
+    let mut d = Vec::new();
+    if rebuilt.lock_time != spend.lock_time {
+        d.push(format!(
+            "lock_time {} vs {}",
+            rebuilt.lock_time, spend.lock_time
+        ));
+    }
+    let ins = |t: &Transaction| -> Vec<String> {
+        t.input
+            .iter()
+            .map(|i| format!("{}/{}", i.previous_output, i.sequence.0))
+            .collect()
+    };
+    if ins(rebuilt) != ins(spend) {
+        d.push(format!("inputs {:?} vs {:?}", ins(rebuilt), ins(spend)));
+    }
+    let outs = |t: &Transaction| -> Vec<String> {
+        t.output
+            .iter()
+            .map(|o| {
+                format!(
+                    "{}:{}",
+                    o.value.to_sat(),
+                    &hex::encode(o.script_pubkey.as_bytes())[..12.min(o.script_pubkey.len() * 2)]
+                )
+            })
+            .collect()
+    };
+    if outs(rebuilt) != outs(spend) {
+        d.push(format!("outputs {:?} vs {:?}", outs(rebuilt), outs(spend)));
+    }
+    if rebuilt.version != spend.version {
+        d.push(format!("version {} vs {}", rebuilt.version, spend.version));
+    }
+    if d.is_empty() {
+        "identical but for witnesses".into()
+    } else {
+        d.join("; ")
+    }
 }
 
 impl crate::node::Node {
