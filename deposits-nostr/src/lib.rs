@@ -5322,8 +5322,18 @@ impl NostrTransport {
                     let _ = self.dispute_tx.send(dispute);
                 }
             } else if kind_num == KIND_FRAUD_PROOF {
-                if let Ok(fp) = self.process_fraud_proof(&event) {
-                    let _ = self.fraud_proof_tx.send(fp);
+                match self.process_fraud_proof(&event) {
+                    Ok(fp) => {
+                        let _ = self.fraud_proof_tx.send(fp);
+                    }
+                    // Said, not swallowed: a proof another implementation encodes differently
+                    // was dropped here without a word (cl's proof 11, regtest 2026-10-14).
+                    Err(e) => tracing::warn!(
+                        "Fraud proof event {} from {} dropped: {}",
+                        &event.id.to_hex()[..16],
+                        &event.pubkey.to_hex()[..16],
+                        e
+                    ),
                 }
             }
             return true;
