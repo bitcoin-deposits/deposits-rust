@@ -59,7 +59,7 @@ fn update(seq: u64, prev: [u8; 32], op: &LedgerOperation, cosigners: &[u8]) -> S
         previous_hash: prev,
         content_hash: [0u8; 32],
         block_height: 0,
-        block_hash: [0u8; 32],
+        block_hash: [0x5b; 32],
         operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
     };

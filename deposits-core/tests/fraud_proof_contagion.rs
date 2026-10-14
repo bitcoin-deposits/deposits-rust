@@ -50,8 +50,20 @@ fn own_ledger(seed: u8, n: u8) -> String {
     hex::encode([seed ^ n; 32])
 }
 
-/// An update at `seq` on `prev`, cosigned by `cosigners`, operator-signed.
+/// An update at `seq` on `prev`, cosigned by `cosigners`, operator-signed. No block hash, as
+/// cl-deposits signed before DEP-02 §Block height and hash (its proof JSON below chains on these).
 fn update(seq: u64, prev: [u8; 32], op: &LedgerOperation, cosigners: &[u8]) -> SignedLedgerUpdate {
+    update_at(seq, prev, op, cosigners, [0u8; 32])
+}
+
+/// `update`, naming `block_hash`.
+fn update_at(
+    seq: u64,
+    prev: [u8; 32],
+    op: &LedgerOperation,
+    cosigners: &[u8],
+    block_hash: [u8; 32],
+) -> SignedLedgerUpdate {
     let secp = Secp256k1::new();
     let mut u = SignedLedgerUpdate {
         message: op.tlv_encode(),
@@ -62,7 +74,7 @@ fn update(seq: u64, prev: [u8; 32], op: &LedgerOperation, cosigners: &[u8]) -> S
         previous_hash: prev,
         content_hash: [0u8; 32],
         block_height: HEIGHT,
-        block_hash: [0u8; 32],
+        block_hash,
         operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
     };
@@ -465,7 +477,14 @@ fn an_operator_accused_proof_about_a_conforming_update_does_not_verify() {
         funding_address: "bcrt1qfund".to_string(),
         commitment: None,
     };
-    let honest = update(4, prefix[3].chain_hash(), &credit, &[ACCUSED, COLLUDER]);
+    // It names its block (DEP-02 §Block height and hash): only its own header is judged.
+    let honest = update_at(
+        4,
+        prefix[3].chain_hash(),
+        &credit,
+        &[ACCUSED, COLLUDER],
+        [0x5b; 32],
+    );
     let b = operator_proof(&honest);
     let err = verify_fraud_broadcast(
         &b,

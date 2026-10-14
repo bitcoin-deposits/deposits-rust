@@ -1311,7 +1311,11 @@ impl DepositsHandler {
                     reserves_amount: reserves_msats,
                     collateral_amount: collateral_msats,
                 };
-                if let Err(e) = ledger_guard.append_operation(operation) {
+                // DEP-02 §Block height and hash: even the genesis names its block.
+                let genesis_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+                if let Err(e) =
+                    ledger_guard.append_operation_with_block(operation, genesis_block, genesis_hash)
+                {
                     tracing::error!("Failed to append LedgerOpen: {:?}", e);
                 } else {
                     self.sign_ledger_update(&mut ledger_guard);
@@ -3278,6 +3282,7 @@ mod tests {
             u.message = o.tlv_encode();
             u.ledger_id = ledger_id;
             u.previous_hash = chain.last().map(|p| p.chain_hash()).unwrap_or([0u8; 32]);
+            u.block_hash = [0x5b; 32]; // DEP-02: every update names a block
             u.content_hash = u.compute_hash();
             let digest = u.operator_digest();
             u.operator_signature = secp

@@ -73,9 +73,11 @@ const FORBIDDEN_PATTERNS: &[(&str, &[&str])] = &[
         &["handler.rs"],
     ),
     (
-        // Fork-branch ops in auto_arm. Single function, sequential.
+        // Fork-branch ops in auto_arm. Single function, sequential. And the LedgerOpen
+        // creation in handler.rs, which names its block (DEP-02 §Block height and hash):
+        // pre-actor at ledger genesis, as above.
         "append_operation_with_block",
-        &["node/dispute.rs"],
+        &["node/dispute.rs", "handler.rs"],
     ),
 ];
 

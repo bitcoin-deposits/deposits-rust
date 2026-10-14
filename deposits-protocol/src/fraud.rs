@@ -878,11 +878,9 @@ pub fn verify_inactive_quorum_member(
         let op = LedgerOperation::tlv_decode(&u.message).map_err(|e| format!("{what}: {e:?}"))?;
         Ok((u, op))
     };
-    // A signed header dates an update when it names a block; one with no block
-    // hash (cl's, so far) is dated by its signed block_height alone.
-    let confirmed_at = |u: &SignedLedgerUpdate| {
-        u.block_hash == [0u8; 32] || block_oracle.confirms(&u.block_hash) == Some(u.block_height)
-    };
+    // DEP-02 §Block height and hash: an update is dated by its signed block_height alone; its
+    // hash is never resolved (a reorganised-out block is not a fault).
+    let confirmed_at = |_: &SignedLedgerUpdate| true;
     let is_qb = |u: &SignedLedgerUpdate| {
         matches!(
             LedgerOperation::tlv_decode(&u.message),
@@ -1499,7 +1497,7 @@ pub fn verify_non_conforming_cosignature(
             hex::encode(&state.parent_pubkey.serialize()[..8]),
         ));
     }
-    match fault_rejection(&state, &fault_update, authorizer)? {
+    match fault_rejection(&state, prefix.last().copied(), &fault_update, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
             "fault update at seq {} applies cleanly with no conformance violation \
@@ -1566,6 +1564,29 @@ pub fn verify_non_conforming_cosignature(
 ///
 /// A same-sequence sibling that chains and applies cleanly is not this fault:
 /// that is `Equivocation`, which has its own verifier.
+/// DEP-02 §Block height and hash: `None` when `update`'s header conforms after `predecessor`
+/// (`None` at sequence 0), else the broken rule. Heights never decrease along a chain (equal is
+/// fine), and every update names a block. The hash is never judged against any chain: a
+/// reorganised-out block is not a fault.
+pub fn header_violation(
+    predecessor: Option<&crate::types::SignedLedgerUpdate>,
+    update: &crate::types::SignedLedgerUpdate,
+) -> Option<String> {
+    if update.block_hash == [0u8; 32] {
+        return Some(format!(
+            "MissingBlockHash: seq {} names no block",
+            update.sequence_number
+        ));
+    }
+    match predecessor {
+        Some(p) if update.block_height < p.block_height => Some(format!(
+            "HeightDecreases: seq {} at height {} follows height {}",
+            update.sequence_number, update.block_height, p.block_height
+        )),
+        _ => None,
+    }
+}
+
 pub fn verify_non_conforming_update(
     proof: &FraudProof,
     history: &[crate::types::SignedLedgerUpdate],
@@ -1658,6 +1679,9 @@ pub fn verify_non_conforming_update(
                     .into(),
             );
         }
+        if header_violation(None, &fault).is_some() {
+            return Ok(());
+        }
         return if fault.previous_hash == [0u8; 32] {
             Err("fault update at seq 0 chains onto the zero hash and its \
                  content_hash is valid — conforming, proof not demonstrated"
@@ -1701,7 +1725,7 @@ pub fn verify_non_conforming_update(
 
     // (9) It chains, so it must break a rule: apply the fault to the state
     //     the prefix it follows replays to.
-    match fault_rejection(&state, &fault, authorizer)? {
+    match fault_rejection(&state, Some(anchor), &fault, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
             "fault update at seq {} chains onto its predecessor and applies \
@@ -1973,11 +1997,16 @@ pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
 /// `authorizer` (see [`verify_non_conforming_update`]).
 fn fault_rejection(
     state: &crate::types::LedgerState,
+    predecessor: Option<&crate::types::SignedLedgerUpdate>,
     fault: &crate::types::SignedLedgerUpdate,
     authorizer: &impl crate::types::Authorizer,
 ) -> Result<Option<String>, String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
+
+    if let Some(v) = header_violation(predecessor, fault) {
+        return Ok(Some(v));
+    }
 
     let op = LedgerOperation::tlv_decode(&fault.message).map_err(|e| {
         format!(
@@ -2094,6 +2123,11 @@ fn first_rule_break<'a>(
         .find_map(|t| index.chain_to_genesis(t, ledger_id).ok())?;
 
     let mut state = replay_canonical(&chain[..1]).ok()?;
+    if let Some(reason) = header_violation(None, chain[0]) {
+        if eligible(chain[0]) && confirm(chain[0]) {
+            return Some((chain[0], reason));
+        }
+    }
     for seq in 1..chain.len() {
         let pred_hash = chain[seq - 1].chain_hash();
         for s in index
@@ -2101,7 +2135,9 @@ fn first_rule_break<'a>(
             .filter(|s| s.previous_hash == pred_hash && s.chain_hash() != chain[seq].chain_hash())
         {
             if eligible(s) && signed(&s) {
-                if let Ok(Some(reason)) = fault_rejection(&state, s, authorizer) {
+                if let Ok(Some(reason)) =
+                    fault_rejection(&state, Some(chain[seq - 1]), s, authorizer)
+                {
                     if confirm(s) {
                         return Some((s, reason));
                     }
@@ -2109,6 +2145,12 @@ fn first_rule_break<'a>(
             }
         }
         let u = chain[seq];
+        // DEP-02 §Block height and hash: judged before the state machine sees it.
+        if let Some(reason) = header_violation(Some(chain[seq - 1]), u) {
+            if eligible(u) && confirm(u) {
+                return Some((u, reason));
+            }
+        }
         let op = match state.apply_update_in_place(u) {
             Ok(op) => op,
             Err(e) => {
@@ -2612,19 +2654,12 @@ pub fn verify_uncredited_onchain(
             )
         })?;
 
-    // (2) proof_sequence update exists, and its block_hash is confirmed.
+    // (2) proof_sequence update exists; it is dated by its signed block_height (DEP-02).
     let proof_update = accused_history
         .iter()
         .find(|u| u.sequence_number == *proof_sequence)
         .ok_or_else(|| format!("proof_sequence {} not in accused history", proof_sequence))?;
-    let proof_height = block_oracle
-        .confirms(&proof_update.block_hash)
-        .ok_or_else(|| {
-            format!(
-                "proof_sequence update's block_hash {} not in verifier's confirmed chain",
-                hex::encode(&proof_update.block_hash[..8])
-            )
-        })?;
+    let proof_height = proof_update.block_height;
 
     // (3) the deadline is the ledger's own terms (governing service_response_blocks at
     //     proof_sequence), never the carried required_confirmations (DEP-06: a carried value
@@ -3136,15 +3171,8 @@ pub fn verify_unhonoured_obligation(
     {
         return Err("proof_update is not the accused's update in its history".into());
     }
-    let (Some(ah), Some(ph)) = (
-        block_oracle.confirms(&au.block_hash),
-        block_oracle.confirms(&pu.block_hash),
-    ) else {
-        return Err("the updates' blocks are not on the verifier's chain".into());
-    };
-    if ph != pu.block_height {
-        return Err("the updates' blocks are not on the verifier's chain".into());
-    }
+    // DEP-02: both dated by their signed heights.
+    let (ah, ph) = (au.block_height, pu.block_height);
     let srb = governing_service_response_blocks(history, au.sequence_number);
     if ph.saturating_sub(ah) < srb {
         return Err(format!(
@@ -3338,12 +3366,8 @@ pub fn verify_uncredited_migration(
     {
         return Err("the proof update is not in the accused's history".into());
     }
-    let ph = block_oracle
-        .confirms(&pu.block_hash)
-        .ok_or("the proof update's block is not in the verifier's chain")?;
-    if ph != pu.block_height {
-        return Err("the proof update's signed height is not its block's".into());
-    }
+    // DEP-02: dated by its signed height.
+    let ph = pu.block_height;
     // The deadline is the accused's own terms at the accept, never a carried value.
     let srb = governing_service_response_blocks(accused_history, au.sequence_number);
     if ph.saturating_sub(confirmed) < srb {

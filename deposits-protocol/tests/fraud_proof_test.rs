@@ -1117,6 +1117,8 @@ mod dispatch {
         let mut proof_update =
             update_with(50, accused_ledger, dummy_transfer_lock(proof_hash), &[], 0);
         proof_update.block_hash = proof_block;
+        // DEP-02: dated by its signed height, not by resolving its hash.
+        proof_update.block_height = 1000 + elapsed;
 
         let mut histories = HashMap::new();
         histories.insert(ledger_id_hex.clone(), vec![proof_update]);
@@ -1733,7 +1735,12 @@ mod uncredited_onchain {
         }
     }
 
-    fn fixture_update(seq: u64, block_hash: [u8; 32], op: LedgerOperation) -> SignedLedgerUpdate {
+    fn fixture_update(
+        seq: u64,
+        block_height: u32,
+        block_hash: [u8; 32],
+        op: LedgerOperation,
+    ) -> SignedLedgerUpdate {
         SignedLedgerUpdate {
             message: op.tlv_encode(),
             message_type: op.message_type(),
@@ -1742,7 +1749,7 @@ mod uncredited_onchain {
             sequence_number: seq,
             previous_hash: [0u8; 32],
             content_hash: [0u8; 32],
-            block_height: 0,
+            block_height,
             block_hash,
             operator_signature: [0u8; 64],
             cosignatures: Vec::new(),
@@ -1826,7 +1833,12 @@ mod uncredited_onchain {
         oracle.insert(funding_block_hash, 1000u32);
         oracle.insert(proof_block_hash, 1000 + elapsed_blocks);
 
-        let history = vec![fixture_update(50, proof_block_hash, dummy_op())];
+        let history = vec![fixture_update(
+            50,
+            1000 + elapsed_blocks,
+            proof_block_hash,
+            dummy_op(),
+        )];
 
         let (accused_pk, accused_hex) = accused_op();
         let ledger_id = hex::encode([0xAA; 32]);
@@ -1918,9 +1930,9 @@ mod uncredited_onchain {
     }
 
     #[test]
-    fn rejects_unconfirmed_proof_sequence_block() {
-        // Build the genuine fixture, then drop the proof-block entry
-        // from the oracle so only the funding block is confirmed.
+    fn a_reorganised_proof_block_is_not_a_fault() {
+        // DEP-02 §Block height and hash: the proof update is dated by its signed height. Drop
+        // its block from the oracle (reorganised out): the proof still verifies.
         let (proof, history, oracle, _) = fixture(80, 6);
         let funding_block_hash = if let FraudEvidence::UncreditedOnchain {
             confirmed_at_block_hash,
@@ -1934,12 +1946,7 @@ mod uncredited_onchain {
         let mut oracle_map = HashMap::new();
         oracle_map.insert(funding_block_hash, oracle.0[&funding_block_hash]);
         let oracle = MockOracle(oracle_map);
-        let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
-        assert!(
-            err.contains("proof_sequence update's block_hash") && err.contains("not in verifier"),
-            "wrong error: {}",
-            err
-        );
+        verify_uncredited_onchain(&proof, &history, &oracle).unwrap();
     }
 
     #[test]
@@ -1954,8 +1961,8 @@ mod uncredited_onchain {
             commitment: None,
         };
         let history = vec![
-            fixture_update(40, [0xCC; 32], credit_op),
-            fixture_update(50, [0xCC; 32], dummy_op()),
+            fixture_update(40, 1080, [0xCC; 32], credit_op),
+            fixture_update(50, 1080, [0xCC; 32], dummy_op()),
         ];
         let err = verify_uncredited_onchain(&proof, &history, &oracle).unwrap_err();
         assert!(err.contains("OnchainCredit found"), "wrong error: {}", err);
@@ -1974,8 +1981,8 @@ mod uncredited_onchain {
             commitment: None,
         };
         let history = vec![
-            fixture_update(40, [0xCC; 32], credit_op),
-            fixture_update(50, [0xCC; 32], dummy_op()),
+            fixture_update(40, 1080, [0xCC; 32], credit_op),
+            fixture_update(50, 1080, [0xCC; 32], dummy_op()),
         ];
         verify_uncredited_onchain(&proof, &history, &oracle).unwrap();
     }

@@ -1551,8 +1551,18 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         sequence_number: sequence,
         previous_hash: our_armed.chain_hash(),
         content_hash: [0u8; 32],
-        block_height: current_block_height,
-        block_hash: [0u8; 32],
+        block_height: deposits_core::ledger::signing_header_after(
+            Some((our_armed.block_height, our_armed.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            Some((our_armed.block_height, our_armed.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .1,
     };
     signed_update.content_hash = signed_update.compute_hash();
     signed_update.operator_signature = *secp
@@ -1699,6 +1709,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
 
     // Validate the hash chain to find the last valid point
     let mut last_valid_hash = [0u8; 32];
+    let mut last_valid_header: Option<(u32, [u8; 32])> = None;
     let mut last_valid_sequence: i64 = -1;
     let mut violation_details = String::new();
     let mut invalid_update_hash: Option<[u8; 32]> = None;
@@ -1744,6 +1755,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         }
 
         last_valid_hash = update.chain_hash();
+        last_valid_header = Some((update.block_height, update.block_hash));
         last_valid_sequence = update.sequence_number as i64;
     }
 
@@ -1809,8 +1821,18 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         sequence_number: sequence,
         previous_hash: last_valid_hash,
         content_hash: [0u8; 32],
-        block_height: current_block_height,
-        block_hash: [0u8; 32],
+        block_height: deposits_core::ledger::signing_header_after(
+            last_valid_header,
+            current_block_height,
+            [0u8; 32],
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            last_valid_header,
+            current_block_height,
+            [0u8; 32],
+        )
+        .1,
     };
     signed_update.content_hash = signed_update.compute_hash();
     signed_update.operator_signature = *secp
@@ -2020,8 +2042,18 @@ pub async fn recovery_rebuild_quorum_add(
         sequence_number: sequence,
         previous_hash: our_latest.chain_hash(),
         content_hash: [0u8; 32],
-        block_height: current_block_height,
-        block_hash: [0u8; 32],
+        block_height: deposits_core::ledger::signing_header_after(
+            Some((our_latest.block_height, our_latest.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            Some((our_latest.block_height, our_latest.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .1,
     };
     signed_update.content_hash = signed_update.compute_hash();
     signed_update.operator_signature = *secp
@@ -2478,8 +2510,18 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         // its bare content hash.
         previous_hash: latest.chain_hash(),
         content_hash: [0u8; 32],
-        block_height: current_block_height,
-        block_hash: [0u8; 32],
+        block_height: deposits_core::ledger::signing_header_after(
+            Some((latest.block_height, latest.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            Some((latest.block_height, latest.block_hash)),
+            current_block_height,
+            [0u8; 32],
+        )
+        .1,
     };
     signed_update.content_hash = signed_update.compute_hash();
     signed_update.operator_signature = *secp
@@ -5145,8 +5187,18 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         sequence_number: sequence,
         previous_hash: our_armed.chain_hash(),
         content_hash: [0u8; 32],
-        block_height: current_block_height,
-        block_hash: current_block_hash,
+        block_height: deposits_core::ledger::signing_header_after(
+            Some((our_armed.block_height, our_armed.block_hash)),
+            current_block_height,
+            current_block_hash,
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            Some((our_armed.block_height, our_armed.block_hash)),
+            current_block_height,
+            current_block_hash,
+        )
+        .1,
     };
     signed_update.content_hash = signed_update.compute_hash();
     signed_update.operator_signature = *secp
@@ -5646,8 +5698,18 @@ pub async fn recovery_embed_hash(args: &[String]) -> Result<(), Box<dyn std::err
         sequence_number: next_seq,
         previous_hash: prev_chain_hash,
         content_hash: [0u8; 32],
-        block_height: 0,
-        block_hash: [0u8; 32],
+        block_height: deposits_core::ledger::signing_header_after(
+            Some((last.block_height, last.block_hash)),
+            0,
+            [0u8; 32],
+        )
+        .0,
+        block_hash: deposits_core::ledger::signing_header_after(
+            Some((last.block_height, last.block_hash)),
+            0,
+            [0u8; 32],
+        )
+        .1,
         operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
     };

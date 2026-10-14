@@ -313,7 +313,12 @@ impl Node {
                 .as_ref()
                 .map(|arc| arc.read().unwrap().ledger_id()),
             self.height_for(fields.block_height, COSIGN_MAX_BLOCK_SKEW),
-            |h| self.wallet.block_hash_at(h),
+            operator_ledger_arc.as_ref().and_then(|arc| {
+                let l = arc.read().unwrap();
+                (fields.sequence_number == l.next_sequence())
+                    .then(|| l.history.last().map(|u| u.block_height))
+                    .flatten()
+            }),
         ) {
             tracing::warn!(
                 "Cosign REFUSED for {}... seq {}: {}",
@@ -1277,15 +1282,16 @@ pub(crate) const COSIGN_MAX_BLOCK_SKEW: u32 = 6;
 /// - `sequence_number` is the one the request names;
 /// - `ledger_id` is the ledger we replicate and are answering about;
 /// - when our chain height is known (nonzero), `block_height` is within
-///   [`COSIGN_MAX_BLOCK_SKEW`] of it;
-/// - when `block_hash` is nonzero and we can look up our chain's hash at
-///   `block_height`, they agree. If the lookup fails we skip this check.
+///   [`COSIGN_MAX_BLOCK_SKEW`] of it (`height_for` first waits for our view to catch up);
+/// - `block_height` is not below the height of the update it follows (`tip_height`), and
+///   `block_hash` is present (DEP-02 §Block height and hash). The hash is never checked
+///   against our chain: a reorganised-out block is not a fault.
 pub(crate) fn check_cosign_header(
     fields: &deposits_core::types::CosignData<'_>,
     request_sequence: u64,
     replica_ledger_id: Option<[u8; 32]>,
     own_height: u32,
-    block_hash_at: impl FnOnce(u32) -> Option<[u8; 32]>,
+    tip_height: Option<u32>,
 ) -> Result<(), String> {
     if fields.sequence_number != request_sequence {
         return Err(format!(
@@ -1303,14 +1309,15 @@ pub(crate) fn check_cosign_header(
             fields.block_height, COSIGN_MAX_BLOCK_SKEW, own_height
         ));
     }
-    if fields.block_hash != [0u8; 32] {
-        if let Some(ours) = block_hash_at(fields.block_height) {
-            if ours != fields.block_hash {
-                return Err(format!(
-                    "block_hash mismatch at height {}",
-                    fields.block_height
-                ));
-            }
+    if fields.block_hash == [0u8; 32] {
+        return Err("MissingBlockHash: the update names no block".to_string());
+    }
+    if let Some(t) = tip_height {
+        if fields.block_height < t {
+            return Err(format!(
+                "HeightDecreases: block_height {} follows height {}",
+                fields.block_height, t
+            ));
         }
     }
     Ok(())
@@ -1413,7 +1420,7 @@ mod cosign_header_tests {
     fn accepts_matching_header() {
         let f = fields(850_000, [0xbb; 32]);
         assert_eq!(
-            check_cosign_header(&f, 7, Some([0xaa; 32]), 850_002, |_| Some([0xbb; 32])),
+            check_cosign_header(&f, 7, Some([0xaa; 32]), 850_002, Some(850_000)),
             Ok(())
         );
     }
@@ -1422,7 +1429,7 @@ mod cosign_header_tests {
     fn refuses_other_ledger() {
         let f = fields(850_000, [0xbb; 32]);
         assert_eq!(
-            check_cosign_header(&f, 7, Some([0xab; 32]), 850_000, |_| None),
+            check_cosign_header(&f, 7, Some([0xab; 32]), 850_000, None),
             Err("ledger_id mismatch".to_string())
         );
     }
@@ -1430,13 +1437,13 @@ mod cosign_header_tests {
     #[test]
     fn refuses_sequence_other_than_requested() {
         let f = fields(850_000, [0xbb; 32]);
-        assert!(check_cosign_header(&f, 8, Some([0xaa; 32]), 850_000, |_| None).is_err());
+        assert!(check_cosign_header(&f, 8, Some([0xaa; 32]), 850_000, None).is_err());
     }
 
     #[test]
     fn block_height_skew() {
-        let f = fields(850_000, [0u8; 32]);
-        let ok = |own| check_cosign_header(&f, 7, Some([0xaa; 32]), own, |_| None);
+        let f = fields(850_000, [0xbb; 32]);
+        let ok = |own| check_cosign_header(&f, 7, Some([0xaa; 32]), own, None);
         assert!(ok(850_000 + COSIGN_MAX_BLOCK_SKEW).is_ok());
         assert!(ok(850_000 - COSIGN_MAX_BLOCK_SKEW).is_ok());
         assert!(ok(850_001 + COSIGN_MAX_BLOCK_SKEW).is_err());
@@ -1444,27 +1451,24 @@ mod cosign_header_tests {
         // Own height unknown: no skew check.
         assert!(ok(0).is_ok());
         // Absent block_height is zero, which is far from any known height.
-        let z = fields(0, [0u8; 32]);
-        assert!(check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| None).is_err());
+        let z = fields(0, [0xbb; 32]);
+        assert!(check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, None).is_err());
     }
 
     #[test]
-    fn block_hash_checked_when_known() {
+    fn block_hash_required_never_checked_against_our_chain() {
+        // Any well-formed hash: a reorganised-out block is not a fault (DEP-02).
         let f = fields(850_000, [0xbb; 32]);
-        let run = |ours: Option<[u8; 32]>| {
-            check_cosign_header(&f, 7, Some([0xaa; 32]), 850_000, move |h| {
-                assert_eq!(h, 850_000);
-                ours
-            })
-        };
-        assert!(run(Some([0xbb; 32])).is_ok());
-        assert!(run(Some([0xbc; 32])).is_err());
-        // Lookup failed: skip the check.
-        assert!(run(None).is_ok());
-        // Zero block_hash: never looked up.
+        assert!(check_cosign_header(&f, 7, Some([0xaa; 32]), 850_000, None).is_ok());
+        // No hash: refused.
         let z = fields(850_000, [0u8; 32]);
-        assert!(
-            check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, |_| panic!("no lookup")).is_ok()
-        );
+        assert!(check_cosign_header(&z, 7, Some([0xaa; 32]), 850_000, None).is_err());
+    }
+
+    #[test]
+    fn height_never_decreases() {
+        let f = fields(850_000, [0xbb; 32]);
+        assert!(check_cosign_header(&f, 7, Some([0xaa; 32]), 850_000, Some(850_000)).is_ok());
+        assert!(check_cosign_header(&f, 7, Some([0xaa; 32]), 850_000, Some(850_001)).is_err());
     }
 }

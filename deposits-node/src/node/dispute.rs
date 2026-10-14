@@ -2059,8 +2059,18 @@ impl Node {
             sequence_number: sequence,
             previous_hash: parent_chain_hash,
             content_hash: [0u8; 32],
-            block_height: current_block,
-            block_hash: current_block_hash,
+            block_height: deposits_core::ledger::signing_header_after(
+                Some((our_armed.block_height, our_armed.block_hash)),
+                current_block,
+                current_block_hash,
+            )
+            .0,
+            block_hash: deposits_core::ledger::signing_header_after(
+                Some((our_armed.block_height, our_armed.block_hash)),
+                current_block,
+                current_block_hash,
+            )
+            .1,
         };
         signed_update.content_hash = signed_update.compute_hash();
         signed_update.operator_signature = self
@@ -2105,11 +2115,22 @@ impl Node {
                 signed_update.clone(),
                 current_block,
             ) {
-                Ok(true) => tracing::info!(
-                    "DisputeAcquire applied + persisted to local fork {} \
-                     (custody rotated to us, dispute cleared)",
-                    &fork_key[..16.min(fork_key.len())],
-                ),
+                Ok(true) => {
+                    tracing::info!(
+                        "DisputeAcquire applied + persisted to local fork {} \
+                         (custody rotated to us, dispute cleared)",
+                        &fork_key[..16.min(fork_key.len())],
+                    );
+                    // DEP-06 §Residue: we owe it now, within the ledger's service_response_blocks.
+                    let conf_txid = claim_tx.input[0].previous_output.txid;
+                    match self.credit_residue(ledger_id, &fork_key, conf_txid).await {
+                        Ok(n) if n > 0 => {
+                            let _ = self.publish_fork(&fork_key).await;
+                        }
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!("residue of {}: {}", &ledger_id[..8], e),
+                    }
+                }
                 Ok(false) => tracing::debug!(
                     "DisputeAcquire already present on fork {} — skipping",
                     &fork_key[..16.min(fork_key.len())],
@@ -2130,6 +2151,196 @@ impl Node {
         }
 
         Ok(true)
+    }
+
+    /// DEP-06 §Residue, as the new operator after `DisputeAcquire` on `fork_key`: credit every
+    /// owed entry the confiscation `conf_txid` did not pay. A migration dangling at the acquire:
+    /// one `MigrationCredit` carrying the confiscation (the fold credits only its unpaid entries,
+    /// and resolves the accept). A payment proven uncredited (recorded on the fork, or proved on
+    /// the relays): its deposit opened if need be, then an `OnchainCredit` of its outpoint. Each
+    /// is signed; the caller publishes the fork. Mirrors cl-deposits' `credit-residue`.
+    pub(crate) async fn credit_residue(
+        &self,
+        ledger_id: &str,
+        fork_key: &str,
+        conf_txid: bitcoin::Txid,
+    ) -> Result<usize, Error> {
+        use deposits_core::TlvEncode;
+        let conf = self
+            .wallet
+            .get_transaction(conf_txid)?
+            .ok_or_else(|| Error::Protocol(format!("confiscation {conf_txid} not found")))?;
+        let fork_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(fork_key)
+            .cloned()
+            .ok_or_else(|| Error::Protocol(format!("no fork {fork_key}")))?;
+        let our_pubkey = self.handler.signer.pubkey();
+        let (history, migration) = {
+            let l = fork_arc.read().unwrap();
+            let migration = l
+                .state
+                .dormancy_accept
+                .as_ref()
+                .filter(|a| !a.resolved)
+                .and_then(|a| a.source.map(|s| (s, a.manifest_hash)));
+            (l.history.clone(), migration)
+        };
+        let mut ops: Vec<LedgerOperation> = Vec::new();
+        if let Some((source, manifest_hash)) = migration {
+            let src = self.receiver_history(&hex::encode(source)).await;
+            let nu = src.iter().rev().find(|u| {
+                matches!(LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DormancyNotice { manifest_hash: Some(h), .. }) if h == manifest_hash)
+            });
+            let qu = nu.and_then(|nu| {
+                use bitcoin::hashes::{sha256, Hash};
+                let id = sha256::Hash::hash(&nu.message).to_byte_array();
+                src.iter().find(|u| {
+                    matches!(LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::QuorumBegin { consumed_notice: Some(c), .. }) if c == id)
+                })
+            });
+            if let (Some(nu), Some(qu)) = (nu, qu) {
+                ops.push(LedgerOperation::MigrationCredit {
+                    source_notice_update: nu.tlv_encode(),
+                    source_qb_update: qu.tlv_encode(),
+                    confiscation_tx: Some(bitcoin::consensus::serialize(&conf)),
+                });
+            }
+        }
+        // Payments: recorded on the fork before the acquire, and proved on the relays.
+        let mut jsons: Vec<Vec<u8>> = history
+            .iter()
+            .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::ObligationRecord {
+                    uncredited_proof: Some(json),
+                    ..
+                }) => Some(json),
+                _ => None,
+            })
+            .collect();
+        jsons.extend(
+            self.fetch_uncredited_payment_proofs(ledger_id, &history)
+                .await,
+        );
+        let mut credited: Vec<([u8; 32], u32)> = history
+            .iter()
+            .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::OnchainCredit { txid, vout, .. }) => Some((txid, vout)),
+                _ => None,
+            })
+            .collect();
+        let mut opened: Vec<[u8; 16]> = Vec::new();
+        for json in jsons {
+            let Ok(proof) = serde_json::from_slice::<deposits_core::fraud::FraudProof>(&json)
+            else {
+                continue;
+            };
+            let deposits_core::fraud::FraudEvidence::UncreditedOnchain {
+                deposit_id,
+                descriptor,
+                txid,
+                vout,
+                amount_sats,
+                funding_address,
+                ..
+            } = &proof.evidence
+            else {
+                continue;
+            };
+            let (Ok(t), Ok(d)) = (hex::decode(txid), hex::decode(deposit_id)) else {
+                continue;
+            };
+            let (Ok(t), Ok(d)) = (<[u8; 32]>::try_from(t), <[u8; 16]>::try_from(d)) else {
+                continue;
+            };
+            if proof.ledger_id != ledger_id || credited.contains(&(t, *vout)) {
+                continue;
+            }
+            let e = deposits_core::messages::ManifestEntry {
+                deposit_id: d,
+                amount: amount_sats * 1000,
+                fees: Default::default(),
+                descriptor: descriptor.clone(),
+            };
+            // Residue: no output of the confiscation paid it.
+            let paid = deposits_core::types::owed_spk_sats(&e).is_some_and(|(spk, v)| {
+                conf.output
+                    .iter()
+                    .any(|o| o.script_pubkey == spk && o.value.to_sat() == v)
+            });
+            if paid {
+                continue;
+            }
+            let open =
+                fork_arc.read().unwrap().state.deposits.contains_key(&d) || opened.contains(&d);
+            if !open {
+                ops.push(LedgerOperation::DepositOpen {
+                    deposit_id: d,
+                    descriptor: descriptor.clone(),
+                    fees: None,
+                    transfer_fees: None,
+                    payment_hash: None,
+                    invoice: None,
+                    cosigner_guarantee_signature: None,
+                    receive_requires_sig: false,
+                    fee_change_after_blocks: None,
+                    fee_change_notice_blocks: None,
+                    fee_change_limit_bps: None,
+                    commitment: None,
+                });
+                opened.push(d);
+            }
+            ops.push(LedgerOperation::OnchainCredit {
+                txid: t,
+                vout: *vout,
+                deposit_id: d,
+                amount: e.amount,
+                funding_address: funding_address.clone(),
+                commitment: None,
+            });
+            credited.push((t, *vout));
+        }
+        let mut n = 0;
+        for op in ops {
+            let height = self.wallet.get_block_height().unwrap_or(0);
+            let hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
+            let appended = {
+                let mut fork = fork_arc.write().unwrap();
+                match fork.append_operation_with_block(op, height, hash) {
+                    Ok(_) => {
+                        if let Some(update) = fork.history.last_mut() {
+                            update.operator_id = our_pubkey;
+                        }
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "residue of {}: credit not appended: {:?}",
+                            &ledger_id[..8],
+                            e
+                        );
+                        false
+                    }
+                }
+            };
+            if appended {
+                self.sign_last_update(fork_key)?;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            tracing::info!(
+                "residue of {}: {} credit operation(s) appended (DEP-06)",
+                &ledger_id[..8],
+                n
+            );
+        }
+        Ok(n)
     }
 
     /// Withdraw our armed dispute on `fork_key`: append `DisputeYield` to the
@@ -2217,8 +2428,18 @@ impl Node {
             sequence_number: sequence,
             previous_hash: parent_chain_hash,
             content_hash: [0u8; 32],
-            block_height: current_block,
-            block_hash: current_block_hash,
+            block_height: deposits_core::ledger::signing_header_after(
+                Some((our_armed.block_height, our_armed.block_hash)),
+                current_block,
+                current_block_hash,
+            )
+            .0,
+            block_hash: deposits_core::ledger::signing_header_after(
+                Some((our_armed.block_height, our_armed.block_hash)),
+                current_block,
+                current_block_hash,
+            )
+            .1,
         };
         signed_update.content_hash = signed_update.compute_hash();
         signed_update.operator_signature = self

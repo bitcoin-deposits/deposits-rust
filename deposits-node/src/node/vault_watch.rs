@@ -405,6 +405,24 @@ impl crate::Node {
                 self.owed_vault_spends.lock().unwrap().remove(&key);
                 continue;
             };
+            // DEP-06: its block was reorganised out. Not a fault, and not proof: forget it and
+            // rescan from below it, so the spend is judged again where it confirms.
+            if self
+                .wallet
+                .confirms_block(&theft.spend.block_hash.to_byte_array())
+                .is_none()
+            {
+                tracing::warn!(
+                    "vault spend {}: its block was reorganised out; re-checking",
+                    key
+                );
+                self.owed_vault_spends.lock().unwrap().remove(&key);
+                let mut scanned = self.vault_scanned.lock().unwrap();
+                if entry.height > 0 {
+                    *scanned = Some(scanned.unwrap_or(0).min(entry.height - 1));
+                }
+                continue;
+            }
             let complete = self.report_vault_spend(&theft, &mut entry.published).await;
             if complete && tip > entry.first_tip + VAULT_SPEND_PUBLISH_BLOCKS {
                 self.owed_vault_spends.lock().unwrap().remove(&key);

@@ -56,7 +56,7 @@ fn signed_update(
         previous_hash: prev,
         content_hash: [0u8; 32],
         block_height,
-        block_hash: [0u8; 32],
+        block_hash: [0x5b; 32],
         operator_signature: [0u8; 64],
         cosignatures: Vec::new(),
     };

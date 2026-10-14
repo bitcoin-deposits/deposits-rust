@@ -159,6 +159,26 @@ pub struct Ledger {
     pub created_at: std::collections::HashMap<[u8; 32], u64>,
 }
 
+/// DEP-02 §Block height and hash: the header an operator signs an update with after a
+/// predecessor at (`height`, `hash`): never below it (a reorganisation that lowered our tip
+/// leaves us at its height, with its hash), and always naming a block: `block_hash`, else (no
+/// chain view) a stand-in. The hash is never judged against any chain.
+pub fn signing_header_after(
+    predecessor: Option<(u32, [u8; 32])>,
+    block_height: u32,
+    block_hash: [u8; 32],
+) -> (u32, [u8; 32]) {
+    use bitcoin::hashes::{sha256, Hash};
+    let height = block_height.max(predecessor.map_or(0, |p| p.0));
+    let hash = match predecessor {
+        Some((h, ph)) if h == height && ph != [0u8; 32] => ph,
+        _ if block_hash != [0u8; 32] && height == block_height => block_hash,
+        _ => sha256::Hash::hash(format!("deposits: no chain view at height {height}").as_bytes())
+            .to_byte_array(),
+    };
+    (height, hash)
+}
+
 impl Ledger {
     /// Create a new ledger as operator.
     pub fn new_as_operator(
@@ -960,6 +980,18 @@ impl Ledger {
         self.append_operation_with_block(operation, 0, [0u8; 32])
     }
 
+    /// DEP-02 §Block height and hash: the header the operator signs a new update with. Never
+    /// below the chain's last height (a reorganisation that lowered our tip leaves us there,
+    /// with that update's hash), and always naming a block: the caller's hash, else (no chain
+    /// view) a stand-in. The hash is never judged against any chain.
+    pub fn signing_header(&self, block_height: u32, block_hash: [u8; 32]) -> (u32, [u8; 32]) {
+        signing_header_after(
+            self.history.last().map(|u| (u.block_height, u.block_hash)),
+            block_height,
+            block_hash,
+        )
+    }
+
     /// Append an operation with block info.
     ///
     /// Same as `append_operation` but includes current block height and hash.
@@ -978,6 +1010,7 @@ impl Ledger {
                 "Cannot append to closed ledger".to_string(),
             ));
         }
+        let (block_height, block_hash) = self.signing_header(block_height, block_hash);
 
         // Validate the operation
         self.validate_operation(&operation)?;
@@ -1085,6 +1118,7 @@ impl Ledger {
                 "Cannot append to closed ledger".to_string(),
             ));
         }
+        let (block_height, block_hash) = self.signing_header(block_height, block_hash);
 
         // Author-side role guards. These check whether THIS NODE is
         // entitled to author the operation onto THIS ledger — a check
