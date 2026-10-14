@@ -779,23 +779,27 @@ mod tests {
             .build()
             .unwrap();
         // The hazard: the bare exchange, in one task poll, stalls once the budget is spent.
+        // (Release builds only: in debug, reqwest's blocking client refuses outright to run
+        // inside an async context, which is the same mistake caught louder.)
         let raw = mk();
-        let r = raw.clone();
-        let stalled = rt.block_on(rt.spawn(async move {
-            (0..300).find_map(|i| {
-                let req = serde_json::json!({"method": "getblockcount", "params": []});
-                r.exchange::<u32>("getblockcount", &req)
-                    .err()
-                    .map(|e| (i, e))
-            })
-        }));
-        let (i, e) = stalled
-            .unwrap()
-            .expect("the bare exchange stalls inside one task poll");
-        assert!(
-            i >= 100,
-            "only once the coop budget is spent (call {i}): {e}"
-        );
+        if !cfg!(debug_assertions) {
+            let r = raw.clone();
+            let stalled = rt.block_on(rt.spawn(async move {
+                (0..300).find_map(|i| {
+                    let req = serde_json::json!({"method": "getblockcount", "params": []});
+                    r.exchange::<u32>("getblockcount", &req)
+                        .err()
+                        .map(|e| (i, e))
+                })
+            }));
+            let (i, e) = stalled
+                .unwrap()
+                .expect("the bare exchange stalls inside one task poll");
+            assert!(
+                i >= 100,
+                "only once the coop budget is spent (call {i}): {e}"
+            );
+        }
         // The fix: the same walk through `call` finishes, and quickly.
         let b = mk();
         let b2 = b.clone();
