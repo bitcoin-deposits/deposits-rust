@@ -639,15 +639,21 @@ pub fn cli_armer_set_updates(
     )
 }
 
+/// Whether a dispute's armer set can no longer change: its confiscation confirmed in block
+/// `confiscated_at`, buried (DEP-03 "When the set is final"). A buried E alone is not final.
+pub fn set_is_final(set: &ArmerSet, confiscated_at: Option<u32>, tip: u32) -> bool {
+    !set.participants.is_empty() && confiscated_at.is_some_and(|c| tip >= c.saturating_add(BURIED))
+}
+
 fn ledger_cache() -> &'static Mutex<HashMap<String, ArmerSet>> {
     static CACHE: OnceLock<Mutex<HashMap<String, ArmerSet>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 impl crate::node::Node {
-    /// The dispute's armer set for `ledger_id`. Once its snapshot is buried
-    /// it cannot change (nothing after E counts), so it is kept per ledger
-    /// and the claim and recovery periodics never refetch whole ledgers.
+    /// The dispute's armer set for `ledger_id`. Once its confiscation has confirmed and is
+    /// buried the set cannot change (DEP-03), so it is kept per ledger and the claim and
+    /// recovery periodics never refetch whole ledgers; before that a later arm may move E.
     pub(crate) async fn lottery_armer_set(&self, ledger_id: &str) -> Result<ArmerSet, String> {
         if let Some(set) = ledger_cache().lock().unwrap().get(ledger_id) {
             return Ok(set.clone());
@@ -678,8 +684,12 @@ impl crate::node::Node {
                 t.elapsed().as_millis()
             );
         }
+        // Cache only a final set: once the confiscation has confirmed (DEP-03 "When the set
+        // is final"). A buried E is not enough: a later arm (a member that entered the
+        // dispute late) moves E, and a set cached at the old E made the claim path compute a
+        // two-armer lottery the landed four-armer confiscation did not pay, so no one revealed.
         let tip = chain.get_tip_height().map_err(|e| e.to_string())?;
-        if !set.participants.is_empty() && tip >= set.snapshot.saturating_add(BURIED) {
+        if set_is_final(&set, confiscated_at, tip) {
             ledger_cache()
                 .lock()
                 .unwrap()
@@ -940,6 +950,24 @@ mod tests {
             None
         );
     }
+    /// A set cached at a buried E went stale when a late arm moved E (regtest 2026-10-14:
+    /// the claim path kept a two-armer cut the landed four-armer confiscation did not pay).
+    #[test]
+    fn only_a_confiscated_set_is_final() {
+        let set = ArmerSet {
+            participants: vec![armer(1, 100, None)],
+            snapshot: 100,
+            ..Default::default()
+        };
+        assert!(!set_is_final(&set, None, 10_000), "a buried E is not final");
+        assert!(
+            !set_is_final(&set, Some(500), 502),
+            "a fresh confiscation is not buried"
+        );
+        assert!(set_is_final(&set, Some(500), 500 + BURIED));
+        assert!(!set_is_final(&ArmerSet::default(), Some(500), 10_000));
+    }
+
     /// A restarted member must not reopen a dispute whose vault the confiscation spent.
     #[test]
     fn a_spent_vault_ends_the_dispute() {
