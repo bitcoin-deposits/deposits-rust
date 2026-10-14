@@ -329,3 +329,34 @@ fn unhonoured_obligation_matches_cl() {
     }
     assert_eq!(n, 22);
 }
+
+/// A proof 11's history is the chain ending at its proof_update (DEP-06): rebuilt by
+/// previous_hash from any pool of the ledger's updates, decoys and order notwithstanding.
+#[test]
+fn proof_11_history_is_the_chain_through_the_proof_update() {
+    use deposits_core::fraud::chain_through;
+    let history: Vec<SignedLedgerUpdate> = include_str!("vectors/unhonoured_obligation.txt")
+        .lines()
+        .filter_map(|l| l.strip_prefix("update "))
+        .map(|h| SignedLedgerUpdate::tlv_decode(&hex::decode(h).unwrap()).unwrap())
+        .collect();
+    let tip = history.last().unwrap().clone();
+    // Shuffled, with a decoy that claims a link it does not have.
+    let mut pool: Vec<SignedLedgerUpdate> = history.iter().rev().cloned().collect();
+    let mut decoy = history[3].clone();
+    decoy.message.push(0);
+    pool.push(decoy);
+    let chain = chain_through(&pool, &tip).expect("the whole chain is in the pool");
+    assert_eq!(chain.len(), history.len());
+    assert!(chain
+        .iter()
+        .zip(&history)
+        .all(|(a, b)| a.chain_hash() == b.chain_hash()));
+    // A missing link: no chain (a verifier fails closed rather than judge a gap).
+    let gappy: Vec<SignedLedgerUpdate> = pool
+        .iter()
+        .filter(|u| u.sequence_number != 4)
+        .cloned()
+        .collect();
+    assert!(chain_through(&gappy, &tip).is_none());
+}

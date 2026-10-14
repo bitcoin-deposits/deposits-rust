@@ -2850,3 +2850,25 @@ fn discriminants_match_shared_vector() {
     }
     assert_eq!(n, 10);
 }
+
+/// DEP-06: a proof's JSON writes byte strings as hex and reads the earlier arrays too. cl writes
+/// hex, and our `anchor_block_hash` (QuorumExpired) took only arrays: every cl QuorumExpired
+/// proof was dropped unparsed (regtest 2026-10-14). Shared with cl-deposits
+/// (inspect/vectors/proof_json.txt).
+#[test]
+fn proof_json_hex_and_array_forms() {
+    let text = include_str!("fixtures/proof_json.txt");
+    let get = |k: &str| {
+        text.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k} ")))
+            .unwrap()
+    };
+    for form in ["hex", "array"] {
+        let p: FraudProof = serde_json::from_str(get(form))
+            .unwrap_or_else(|e| panic!("the {form} form does not parse: {e}"));
+        assert_eq!(hex::encode(p.proof_hash()), get("hash"), "{form} hash");
+        let back: serde_json::Value = serde_json::to_value(&p).unwrap();
+        let want: serde_json::Value = serde_json::from_str(get("hex")).unwrap();
+        assert_eq!(back, want, "{form} re-encodes as the hex form");
+    }
+}

@@ -1428,16 +1428,63 @@ impl Node {
             }
         }
 
+        // DEP-06 proof 11: the accused's history is the chain ending at its proof_update, the
+        // base up to the fork point and then the winner's fork. A member that lost the lottery
+        // does not follow that fork, so rebuild the chain from our updates and the relay's.
+        let mut overrides: std::collections::HashMap<
+            String,
+            Vec<deposits_core::types::SignedLedgerUpdate>,
+        > = std::collections::HashMap::new();
+        if let deposits_core::fraud::FraudEvidence::UnhonouredObligation { proof_update, .. } =
+            &broadcast.proof.evidence
+        {
+            use deposits_core::TlvDecode;
+            let lid = broadcast.proof.ledger_id.clone();
+            if let Some(tip) = hex::decode(proof_update)
+                .ok()
+                .and_then(|b| deposits_core::types::SignedLedgerUpdate::tlv_decode(&b).ok())
+            {
+                let mut pool: Vec<deposits_core::types::SignedLedgerUpdate> = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    ledgers
+                        .iter()
+                        .filter(|(k, _)| k.starts_with(&lid))
+                        .flat_map(|(_, a)| a.read().unwrap().history.clone())
+                        .collect()
+                };
+                if deposits_core::fraud::chain_through(&pool, &tip).is_none() {
+                    pool.extend(self.fetch_all_ledger_updates_paginated(&lid).await);
+                }
+                match deposits_core::fraud::chain_through(&pool, &tip) {
+                    Some(chain) => {
+                        overrides.insert(lid, chain);
+                    }
+                    None => tracing::warn!(
+                        "UnhonouredObligation on {}: the chain through its proof update is not \
+                         complete on the relay; judging against our replica",
+                        &lid[..16.min(lid.len())]
+                    ),
+                }
+            }
+        }
+
         // Structural + embedding + causal chain + per-type evidence — all in
         // the protocol-layer verifier so unit tests exercise the same path.
         struct DaemonLedgers<'a> {
             handler: &'a Arc<crate::handler::DepositsHandler>,
+            overrides: &'a std::collections::HashMap<
+                String,
+                Vec<deposits_core::types::SignedLedgerUpdate>,
+            >,
         }
         impl<'a> deposits_core::fraud::LedgerProvider for DaemonLedgers<'a> {
             fn ledger_history(
                 &self,
                 ledger_id: &str,
             ) -> Option<Vec<deposits_core::types::SignedLedgerUpdate>> {
+                if let Some(chain) = self.overrides.get(ledger_id) {
+                    return Some(chain.clone());
+                }
                 let ledgers = self.handler.ledgers.lock().unwrap();
                 ledgers
                     .get(ledger_id)
@@ -1473,6 +1520,7 @@ impl Node {
         // the confiscation driver.
         let provider = DaemonLedgers {
             handler: &self.handler,
+            overrides: &overrides,
         };
         let oracle = WalletOracle {
             wallet: &self.wallet,
@@ -1589,6 +1637,29 @@ impl Node {
         // verifies (the accused did operate the ledger at the fault's
         // sequence), but acting on it would freeze the honest successor.
         // Verification is unchanged: this only decides whether to act.
+        // DEP-06 proof 11 accuses the winner that took custody. A member that lost the lottery
+        // still holds the old operator's chain; adopt the resolved one (the reimport follows a
+        // DisputeAcquire to its new custodian) so the dispute forks from the winner's chain.
+        if matches!(
+            broadcast.proof.evidence,
+            deposits_core::fraud::FraudEvidence::UnhonouredObligation { .. }
+        ) {
+            let held = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().state.parent_pubkey)
+            };
+            if !fraud_proof_accuses_current_operator(&broadcast.proof.accused, held.as_ref()) {
+                if let Err(e) = self.reimport_joined_ledger(ledger_id).await {
+                    tracing::warn!(
+                        "UnhonouredObligation on {}: could not adopt the new custodian's chain: {}",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        e
+                    );
+                }
+            }
+        }
         let current_operator = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers

@@ -364,14 +364,14 @@ pub enum FraudEvidence {
         claim_txid: String,
         /// Block hash anchoring the claim TX's confirmation. Verifier
         /// confirms this hash is in its chain via `BlockOracle`.
-        #[serde(with = "crate::types::serde_32")]
+        #[serde(with = "crate::types::serde_32_hex")]
         claim_block_hash: [u8; 32],
     },
 
     QuorumExpired {
         /// Anchor block whose chain-height proves the deadline has
         /// passed. Verifier looks this up via the BlockOracle.
-        #[serde(with = "crate::types::serde_32")]
+        #[serde(with = "crate::types::serde_32_hex")]
         anchor_block_hash: [u8; 32],
         /// The expired quorum's `quorum_expiry`, as recorded on the
         /// ledger's most recent `QuorumBegin`. Carried in the evidence
@@ -3024,6 +3024,32 @@ fn obligation_credited(
         .filter(|u| u.sequence_number > after_seq && u.sequence_number <= upto_seq)
         .filter_map(|u| LedgerOperation::tlv_decode(&u.message).ok())
         .any(|op| hit(&op, owed.txid, owed.vout))
+}
+
+/// The chain an operator signed through `tip`: `tip`, then each update whose chain hash is the
+/// previous one's `previous_hash`, back to sequence 0, oldest first. `pool` holds the candidates
+/// (a replica's history, and updates of the ledger fetched from the relay); `None` when a link is
+/// missing. A proof 11's history is the chain that ends at its `proof_update`: the base up to the
+/// fork point, then the winner's fork, which a member that lost the lottery does not follow
+/// (DEP-06, regtest 2026-10-14).
+pub fn chain_through(
+    pool: &[crate::types::SignedLedgerUpdate],
+    tip: &crate::types::SignedLedgerUpdate,
+) -> Option<Vec<crate::types::SignedLedgerUpdate>> {
+    let by_hash: std::collections::HashMap<[u8; 32], &crate::types::SignedLedgerUpdate> =
+        pool.iter().map(|u| (u.chain_hash(), u)).collect();
+    let mut out = vec![tip.clone()];
+    let mut cur = tip;
+    while cur.sequence_number > 0 {
+        let prev = by_hash.get(&cur.previous_hash)?;
+        if prev.sequence_number + 1 != cur.sequence_number {
+            return None;
+        }
+        out.push((*prev).clone());
+        cur = prev;
+    }
+    out.reverse();
+    Some(out)
 }
 
 /// DEP-06 producer: an `UnhonouredObligation` against the new operator (`acquire`'s custodian)

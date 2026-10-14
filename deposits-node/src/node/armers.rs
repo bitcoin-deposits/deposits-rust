@@ -580,6 +580,31 @@ pub fn vault_spent_on_chain(chain: &dyn ChainBackend, vault: &OutPoint) -> Optio
     }
 }
 
+/// Whether a dispute forking at `last_valid_seq` comes after a custody change: `history`
+/// holds a `DisputeAcquire` at or before `last_valid_seq` and after its last `QuorumBegin`
+/// before that. Such a dispute (DEP-06 proof 11, against the winner) is a new one, and the
+/// spent vault of that QuorumBegin is the old dispute's, not grounds to stand down.
+pub fn forks_past_custody_change(history: &[SignedLedgerUpdate], last_valid_seq: u64) -> bool {
+    let mut last_qb = None;
+    let mut acquired_after_qb = false;
+    for u in history
+        .iter()
+        .filter(|u| u.sequence_number <= last_valid_seq)
+    {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin { .. }) => {
+                last_qb = Some(u.sequence_number);
+                acquired_after_qb = false;
+            }
+            Ok(LedgerOperation::DisputeAcquire { .. }) if last_qb.is_some() => {
+                acquired_after_qb = true;
+            }
+            _ => {}
+        }
+    }
+    acquired_after_qb
+}
+
 /// The signed-header height of the dispute's first arm: no confiscation can precede it, so
 /// the search for the landed one starts here, not at E (which later arms may have lifted
 /// past it; DEP-03 "When the set is final").
@@ -966,6 +991,34 @@ mod tests {
         );
         assert!(set_is_final(&set, Some(500), 500 + BURIED));
         assert!(!set_is_final(&ArmerSet::default(), Some(500), 10_000));
+    }
+
+    /// Proof 11 disputes the winner from past its DisputeAcquire: that is a new dispute, not
+    /// the old one the spent vault closed (the vector's chain: a QuorumBegin, then the acquire).
+    #[test]
+    fn a_dispute_past_the_custody_change_is_a_new_one() {
+        let history: Vec<SignedLedgerUpdate> =
+            include_str!("../../../deposits-core/tests/vectors/unhonoured_obligation.txt")
+                .lines()
+                .filter_map(|l| l.strip_prefix("update "))
+                .map(|h| SignedLedgerUpdate::tlv_decode(&hex::decode(h).unwrap()).unwrap())
+                .collect();
+        let acquire = history
+            .iter()
+            .find(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeAcquire { .. })
+                )
+            })
+            .unwrap()
+            .sequence_number;
+        assert!(
+            !forks_past_custody_change(&history, acquire - 1),
+            "the old dispute"
+        );
+        assert!(forks_past_custody_change(&history, acquire));
+        assert!(forks_past_custody_change(&history, acquire + 3));
     }
 
     /// A restarted member must not reopen a dispute whose vault the confiscation spent.

@@ -868,7 +868,7 @@ impl Node {
         // confirmed chain is over. Entering or arming it again (after a restart, on a fork
         // DisputeEnter the relay replays, or on a pledge the confiscation itself spent)
         // only moved E, and with it every member's view of the set.
-        if self.dispute_vault_spent(ledger_id).await == Some(true) {
+        if self.dispute_vault_spent(ledger_id, last_valid_seq).await == Some(true) {
             if logged_once(ledger_id) {
                 tracing::info!(
                     "Dispute on {}: its vault is spent on the confirmed chain; not entering or arming",
@@ -4485,7 +4485,25 @@ impl Node {
     /// is spent on the confirmed chain, `Some(false)` unspent, `None` unknown (the caller
     /// proceeds as before). The vault comes from the replica, else a fork of it, else the
     /// relay: a restarted replica's in-memory history may have lost the QuorumBegin.
-    pub(crate) async fn dispute_vault_spent(&self, ledger_id: &str) -> Option<bool> {
+    pub(crate) async fn dispute_vault_spent(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+    ) -> Option<bool> {
+        // A dispute against a custodian that took the ledger after the last QuorumBegin (DEP-06
+        // proof 11 against the winner) forks at or past that DisputeAcquire: the spent vault
+        // is the one the old dispute confiscated, not this one's. Only a dispute from before
+        // the custody change is the old one.
+        let after_custody_change = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id).cloned()
+        }
+        .is_some_and(|arc| {
+            super::armers::forks_past_custody_change(&arc.read().unwrap().history, last_valid_seq)
+        });
+        if after_custody_change {
+            return Some(false);
+        }
         let prefix = &ledger_id[..16.min(ledger_id.len())];
         if self
             .data_dir
