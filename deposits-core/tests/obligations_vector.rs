@@ -164,6 +164,7 @@ fn unhonoured_obligation_matches_cl() {
     let mut kv: HashMap<String, String> = HashMap::new();
     let mut history: Vec<SignedLedgerUpdate> = Vec::new();
     let mut n = 0;
+    let mut hashes: HashMap<(String, String), String> = HashMap::new();
     let dec = |h: &str| SignedLedgerUpdate::tlv_decode(&hex::decode(h).unwrap()).unwrap();
     for line in include_str!("vectors/unhonoured_obligation.txt").lines() {
         if line.starts_with('#') || line.is_empty() {
@@ -299,6 +300,26 @@ fn unhonoured_obligation_matches_cl() {
                 let o = |b: &[u8; 32]| oracle(&history, b);
                 let v = verify_unhonoured_obligation(&proof, &history, &o);
                 assert_eq!(v.is_ok(), w[4] == "1", "{} verdict at {seq}: {v:?}", w[1]);
+                hashes.insert((w[1].to_string(), w[2].to_string()), w[6].to_string());
+                n += 1;
+            }
+            "json" => {
+                // Proof 11 as cl broadcasts it: we must parse it as UnhonouredObligation (a
+                // mis-tagged variant made us drop every one, regtest 2026-10-14), same hash.
+                let json = &line[w[0].len() + w[1].len() + w[2].len() + 3..];
+                let p: FraudProof = serde_json::from_str(json)
+                    .unwrap_or_else(|e| panic!("cl's proof 11 ({}) does not parse: {e}", w[1]));
+                assert!(
+                    matches!(p.evidence, FraudEvidence::UnhonouredObligation { .. }),
+                    "{}: evidence variant",
+                    w[1]
+                );
+                assert_eq!(
+                    hex::encode(p.proof_hash()),
+                    hashes[&(w[1].to_string(), w[2].to_string())],
+                    "{} json hash",
+                    w[1]
+                );
                 n += 1;
             }
             k => {
@@ -306,5 +327,5 @@ fn unhonoured_obligation_matches_cl() {
             }
         }
     }
-    assert_eq!(n, 20);
+    assert_eq!(n, 22);
 }
