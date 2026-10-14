@@ -52,10 +52,7 @@ impl Node {
         }
 
         // Accumulate in collector (don't remove — more responses may come)
-        let collector = {
-            let pending = self.pending_cosign_requests.lock().unwrap();
-            pending.get(&response.request_id).map(|(_, c)| c.clone())
-        };
+        let collector = self.cosign_collector_for(&response.request_id);
 
         if let Some(collector) = collector {
             // This is a successful co-sign response
@@ -123,10 +120,7 @@ impl Node {
     pub(crate) async fn handle_ledger_response(&self, response: crate::nostr::LedgerResponse) {
         // First, check if this is a response to a pending co-sign request
         // For error responses, don't remove - keep waiting for success from actual quorum member
-        let is_cosign_request = {
-            let pending = self.pending_cosign_requests.lock().unwrap();
-            pending.contains_key(&response.request_id)
-        };
+        let is_cosign_request = self.cosign_collector_for(&response.request_id).is_some();
 
         if is_cosign_request {
             if !response.success {
@@ -141,10 +135,7 @@ impl Node {
             }
 
             // Accumulate in collector (don't remove from map — more responses may come)
-            let collector = {
-                let pending = self.pending_cosign_requests.lock().unwrap();
-                pending.get(&response.request_id).map(|(_, c)| c.clone())
-            };
+            let collector = self.cosign_collector_for(&response.request_id);
 
             if let Some(collector) = collector {
                 // This is a successful co-sign response
@@ -480,7 +471,24 @@ impl Node {
             return Ok(Vec::new());
         }
 
-        let collector = Arc::new(CosignCollector::new(threshold));
+        // DEP-05 §Cosign rounds: a retry of the same update (same cosign_data)
+        // starts from the cosignatures that arrived for the earlier attempt,
+        // late ones included.
+        let collector = self.cosign_rounds.lock().unwrap().begin(
+            &cosign_data,
+            threshold,
+            std::time::Instant::now(),
+        );
+        if collector.count() >= threshold {
+            tracing::info!(
+                "[COSIGN] seq={} {}/{} cosigs already held from an earlier attempt",
+                update.sequence_number,
+                collector.count(),
+                threshold
+            );
+            self.cosign_rounds.lock().unwrap().finish(&cosign_data);
+            return Ok(Self::cosign_entries(collector.results()));
+        }
 
         // Send the multicast request to the ledger
         let request_id = self
@@ -489,6 +497,10 @@ impl Node {
             .await
             .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
         self.track_sent_event(&request_id);
+        self.cosign_rounds
+            .lock()
+            .unwrap()
+            .attach(&cosign_data, &request_id);
 
         // Store collector in pending requests — handle_ledger_response() accumulates responses.
         {
@@ -511,16 +523,16 @@ impl Node {
 
         // Wait until threshold cosignatures collected or timeout.
         //
-        // Target: sub-1s in steady state. The 10s default is a safety net for
-        // bursts of concurrent cosign rounds (e.g. simultaneous auto_quorum_refresh
-        // rotations across many ledgers), where Nostr relay round-trips + the
-        // cosigners' inbound wait-for-data shim (see inbound.rs) can stack up
-        // beyond 5s under load. Override via `COSIGN_TIMEOUT_MS` env when
-        // benchmarking the steady-state path.
+        // Target: sub-1s in steady state. The deadline is DEP-05's advisory
+        // `cosign_response_seconds` (30): a member behind a burst of relay
+        // traffic answers late, and calling the round short sooner only makes
+        // the operator retry. Answers after it still land in the round (kept
+        // in `cosign_rounds`) for the next attempt. `COSIGN_TIMEOUT_MS`
+        // overrides it when benchmarking the steady-state path.
         let deadline_ms: u64 = std::env::var("COSIGN_TIMEOUT_MS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(10000);
+            .unwrap_or(super::cosign_rounds::COSIGN_RESPONSE_SECONDS * 1000);
         let deadline = Duration::from_millis(deadline_ms);
 
         tokio::select! {
@@ -539,7 +551,7 @@ impl Node {
             metrics::set_pending_cosign_requests(pending.len());
         }
 
-        let results = collector.take_results();
+        let results = collector.results();
         let cosign_rtt = cosign_send_time.elapsed();
         metrics::record_cosign_phase("rtt", cosign_rtt);
 
@@ -559,18 +571,32 @@ impl Node {
             threshold,
             cosign_rtt.as_secs_f64() * 1000.0
         );
+        self.cosign_rounds.lock().unwrap().finish(&cosign_data);
 
-        // Convert to CosignEntries
-        let entries: Vec<deposits_core::CosignEntry> = results
+        Ok(Self::cosign_entries(results))
+    }
+
+    fn cosign_entries(results: Vec<CoSignResult>) -> Vec<deposits_core::CosignEntry> {
+        results
             .into_iter()
             .map(|r| deposits_core::CosignEntry {
                 cosigner_pubkey: r.cosigner_pubkey,
                 cosign_signature: r.cosign_signature,
                 member_ledger_hash: r.member_ledger_hash,
             })
-            .collect();
+            .collect()
+    }
 
-        Ok(entries)
+    /// The collector an answer to REQUEST_ID feeds: an open round's, or one kept
+    /// past its deadline (DEP-05 §Cosign rounds).
+    fn cosign_collector_for(&self, request_id: &str) -> Option<Arc<CosignCollector>> {
+        let open = self
+            .pending_cosign_requests
+            .lock()
+            .unwrap()
+            .get(request_id)
+            .map(|(_, c)| c.clone());
+        open.or_else(|| self.cosign_rounds.lock().unwrap().collector_for(request_id))
     }
 
     /// Request consent from a quorum member to join our quorum.

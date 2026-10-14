@@ -267,6 +267,7 @@ impl Node {
             deposit_offers: Mutex::new(deposit_offers),
             withdrawals: Mutex::new(withdrawals),
             pending_cosign_requests: Arc::new(Mutex::new(HashMap::new())),
+            cosign_rounds: Arc::new(Mutex::new(super::cosign_rounds::CosignRounds::default())),
             pending_consent_requests: Arc::new(Mutex::new(HashMap::new())),
             staging_locks: Mutex::new(HashMap::new()),
             rotating_ledgers: Arc::new(Mutex::new(std::collections::HashSet::new())),

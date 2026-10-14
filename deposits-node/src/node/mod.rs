@@ -179,8 +179,11 @@ pub struct CoSignResult {
 
 /// Collector for majority cosignatures.
 /// Accumulates responses from quorum members until threshold is reached.
+/// With `cosign_data` it keeps only signatures that verify over it, so a round
+/// kept past its deadline (DEP-05 §Cosign rounds) holds nothing a retry must undo.
 struct CosignCollector {
     threshold: usize,
+    cosign_data: Option<Vec<u8>>,
     results: std::sync::Mutex<Vec<CoSignResult>>,
     seen_pubkeys: std::sync::Mutex<std::collections::HashSet<[u8; 33]>>,
     notify: tokio::sync::Notify,
@@ -190,14 +193,46 @@ impl CosignCollector {
     fn new(threshold: usize) -> Self {
         Self {
             threshold,
+            cosign_data: None,
             results: std::sync::Mutex::new(Vec::new()),
             seen_pubkeys: std::sync::Mutex::new(std::collections::HashSet::new()),
             notify: tokio::sync::Notify::new(),
         }
     }
 
+    /// A collector for one `cosign_data`, verifying each signature over it.
+    fn for_data(threshold: usize, cosign_data: Vec<u8>) -> Self {
+        Self {
+            cosign_data: Some(cosign_data),
+            ..Self::new(threshold)
+        }
+    }
+
+    fn verifies(&self, result: &CoSignResult) -> bool {
+        use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
+        let Some(data) = &self.cosign_data else {
+            return true;
+        };
+        let digest = deposits_core::SignedLedgerUpdate::cosign_digest_for_data(
+            data,
+            &result.member_ledger_hash,
+        );
+        Signature::from_slice(&result.cosign_signature)
+            .and_then(|sig| {
+                Secp256k1::verification_only().verify_schnorr(
+                    &sig,
+                    &Message::from_digest(digest),
+                    &result.cosigner_pubkey.x_only_public_key().0,
+                )
+            })
+            .is_ok()
+    }
+
     /// Add a cosign result. Returns true if threshold is now met.
     fn add(&self, result: CoSignResult) -> bool {
+        if !self.verifies(&result) {
+            return false;
+        }
         let pk_bytes = result.cosigner_pubkey.serialize();
         {
             let mut seen = self.seen_pubkeys.lock().unwrap();
@@ -218,9 +253,13 @@ impl CosignCollector {
         }
     }
 
-    /// Take collected results.
-    fn take_results(&self) -> Vec<CoSignResult> {
-        std::mem::take(&mut *self.results.lock().unwrap())
+    fn count(&self) -> usize {
+        self.results.lock().unwrap().len()
+    }
+
+    /// The results so far; the round keeps them for a retry.
+    fn results(&self) -> Vec<CoSignResult> {
+        self.results.lock().unwrap().clone()
     }
 }
 
@@ -350,6 +389,10 @@ pub struct Node {
     /// Pending co-sign requests: request_id -> (ledger_id, oneshot sender for co-sign result)
     /// The result includes the co-signer's signature and the member's ledger hash
     pending_cosign_requests: Arc<Mutex<HashMap<String, (String, Arc<CosignCollector>)>>>,
+
+    /// DEP-05 §Cosign rounds: collectors by cosign_data, kept past their deadline
+    /// so late cosignatures land and a retry of the same update reuses them.
+    cosign_rounds: Arc<Mutex<cosign_rounds::CosignRounds>>,
 
     /// Pending consent requests: request_id -> oneshot sender for consent result
     /// Used by quorum_add to await the member's consent signature
@@ -633,6 +676,7 @@ pub mod armers;
 pub mod auto_tasks;
 pub mod coordination;
 pub mod cosign_policy;
+pub mod cosign_rounds;
 pub mod dereliction;
 pub mod dispute;
 pub mod expiry_watch;
