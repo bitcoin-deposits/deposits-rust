@@ -84,7 +84,8 @@ pub(crate) struct VaultTheft {
 }
 
 /// Which of `spends` are thefts: they spend a ledger's vault, their txid is
-/// none of its recorded rotations nor a confiscation we know, and a tier
+/// none of its recorded rotations nor `known_confiscations` (the ones rebuilt from public
+/// state, DEP-06), and a tier
 /// witness on the vault input verifies. One per ledger per pass; spends whose
 /// `vault_spend_key` is in `reported` (owed or done) are skipped.
 pub(crate) fn find_vault_thefts(
@@ -319,7 +320,27 @@ impl crate::Node {
                 }
                 Err(_) => return,
             };
-            let known = self.known_confiscation_txids.lock().unwrap().clone();
+            // DEP-06: a spend is a confiscation iff it is the one the rules build from public
+            // state; never because we built, signed or saw it.
+            let mut known: HashSet<[u8; 32]> = HashSet::new();
+            for (id, history) in &histories {
+                if crate::node::fork_publish::fork_key_last_valid_seq(id).is_some() {
+                    continue;
+                }
+                let rotations = authorised_spend_txids(history);
+                for (vault, _) in recent_vaults(history) {
+                    for spend in spends.iter().filter(|s| s.outpoint == vault) {
+                        let txid = spend.tx.compute_txid().to_byte_array();
+                        if !rotations.contains(&txid)
+                            && self
+                                .authorised_confiscation_spend(id, &spend.tx, Some(spend.height))
+                                .await
+                        {
+                            known.insert(txid);
+                        }
+                    }
+                }
+            }
             let mut skip = self.reported_vault_spends.lock().unwrap().clone();
             skip.extend(self.owed_vault_spends.lock().unwrap().keys().cloned());
             for theft in find_vault_thefts(&histories, &spends, &known, &skip) {

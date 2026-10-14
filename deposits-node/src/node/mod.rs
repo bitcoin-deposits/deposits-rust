@@ -674,6 +674,7 @@ impl Node {
 
 pub mod armers;
 pub mod auto_tasks;
+pub mod confiscation_rebuild;
 pub mod coordination;
 pub mod cosign_policy;
 pub mod cosign_rounds;

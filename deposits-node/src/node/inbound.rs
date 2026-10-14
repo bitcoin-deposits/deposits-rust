@@ -1428,6 +1428,31 @@ impl Node {
             }
         }
 
+        // DEP-06 "Authorised confiscation": a vault spend is excused iff it is the confiscation
+        // the rules build from public state, whoever we are and whatever we saw.
+        let mut rebuilt_confiscation: Vec<[u8; 32]> = Vec::new();
+        if let deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
+            spent_ledger_id,
+            spend_tx_hex,
+            spend_block_hash,
+            ..
+        } = &broadcast.proof.evidence
+        {
+            if let Some(tx) = hex::decode(spend_tx_hex)
+                .ok()
+                .and_then(|b| bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b).ok())
+            {
+                let height = self.wallet.confirms_block(spend_block_hash);
+                if self
+                    .authorised_confiscation_spend(spent_ledger_id, &tx, height)
+                    .await
+                {
+                    rebuilt_confiscation
+                        .push(bitcoin::hashes::Hash::to_byte_array(tx.compute_txid()));
+                }
+            }
+        }
+
         // DEP-06 proof 11: the accused's history is the chain ending at its proof_update, the
         // base up to the fork point and then the winner's fork. A member that lost the lottery
         // does not follow that fork, so rebuild the chain from our updates and the relay's.
@@ -1547,17 +1572,10 @@ impl Node {
             let history = provider
                 .ledger_history(spent_ledger_id)
                 .ok_or("UnauthorizedVaultSpend: spent ledger not available")?;
-            let known_confiscations: Vec<[u8; 32]> = self
-                .known_confiscation_txids
-                .lock()
-                .unwrap()
-                .iter()
-                .copied()
-                .collect();
             deposits_core::vault_spend::verify_unauthorized_vault_spend(
                 &broadcast.proof,
                 &history,
-                &known_confiscations,
+                &rebuilt_confiscation,
             )
             .map_err(|e| format!("UnauthorizedVaultSpend: {}", e))?;
         }
