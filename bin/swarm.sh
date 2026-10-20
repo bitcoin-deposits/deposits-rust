@@ -50,10 +50,10 @@ done
 DEPOSITS_JSON="$DATA_DIR/deposits.json"
 [[ -f "$DEPOSITS_JSON" ]] || { echo "error: no deposits.json at $DEPOSITS_JSON" >&2; exit 2; }
 
-# Locate the binary (prefer release, fall back to debug, then PATH).
+# Locate the binary: $DEPOSIT_BOT, then $CARGO_TARGET_DIR/release, then release, debug, PATH.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOT=""
-for cand in "$ROOT/target/release/deposit-bot" "$ROOT/target/debug/deposit-bot" "$(command -v deposit-bot || true)"; do
+for cand in "${DEPOSIT_BOT:-}" "${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/release/deposit-bot}" "$ROOT/target/release/deposit-bot" "$ROOT/target/debug/deposit-bot" "$(command -v deposit-bot || true)"; do
   if [[ -n "$cand" && -x "$cand" ]]; then BOT="$cand"; break; fi
 done
 [[ -n "$BOT" ]] || { echo "error: deposit-bot binary not found — run: cargo build -p deposits-node --bin deposit-bot" >&2; exit 2; }
