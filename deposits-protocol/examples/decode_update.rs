@@ -73,6 +73,7 @@ fn opname(op: &LedgerOperation) -> &'static str {
         O::DisputeYield => "DisputeYield",
         O::DisputeArmed { .. } => "DisputeArmed",
         O::DeliveryEmbed { .. } => "DeliveryEmbed",
+        O::QuorumChallenge { .. } => "QuorumChallenge",
         O::LedgerClose => "LedgerClose",
         O::Batch(_) => "Batch",
     }
