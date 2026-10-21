@@ -79,9 +79,9 @@ fn ledger_operator(updates: &[SignedLedgerUpdate]) -> Option<bitcoin::secp256k1:
 /// DEP-06 §Spend challenge: the update among `updates` that answers an anchored spend `txid` of
 /// the vault the `QuorumBegin` at `governing_seq` of `spent_history` created, as a rotation: a
 /// `QuorumBegin` whose `previous_hash` is `anchor`, signed by the ledger's operator, whose rungs
-/// include `txid`, carrying valid cosignatures over it from at least the threshold of tier
-/// `tier_index` (the tier the spend's witness uses) by keys of that tier (none needed at the
-/// operator's solo tier). `updates` is whatever the judge holds of the ledger, any order, any
+/// include `txid`, and whose signatures by keys of tier `tier_index` (the tier the spend's witness
+/// uses) reach its threshold: valid cosignatures over it, and the operator's own signature when the
+/// operator's key is one of the tier's (none needed at the operator's solo tier). `updates` is whatever the judge holds of the ledger, any order, any
 /// fork. Mirrors cl-deposits' `rotation-answer`; vector `tests/vectors/vault_spend_anchor.txt`.
 pub fn rotation_answer<'a>(
     updates: &'a [SignedLedgerUpdate],
@@ -94,8 +94,11 @@ pub fn rotation_answer<'a>(
     let (builder, config, operator) = governing_reserves(spent_history, governing_seq).ok()?;
     let tier = config.tiers.get(tier_index)?;
     let keys = leaf_keys(&builder.build_threshold_leaf(tier).ok()?);
+    // The operator's own signature on the QuorumBegin counts when its key is the tier's.
     let needed = if tier.threshold == 1 && tier.requires_tie_breaker {
         0
+    } else if keys.contains(&operator.x_only_public_key().0) {
+        tier.threshold - 1
     } else {
         tier.threshold
     };
