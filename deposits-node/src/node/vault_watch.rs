@@ -292,6 +292,7 @@ impl crate::Node {
             return;
         }
         let to = to.min(from + VAULT_SCAN_CHUNK - 1);
+        let mut hold: Option<u32> = None;
 
         let histories: HashMap<String, Vec<SignedLedgerUpdate>> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -344,6 +345,34 @@ impl crate::Node {
             let mut skip = self.reported_vault_spends.lock().unwrap().clone();
             skip.extend(self.owed_vault_spends.lock().unwrap().keys().cloned());
             for theft in find_vault_thefts(&histories, &spends, &known, &skip) {
+                // DEP-06 "Recorded rotation": our replica may lag (a gap it has not filled, an
+                // update it never received). The QuorumBegin is on the relay before the rotation
+                // is broadcast (DEP-03), so judge on the relay's updates too; a relay we cannot
+                // read holds the scan below this block, to judge it again next pass.
+                let relay = self
+                    .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
+                    .await;
+                if relay.is_empty() {
+                    tracing::warn!(
+                        "vault watch: no relay history for {}; holding the spend {} to judge again",
+                        &theft.ledger_id[..8.min(theft.ledger_id.len())],
+                        &theft.spend.tx.compute_txid().to_string()[..16],
+                    );
+                    hold =
+                        Some(hold.map_or(theft.spend.height, |h: u32| h.min(theft.spend.height)));
+                    continue;
+                }
+                let mut all = histories.get(&theft.ledger_id).cloned().unwrap_or_default();
+                all.extend(relay);
+                let txid = theft.spend.tx.compute_txid().to_byte_array();
+                if deposits_core::vault_spend::rotation_excused(&all, theft.governing_seq, &txid) {
+                    tracing::info!(
+                        "vault watch: {}'s spend {} is a rotation recorded on the relay (our replica lags)",
+                        &theft.ledger_id[..8.min(theft.ledger_id.len())],
+                        &theft.spend.tx.compute_txid().to_string()[..16],
+                    );
+                    continue;
+                }
                 tracing::warn!(
                     "VAULT SPEND: ledger {}'s reserves were spent by {}, which no rotation or \
                      confiscation accounts for; {} signers",
@@ -359,7 +388,8 @@ impl crate::Node {
                 );
             }
         }
-        *self.vault_scanned.lock().unwrap() = Some(to);
+        *self.vault_scanned.lock().unwrap() =
+            Some(hold.map_or(to, |h| to.min(h.saturating_sub(1))));
         self.publish_owed_vault_spends(tip).await;
         self.save_vault_watch();
     }

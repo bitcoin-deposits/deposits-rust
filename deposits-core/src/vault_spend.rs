@@ -46,6 +46,73 @@ pub fn authorised_spend_txids(history: &[SignedLedgerUpdate]) -> Vec<[u8; 32]> {
     out
 }
 
+/// DEP-06 proof 10 "Recorded rotation": `txid` (internal byte order) is a recorded rotation of
+/// the vault the `QuorumBegin` at `governing_seq` creates. That is, a `QuorumBegin` whose
+/// `new_outpoint_txid` it is, signed by the ledger's operator (its `LedgerOpen`'s), reachable
+/// from the governing `QuorumBegin` by `previous_hash` links at consecutive sequences through
+/// that operator's updates. `updates` is whatever the judge found of the ledger, its replica and
+/// the relay's copies together: forks, duplicates and dead-end variants cost nothing, since only
+/// the links count. Only the matching `QuorumBegin`'s signature is verified: it commits to the
+/// whole path by hash. Mirrors cl-deposits' `rotation-excused-p`; vector
+/// `tests/vectors/rotation_excuse.txt`.
+pub fn rotation_excused(
+    updates: &[SignedLedgerUpdate],
+    governing_seq: u64,
+    txid: &[u8; 32],
+) -> bool {
+    use sha2::{Digest, Sha256};
+    let link = |u: &SignedLedgerUpdate| -> [u8; 32] {
+        let mut h = Sha256::new();
+        h.update(u.compute_hash());
+        h.update(u.operator_signature);
+        h.finalize().into()
+    };
+    let is_qb = |u: &SignedLedgerUpdate| match LedgerOperation::tlv_decode(&u.message) {
+        Ok(LedgerOperation::QuorumBegin {
+            new_outpoint_txid, ..
+        }) => Some(new_outpoint_txid),
+        _ => None,
+    };
+    let Some(operator) = updates.iter().find_map(|u| {
+        if u.sequence_number != 0 {
+            return None;
+        }
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::LedgerOpen { .. }) => Some(u.operator_id),
+            _ => None,
+        }
+    }) else {
+        return false;
+    };
+    let mut by_prev: std::collections::HashMap<[u8; 32], Vec<&SignedLedgerUpdate>> =
+        std::collections::HashMap::new();
+    let mut frontier: Vec<&SignedLedgerUpdate> = Vec::new();
+    for u in updates.iter().filter(|u| u.operator_id == operator) {
+        if u.sequence_number == governing_seq && is_qb(u).is_some() {
+            frontier.push(u);
+        } else if u.sequence_number > governing_seq {
+            by_prev.entry(u.previous_hash).or_default().push(u);
+        }
+    }
+    let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
+    while let Some(cur) = frontier.pop() {
+        let h = link(cur);
+        if !seen.insert(h) {
+            continue;
+        }
+        for n in by_prev.get(&h).into_iter().flatten() {
+            if n.sequence_number != cur.sequence_number + 1 {
+                continue;
+            }
+            if is_qb(n).as_ref() == Some(txid) && n.verify_operator_signature().is_ok() {
+                return true;
+            }
+            frontier.push(n);
+        }
+    }
+    false
+}
+
 fn parse_prevouts(strings: &[String]) -> Result<Vec<TxOut>, String> {
     strings
         .iter()

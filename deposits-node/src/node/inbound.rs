@@ -1450,6 +1450,39 @@ impl Node {
                     rebuilt_confiscation
                         .push(bitcoin::hashes::Hash::to_byte_array(tx.compute_txid()));
                 }
+                // DEP-06 "Recorded rotation": judged on our replica and the relay together. A
+                // replica that lags (or one gap-filled before the QuorumBegin reached the relay
+                // we asked) must not turn a rotation into a theft; a relay we cannot read means
+                // no verdict, not a guilty one.
+                let txid = bitcoin::hashes::Hash::to_byte_array(tx.compute_txid());
+                let mut all = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    ledgers
+                        .get(spent_ledger_id)
+                        .map(|l| l.read().unwrap().history.clone())
+                        .unwrap_or_default()
+                };
+                let governing = match &broadcast.proof.evidence {
+                    deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
+                        governing_quorumbegin_seq,
+                        ..
+                    } => *governing_quorumbegin_seq,
+                    _ => 0,
+                };
+                if !deposits_core::vault_spend::rotation_excused(&all, governing, &txid) {
+                    let relay = self
+                        .fetch_ledger_updates_paginated_filtered(spent_ledger_id, &[])
+                        .await;
+                    if relay.is_empty() {
+                        return Err("UnauthorizedVaultSpend: no relay history for the spent \
+                                    ledger; not judged"
+                            .into());
+                    }
+                    all.extend(relay);
+                    if deposits_core::vault_spend::rotation_excused(&all, governing, &txid) {
+                        rebuilt_confiscation.push(txid);
+                    }
+                }
             }
         }
 
