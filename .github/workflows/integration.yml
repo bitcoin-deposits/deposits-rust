@@ -27,8 +27,8 @@ jobs:
       # dangerous-testing: the dispute phase has the operator equivocate.
       - name: Build
         run: |
-          cargo build --release -p deposits-node --features dangerous-testing --bin deposits-node
-          cargo build --release -p deposits-wallet --bin deposits-wallet
+          cargo build --locked --release -p deposits-node --features dangerous-testing --bin deposits-node
+          cargo build --locked --release -p deposits-wallet --bin deposits-wallet
 
       - name: Install Bitcoin Core 28.1
         run: |

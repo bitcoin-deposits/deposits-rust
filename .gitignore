@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 deposits-tools/certs/
 deposits-tools/bin/strfry
 # Symlinks dropped by ./bin/build-cmds.sh — local build artifacts,
