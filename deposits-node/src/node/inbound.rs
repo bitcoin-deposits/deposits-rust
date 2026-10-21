@@ -1428,9 +1428,13 @@ impl Node {
             }
         }
 
-        // DEP-06 "Authorised confiscation": a vault spend is excused iff it is the confiscation
-        // the rules build from public state, whoever we are and whatever we saw.
-        let mut rebuilt_confiscation: Vec<[u8; 32]> = Vec::new();
+        // DEP-06 §Spend challenge: what answers the spend, gathered before the (sync) verdict. The
+        // confiscation the rules rebuild from public state (whoever we are and whatever we saw),
+        // or the QuorumBegin that is the child of the spend's anchor and names it, found among
+        // our replica, the relay's copies and the answers published to challenges. Finding
+        // nothing proves nothing here: the proof itself must be unanchored or lapsed.
+        let mut confiscation_answer = false;
+        let mut answer_pool: Vec<deposits_core::types::SignedLedgerUpdate> = Vec::new();
         if let deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
             spent_ledger_id,
             spend_tx_hex,
@@ -1442,46 +1446,28 @@ impl Node {
                 .ok()
                 .and_then(|b| bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b).ok())
             {
-                let height = self.wallet.confirms_block(spend_block_hash);
-                if self
-                    .authorised_confiscation_spend(spent_ledger_id, &tx, height)
-                    .await
-                {
-                    rebuilt_confiscation
-                        .push(bitcoin::hashes::Hash::to_byte_array(tx.compute_txid()));
-                }
-                // DEP-06 "Recorded rotation": judged on our replica and the relay together. A
-                // replica that lags (or one gap-filled before the QuorumBegin reached the relay
-                // we asked) must not turn a rotation into a theft; a relay we cannot read means
-                // no verdict, not a guilty one.
-                let txid = bitcoin::hashes::Hash::to_byte_array(tx.compute_txid());
-                let mut all = {
-                    let ledgers = self.handler.ledgers.lock().unwrap();
-                    ledgers
-                        .get(spent_ledger_id)
-                        .map(|l| l.read().unwrap().history.clone())
-                        .unwrap_or_default()
-                };
-                let governing = match &broadcast.proof.evidence {
-                    deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
-                        governing_quorumbegin_seq,
-                        ..
-                    } => *governing_quorumbegin_seq,
-                    _ => 0,
-                };
-                if !deposits_core::vault_spend::rotation_excused(&all, governing, &txid) {
+                if deposits_core::tapscript_reserves::anchor_of(&tx).is_some() {
+                    let height = self.wallet.confirms_block(spend_block_hash);
+                    confiscation_answer = self
+                        .authorised_confiscation_spend(spent_ledger_id, &tx, height)
+                        .await;
+                    answer_pool = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        ledgers
+                            .get(spent_ledger_id)
+                            .map(|l| l.read().unwrap().history.clone())
+                            .unwrap_or_default()
+                    };
                     let relay = self
                         .fetch_ledger_updates_paginated_filtered(spent_ledger_id, &[])
                         .await;
-                    if relay.is_empty() {
+                    if relay.is_empty() && answer_pool.is_empty() {
                         return Err("UnauthorizedVaultSpend: no relay history for the spent \
                                     ledger; not judged"
                             .into());
                     }
-                    all.extend(relay);
-                    if deposits_core::vault_spend::rotation_excused(&all, governing, &txid) {
-                        rebuilt_confiscation.push(txid);
-                    }
+                    answer_pool.extend(relay);
+                    answer_pool.extend(self.handler.spend_answers_for(spent_ledger_id));
                 }
             }
         }
@@ -1605,10 +1591,31 @@ impl Node {
             let history = provider
                 .ledger_history(spent_ledger_id)
                 .ok_or("UnauthorizedVaultSpend: spent ledger not available")?;
+            let governing = match &broadcast.proof.evidence {
+                deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
+                    governing_quorumbegin_seq,
+                    ..
+                } => *governing_quorumbegin_seq,
+                _ => 0,
+            };
+            let hob = |b: &[u8; 32]| self.wallet.confirms_block(b);
+            let answered = |txid: &[u8; 32], anchor: &[u8; 32], tier: usize| {
+                confiscation_answer
+                    || deposits_core::vault_spend::rotation_answer(
+                        &answer_pool,
+                        &history,
+                        governing,
+                        anchor,
+                        txid,
+                        tier,
+                    )
+                    .is_some()
+            };
             deposits_core::vault_spend::verify_unauthorized_vault_spend(
                 &broadcast.proof,
                 &history,
-                &rebuilt_confiscation,
+                &hob,
+                &answered,
             )
             .map_err(|e| format!("UnauthorizedVaultSpend: {}", e))?;
         }

@@ -404,6 +404,29 @@ pub fn lottery_recovery_voters(
     Some((voters, t))
 }
 
+/// DEP-03 §Fee ladder: output 0 of every rung of the `QuorumBegin` [`vault_at_fork`] finds (only
+/// one can confirm), rung 0 first; empty with no `QuorumBegin`.
+pub fn vault_rungs_at_fork(updates: &[SignedLedgerUpdate]) -> Vec<OutPoint> {
+    let Some(v) = vault_at_fork(updates) else {
+        return Vec::new();
+    };
+    updates
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(op @ LedgerOperation::QuorumBegin {
+                new_outpoint_txid, ..
+            }) if Txid::from_byte_array(new_outpoint_txid) == v.txid => Some(
+                crate::vault_spend::quorum_begin_rungs(&op)
+                    .into_iter()
+                    .map(|t| OutPoint::new(Txid::from_byte_array(t), v.vout))
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .next()
+        .unwrap_or_else(|| vec![v])
+}
+
 /// DEP-06: the vault a confiscation spends, the outpoint of the original operator's newest
 /// `QuorumBegin` at or before the fork point. Never "a UTXO at the vault script": migration
 /// outputs sit at that script too (DEP-20 §8.3).
@@ -436,6 +459,21 @@ pub fn vault_at_fork(updates: &[SignedLedgerUpdate]) -> Option<OutPoint> {
         })
         .max_by_key(|(s, _)| *s)
         .map(|(_, o)| o)
+}
+
+/// DEP-03 §On-Chain State Anchor: a confiscation's anchor, the chain hash of the disputed ledger's
+/// update at the dispute's fork point: the `previous_hash` of the `DisputeEnter` naming the lowest
+/// `last_valid_sequence` (it extends that update); with none in `updates`, the original operator's
+/// update at the lowest fork point found. Mirrors cl-deposits' `dispute-anchor`.
+pub fn dispute_anchor(updates: &[SignedLedgerUpdate]) -> Option<[u8; 32]> {
+    let enters = updates.iter().filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+        Ok(LedgerOperation::DisputeEnter {
+            last_valid_sequence,
+            ..
+        }) => Some((last_valid_sequence, u.previous_hash)),
+        _ => None,
+    });
+    enters.min_by_key(|(lvs, _)| *lvs).map(|(_, h)| h)
 }
 
 /// Every DEP-20 output a rotation at `height` pays after the new vault: the due exits (each

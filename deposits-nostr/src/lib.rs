@@ -204,6 +204,10 @@ pub const KIND_CUSTODY_LOTTERY_REVEAL: u16 = 9106;
 /// DEP-03 §"Rotation ordering": the signed rotation a `QuorumBegin` names,
 /// `{ledger_id, sequence, tx}`, so any member or watcher can broadcast it.
 pub const KIND_ROTATION_TX: u16 = 9107;
+/// DEP-06 §Spend challenge: a `QuorumChallenge` update, tagged with the spent ledger.
+pub const KIND_SPEND_CHALLENGE: u16 = 9111;
+/// DEP-06 §Spend challenge: the signed updates answering a challenge.
+pub const KIND_CHALLENGE_ANSWER: u16 = 9112;
 
 /// Custom Kind for ledger advertisement (operator terms)
 /// Uses NIP-33 parameterized replaceable events (30000-39999).
@@ -3795,16 +3799,73 @@ impl NostrTransport {
     /// piggyback on the price feed to learn the tip without polling
     /// another source. `0` means "unknown" — wallets ignore the
     /// height in that case.
-    /// Publish a recorded rotation (Kind 9107, DEP-03 §"Rotation ordering").
+    /// DEP-06 §Spend challenge: publish a challenge (Kind 9111) or an answer (Kind 9112) of a
+    /// spend of `ledger_id`'s vault, tagged with that ledger.
+    pub async fn publish_spend_challenge_event(
+        &self,
+        kind: u16,
+        ledger_id: &str,
+        txid_hex: &str,
+        anchor_hex: &str,
+        updates_b64: &[String],
+    ) -> Result<String, Error> {
+        let mut content = serde_json::json!({
+            "challenged_ledger_id": ledger_id,
+            "txid": txid_hex,
+            "anchor": anchor_hex,
+        });
+        if kind == KIND_SPEND_CHALLENGE {
+            content["update"] = serde_json::json!(updates_b64.first().cloned().unwrap_or_default());
+        } else {
+            content["updates"] = serde_json::json!(updates_b64);
+        }
+        let event = EventBuilder::new(Kind::Custom(kind), content.to_string())
+            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id]))
+            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_ID), [ledger_tag(ledger_id)]))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign challenge event: {}", e)))?;
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to publish challenge event: {}", e)))?;
+        Ok(event_id)
+    }
+
+    /// DEP-06 §Spend challenge: the challenges (Kind 9111) or answers (Kind 9112) published
+    /// for spends of `ledger_id`'s vault, as their JSON contents.
+    pub async fn fetch_spend_challenge_events(
+        &self,
+        kind: u16,
+        ledger_id: &str,
+    ) -> Result<Vec<serde_json::Value>, Error> {
+        let filters = vec![Filter::new()
+            .kind(Kind::Custom(kind))
+            .custom_tag(TAG_LEDGER_REQ, [ledger_id])];
+        let events = self
+            .client
+            .fetch_events(filters, Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch challenge events: {}", e)))?;
+        Ok(events
+            .iter()
+            .filter_map(|e| serde_json::from_str::<serde_json::Value>(&e.content).ok())
+            .filter(|v| v.get("challenged_ledger_id").and_then(|l| l.as_str()) == Some(ledger_id))
+            .collect())
+    }
+
+    /// Publish one signed rung of a recorded rotation (Kind 9107, DEP-03 §"Rotation ordering",
+    /// §Fee ladder).
     pub async fn publish_rotation_tx(
         &self,
         ledger_id: &str,
         sequence: u64,
+        rung: usize,
         tx_hex: &str,
     ) -> Result<String, Error> {
         let content = serde_json::json!({
             "ledger_id": ledger_id,
             "sequence": sequence,
+            "rung": rung,
             "tx": tx_hex,
         })
         .to_string();

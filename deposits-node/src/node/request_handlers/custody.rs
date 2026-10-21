@@ -940,538 +940,258 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use bitcoin::Transaction;
-        use deposits_core::tapscript_reserves::{
-            ReservesSpendBuilder, TapscriptReservesBuilder, VoterSet,
-        };
-        use deposits_core::QuorumState;
+        use deposits_core::tapscript_reserves::{ReservesSpendBuilder, TapscriptReservesBuilder, VoterSet};
+        use deposits_core::{LedgerOperation, QuorumState, TlvDecode};
         use deposits_signer_api::{SigPurpose, SignContext};
 
         let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
-        tracing::debug!("[rotation_sign] received for ledger {}...", ledger_prefix);
-
-        let sighash_hex = match request.params.get("sighash").and_then(|v| v.as_str()) {
-            Some(h) => h,
-            None => return (false, None, Some("Missing sighash parameter".to_string())),
+        let refuse = |m: String| {
+            tracing::info!("[rotation_sign] refused for {}: {}", ledger_prefix, m);
+            (false, None, Some(m))
         };
-        let sighash_bytes: [u8; 32] = match hex::decode(sighash_hex) {
-            Ok(b) if b.len() == 32 => {
-                let mut a = [0u8; 32];
-                a.copy_from_slice(&b);
-                a
-            }
-            _ => return (false, None, Some("Invalid sighash format".to_string())),
-        };
-
-        let unsigned_tx_hex = match request.params.get("unsigned_tx").and_then(|v| v.as_str()) {
-            Some(h) => h,
-            None => {
-                return (
-                    false,
-                    None,
-                    Some("Missing unsigned_tx parameter".to_string()),
-                )
-            }
-        };
-        let tx_bytes = match hex::decode(unsigned_tx_hex) {
-            Ok(b) => b,
-            Err(e) => return (false, None, Some(format!("unsigned_tx hex decode: {}", e))),
-        };
-        let proposed_tx: Transaction = match bitcoin::consensus::encode::deserialize(&tx_bytes) {
-            Ok(t) => t,
-            Err(e) => return (false, None, Some(format!("unsigned_tx parse: {}", e))),
-        };
-
-        // DEP-03 / DEP-20: the vault (and a splice-in), then the new vault and any exit or
-        // migration outputs. The byte-for-byte rebuild below fixes the exact shape.
-        if !(1..=2).contains(&proposed_tx.input.len()) || proposed_tx.output.is_empty() {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "rotation tx has {} inputs and {} outputs",
-                    proposed_tx.input.len(),
-                    proposed_tx.output.len()
-                )),
-            );
-        }
-
-        // Snapshot ledger state. We must hold this ledger locally (we
-        // joined it as a cosigner) — if not, refuse outright.
-        let ledger_arc = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            match ledgers.get(&request.ledger_id) {
-                Some(arc) => {
-                    // DEP-05 §"Deposed operator" (an expiry dispute does not freeze).
-                    let refusal = crate::node::cosign_policy::refusal_for(
-                        &ledgers,
-                        &request.ledger_id,
-                        &arc.read().unwrap(),
-                        &self.node_id_hex,
-                    );
-                    if let Some(why) = refusal {
-                        return (false, None, Some(format!("operator deposed: {why}")));
-                    }
-                    arc.clone()
-                }
-                None => {
-                    return (
-                        false,
-                        None,
-                        Some("Ledger not locally held; refusing rotation cosign".to_string()),
-                    )
-                }
-            }
-        };
-
-        let (
-            ruleset_name,
-            ledger_hash,
-            reserves_id,
-            quorum_expiry,
-            operator_key,
-            current_members,
-            new_members,
-        ) = {
-            let ledger = ledger_arc.read().unwrap();
-            let state = &ledger.state;
-            if state.quorum_state != QuorumState::Active {
-                return (
-                    false,
-                    None,
-                    Some(format!(
-                        "quorum not active (state={:?})",
-                        state.quorum_state
-                    )),
-                );
-            }
-            if state.dispute_state != deposits_core::types::DisputeState::Normal {
-                return (
-                    false,
-                    None,
-                    Some(format!(
-                        "dispute_state={:?}, refusing rotation cosign",
-                        state.dispute_state
-                    )),
-                );
-            }
-            let we_are_member = state
-                .quorum_members
-                .iter()
-                .any(|m| m.pubkey == self.node_id);
-            if !we_are_member {
-                return (
-                    false,
-                    None,
-                    Some("Not a current quorum member for this ledger".to_string()),
-                );
-            }
-            let block_height = self.wallet.get_block_height().unwrap_or(0);
-            let qe = state.quorum_expiry.unwrap_or(0);
-            // Past expiry, refuse only on legacy ledgers. cltv-offset-v2
-            // ledgers are entitled to the DEP-05 §Lifecycle self-rescue
-            // path: cosigners cosign QuorumBegin (the establishment op
-            // `rotation_sign` is supporting) at degraded thresholds via
-            // the cosign_threshold helper. The downstream sighash check
-            // and the operator's collected cosignature count must still
-            // both line up; this gate just removes the blanket refusal
-            // so the lifecycle cascade can engage.
-            let cascade_active =
-                deposits_core::ruleset::lookup(&state.active_ruleset_name).is_some();
-            if qe != 0 && block_height > qe && !cascade_active {
-                return (
-                    false,
-                    None,
-                    Some(format!("quorum past expiry ({} > {})", block_height, qe)),
-                );
-            }
-            let current: Vec<bitcoin::secp256k1::PublicKey> =
-                state.quorum_members.iter().map(|m| m.pubkey).collect();
-            let new: Vec<bitcoin::secp256k1::PublicKey> = if state.next_quorum_members.is_empty() {
-                current.clone()
-            } else {
-                state.next_quorum_members.iter().map(|m| m.pubkey).collect()
-            };
-            (
-                state.active_ruleset_name.clone(),
-                ledger.hash(),
-                state.reserves_key.clone(),
-                qe,
-                state.operator_key,
-                current,
-                new,
-            )
-        };
-
-        // Look up the current on-chain reserves UTXO.
-        let reserves_addr: bitcoin::Address<bitcoin::address::NetworkUnchecked> =
-            match reserves_id.parse() {
-                Ok(a) => a,
-                Err(e) => return (false, None, Some(format!("parse reserves_id: {}", e))),
-            };
-        let reserves_addr = match reserves_addr.require_network(self.wallet.network()) {
-            Ok(a) => a,
-            Err(e) => return (false, None, Some(format!("network mismatch: {}", e))),
-        };
-        let reserves_script = reserves_addr.script_pubkey();
-        let recorded = crate::node::vault_watch::current_vault(&ledger_arc.read().unwrap().history)
-            .map(|(o, _)| o);
-        let (reserves_outpoint, reserves_amount) =
-            match self.wallet.vault_utxo(recorded, &reserves_script) {
-                Ok(Some(u)) => u,
-                Ok(None) => {
-                    return (
-                        false,
-                        None,
-                        Some("reserves UTXO not found on-chain (already spent?)".to_string()),
-                    )
-                }
-                Err(e) => return (false, None, Some(format!("esplora reserves lookup: {}", e))),
-            };
-
-        if proposed_tx.input[0].previous_output != reserves_outpoint {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "input outpoint {} ≠ on-chain reserves UTXO {}",
-                    proposed_tx.input[0].previous_output, reserves_outpoint
-                )),
-            );
-        }
-
-        // Operator passes their own ledger_hash + new_quorum_expiry in
-        // the request so both sides feed identical inputs to
-        // TapscriptReservesBuilder. Until chain_tip_hash converges across
-        // replay paths, computing this on the cosigner side independently
-        // produces a different hash and the script comparison below
-        // would refuse every legitimate rotation. Trust here is bounded:
-        // the cosigner still verifies the *resulting* script matches the
-        // proposed TX, so an operator who lies about ledger_hash just
-        // builds a Taproot output they can't later spend.
-        let claimed_ledger_hash: [u8; 32] = match request
+        // DEP-03 §Rotation ordering: the final QuorumBegin naming the rungs, and the rungs.
+        let Some(qb) = request
             .params
-            .get("ledger_hash")
+            .get("quorum_begin")
             .and_then(|v| v.as_str())
-            .and_then(|s| hex::decode(s).ok())
-            .and_then(|b| <[u8; 32]>::try_from(b).ok())
-        {
-            Some(h) => h,
-            None => ledger_hash, // Fall back to our own if not provided.
+            .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+            .and_then(|b| deposits_core::types::SignedLedgerUpdate::tlv_decode(&b).ok())
+        else {
+            return refuse("no quorum_begin: a member signs only rungs a final QuorumBegin names".into());
         };
-        let claimed_new_quorum_expiry: u32 = request
+        let rungs: Vec<bitcoin::Transaction> = request
             .params
-            .get("new_quorum_expiry")
-            .and_then(|v| v.as_u64())
-            .map(|v| v as u32)
-            .unwrap_or(quorum_expiry);
-
-        // Helper: rebuild a TapscriptReservesOutput from a member set.
-        // Used twice — once for the *current* output (to derive the
-        // tier-0 leaf script for sighash recomputation) and once for
-        // the *expected new* output (to compare against proposed_tx.output[0]).
-        // Closure variant takes the (hash, expiry) inputs explicitly so
-        // the *new* output is rebuilt against the operator's claimed
-        // values while the *current* output is rebuilt against our own
-        // state (the spend authorization side, which we control).
-        let rebuild = |members: &[bitcoin::secp256k1::PublicKey], lh: [u8; 32], qe: u32| {
-            let others: Vec<bitcoin::secp256k1::PublicKey> = members
-                .iter()
-                .filter(|pk| **pk != operator_key)
-                .copied()
-                .collect();
-            let voter_set = VoterSet::new(operator_key, others);
-            let ruleset = deposits_core::ruleset::resolve_or_current(Some(&ruleset_name));
-            let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), qe);
-            TapscriptReservesBuilder::new(voter_set, config, self.wallet.network(), lh).build()
-        };
-
-        // Build the *new* Taproot output and verify the proposed TX matches.
-        let expected_new =
-            match rebuild(&new_members, claimed_ledger_hash, claimed_new_quorum_expiry) {
-                Ok(o) => o,
-                Err(e) => {
-                    return (
-                        false,
-                        None,
-                        Some(format!("build expected rotated taproot output: {:?}", e)),
-                    )
-                }
-            };
-        if proposed_tx.output[0].script_pubkey != expected_new.script_pubkey() {
-            return (
-                false,
-                None,
-                Some(
-                    "output[0] script mismatch — proposed Taproot output differs from \
-                     cosigner's rebuild (likely diverged ledger_hash or member set; \
-                     operator may have advanced past cosigner's view)"
-                        .to_string(),
-                ),
-            );
+            .get("unsigned_rungs")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(|h| hex::decode(h).ok())
+                    .filter_map(|b| bitcoin::consensus::deserialize(&b).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if rungs.is_empty() {
+            return refuse("no unsigned_rungs".into());
         }
-        // Build the *current* Taproot output → get its tier-0 leaf for
-        // sighash recomputation. Tier-0 is the "majority immediate" leaf
-        // (no timelock); rotations always use it. Uses *our* state for
-        // hash/expiry because we're validating the operator's authority
-        // to spend the on-chain UTXO that was committed against our
-        // observed history.
-        let current_output = match rebuild(&current_members, ledger_hash, quorum_expiry) {
-            Ok(o) => o,
-            Err(e) => {
-                return (
-                    false,
-                    None,
-                    Some(format!("build current taproot output: {:?}", e)),
-                )
-            }
-        };
-        // tier_index from the operator's request. Default to 0 for
-        // back-compat with rotation_sign requests that predate the
-        // DEP-05 §Lifecycle plumbing.
         let tier_index = request
             .params
             .get("tier_index")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
-        let chosen_tier = match current_output.config.tiers.get(tier_index) {
-            Some(t) => t.clone(),
-            None => {
-                return (
-                    false,
-                    None,
-                    Some(format!(
-                        "tier_index {} out of range (config has {} tiers)",
-                        tier_index,
-                        current_output.config.tiers.len()
-                    )),
-                )
-            }
-        };
-        // Sanity: verify the proposed TX's lock_time matches the tier's
-        // CLTV target. Without this check the operator could ask for a
-        // degraded tier but submit a TX that the on-chain script won't
-        // accept (BIP-65 OP_CLTV requires nLockTime >= target).
-        let lock_time_value = proposed_tx.lock_time.to_consensus_u32();
-        if lock_time_value != chosen_tier.timelock_blocks {
-            return (
-                false,
-                None,
-                Some(format!(
-                    "rotation tx lock_time {} does not match tier-{} CLTV target {}",
-                    lock_time_value, tier_index, chosen_tier.timelock_blocks
-                )),
-            );
-        }
-        let leaf_script = {
-            // Rebuild the builder once more so we can call build_threshold_leaf.
-            // (TapscriptReservesOutput doesn't expose its inner builder.)
-            let others: Vec<bitcoin::secp256k1::PublicKey> = current_members
-                .iter()
-                .filter(|pk| **pk != operator_key)
-                .copied()
-                .collect();
-            let voter_set = VoterSet::new(operator_key, others);
-            let ruleset = deposits_core::ruleset::resolve_or_current(Some(&ruleset_name));
-            let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), quorum_expiry);
-            let builder = TapscriptReservesBuilder::new(
-                voter_set,
-                config,
-                self.wallet.network(),
-                ledger_hash,
-            );
-            match builder.build_threshold_leaf(&chosen_tier) {
-                Ok(s) => s,
-                Err(e) => {
-                    return (
-                        false,
-                        None,
-                        Some(format!("build tier-{} leaf: {:?}", tier_index, e)),
-                    )
-                }
-            }
-        };
-        // DEP-20 §4: a splice-in ("txid:vout", txid in internal byte order) is input 1; we look
-        // it up ourselves (confirmed, unspent) and its prevout enters the sighash.
-        let splice = match request
-            .params
-            .get("splice_in_outpoint")
-            .and_then(|v| v.as_str())
-        {
-            None => None,
-            Some(s) => {
-                let parsed = s.split_once(':').and_then(|(t, v)| {
-                    Some((
-                        <[u8; 32]>::try_from(hex::decode(t).ok()?).ok()?,
-                        v.parse::<u32>().ok()?,
-                    ))
-                });
-                let Some((stxid, svout)) = parsed else {
-                    return (false, None, Some("bad splice_in_outpoint".to_string()));
-                };
-                match self.wallet.splice_prevout(stxid, svout) {
-                    Ok(p) => Some((stxid, svout, p)),
-                    Err(e) => return (false, None, Some(e)),
-                }
-            }
-        };
-        let more_prevouts: Vec<bitcoin::TxOut> = splice.iter().map(|(_, _, p)| p.clone()).collect();
-        let recomputed_sighash = match ReservesSpendBuilder::compute_sighash_with(
-            &proposed_tx,
-            0,
-            reserves_amount,
-            &reserves_script,
-            &leaf_script,
-            &more_prevouts,
-        ) {
-            Ok(s) => s,
-            Err(e) => return (false, None, Some(format!("recompute sighash: {:?}", e))),
-        };
-        let recomputed_bytes: [u8; 32] = *recomputed_sighash.as_ref();
-        if recomputed_bytes != sighash_bytes {
-            return (
-                false,
-                None,
-                Some(
-                    "recomputed sighash ≠ request sighash (operator's claimed sighash doesn't \
-                     match the TX they sent)"
-                        .to_string(),
-                ),
-            );
-        }
-
-        // DEP-20 §3: the exits due under the operator's cutoff, which must sit within
-        // the margin below our height (absent: height − margin).
-        let rotation_feerate = ledger_arc.read().unwrap().state.rotation_feerate();
-        let exit_extras = {
-            let margin = deposits_core::types::EXIT_CUTOFF_MARGIN_BLOCKS;
-            let cutoff = request
-                .params
-                .get("exit_cutoff_height")
-                .and_then(|v| v.as_u64())
-                .map(|c| c as u32);
-            let h = self.height_for(cutoff.unwrap_or(0), 6);
-            if let Some(c) = cutoff {
-                if c > h + 6 || c < h.saturating_sub(margin + 6) {
-                    return (
-                        false,
-                        None,
-                        Some(format!(
-                            "exit_cutoff_height {} outside [{}, {}]",
-                            c,
-                            h.saturating_sub(margin + 6),
-                            h + 6
-                        )),
-                    );
-                }
-            }
-            let ledger = ledger_arc.read().unwrap();
-            deposits_core::rotation_order::settlement_outputs(&ledger.state, h, cutoff).0
-        };
-        // DEP-03 §"Rotation transaction": rebuild it and sign only an identical one
-        // (shape and fee are rules, not the proposer's choice).
-        let expected_tx = deposits_core::tapscript_reserves::build_rotation_tx(
-            &deposits_core::tapscript_reserves::RotationTxParams {
-                vault: reserves_outpoint,
-                vault_sats: reserves_amount,
-                voters: current_output.voter_set.all_voters().len(),
-                feerate_sat_vb: rotation_feerate,
-                lock_time: chosen_tier.timelock_blocks,
-                new_vault_spk: expected_new.script_pubkey(),
-                splice_in: splice.as_ref().map(|(t, v, p)| {
-                    (
-                        bitcoin::OutPoint::new(
-                            {
-                                use bitcoin::hashes::Hash;
-                                bitcoin::Txid::from_byte_array(*t)
-                            },
-                            *v,
-                        ),
-                        p.value.to_sat(),
-                    )
-                }),
-                splice_vault: splice
-                    .as_ref()
-                    .is_some_and(|(_, _, p)| p.script_pubkey == reserves_script),
-                extra_outputs: exit_extras,
-            },
-        );
-        if expected_tx.as_ref() != Some(&proposed_tx) {
-            return (
-                false,
-                None,
-                Some("rotation tx differs from the DEP-03 rotation we build".to_string()),
-            );
-        }
-        if let Err(e) = deposits_core::rotation_order::check_relayable(&proposed_tx) {
-            return (false, None, Some(e));
-        }
-
-        let signature_bytes = match self.handler.signer.bip340_sign(
-            &SignContext::no_ledger(SigPurpose::OnchainSighash),
-            &sighash_bytes,
-        ) {
-            Ok(s) => s,
-            Err(e) => return (false, None, Some(format!("rotation sighash sign: {}", e))),
+        let Ok(op @ LedgerOperation::QuorumBegin { .. }) = LedgerOperation::tlv_decode(&qb.message)
+        else {
+            return refuse("quorum_begin is not a QuorumBegin".into());
         };
 
-        // DEP-03: a splice-in at the vault's own script is signed through the same tier.
-        let splice_signature = if splice
-            .as_ref()
-            .is_some_and(|(_, _, p)| p.script_pubkey == reserves_script)
-        {
-            let h1: [u8; 32] = match ReservesSpendBuilder::compute_sighash_with(
-                &proposed_tx,
-                1,
-                reserves_amount,
-                &reserves_script,
-                &leaf_script,
-                &more_prevouts,
-            ) {
-                Ok(s) => *AsRef::<[u8; 32]>::as_ref(&s),
-                Err(e) => return (false, None, Some(format!("splice sighash: {:?}", e))),
+        // Our replica as it stood before the QuorumBegin.
+        let (history, state) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let Some(arc) = ledgers.get(&request.ledger_id) else {
+                return refuse("ledger not locally held".into());
             };
-            let claimed = request
-                .params
-                .get("splice_sighash")
-                .and_then(|v| v.as_str())
-                .and_then(|h| hex::decode(h).ok());
-            if claimed.as_deref() != Some(&h1[..]) {
-                return (
-                    false,
-                    None,
-                    Some("splice_sighash is not the rotation's input-1 sighash".to_string()),
-                );
+            let l = arc.read().unwrap();
+            if let Some(why) = crate::node::cosign_policy::refusal_for(
+                &ledgers,
+                &request.ledger_id,
+                &l,
+                &self.node_id_hex,
+            ) {
+                return refuse(format!("operator deposed: {why}"));
             }
-            match self
-                .handler
-                .signer
-                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), &h1)
-            {
-                Ok(s) => Some(hex::encode(s)),
-                Err(e) => return (false, None, Some(format!("splice sighash sign: {}", e))),
+            if qb.ledger_id != l.state.ledger_id || qb.operator_id != l.state.operator_key {
+                return refuse("the QuorumBegin is not this ledger's operator's".into());
+            }
+            let pre: Vec<deposits_core::types::SignedLedgerUpdate> = l
+                .history
+                .iter()
+                .filter(|u| u.sequence_number < qb.sequence_number)
+                .cloned()
+                .collect();
+            if pre.len() == l.history.len() {
+                (pre, l.state.clone())
+            } else {
+                let mut st = deposits_core::LedgerState::new(
+                    l.state.operator_key,
+                    l.state.reserves_key.clone(),
+                    l.state.genesis_block,
+                );
+                for u in &pre {
+                    if let Err(e) = st.apply_update_in_place(u) {
+                        return refuse(format!("replay before the QuorumBegin: {e}"));
+                    }
+                }
+                (pre, st)
+            }
+        };
+        let Some(tip) = history.last() else {
+            return refuse("empty replica".into());
+        };
+        if tip.sequence_number + 1 != qb.sequence_number || state.chain_tip_hash != qb.previous_hash {
+            return refuse("the QuorumBegin does not extend our replica".into());
+        }
+        if qb.verify_operator_signature().is_err() {
+            return refuse("the QuorumBegin's operator signature does not verify".into());
+        }
+        if state.quorum_state != QuorumState::Active
+            || state.dispute_state != deposits_core::types::DisputeState::Normal
+        {
+            return refuse("the ledger is not active and undisputed".into());
+        }
+        let current: Vec<bitcoin::secp256k1::PublicKey> =
+            state.quorum_members.iter().map(|m| m.pubkey).collect();
+        if !current.contains(&self.node_id) {
+            return refuse("not a member of the spent vault".into());
+        }
+        // Final: cosigned by the quorum that governs it (its establishment threshold).
+        let required =
+            deposits_core::cosign_threshold::cosign_requirement(&state, &op, qb.block_height)
+                .required_sigs;
+        if let Err(e) = qb.verify_cosign_signatures(&current, required) {
+            return refuse(format!("the QuorumBegin is not final: {e}"));
+        }
+        let splice_prevout = match &op {
+            LedgerOperation::QuorumBegin {
+                splice_in_outpoint: Some((stxid, svout)),
+                ..
+            } => match self.wallet.splice_prevout(*stxid, *svout) {
+                Ok(p) => Some(p),
+                Err(e) => return refuse(e),
+            },
+            _ => None,
+        };
+        let recorded = crate::node::vault_watch::current_vault(&history).map(|(o, _)| o);
+        let gov_op = deposits_core::rotation_order::rotating_quorum_begin_seq(&history)
+            .and_then(|g| history.iter().find(|u| u.sequence_number == g))
+            .and_then(|u| LedgerOperation::tlv_decode(&u.message).ok());
+        let Some(LedgerOperation::QuorumBegin {
+            ledger_hash: gov_hash,
+            quorum_expiry: gov_expiry,
+            quorum_members: gov_members,
+            protocol_version: gov_ruleset,
+            ..
+        }) = gov_op.clone()
+        else {
+            return refuse("no vault to rotate".into());
+        };
+        let reserves_script = match state
+            .reserves_key
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .ok()
+            .and_then(|a| a.require_network(self.wallet.network()).ok())
+        {
+            Some(a) => a.script_pubkey(),
+            None => return refuse("reserves_id does not parse".into()),
+        };
+        let rungs_gov = gov_op
+            .as_ref()
+            .map(deposits_core::vault_spend::quorum_begin_rungs)
+            .unwrap_or_default();
+        let rung_outpoints: Vec<bitcoin::OutPoint> = rungs_gov
+            .iter()
+            .map(|t| {
+                bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_byte_array(*t),
+                    recorded.map_or(0, |o| o.vout),
+                )
+            })
+            .collect();
+        let (vault_outpoint, vault_sats) = match self.wallet.vault_utxo_rungs(&rung_outpoints, &reserves_script) {
+            Ok(Some(u)) => u,
+            Ok(None) => return refuse("vault outpoint is spent or unknown".into()),
+            Err(e) => return refuse(format!("vault lookup: {e}")),
+        };
+        let vault_override = (Some(vault_outpoint) != rung_outpoints.first().copied())
+            .then_some((vault_outpoint, vault_sats));
+        if let Err(e) = deposits_core::rotation_order::verify_rotation_rungs(
+            &history,
+            &state,
+            qb.block_height,
+            &op,
+            &rungs,
+            self.wallet.network(),
+            splice_prevout.clone(),
+            vault_override,
+            qb.previous_hash,
+        ) {
+            return refuse(format!("the rungs are not the ladder the QuorumBegin names: {e}"));
+        }
+        // The spent vault's tier leaf, for the sighashes.
+        let voter_set = VoterSet::new(
+            state.operator_key,
+            gov_members
+                .iter()
+                .map(|m| m.pubkey)
+                .filter(|pk| *pk != state.operator_key)
+                .collect(),
+        );
+        let ruleset = deposits_core::ruleset::resolve_or_current(gov_ruleset.as_deref());
+        let config = (ruleset.tier_config_factory)(voter_set.all_voters().len(), gov_expiry);
+        let Some(tier) = config.tiers.get(tier_index).cloned() else {
+            return refuse(format!("tier_index {tier_index} out of range"));
+        };
+        if rungs[0].lock_time.to_consensus_u32() != tier.timelock_blocks {
+            return refuse("tier_index is not the rungs' tier".into());
+        }
+        let builder = TapscriptReservesBuilder::new(
+            voter_set,
+            config,
+            self.wallet.network(),
+            gov_hash,
+        );
+        let leaf = match builder.build_threshold_leaf(&tier) {
+            Ok(l) => l,
+            Err(e) => return refuse(format!("tier leaf: {e:?}")),
+        };
+        let more: Vec<bitcoin::TxOut> = splice_prevout.iter().cloned().collect();
+        let splice_vault = splice_prevout
+            .as_ref()
+            .is_some_and(|p| p.script_pubkey == reserves_script);
+        let sign_input = |i: usize| -> Result<Vec<String>, String> {
+            rungs
+                .iter()
+                .map(|r| {
+                    let h = ReservesSpendBuilder::compute_sighash_with(
+                        r,
+                        i,
+                        vault_sats,
+                        &reserves_script,
+                        &leaf,
+                        &more,
+                    )
+                    .map_err(|e| format!("sighash: {e:?}"))?;
+                    self.handler
+                        .signer
+                        .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h.as_ref())
+                        .map(hex::encode)
+                        .map_err(|e| format!("sign: {e}"))
+                })
+                .collect()
+        };
+        let signatures = match sign_input(0) {
+            Ok(s) => s,
+            Err(e) => return refuse(e),
+        };
+        let splice_signatures = if splice_vault {
+            match sign_input(1) {
+                Ok(s) => Some(s),
+                Err(e) => return refuse(e),
             }
         } else {
             None
         };
+        tracing::info!(
+            "[rotation_sign] signed the {} rungs of {}'s rotation (QuorumBegin seq {}) at tier {}",
+            rungs.len(),
+            ledger_prefix,
+            qb.sequence_number,
+            tier_index
+        );
         let result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
-            "signature": hex::encode(signature_bytes),
-            "sighash": sighash_hex,
-            "splice_signature": splice_signature,
+            "signatures": signatures,
+            "splice_signatures": splice_signatures,
         });
-
-        tracing::info!(
-            "[rotation_sign] signed for ledger {}, fee={}sats",
-            ledger_prefix,
-            reserves_amount.saturating_sub(
-                proposed_tx
-                    .output
-                    .iter()
-                    .map(|o| o.value.to_sat())
-                    .sum::<u64>()
-            )
-        );
         (true, Some(result.to_string()), None)
     }
 
@@ -1744,8 +1464,8 @@ impl Node {
         let reserves_script = reserves_addr.script_pubkey();
         let reserves_utxo = self
             .wallet
-            .vault_utxo(
-                deposits_core::rotation_order::vault_at_fork(&updates),
+            .vault_utxo_rungs(
+                &deposits_core::rotation_order::vault_rungs_at_fork(&updates),
                 &reserves_script,
             )
             .map_err(|e| format!("esplora reserves lookup: {}", e))?
@@ -1781,6 +1501,9 @@ impl Node {
                 residue_sats: obligations.residue_sats,
                 splice_outs: obligations.splice_outs.clone(),
                 operator: original_operator,
+                // DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point
+                anchor: deposits_core::rotation_order::dispute_anchor(&updates)
+                    .ok_or("no DisputeEnter to anchor the confiscation")?,
             },
         );
         if rebuilt != proposed_tx {

@@ -136,7 +136,26 @@ impl Node {
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
+        self.commit_operation_with(ledger_id, |_| Ok(operation)).await
+    }
+
+    /// As [`Self::commit_operation`], the operation built by `build` from the chain hash of the
+    /// tip it will extend, under the staging lock: a rotation's rungs carry that hash as their
+    /// anchor (DEP-03 §On-Chain State Anchor), so no other update may land in between.
+    pub async fn commit_operation_with(
+        &self,
+        ledger_id: &str,
+        build: impl FnOnce([u8; 32]) -> Result<deposits_core::messages::LedgerOperation, Error>,
+    ) -> Result<String, Error> {
         let _lock = self.acquire_staging_lock(ledger_id).await;
+        let tip = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|l| l.read().unwrap().state.chain_tip_hash)
+                .unwrap_or([0; 32])
+        };
+        let operation = build(tip)?;
 
         let block_height = self.wallet.get_block_height().unwrap_or(0);
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);

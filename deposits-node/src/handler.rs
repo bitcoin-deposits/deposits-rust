@@ -151,9 +151,20 @@ pub struct DepositsHandler {
     /// The splice a pending rotation spends (txid internal order, vout, sats).
     pub pending_rotation_splices: Mutex<HashMap<String, ([u8; 32], u32, u64)>>,
 
-    /// Recorded rotations (ours or ones we cosigned or received as Kind 9107),
-    /// rebroadcast until they confirm.
-    pub inflight_rotations: Mutex<HashMap<bitcoin::Txid, bitcoin::Transaction>>,
+    /// Recorded rotations (ours or ones we cosigned or received as Kind 9107), by rung 0's
+    /// txid: every signed rung we hold, rebroadcast and bumped until one confirms (DEP-03 §Fee
+    /// ladder).
+    pub inflight_rotations: Mutex<HashMap<bitcoin::Txid, InflightRotation>>,
+    /// DEP-03 §Rotation ordering: per ledger we operate, the unsigned rungs of the rotation its
+    /// pending QuorumBegin names (carried in that update's cosign request), and what signing them
+    /// after the QuorumBegin needs.
+    pub pending_rotation_plans: Mutex<HashMap<String, RotationPlan>>,
+    /// DEP-06 §Spend challenge: updates published (Kind 9112) as answers to challenges of a
+    /// ledger's vault spends, by ledger id.
+    pub spend_answers: Mutex<HashMap<String, Vec<deposits_core::types::SignedLedgerUpdate>>>,
+    /// Challenges we answered (ledger id : txid), and when the answer pass last ran.
+    pub answered_challenges: Mutex<std::collections::HashSet<String>>,
+    pub challenge_answer_pass: Mutex<Option<std::time::Instant>>,
 
     /// Rotation txids already looked up among Kind 9107 events (found or not).
     pub rotation_lookups: Mutex<std::collections::HashSet<bitcoin::Txid>>,
@@ -234,7 +245,45 @@ struct PersistAppend {
     state: Option<LedgerState>,
 }
 
+/// DEP-03 §Fee ladder: a recorded rotation's signed rungs (rung order; `None` where unknown) and
+/// its QuorumBegin's height, which fixes the bump schedule (rung i once 6·i blocks old).
+#[derive(Clone, Debug)]
+pub struct InflightRotation {
+    pub rungs: Vec<Option<bitcoin::Transaction>>,
+    pub qb_height: u32,
+}
+
+/// What an operator needs to sign its rotation's rungs once the QuorumBegin naming them is final.
+#[derive(Clone, Debug)]
+pub struct RotationPlan {
+    /// The build parameters (anchor and rung filled in at the QuorumBegin).
+    pub params: deposits_core::tapscript_reserves::RotationTxParams,
+    /// The unsigned rungs, once built against the QuorumBegin's tip.
+    pub rungs: Vec<bitcoin::Transaction>,
+    pub max_rungs: usize,
+    pub tier_index: usize,
+    pub operator_alone: bool,
+    pub cosigner_threshold: usize,
+    /// The spent vault's voters, prevout script and the splice prevout (if any).
+    pub cur_voter_set: deposits_core::tapscript_reserves::VoterSet,
+    pub prev_script_pubkey: bitcoin::ScriptBuf,
+    pub leaf_script: bitcoin::ScriptBuf,
+    pub control_block: Vec<u8>,
+    pub splice: Option<([u8; 32], u32, bitcoin::TxOut)>,
+    pub active_set: Vec<bitcoin::secp256k1::PublicKey>,
+}
+
 impl DepositsHandler {
+    /// DEP-06 §Spend challenge: the answers published to challenges of `ledger_id`'s spends.
+    pub fn spend_answers_for(&self, ledger_id: &str) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+        self.spend_answers
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     /// Create a new handler
     ///
     /// Returns the handler and a receiver for outbound messages that should
@@ -338,6 +387,10 @@ impl DepositsHandler {
             requested_splices: Mutex::new(HashMap::new()),
             pending_rotation_splices: Mutex::new(HashMap::new()),
             inflight_rotations: Mutex::new(HashMap::new()),
+            pending_rotation_plans: Mutex::new(HashMap::new()),
+            spend_answers: Mutex::new(HashMap::new()),
+            answered_challenges: Mutex::new(std::collections::HashSet::new()),
+            challenge_answer_pass: Mutex::new(None),
             rotation_lookups: Mutex::new(std::collections::HashSet::new()),
             scanned_non_conforming: Mutex::new(HashMap::new()),
             last_file_modtimes: Mutex::new(HashMap::new()),

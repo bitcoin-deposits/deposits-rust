@@ -827,17 +827,25 @@ impl Node {
                         None
                     };
                     if let Some((history, pre_state)) = rotating_history {
-                        let tx: Option<bitcoin::Transaction> = request
+                        // DEP-03 §Rotation ordering: the unsigned rungs, rebuilt byte for byte.
+                        let rungs: Vec<bitcoin::Transaction> = request
                             .params
-                            .get("rotation_tx")
-                            .and_then(|v| v.as_str())
-                            .and_then(|h| hex::decode(h).ok())
-                            .and_then(|b| bitcoin::consensus::deserialize(&b).ok());
-                        let Some(tx) = tx else {
-                            let msg = "a rotating QuorumBegin must carry rotation_tx".to_string();
+                            .get("rotation_rungs_tx")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .filter_map(|h| hex::decode(h).ok())
+                                    .filter_map(|b| bitcoin::consensus::deserialize(&b).ok())
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                        if rungs.is_empty() {
+                            let msg =
+                                "a rotating QuorumBegin must carry rotation_rungs_tx".to_string();
                             tracing::warn!("Refusing cosign: {}", msg);
                             return (false, None, Some(msg));
-                        };
+                        }
                         let splice_prevout = match &operation {
                             LedgerOperation::QuorumBegin {
                                 splice_in_outpoint: Some((stxid, svout)),
@@ -851,23 +859,42 @@ impl Node {
                             },
                             _ => None,
                         };
-                        if let Err(e) = deposits_core::rotation_order::verify_rotation_tx(
+                        // DEP-03 §Fee ladder: the vault is output 0 of the governing ladder's
+                        // confirmed rung (rung 0, at its recorded amounts, by default).
+                        let vault = {
+                            let gov = deposits_core::rotation_order::rotating_quorum_begin_seq(
+                                &history,
+                            );
+                            let rungs_gov: Vec<[u8; 32]> = history
+                                .iter()
+                                .filter(|u| Some(u.sequence_number) == gov)
+                                .find_map(|u| LedgerOperation::tlv_decode(&u.message).ok())
+                                .map(|op| deposits_core::vault_spend::quorum_begin_rungs(&op))
+                                .unwrap_or_default();
+                            rungs_gov.iter().enumerate().skip(1).find_map(|(_, t)| {
+                                let txid = bitcoin::Txid::from_byte_array(*t);
+                                match self.wallet.get_outpoint_value_and_confs(txid, 0) {
+                                    Ok(Some((sats, _))) => {
+                                        Some((bitcoin::OutPoint::new(txid, 0), sats))
+                                    }
+                                    _ => None,
+                                }
+                            })
+                        };
+                        if let Err(e) = deposits_core::rotation_order::verify_rotation_rungs(
                             &history,
                             &pre_state,
                             fields.block_height,
                             &operation,
-                            &tx,
+                            &rungs,
                             self.wallet.network(),
                             splice_prevout,
+                            vault,
+                            fields.previous_hash,
                         ) {
                             tracing::warn!("Refusing cosign: {}", e);
                             return (false, None, Some(e));
                         }
-                        self.handler
-                            .inflight_rotations
-                            .lock()
-                            .unwrap()
-                            .insert(tx.compute_txid(), tx);
                     } else if let LedgerOperation::QuorumBegin {
                         new_outpoint_txid,
                         new_outpoint_vout,

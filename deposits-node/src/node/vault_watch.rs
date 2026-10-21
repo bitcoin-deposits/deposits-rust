@@ -51,26 +51,27 @@ pub(crate) fn current_vault(history: &[SignedLedgerUpdate]) -> Option<(OutPoint,
 /// recorded before its rotation confirms (DEP-03), so the previous vault stays watched until
 /// it is spent by that rotation (authorised) or by anything else (theft under the old quorum).
 pub(crate) fn recent_vaults(history: &[SignedLedgerUpdate]) -> Vec<(OutPoint, u64)> {
-    let mut v: Vec<(OutPoint, u64)> = history
+    let mut qbs: Vec<(u64, Vec<OutPoint>)> = history
         .iter()
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::QuorumBegin {
-                new_outpoint_txid,
-                new_outpoint_vout,
-                ..
+            Ok(op @ LedgerOperation::QuorumBegin {
+                new_outpoint_vout, ..
             }) => Some((
-                OutPoint::new(
-                    bitcoin::Txid::from_byte_array(new_outpoint_txid),
-                    new_outpoint_vout,
-                ),
                 u.sequence_number,
+                // DEP-03 §Fee ladder: output 0 of every rung (only one can confirm)
+                deposits_core::vault_spend::quorum_begin_rungs(&op)
+                    .into_iter()
+                    .map(|t| OutPoint::new(bitcoin::Txid::from_byte_array(t), new_outpoint_vout))
+                    .collect(),
             )),
             _ => None,
         })
         .collect();
-    v.sort_by_key(|(_, seq)| std::cmp::Reverse(*seq));
-    v.truncate(2);
-    v
+    qbs.sort_by_key(|(seq, _)| std::cmp::Reverse(*seq));
+    qbs.truncate(2);
+    qbs.into_iter()
+        .flat_map(|(seq, outs)| outs.into_iter().map(move |o| (o, seq)))
+        .collect()
 }
 
 /// A theft found by the scan: which ledger's vault, the governing
@@ -81,6 +82,8 @@ pub(crate) struct VaultTheft {
     pub governing_seq: u64,
     pub spend: ScannedSpend,
     pub signers: Vec<bitcoin::secp256k1::XOnlyPublicKey>,
+    /// The tier the spend's witness uses.
+    pub tier: usize,
 }
 
 /// Which of `spends` are thefts: they spend a ledger's vault, their txid is
@@ -106,12 +109,15 @@ pub(crate) fn find_vault_thefts(
                 let txid = spend.tx.compute_txid().to_byte_array();
                 if reported.contains(&vault_spend_key(id, &spend.tx))
                     || known_confiscations.contains(&txid)
-                    || authorised_spend_txids(history).contains(&txid)
                 {
                     continue;
                 }
-                let Ok(signers) = vault_spend_signers(history, seq, &spend.tx, &spend.prevouts)
-                else {
+                let Ok((signers, tier)) = deposits_core::vault_spend::vault_spend_witness(
+                    history,
+                    seq,
+                    &spend.tx,
+                    &spend.prevouts,
+                ) else {
                     continue;
                 };
                 if signers.is_empty() {
@@ -122,6 +128,7 @@ pub(crate) fn find_vault_thefts(
                     governing_seq: seq,
                     spend: spend.clone(),
                     signers,
+                    tier,
                 });
                 break 'vaults;
             }
@@ -143,6 +150,7 @@ fn proof_against(
     accused: &bitcoin::secp256k1::PublicKey,
     target_ledger_id: &str,
     theft: &VaultTheft,
+    lapsed: Option<&(String, [u8; 32])>,
 ) -> deposits_core::fraud::FraudBroadcast {
     use deposits_core::fraud::{FraudBroadcast, FraudEvidence, FraudProof, FraudProofType};
     FraudBroadcast {
@@ -167,6 +175,8 @@ fn proof_against(
                         )
                     })
                     .collect(),
+                challenge_update: lapsed.map(|(c, _)| c.clone()),
+                lapse_block_hash: lapsed.map(|(_, b)| *b),
             },
         },
         embedding: None,
@@ -197,6 +207,15 @@ pub(crate) struct OwedTheft {
     pub signers: Vec<String>,
     pub published: std::collections::BTreeSet<String>,
     pub first_tip: u32,
+    /// DEP-06: "unanchored" (proven at once) or "challenge" (proven only once its challenge
+    /// lapses unanswered). Absent in records kept before forms existed: judged by the anchor.
+    #[serde(default)]
+    pub form: Option<String>,
+    /// The challenge we recorded on our own ledger (DEP-02 encoding, hex), once recorded.
+    #[serde(default)]
+    pub challenge_update: Option<String>,
+    #[serde(default)]
+    pub tier: usize,
 }
 
 impl OwedTheft {
@@ -221,6 +240,16 @@ impl OwedTheft {
                 .collect(),
             published: Default::default(),
             first_tip: tip,
+            form: Some(
+                if deposits_core::tapscript_reserves::anchor_of(&t.spend.tx).is_some() {
+                    "challenge"
+                } else {
+                    "unanchored"
+                }
+                .into(),
+            ),
+            challenge_update: None,
+            tier: t.tier,
         }
     }
 
@@ -253,6 +282,7 @@ impl OwedTheft {
                 .iter()
                 .map(|h| bitcoin::secp256k1::XOnlyPublicKey::from_slice(&hex::decode(h).ok()?).ok())
                 .collect::<Option<Vec<_>>>()?,
+            tier: self.tier,
         })
     }
 }
@@ -345,41 +375,51 @@ impl crate::Node {
             let mut skip = self.reported_vault_spends.lock().unwrap().clone();
             skip.extend(self.owed_vault_spends.lock().unwrap().keys().cloned());
             for theft in find_vault_thefts(&histories, &spends, &known, &skip) {
-                // DEP-06 "Recorded rotation": our replica may lag (a gap it has not filled, an
-                // update it never received). The QuorumBegin is on the relay before the rotation
-                // is broadcast (DEP-03), so judge on the relay's updates too; a relay we cannot
-                // read holds the scan below this block, to judge it again next pass.
-                let relay = self
-                    .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
-                    .await;
-                if relay.is_empty() {
+                // DEP-06 §Spend challenge: judged by its anchor. None: theft on its face. One: the
+                // spend is answered by the QuorumBegin that is the child of the anchor and names
+                // it, found among our replica, the relay's copies and published answers; if none
+                // is found, we challenge, and prove only once the challenge lapses. A relay we
+                // cannot read holds the scan below this block, to judge it again next pass.
+                if let Some(anchor) = deposits_core::tapscript_reserves::anchor_of(&theft.spend.tx) {
+                    let relay = self
+                        .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
+                        .await;
+                    if relay.is_empty() {
+                        tracing::warn!(
+                            "vault watch: no relay history for {}; holding the spend {} to judge again",
+                            &theft.ledger_id[..8.min(theft.ledger_id.len())],
+                            &theft.spend.tx.compute_txid().to_string()[..16],
+                        );
+                        hold = Some(
+                            hold.map_or(theft.spend.height, |h: u32| h.min(theft.spend.height)),
+                        );
+                        continue;
+                    }
+                    if self.spend_answered(&theft, &anchor, relay).await {
+                        tracing::info!(
+                            "vault watch: {}'s spend {} is answered by its anchor",
+                            &theft.ledger_id[..8.min(theft.ledger_id.len())],
+                            &theft.spend.tx.compute_txid().to_string()[..16],
+                        );
+                        continue;
+                    }
                     tracing::warn!(
-                        "vault watch: no relay history for {}; holding the spend {} to judge again",
+                        "VAULT SPEND CHALLENGED: ledger {}'s reserves were spent by {}, anchored at \
+                         {}, and nothing we hold answers it; challenging ({} signers)",
                         &theft.ledger_id[..8.min(theft.ledger_id.len())],
                         &theft.spend.tx.compute_txid().to_string()[..16],
+                        &hex::encode(anchor)[..16],
+                        theft.signers.len(),
                     );
-                    hold =
-                        Some(hold.map_or(theft.spend.height, |h: u32| h.min(theft.spend.height)));
-                    continue;
-                }
-                let mut all = histories.get(&theft.ledger_id).cloned().unwrap_or_default();
-                all.extend(relay);
-                let txid = theft.spend.tx.compute_txid().to_byte_array();
-                if deposits_core::vault_spend::rotation_excused(&all, theft.governing_seq, &txid) {
-                    tracing::info!(
-                        "vault watch: {}'s spend {} is a rotation recorded on the relay (our replica lags)",
+                } else {
+                    tracing::warn!(
+                        "VAULT SPEND: ledger {}'s reserves were spent by {}, which carries no \
+                         anchor: theft on its face; {} signers",
                         &theft.ledger_id[..8.min(theft.ledger_id.len())],
                         &theft.spend.tx.compute_txid().to_string()[..16],
+                        theft.signers.len(),
                     );
-                    continue;
                 }
-                tracing::warn!(
-                    "VAULT SPEND: ledger {}'s reserves were spent by {}, which no rotation or \
-                     confiscation accounts for; {} signers",
-                    &theft.ledger_id[..8.min(theft.ledger_id.len())],
-                    &theft.spend.tx.compute_txid().to_string()[..16],
-                    theft.signers.len(),
-                );
                 // Owed BEFORE the scan height moves past its block: a publish failure or a
                 // restart can no longer lose it.
                 self.owed_vault_spends.lock().unwrap().insert(
@@ -474,7 +514,53 @@ impl crate::Node {
                 }
                 continue;
             }
-            let complete = self.report_vault_spend(&theft, &mut entry.published).await;
+            let anchored = deposits_core::tapscript_reserves::anchor_of(&theft.spend.tx);
+            let form = entry.form.clone().unwrap_or_else(|| {
+                if anchored.is_some() { "challenge" } else { "unanchored" }.into()
+            });
+            let mut lapsed: Option<(String, [u8; 32])> = None;
+            if form == "challenge" {
+                let Some(anchor) = anchored else { continue };
+                if entry.challenge_update.is_none() {
+                    entry.challenge_update = self.open_spend_challenge(&theft, &anchor).await;
+                }
+                let relay = self
+                    .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
+                    .await;
+                if self.spend_answered(&theft, &anchor, relay).await {
+                    tracing::info!("the challenge of {}'s spend is answered; nothing to prove", key);
+                    self.owed_vault_spends.lock().unwrap().remove(&key);
+                    self.reported_vault_spends.lock().unwrap().insert(key);
+                    continue;
+                }
+                if let Some(cu) = entry.challenge_update.as_ref().and_then(|h| {
+                    hex::decode(h)
+                        .ok()
+                        .and_then(|b| SignedLedgerUpdate::tlv_decode(&b).ok())
+                }) {
+                    let history = {
+                        let ledgers = self.handler.ledgers.lock().unwrap();
+                        ledgers
+                            .get(&theft.ledger_id)
+                            .map(|l| l.read().unwrap().history.clone())
+                            .unwrap_or_default()
+                    };
+                    let w = deposits_core::vault_spend::spend_window(&history, theft.governing_seq);
+                    let end = cu.block_height.max(theft.spend.height) + w;
+                    if tip >= end {
+                        if let Some(b) = self.wallet.block_hash_at(end) {
+                            lapsed = Some((entry.challenge_update.clone().unwrap(), b));
+                        }
+                    }
+                }
+                if lapsed.is_none() {
+                    self.owed_vault_spends.lock().unwrap().insert(key, entry);
+                    continue;
+                }
+            }
+            let complete = self
+                .report_vault_spend(&theft, &mut entry.published, lapsed.as_ref())
+                .await;
             if complete && tip > entry.first_tip + VAULT_SPEND_PUBLISH_BLOCKS {
                 self.owed_vault_spends.lock().unwrap().remove(&key);
                 self.reported_vault_spends.lock().unwrap().insert(key);
@@ -735,10 +821,209 @@ impl crate::Node {
         }
     }
 
+    /// DEP-06 §Spend challenge: `theft`'s anchored spend is answered (by the QuorumBegin that is
+    /// the child of `anchor` and names it, among our replica, `relay` and published answers; or by
+    /// the confiscation the rules rebuild from public state).
+    async fn spend_answered(
+        &self,
+        theft: &VaultTheft,
+        anchor: &[u8; 32],
+        relay: Vec<SignedLedgerUpdate>,
+    ) -> bool {
+        let history = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(&theft.ledger_id)
+                .map(|l| l.read().unwrap().history.clone())
+                .unwrap_or_default()
+        };
+        let mut pool = history.clone();
+        pool.extend(relay);
+        if let Ok(answers) = self
+            .nostr
+            .fetch_spend_challenge_events(deposits_nostr::KIND_CHALLENGE_ANSWER, &theft.ledger_id)
+            .await
+        {
+            self.keep_challenge_answers(&theft.ledger_id, &answers);
+        }
+        pool.extend(self.handler.spend_answers_for(&theft.ledger_id));
+        let txid = theft.spend.tx.compute_txid().to_byte_array();
+        deposits_core::vault_spend::rotation_answer(
+            &pool,
+            &history,
+            theft.governing_seq,
+            anchor,
+            &txid,
+            theft.tier,
+        )
+        .is_some()
+            || self
+                .authorised_confiscation_spend(&theft.ledger_id, &theft.spend.tx, Some(theft.spend.height))
+                .await
+    }
+
+    /// Kind 9112 contents: keep the answering updates of `ledger_id`.
+    fn keep_challenge_answers(&self, ledger_id: &str, answers: &[serde_json::Value]) {
+        use base64::Engine;
+        let mut map = self.handler.spend_answers.lock().unwrap();
+        let have = map.entry(ledger_id.to_string()).or_default();
+        for a in answers {
+            for b in a.get("updates").and_then(|u| u.as_array()).into_iter().flatten() {
+                let Some(u) = b
+                    .as_str()
+                    .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
+                    .and_then(|b| SignedLedgerUpdate::tlv_decode(&b).ok())
+                else {
+                    continue;
+                };
+                if hex::encode(u.ledger_id) == ledger_id
+                    && !have.iter().any(|h| h.content_hash == u.content_hash && h.operator_signature == u.operator_signature)
+                {
+                    have.push(u);
+                }
+            }
+        }
+        let n = have.len();
+        if n > 64 {
+            have.drain(..n - 64);
+        }
+    }
+
+    /// DEP-06 §Spend challenge: record a `QuorumChallenge` of `theft`'s spend on a ledger we
+    /// operate, and publish it (Kind 9111). Returns the recorded update (DEP-02 encoding, hex), or
+    /// `None` when we operate no ledger to record it on (or the commit failed; retried next pass).
+    async fn open_spend_challenge(&self, theft: &VaultTheft, anchor: &[u8; 32]) -> Option<String> {
+        use base64::Engine;
+        use deposits_core::TlvEncode;
+        let own: Option<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(k, _)| k.len() == 64)
+                .find(|(_, arc)| {
+                    let l = arc.read().unwrap();
+                    l.state.operator_key == self.node_id
+                        && l.state.quorum_state == deposits_core::QuorumState::Active
+                })
+                .map(|(k, _)| k.clone())
+        };
+        let own = own?;
+        let txid = theft.spend.tx.compute_txid().to_byte_array();
+        let op = LedgerOperation::QuorumChallenge {
+            challenged_ledger_id: hex::decode(&theft.ledger_id).ok()?.try_into().ok()?,
+            challenged_txid: txid,
+            challenged_anchor: *anchor,
+        };
+        if let Err(e) = self.commit_operation(&own, op).await {
+            tracing::warn!("vault watch: recording the challenge failed (retrying): {}", e);
+            return None;
+        }
+        let u = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(&own).and_then(|l| l.read().unwrap().history.last().cloned())?
+        };
+        let b64 = base64::engine::general_purpose::STANDARD.encode(u.tlv_encode());
+        let _ = self
+            .nostr
+            .publish_spend_challenge_event(
+                deposits_nostr::KIND_SPEND_CHALLENGE,
+                &theft.ledger_id,
+                &hex::encode(txid),
+                &hex::encode(anchor),
+                &[b64],
+            )
+            .await;
+        tracing::info!(
+            "vault watch: challenge of {}'s spend recorded on our ledger {} at seq {}",
+            &theft.ledger_id[..8.min(theft.ledger_id.len())],
+            &own[..8],
+            u.sequence_number
+        );
+        Some(hex::encode(u.tlv_encode()))
+    }
+
+    /// DEP-06 §Spend challenge, the answering side: for every ledger we replicate, the challenges
+    /// published of its spends (Kind 9111); one we hold the answer to (the rotation's
+    /// QuorumBegin) is answered (Kind 9112), whoever the accused. At most once a minute.
+    pub(crate) async fn answer_spend_challenges(&self) {
+        use base64::Engine;
+        use deposits_core::TlvEncode;
+        {
+            let mut last = self.handler.challenge_answer_pass.lock().unwrap();
+            if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(60)) {
+                return;
+            }
+            *last = Some(std::time::Instant::now());
+        }
+        let histories: Vec<(String, Vec<SignedLedgerUpdate>)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(k, _)| k.len() == 64)
+                .map(|(k, arc)| (k.clone(), arc.read().unwrap().history.clone()))
+                .collect()
+        };
+        for (id, history) in histories {
+            let Ok(challenges) = self
+                .nostr
+                .fetch_spend_challenge_events(deposits_nostr::KIND_SPEND_CHALLENGE, &id)
+                .await
+            else {
+                continue;
+            };
+            for c in challenges {
+                let (Some(txid), Some(anchor)) = (
+                    c.get("txid").and_then(|v| v.as_str()).and_then(|h| hex::decode(h).ok()),
+                    c.get("anchor").and_then(|v| v.as_str()).and_then(|h| hex::decode(h).ok()),
+                ) else {
+                    continue;
+                };
+                let key = format!("{}:{}", id, hex::encode(&txid));
+                if self.handler.answered_challenges.lock().unwrap().contains(&key) {
+                    continue;
+                }
+                let answer = history.iter().find(|u| {
+                    u.previous_hash[..] == anchor[..]
+                        && LedgerOperation::tlv_decode(&u.message)
+                            .map(|op| {
+                                matches!(op, LedgerOperation::QuorumBegin { .. })
+                                    && deposits_core::vault_spend::quorum_begin_rungs(&op)
+                                        .iter()
+                                        .any(|t| t[..] == txid[..])
+                            })
+                            .unwrap_or(false)
+                });
+                let Some(answer) = answer else { continue };
+                tracing::info!(
+                    "answering the challenge of {}'s spend {}: its rotation's QuorumBegin (seq {})",
+                    &id[..8],
+                    &hex::encode(&txid)[..16],
+                    answer.sequence_number
+                );
+                let b64 = base64::engine::general_purpose::STANDARD.encode(answer.tlv_encode());
+                if self
+                    .nostr
+                    .publish_spend_challenge_event(
+                        deposits_nostr::KIND_CHALLENGE_ANSWER,
+                        &id,
+                        &hex::encode(&txid),
+                        &hex::encode(&anchor),
+                        &[b64],
+                    )
+                    .await
+                    .is_ok()
+                {
+                    self.handler.answered_challenges.lock().unwrap().insert(key);
+                }
+            }
+        }
+    }
+
     async fn report_vault_spend(
         &self,
         theft: &VaultTheft,
         published: &mut std::collections::BTreeSet<String>,
+        lapsed: Option<&(String, [u8; 32])>,
     ) -> bool {
         let mut complete = true;
         for x in &theft.signers {
@@ -765,7 +1050,7 @@ impl crate::Node {
                         hex::encode(&x.serialize()[..4]),
                         &t[..8.min(t.len())]
                     );
-                    let b = proof_against(&pk, &t, theft);
+                    let b = proof_against(&pk, &t, theft, lapsed);
                     match self.nostr.broadcast_fraud_proof(&b).await {
                         Ok(_) => {
                             published.insert(pkey);

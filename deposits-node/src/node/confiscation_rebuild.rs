@@ -5,6 +5,7 @@
 //! arms. Never "one we know of": a member that missed the dispute (a restart, a node that
 //! joined later) rebuilds it from the relay and reaches the same verdict as one that signed it.
 
+use bitcoin::hashes::Hash;
 use bitcoin::{OutPoint, Transaction};
 use deposits_core::messages::LedgerOperation;
 use deposits_core::{SignedLedgerUpdate, TlvDecode};
@@ -123,39 +124,62 @@ pub fn rebuild_matching(
         .iter()
         .filter(|u| u.operator_id == origin && u.sequence_number <= fork_point)
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::QuorumBegin {
-                quorum_members,
-                quorum_expiry,
-                protocol_version,
-                new_outpoint_txid,
-                new_outpoint_vout,
-                amount,
-                collateral_amount,
-                ..
-            }) => Some((
-                u.sequence_number,
-                quorum_members.iter().map(|m| m.pubkey).collect::<Vec<_>>(),
-                quorum_expiry,
-                protocol_version,
-                (
-                    OutPoint::new(
-                        bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array(
-                            new_outpoint_txid,
-                        )),
-                        new_outpoint_vout,
-                    ),
-                    (amount + collateral_amount) / 1000,
-                ),
-            )),
+            Ok(
+                op @ LedgerOperation::QuorumBegin {
+                    new_outpoint_vout,
+                    amount,
+                    collateral_amount,
+                    ..
+                },
+            ) => {
+                let rungs = deposits_core::vault_spend::quorum_begin_rungs(&op);
+                let LedgerOperation::QuorumBegin {
+                    quorum_members,
+                    quorum_expiry,
+                    protocol_version,
+                    ..
+                } = op
+                else {
+                    unreachable!()
+                };
+                Some((
+                    u.sequence_number,
+                    quorum_members.iter().map(|m| m.pubkey).collect::<Vec<_>>(),
+                    quorum_expiry,
+                    protocol_version,
+                    (rungs, new_outpoint_vout, (amount + collateral_amount) / 1000),
+                ))
+            }
             _ => None,
         })
         .max_by_key(|(seq, ..)| *seq)
         .map(|(_, m, e, r, v)| (m, e, r, v))
         .ok_or("no QuorumBegin at or before the fork point")?;
 
-    if spend.input.first().map(|i| i.previous_output) != Some(vault.0) {
-        return Err("input 0 is not the vault".into());
-    }
+    // DEP-03 §Fee ladder: the vault is output 0 of whichever rung confirmed; rung 0 holds the
+    // recorded amounts, a higher one what the chain says.
+    let vault = {
+        let (rungs, vout, recorded) = vault;
+        let input0 = spend.input.first().map(|i| i.previous_output).ok_or("no input")?;
+        let rung = rungs
+            .iter()
+            .position(|t| input0.txid.to_byte_array() == *t && input0.vout == vout)
+            .ok_or("input 0 is not the vault")?;
+        let sats = if rung == 0 {
+            recorded
+        } else {
+            chain
+                .get_tx(&input0.txid)
+                .ok()
+                .flatten()
+                .and_then(|t| t.output.get(vout as usize).map(|o| o.value.to_sat()))
+                .ok_or("the confirmed rung is not on our chain")?
+        };
+        (input0, sats)
+    };
+    // DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point.
+    let anchor =
+        deposits_core::rotation_order::dispute_anchor(&view).ok_or("no DisputeEnter to anchor")?;
 
     // The tier: the spend's nLockTime must be a confiscation tier's CLTV (never the operator's
     // tie-breaker tier).
@@ -239,6 +263,7 @@ pub fn rebuild_matching(
             residue_sats: obligations.residue_sats,
             splice_outs: obligations.splice_outs.clone(),
             operator: origin,
+            anchor,
         });
         if rebuilt.compute_txid() == spend.compute_txid() {
             return Ok(());

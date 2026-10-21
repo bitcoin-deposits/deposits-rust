@@ -1403,30 +1403,76 @@ impl Node {
         // is still PreQuorum here) it goes through request_cosign against
         // next_quorum_members and embeds their signatures into the update,
         // producing a result that peers' validators will accept.
-        let committed = self.commit_operation(ledger_id, operation).await;
-        let rotation_tx = self
-            .handler
+        // DEP-03 §Fee ladder: a rotation's rungs are built on the tip the QuorumBegin extends
+        // (their anchor), under the staging lock, and named by it.
+        let mut rung0_txid: Option<bitcoin::Txid> = None;
+        let committed = if rotating {
+            let handler = self.handler.clone();
+            let lid = ledger_id.to_string();
+            let collateral = collateral_msats;
+            let txid_cell = &mut rung0_txid;
+            self.commit_operation_with(ledger_id, move |anchor| {
+                let mut plans = handler.pending_rotation_plans.lock().unwrap();
+                let plan = plans
+                    .get_mut(&lid)
+                    .ok_or_else(|| Error::Protocol("no pending rotation plan".to_string()))?;
+                plan.params.anchor = anchor;
+                let rungs = deposits_core::tapscript_reserves::build_rotation_ladder(
+                    &plan.params,
+                    collateral,
+                    plan.max_rungs,
+                )
+                .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".into()))?;
+                let txids: Vec<[u8; 32]> =
+                    rungs.iter().map(|r| r.compute_txid().to_byte_array()).collect();
+                *txid_cell = Some(rungs[0].compute_txid());
+                plan.rungs = rungs;
+                let mut op = operation;
+                if let LedgerOperation::QuorumBegin {
+                    spending_txid,
+                    new_outpoint_txid,
+                    new_outpoint_vout,
+                    rotation_rungs,
+                    ..
+                } = &mut op
+                {
+                    *spending_txid = txids[0];
+                    *new_outpoint_txid = txids[0];
+                    *new_outpoint_vout = 0;
+                    *rotation_rungs = txids;
+                }
+                Ok(op)
+            })
+            .await
+        } else {
+            self.commit_operation(ledger_id, operation).await
+        };
+        self.handler
             .pending_rotation_txs
             .lock()
             .unwrap()
             .remove(ledger_id);
         committed?;
-        if let Some(tx) = rotation_tx {
-            // Recorded: now broadcast it, publish it (Kind 9107) so any member or
-            // watcher can, and rebroadcast until it confirms.
-            match self.wallet.broadcast(&tx) {
-                Ok(t) => tracing::info!(
-                    "auto_rotation: broadcast rotation tx {} after its QuorumBegin",
-                    t
-                ),
-                Err(e) => tracing::warn!("rotation broadcast failed (members rebroadcast): {}", e),
+        let txid = rung0_txid.unwrap_or(txid);
+        if rotating {
+            // Recorded: now the members sign every rung (rotation_sign carries the final
+            // QuorumBegin), and rung 0 is broadcast. A failure leaves the plan pending:
+            // rebroadcast_inflight_rotations retries.
+            let qb = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .and_then(|l| l.read().unwrap().history.last().cloned())
+            };
+            if let Some(qb) = qb {
+                if let Err(e) = self.sign_rotation_rungs(ledger_id, &qb).await {
+                    tracing::warn!(
+                        "auto_rotation: QuorumBegin recorded for {}...; its rungs await signatures: {}",
+                        &ledger_id[..16],
+                        e
+                    );
+                }
             }
-            self.publish_rotation_tx(ledger_id, &tx).await;
-            self.handler
-                .inflight_rotations
-                .lock()
-                .unwrap()
-                .insert(tx.compute_txid(), tx);
         }
 
         // --- Phase 5: the ledger op has committed → confirm wallet state ---
@@ -1481,13 +1527,8 @@ impl Node {
         ),
         Error,
     > {
-        use bitcoin::taproot::LeafVersion;
-        use bitcoin::Witness;
-        use deposits_core::tapscript_reserves::{
-            ReservesSpendBuilder, SpendTxParams, TapscriptReservesBuilder, VoterSet,
-        };
-        use deposits_signer_api::{SigPurpose, SignContext};
-        use nostr_sdk::{Filter, Kind};
+        use deposits_core::tapscript_reserves::{TapscriptReservesBuilder, VoterSet};
+        use deposits_core::TlvDecode;
 
         let operator_key = self.node_id;
 
@@ -1618,29 +1659,77 @@ impl Node {
                 Some((stxid, svout, prevout))
             }
         };
-        let rotation_tx = deposits_core::tapscript_reserves::build_rotation_tx(
-            &deposits_core::tapscript_reserves::RotationTxParams {
-                vault: existing.outpoint,
-                vault_sats: existing.amount,
-                voters: cur_voter_set.all_voters().len(),
-                feerate_sat_vb: rotation_feerate,
-                lock_time: tier_lock_time,
-                new_vault_spk: new_script_pubkey.clone(),
-                splice_in: splice.as_ref().map(|(t, v, p)| {
-                    (
-                        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(*t), *v),
-                        p.value.to_sat(),
-                    )
-                }),
-                splice_vault: splice
-                    .as_ref()
-                    .is_some_and(|(_, _, p)| p.script_pubkey == prev_script_pubkey),
-                extra_outputs: exit_outputs,
-            },
-        )
-        .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".to_string()))?;
+        // DEP-03 §Fee ladder: the vault is output 0 of whichever rung of the governing ladder
+        // confirmed; the wallet records rung 0.
+        let (vault_outpoint, vault_sats) = {
+            let rungs: Vec<bitcoin::OutPoint> = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .and_then(|l| {
+                        let l = l.read().unwrap();
+                        l.history.iter().rev().find_map(|u| {
+                            match deposits_core::LedgerOperation::tlv_decode(&u.message) {
+                                Ok(op @ deposits_core::LedgerOperation::QuorumBegin { .. }) => {
+                                    Some(deposits_core::vault_spend::quorum_begin_rungs(&op))
+                                }
+                                _ => None,
+                            }
+                        })
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(t), existing.outpoint.vout))
+                    .collect()
+            };
+            if rungs.first() == Some(&existing.outpoint) && rungs.len() > 1 {
+                match self.wallet.vault_utxo_rungs(&rungs, &prev_script_pubkey)? {
+                    Some((o, sats)) if o != existing.outpoint => (o, sats),
+                    _ => (existing.outpoint, existing.amount),
+                }
+            } else {
+                (existing.outpoint, existing.amount)
+            }
+        };
+        let splice_vault = splice
+            .as_ref()
+            .is_some_and(|(_, _, p)| p.script_pubkey == prev_script_pubkey);
+        let params = deposits_core::tapscript_reserves::RotationTxParams {
+            vault: vault_outpoint,
+            vault_sats,
+            voters: cur_voter_set.all_voters().len(),
+            feerate_sat_vb: rotation_feerate,
+            lock_time: tier_lock_time,
+            new_vault_spk: new_script_pubkey.clone(),
+            splice_in: splice.as_ref().map(|(t, v, p)| {
+                (
+                    bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(*t), *v),
+                    p.value.to_sat(),
+                )
+            }),
+            splice_vault,
+            extra_outputs: exit_outputs,
+            // filled in at the QuorumBegin (its previous_hash); amounts do not depend on it
+            anchor: [0; 32],
+            rung: 0,
+        };
+        let migration = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers.get(ledger_id).is_some_and(|l| {
+                let st = &l.read().unwrap().state;
+                let (_, _, mig) = deposits_core::rotation_order::migration_entries(
+                    st,
+                    exit_cutoff,
+                    current_height,
+                    0,
+                    0,
+                );
+                mig.is_some()
+            })
+        };
+        let rotation_tx = deposits_core::tapscript_reserves::build_rotation_tx(&params)
+            .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".to_string()))?;
         let new_amount = rotation_tx.output[0].value.to_sat();
-        let new_txid = rotation_tx.compute_txid();
 
         let cur_builder = TapscriptReservesBuilder::new(
             cur_voter_set.clone(),
@@ -1651,379 +1740,68 @@ impl Node {
         let leaf_script = cur_builder
             .build_threshold_leaf(&tier)
             .map_err(|e| Error::Wallet(format!("build tier-{} leaf: {:?}", tier_index, e)))?;
-
-        let more_prevouts: Vec<bitcoin::TxOut> = splice.iter().map(|(_, _, p)| p.clone()).collect();
-        let sighash = ReservesSpendBuilder::compute_sighash_with(
-            &rotation_tx,
-            0,
-            existing.amount,
-            &prev_script_pubkey,
-            &leaf_script,
-            &more_prevouts,
-        )
-        .map_err(|e| Error::Wallet(format!("compute rotation sighash: {:?}", e)))?;
-        let sighash_bytes: [u8; 32] = *sighash.as_ref();
-        // DEP-03: a vault-script splice-in is spent through the same tier: a second sighash.
-        let splice_vault = splice
-            .as_ref()
-            .is_some_and(|(_, _, p)| p.script_pubkey == prev_script_pubkey);
-        let sighash1_bytes: Option<[u8; 32]> = if splice_vault {
-            let h = ReservesSpendBuilder::compute_sighash_with(
-                &rotation_tx,
-                1,
-                existing.amount,
-                &prev_script_pubkey,
-                &leaf_script,
-                &more_prevouts,
-            )
-            .map_err(|e| Error::Wallet(format!("compute splice sighash: {:?}", e)))?;
-            Some(*h.as_ref())
-        } else {
-            None
-        };
-
-        // Operator signs first.
-        let our_sig = self
-            .handler
-            .signer
-            .bip340_sign(
-                &SignContext::no_ledger(SigPurpose::OnchainSighash),
-                &sighash_bytes,
-            )
-            .map_err(|e| Error::Protocol(format!("operator rotation sighash sign: {}", e)))?;
-
-        let mut sigs: std::collections::HashMap<PublicKey, [u8; 64]> =
-            std::collections::HashMap::new();
-        sigs.insert(operator_key, our_sig);
-        let mut sigs1: std::collections::HashMap<PublicKey, [u8; 64]> =
-            std::collections::HashMap::new();
-        if let Some(h1) = sighash1_bytes {
-            let s1 = self
-                .handler
-                .signer
-                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), &h1)
-                .map_err(|e| Error::Protocol(format!("operator splice sighash sign: {}", e)))?;
-            sigs1.insert(operator_key, s1);
-        }
-
-        // Tier-aware cosigner threshold. Tier 3 (operator-alone) needs
-        // zero cosigner sigs — we short-circuit the multicast entirely
-        // below. Tier 0 needs majority (= tier.threshold) total sigs,
-        // and the operator's already in `sigs`.
+        let control_block = existing
+            .taproot_output
+            .control_block_for_tier(tier_index)
+            .ok_or_else(|| Error::Protocol(format!("no control block for tier {}", tier_index)))?;
         let cosigner_threshold = if operator_alone {
             0
         } else {
             tier.threshold.saturating_sub(1)
         };
-
-        // Send rotation_sign request to the ledger; cosigners verify
-        // TX shape + sighash and reply via KIND_LEDGER_RESPONSE.
-        // tier_index lets the cosigner-side rebuild the same leaf
-        // script we used for sighash; otherwise they'd default to
-        // Tier 0 and the sighash check would fail when the operator
-        // is rotating at a degraded tier.
-        let unsigned_tx_hex = hex::encode(bitcoin::consensus::encode::serialize(&rotation_tx));
-        let request_params = serde_json::json!({
-            "splice_in_outpoint": splice.as_ref().map(|(t, v, _)| format!("{}:{}", hex::encode(t), v)),
-            "exit_cutoff_height": exit_cutoff,
-            "sighash": hex::encode(sighash_bytes),
-            "splice_sighash": sighash1_bytes.map(hex::encode),
-            "unsigned_tx": unsigned_tx_hex,
-            "tier_index": tier_index,
-            // Operator's own ledger_hash + new_first_expiry so the cosigner
-            // rebuilds the *expected* rotated Taproot output with the same
-            // inputs the operator used. Until chain_tip_hash is consistent
-            // across replay paths, computing this independently on the
-            // cosigner side produces a different hash → script mismatch
-            // → refusal. The cosigner still validates the operator's claim
-            // by checking the resulting script against the proposed TX.
-            "ledger_hash": hex::encode(new_ledger_hash),
-            "new_quorum_expiry": new_first_expiry,
-        });
-        // Tier-3 short-circuit: operator-alone path. No cosignatures
-        // needed for the on-chain spend; skip the multicast + poll.
-        // The off-chain ledger update's cosignatures are handled
-        // separately by the cosign coordinator (which also short-
-        // circuits at Tier 3).
-        let request_id = if operator_alone {
-            tracing::info!(
-                "auto_rotation: Tier-{} operator-alone path for ledger {}... — skipping cosigner multicast",
-                tier_index,
-                &ledger_id[..16],
-            );
-            String::new()
-        } else {
-            let id = self
-                .nostr
-                .send_ledger_request(ledger_id, "rotation_sign", request_params)
-                .await
-                .map_err(|e| Error::Protocol(format!("publish rotation_sign: {:?}", e)))?;
-            tracing::info!(
-                "auto_rotation: published rotation_sign request {} for ledger {}... \
-                 (tier={}, need {} cosigner sigs)",
-                &id[..16.min(id.len())],
-                &ledger_id[..16],
-                tier_index,
-                cosigner_threshold
-            );
-            id
-        };
-
-        // Poll relay for responses tagged with our request_id (skip for
-        // operator-alone path).
-        if !operator_alone {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-            let active_set: std::collections::HashSet<PublicKey> =
-                existing.quorum_members.iter().copied().collect();
-            while std::time::Instant::now() < deadline {
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-
-                let since = nostr_sdk::Timestamp::now() - 120;
-                let filter = Filter::new()
-                    .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
-                    .since(since);
-                // Responses are KIND_LEDGER_RESPONSE (ephemeral 20102); they
-                // arrive on the fast (main) relay, not the slow/durable one.
-                // Using fetch_client() would silently miss every response.
-                let events = self
-                    .nostr
-                    .client()
-                    .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
-                    .await
-                    .map_err(|e| {
-                        Error::Protocol(format!("fetch rotation_sign responses: {}", e))
-                    })?;
-
-                for event in events.iter() {
-                    let mut matches_request = false;
-                    for tag in event.tags.iter() {
-                        if tag.kind()
-                            == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
-                        {
-                            if let Some(v) = tag.content() {
-                                if v == request_id {
-                                    matches_request = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if !matches_request {
-                        continue;
-                    }
-                    let resp: crate::nostr::LedgerResponse =
-                        match serde_json::from_str(&event.content) {
-                            Ok(r) => r,
-                            Err(_) => continue,
-                        };
-                    if !resp.success {
-                        tracing::info!(
-                            "auto_rotation: cosigner refused: {}",
-                            resp.error
-                                .clone()
-                                .unwrap_or_else(|| "no reason".to_string())
-                        );
-                        continue;
-                    }
-                    let result = match resp.result.as_ref() {
-                        Some(r) => r,
-                        None => continue,
-                    };
-                    let signer_hex = match result.get("signer").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let sig_hex = match result.get("signature").and_then(|v| v.as_str()) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let signer_pk: PublicKey = match signer_hex.parse() {
-                        Ok(pk) => pk,
-                        Err(_) => continue,
-                    };
-                    if !active_set.contains(&signer_pk) {
-                        continue; // ignore non-members
-                    }
-                    if sigs.contains_key(&signer_pk) {
-                        continue;
-                    }
-                    let sig_bytes = match hex::decode(sig_hex) {
-                        Ok(b) if b.len() == 64 => b,
-                        _ => continue,
-                    };
-                    let mut arr = [0u8; 64];
-                    arr.copy_from_slice(&sig_bytes);
-                    if sighash1_bytes.is_some() {
-                        // A vault-script splice needs the member's signature on input 1 too.
-                        let Some(s1) = result
-                            .get("splice_signature")
-                            .and_then(|v| v.as_str())
-                            .and_then(|h| hex::decode(h).ok())
-                            .filter(|b| b.len() == 64)
-                        else {
-                            continue;
-                        };
-                        let mut a1 = [0u8; 64];
-                        a1.copy_from_slice(&s1);
-                        sigs1.insert(signer_pk, a1);
-                    }
-                    sigs.insert(signer_pk, arr);
-                    tracing::info!(
-                        "auto_rotation: collected sig from {}... ({}/{})",
-                        &signer_pk.to_string()[..16],
-                        sigs.len() - 1, // exclude operator
-                        cosigner_threshold
-                    );
-                }
-
-                // We need majority of all voters (operator + cosigners). The
-                // operator already signed; check we have ≥ cosigner_threshold
-                // from cosigners.
-                if sigs.len() > cosigner_threshold {
-                    break;
-                }
-            }
-            tracing::info!(
-                "auto_rotation: polling exited for request {} — {} cosigner sigs collected",
-                &request_id[..16.min(request_id.len())],
-                sigs.len() - 1
-            );
-            if sigs.len() - 1 < cosigner_threshold {
-                return Err(Error::Protocol(format!(
-                    "rotation cosign timeout: got {}/{} cosigner sigs",
-                    sigs.len() - 1,
-                    cosigner_threshold
-                )));
-            }
-        } // end if !operator_alone
-
-        // Assemble the witness, shape depending on the tier we picked.
-        let control_block = existing
-            .taproot_output
-            .control_block_for_tier(tier_index)
-            .ok_or_else(|| Error::Protocol(format!("no control block for tier {}", tier_index)))?;
-
-        let mut witness = Witness::new();
-        if operator_alone {
-            // Tier-3 leaf: `<operator_xonly> CHECKSIG`. Witness is just
-            // the operator's sig.
-            let op_sig = sigs.get(&operator_key).ok_or_else(|| {
-                Error::Protocol("operator sig missing for Tier-3 path".to_string())
-            })?;
-            witness.push(op_sig);
-        } else {
-            // Tier-0 (and any future multisig tier): CHECKSIGADD pattern.
-            // Stack order: [sig_N, sig_{N-1}, ..., sig_0, leaf, ctrl]
-            // where sig_i corresponds to voter at sorted_x_only_pubkeys()[i].
-            // Empty bytes for voters that didn't sign (still a valid
-            // stack entry for OP_CHECKSIGADD).
-            let sorted = cur_voter_set.sorted_x_only_pubkeys();
-            for x_only in sorted.iter().rev() {
-                let mut pushed = false;
-                for (pk, sig) in &sigs {
-                    if pk.x_only_public_key().0 == *x_only {
-                        witness.push(sig);
-                        pushed = true;
-                        break;
-                    }
-                }
-                if !pushed {
-                    witness.push([] as [u8; 0]);
-                }
-            }
-        }
-        witness.push(leaf_script.as_bytes());
-        witness.push(control_block.serialize());
-
-        let mut signed_tx = rotation_tx;
-        signed_tx.input[0].witness = witness;
-        if splice_vault {
-            // Input 1 at the vault's script: the same tier witness, its own signatures.
-            let mut w1 = Witness::new();
-            for x_only in cur_voter_set.sorted_x_only_pubkeys().iter().rev() {
-                match sigs1
-                    .iter()
-                    .find(|(pk, _)| pk.x_only_public_key().0 == *x_only)
-                {
-                    Some((_, sig)) => w1.push(sig),
-                    None => w1.push([] as [u8; 0]),
-                }
-            }
-            w1.push(leaf_script.as_bytes());
-            w1.push(control_block.serialize());
-            signed_tx.input[1].witness = w1;
-            if let Some((stxid, svout, prevout)) = &splice {
-                self.handler
-                    .pending_rotation_splices
-                    .lock()
-                    .unwrap()
-                    .insert(
-                        ledger_id.to_string(),
-                        (*stxid, *svout, prevout.value.to_sat()),
-                    );
-            }
-        } else if let Some((stxid, svout, prevout)) = &splice {
-            use bitcoin::sighash::{EcdsaSighashType, SighashCache};
-            let h = SighashCache::new(&signed_tx)
-                .p2wpkh_signature_hash(
-                    1,
-                    &prevout.script_pubkey,
-                    prevout.value,
-                    EcdsaSighashType::All,
-                )
-                .map_err(|e| Error::Protocol(format!("splice sighash: {}", e)))?;
-            let sig = self
-                .handler
-                .signer
-                .ecdsa_sign_sighash(
-                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
-                    h.as_ref(),
-                )
-                .map_err(|e| Error::Protocol(format!("splice sighash sign: {}", e)))?;
-            let mut der = sig.serialize_der().to_vec();
-            der.push(EcdsaSighashType::All as u8);
-            let mut w = Witness::new();
-            w.push(&der);
-            w.push(operator_key.serialize());
-            signed_tx.input[1].witness = w;
+        if let Some((stxid, svout, prevout)) = &splice {
             self.handler
                 .pending_rotation_splices
                 .lock()
                 .unwrap()
-                .insert(
-                    ledger_id.to_string(),
-                    (*stxid, *svout, prevout.value.to_sat()),
-                );
+                .insert(ledger_id.to_string(), (*stxid, *svout, prevout.value.to_sat()));
         }
 
-        let _ = LeafVersion::TapScript;
-
-        // DEP-03 §"Rotation ordering": not broadcast here. The QuorumBegin naming
-        // it is cosigned first (its request carries this transaction), then the
-        // rotation is broadcast (rotate_reserves, after commit_operation).
+        // DEP-03 §"Rotation ordering": nothing is signed yet. The QuorumBegin names every rung
+        // (built on its tip); its cosigners rebuild them unsigned; once it is final the members
+        // sign (sign_rotation_rungs).
         self.handler
             .pending_rotation_txs
             .lock()
             .unwrap()
-            .insert(ledger_id.to_string(), signed_tx.clone());
+            .insert(ledger_id.to_string(), rotation_tx.clone());
+        self.handler.pending_rotation_plans.lock().unwrap().insert(
+            ledger_id.to_string(),
+            crate::handler::RotationPlan {
+                params,
+                rungs: Vec::new(),
+                max_rungs: if migration {
+                    1
+                } else {
+                    deposits_core::tapscript_reserves::ROTATION_RUNGS
+                },
+                tier_index,
+                operator_alone,
+                cosigner_threshold,
+                cur_voter_set: cur_voter_set.clone(),
+                prev_script_pubkey: prev_script_pubkey.clone(),
+                leaf_script: leaf_script.clone(),
+                control_block: control_block.serialize(),
+                splice: splice.clone(),
+                active_set: existing.quorum_members.clone(),
+            },
+        );
         tracing::info!(
-            "auto_rotation: rotation tx {} signed, awaiting its QuorumBegin (ledger {}..., {} -> {} sats, fee {})",
-            new_txid,
+            "auto_rotation: rotation of ledger {}... planned ({} -> {} sats); its QuorumBegin records the ladder next",
             &ledger_id[..16],
-            existing.amount,
+            vault_sats,
             new_amount,
-            existing.amount - new_amount,
         );
 
         let new_outpoint = bitcoin::OutPoint {
-            txid: new_txid,
+            txid: rotation_tx.compute_txid(),
             vout: 0,
         };
         let synth_result = crate::wallet::TaprootReservesCreateResult {
             outpoint: new_outpoint,
             address: new_address,
             amount: new_amount,
-            tx: signed_tx,
+            tx: rotation_tx,
             taproot_output: new_taproot_output.clone(),
             quorum_expiry: new_first_expiry,
             ledger_hash: new_ledger_hash,
@@ -2040,6 +1818,227 @@ impl Node {
             confirmed: false,
         };
         Ok((synth_result, pending))
+    }
+
+    /// DEP-03 §Rotation ordering, steps 3-4: `qb` (final, published) names the rungs of the
+    /// pending rotation of `ledger_id`. Gather the spent vault's tier signatures on every rung
+    /// (`rotation_sign`, carrying `qb`: a member signs only rungs a final QuorumBegin names),
+    /// assemble, broadcast rung 0, publish every rung (Kind 9107) and keep them to rebroadcast and
+    /// bump. Returns the signed rungs.
+    pub(crate) async fn sign_rotation_rungs(
+        &self,
+        ledger_id: &str,
+        qb: &deposits_core::types::SignedLedgerUpdate,
+    ) -> Result<Vec<bitcoin::Transaction>, Error> {
+        use bitcoin::Witness;
+        use deposits_core::tapscript_reserves::ReservesSpendBuilder;
+        use deposits_core::TlvEncode;
+        use deposits_signer_api::{SigPurpose, SignContext};
+        use nostr_sdk::{Filter, Kind};
+        let plan = self
+            .handler
+            .pending_rotation_plans
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .cloned()
+            .ok_or_else(|| Error::Protocol("no pending rotation plan".to_string()))?;
+        let operator_key = self.node_id;
+        let more_prevouts: Vec<bitcoin::TxOut> =
+            plan.splice.iter().map(|(_, _, p)| p.clone()).collect();
+        let splice_vault = plan.params.splice_vault;
+        let hashes = |i: usize| -> Result<Vec<[u8; 32]>, Error> {
+            plan.rungs
+                .iter()
+                .map(|r| {
+                    ReservesSpendBuilder::compute_sighash_with(
+                        r,
+                        i,
+                        plan.params.vault_sats,
+                        &plan.prev_script_pubkey,
+                        &plan.leaf_script,
+                        &more_prevouts,
+                    )
+                    .map(|h| *h.as_ref())
+                    .map_err(|e| Error::Wallet(format!("rung sighash: {:?}", e)))
+                })
+                .collect()
+        };
+        let h0 = hashes(0)?;
+        let h1 = if splice_vault { hashes(1)? } else { Vec::new() };
+        let sign = |h: &[u8; 32]| {
+            self.handler
+                .signer
+                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
+                .map_err(|e| Error::Protocol(format!("operator rung sign: {}", e)))
+        };
+        // signer -> (per-rung signatures, per-rung splice signatures)
+        let mut sigs: std::collections::HashMap<PublicKey, (Vec<[u8; 64]>, Vec<[u8; 64]>)> =
+            std::collections::HashMap::new();
+        sigs.insert(
+            operator_key,
+            (
+                h0.iter().map(sign).collect::<Result<_, _>>()?,
+                h1.iter().map(sign).collect::<Result<_, _>>()?,
+            ),
+        );
+        if !plan.operator_alone {
+            let params = serde_json::json!({
+                "quorum_begin": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, qb.tlv_encode()),
+                "unsigned_rungs": plan.rungs.iter().map(bitcoin::consensus::encode::serialize_hex).collect::<Vec<_>>(),
+                "tier_index": plan.tier_index,
+                "splice_in_outpoint": plan.splice.as_ref().map(|(t, v, _)| format!("{}:{}", hex::encode(t), v)),
+            });
+            let request_id = self
+                .nostr
+                .send_ledger_request(ledger_id, "rotation_sign", params)
+                .await
+                .map_err(|e| Error::Protocol(format!("publish rotation_sign: {:?}", e)))?;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+            let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+            let verify_all = |pk: &PublicKey, hs: &[[u8; 32]], ss: &[[u8; 64]]| {
+                hs.len() == ss.len()
+                    && hs.iter().zip(ss).all(|(h, sg)| {
+                        bitcoin::secp256k1::schnorr::Signature::from_slice(sg)
+                            .map(|sig| {
+                                secp.verify_schnorr(
+                                    &sig,
+                                    &bitcoin::secp256k1::Message::from_digest(*h),
+                                    &pk.x_only_public_key().0,
+                                )
+                                .is_ok()
+                            })
+                            .unwrap_or(false)
+                    })
+            };
+            while std::time::Instant::now() < deadline && sigs.len() <= plan.cosigner_threshold {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                let filter = Filter::new()
+                    .kind(Kind::Custom(crate::nostr::KIND_LEDGER_RESPONSE))
+                    .since(nostr_sdk::Timestamp::now() - 120);
+                let events = self
+                    .nostr
+                    .client()
+                    .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
+                    .await
+                    .map_err(|e| Error::Protocol(format!("fetch rotation_sign responses: {}", e)))?;
+                for event in events.iter() {
+                    let ours = event.tags.iter().any(|t| {
+                        t.kind() == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
+                            && t.content() == Some(request_id.as_str())
+                    });
+                    if !ours {
+                        continue;
+                    }
+                    let Ok(resp) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
+                    else {
+                        continue;
+                    };
+                    if !resp.success {
+                        tracing::info!(
+                            "auto_rotation: member refused the rungs: {}",
+                            resp.error.clone().unwrap_or_default()
+                        );
+                        continue;
+                    }
+                    let Some(result) = resp.result.as_ref() else { continue };
+                    let Some(pk) = result
+                        .get("signer")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<PublicKey>().ok())
+                    else {
+                        continue;
+                    };
+                    if !plan.active_set.contains(&pk) || sigs.contains_key(&pk) {
+                        continue;
+                    }
+                    let list = |k: &str| -> Vec<[u8; 64]> {
+                        result
+                            .get(k)
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str())
+                                    .filter_map(|h| hex::decode(h).ok())
+                                    .filter_map(|b| b.try_into().ok())
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    let (ss, ss1) = (list("signatures"), list("splice_signatures"));
+                    if verify_all(&pk, &h0, &ss) && (!splice_vault || verify_all(&pk, &h1, &ss1)) {
+                        sigs.insert(pk, (ss, ss1));
+                    }
+                }
+            }
+            if sigs.len() <= plan.cosigner_threshold {
+                return Err(Error::Protocol(format!(
+                    "rotation: only {}/{} member signatures on its rungs",
+                    sigs.len() - 1,
+                    plan.cosigner_threshold
+                )));
+            }
+        }
+        // Assemble every rung: [sig_N .. sig_0, leaf, control] (empty where absent).
+        let sorted = plan.cur_voter_set.sorted_x_only_pubkeys();
+        let witness_for = |rung: usize, splice_input: bool| {
+            let mut w = Witness::new();
+            if plan.operator_alone {
+                let (s0, s1) = &sigs[&operator_key];
+                w.push(if splice_input { s1[rung] } else { s0[rung] });
+            } else {
+                for x in sorted.iter().rev() {
+                    match sigs.iter().find(|(pk, _)| pk.x_only_public_key().0 == *x) {
+                        Some((_, (s0, s1))) => w.push(if splice_input { s1[rung] } else { s0[rung] }),
+                        None => w.push([] as [u8; 0]),
+                    }
+                }
+            }
+            w.push(plan.leaf_script.as_bytes());
+            w.push(&plan.control_block);
+            w
+        };
+        let mut signed = Vec::new();
+        for (i, rung) in plan.rungs.iter().enumerate() {
+            let mut tx = rung.clone();
+            tx.input[0].witness = witness_for(i, false);
+            if splice_vault {
+                tx.input[1].witness = witness_for(i, true);
+            } else if let Some((_, _, prevout)) = &plan.splice {
+                use bitcoin::sighash::{EcdsaSighashType, SighashCache};
+                let h = SighashCache::new(&tx)
+                    .p2wpkh_signature_hash(1, &prevout.script_pubkey, prevout.value, EcdsaSighashType::All)
+                    .map_err(|e| Error::Protocol(format!("splice sighash: {}", e)))?;
+                let sig = self
+                    .handler
+                    .signer
+                    .ecdsa_sign_sighash(&SignContext::no_ledger(SigPurpose::OnchainSighash), h.as_ref())
+                    .map_err(|e| Error::Protocol(format!("splice sighash sign: {}", e)))?;
+                let mut der = sig.serialize_der().to_vec();
+                der.push(EcdsaSighashType::All as u8);
+                let mut w = Witness::new();
+                w.push(&der);
+                w.push(operator_key.serialize());
+                tx.input[1].witness = w;
+            }
+            signed.push(tx);
+        }
+        match self.wallet.broadcast(&signed[0]) {
+            Ok(t) => tracing::info!("auto_rotation: broadcast rung 0 {} after its QuorumBegin", t),
+            Err(e) => tracing::warn!("rotation broadcast failed (members rebroadcast): {}", e),
+        }
+        for (i, tx) in signed.iter().enumerate() {
+            self.publish_rotation_rung(ledger_id, qb.sequence_number, i, tx).await;
+        }
+        self.handler.inflight_rotations.lock().unwrap().insert(
+            signed[0].compute_txid(),
+            crate::handler::InflightRotation {
+                rungs: signed.iter().cloned().map(Some).collect(),
+                qb_height: qb.block_height,
+            },
+        );
+        self.handler.pending_rotation_plans.lock().unwrap().remove(ledger_id);
+        Ok(signed)
     }
 
     // ========================================================================
@@ -2418,100 +2417,139 @@ impl Node {
 
     /// Fetch BTC/USD price and publish as a Nostr price oracle event.
     /// Publish a recorded rotation as Kind 9107 (DEP-03 §"Rotation ordering").
-    pub(crate) async fn publish_rotation_tx(&self, ledger_id: &str, tx: &bitcoin::Transaction) {
-        let seq = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .get(ledger_id)
-                .map(|l| l.read().unwrap().next_sequence().saturating_sub(1))
-                .unwrap_or(0)
-        };
+    /// Kind 9107: one signed rung of the rotation the QuorumBegin at `seq` names.
+    pub(crate) async fn publish_rotation_rung(
+        &self,
+        ledger_id: &str,
+        seq: u64,
+        rung: usize,
+        tx: &bitcoin::Transaction,
+    ) {
         let hex = bitcoin::consensus::encode::serialize_hex(tx);
-        if let Err(e) = self.nostr.publish_rotation_tx(ledger_id, seq, &hex).await {
-            tracing::debug!("Failed to publish rotation tx: {}", e);
+        if let Err(e) = self.nostr.publish_rotation_tx(ledger_id, seq, rung, &hex).await {
+            tracing::debug!("Failed to publish rotation rung: {}", e);
         }
     }
 
-    /// DEP-03 §"Rotation ordering": for every ledger we replicate whose latest
-    /// QuorumBegin's rotation is not yet confirmed and not held, take it from the
-    /// published Kind 9107 events (whoever published it), then rebroadcast every
-    /// recorded rotation we hold until it confirms.
+    /// DEP-03 §"Rotation ordering" and §Fee ladder: for every ledger we replicate whose latest
+    /// QuorumBegin's rotation has no rung confirmed and is not held, take its rungs from the
+    /// published Kind 9107 events (whoever published them); resume signing a rotation of ours
+    /// recorded but not yet signed; then rebroadcast every rotation we hold, moving to rung i
+    /// once its QuorumBegin is 6·i blocks old.
     pub(crate) async fn rebroadcast_inflight_rotations(&self) {
         use bitcoin::hashes::Hash;
-        let wanted: Vec<(String, [u8; 32])> = {
+        use deposits_core::TlvDecode;
+        // (ledger, its latest QuorumBegin update, rungs)
+        let wanted: Vec<(String, deposits_core::types::SignedLedgerUpdate, Vec<[u8; 32]>)> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .iter()
                 .filter(|(k, _)| k.len() == 64)
                 .filter_map(|(k, arc)| {
-                    deposits_core::rotation_order::latest_quorum_begin_txid(
-                        &arc.read().unwrap().history,
-                    )
-                    .map(|t| (k.clone(), t))
+                    let l = arc.read().unwrap();
+                    l.history.iter().rev().find_map(|u| {
+                        match deposits_core::LedgerOperation::tlv_decode(&u.message) {
+                            Ok(op @ deposits_core::LedgerOperation::QuorumBegin { .. }) => Some((
+                                k.clone(),
+                                u.clone(),
+                                deposits_core::vault_spend::quorum_begin_rungs(&op),
+                            )),
+                            _ => None,
+                        }
+                    })
                 })
                 .collect()
         };
-        for (ledger_id, txid_bytes) in wanted {
-            let txid = bitcoin::Txid::from_byte_array(txid_bytes);
-            if self
+        for (ledger_id, qb, rungs) in wanted {
+            let Some(first) = rungs.first() else { continue };
+            let rung0 = bitcoin::Txid::from_byte_array(*first);
+            // ours, recorded but unsigned: sign it now
+            let ours = self
                 .handler
-                .inflight_rotations
+                .pending_rotation_plans
                 .lock()
                 .unwrap()
-                .contains_key(&txid)
-            {
+                .get(&ledger_id)
+                .is_some_and(|p| p.rungs.first().map(|r| r.compute_txid()) == Some(rung0));
+            if ours {
+                if let Err(e) = self.sign_rotation_rungs(&ledger_id, &qb).await {
+                    tracing::info!(
+                        "rotation of {}... still awaits its rung signatures: {}",
+                        &ledger_id[..16],
+                        e
+                    );
+                }
                 continue;
             }
-            if !self.handler.rotation_lookups.lock().unwrap().insert(txid) {
+            if self.handler.inflight_rotations.lock().unwrap().contains_key(&rung0) {
+                continue;
+            }
+            if !self.handler.rotation_lookups.lock().unwrap().insert(rung0) {
                 continue; // looked up once already
             }
-            if let Ok(Some((_, confs))) = self.wallet.get_outpoint_value_and_confs(txid, 0) {
-                if confs >= 1 {
-                    continue; // confirmed
-                }
+            let confirmed = rungs.iter().any(|t| {
+                matches!(
+                    self.wallet.get_outpoint_value_and_confs(bitcoin::Txid::from_byte_array(*t), 0),
+                    Ok(Some((_, c))) if c >= 1
+                )
+            });
+            if confirmed {
+                continue;
             }
             if let Ok(candidates) = self.nostr.fetch_rotation_txs(&ledger_id).await {
-                if let Some(tx) =
-                    deposits_core::rotation_order::published_rotation(txid_bytes, &candidates)
-                {
+                let held: Vec<Option<bitcoin::Transaction>> = rungs
+                    .iter()
+                    .map(|t| deposits_core::rotation_order::published_rotation(*t, &candidates))
+                    .collect();
+                if held.iter().any(|t| t.is_some()) {
                     tracing::info!(
-                        "rotation {} for {}... taken from Kind 9107",
-                        txid,
-                        &ledger_id[..16]
+                        "rotation {} for {}... taken from Kind 9107 ({} of {} rungs)",
+                        rung0,
+                        &ledger_id[..16],
+                        held.iter().filter(|t| t.is_some()).count(),
+                        rungs.len()
                     );
-                    self.handler
-                        .inflight_rotations
-                        .lock()
-                        .unwrap()
-                        .insert(txid, tx);
+                    self.handler.inflight_rotations.lock().unwrap().insert(
+                        rung0,
+                        crate::handler::InflightRotation {
+                            rungs: held,
+                            qb_height: qb.block_height,
+                        },
+                    );
                 }
             }
         }
         self.rebroadcast_held_rotations();
     }
 
+    /// DEP-03 §Fee ladder: blocks a rung may stay unconfirmed before the next replaces it.
+    const RUNG_BUMP_BLOCKS: u32 = 6;
+
     fn rebroadcast_held_rotations(&self) {
-        let txs: Vec<bitcoin::Transaction> = self
+        let held: Vec<(bitcoin::Txid, crate::handler::InflightRotation)> = self
             .handler
             .inflight_rotations
             .lock()
             .unwrap()
-            .values()
-            .cloned()
+            .iter()
+            .map(|(k, v)| (*k, v.clone()))
             .collect();
-        for tx in txs {
-            let txid = tx.compute_txid();
-            match self.wallet.get_outpoint_value_and_confs(txid, 0) {
-                Ok(Some((_, confs))) if confs >= 1 => {
-                    self.handler
-                        .inflight_rotations
-                        .lock()
-                        .unwrap()
-                        .remove(&txid);
-                }
-                _ => {
-                    let _ = self.wallet.broadcast(&tx);
-                }
+        let tip = self.wallet.get_block_height().unwrap_or(0);
+        for (rung0, r) in held {
+            let confirmed = r.rungs.iter().flatten().any(|tx| {
+                matches!(
+                    self.wallet.get_outpoint_value_and_confs(tx.compute_txid(), 0),
+                    Ok(Some((_, c))) if c >= 1
+                )
+            });
+            if confirmed {
+                self.handler.inflight_rotations.lock().unwrap().remove(&rung0);
+                continue;
+            }
+            let want = ((tip.saturating_sub(r.qb_height) / Self::RUNG_BUMP_BLOCKS) as usize)
+                .min(r.rungs.len().saturating_sub(1));
+            if let Some(tx) = r.rungs[..=want].iter().rev().flatten().next() {
+                let _ = self.wallet.broadcast(tx);
             }
         }
     }

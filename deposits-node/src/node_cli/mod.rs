@@ -1647,6 +1647,18 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                     "DeliveryEmbed",
                     format!("target_ledger={}...", &hex::encode(target_ledger_id)[..16]),
                 ),
+                LedgerOperation::QuorumChallenge {
+                    challenged_ledger_id,
+                    challenged_txid,
+                    ..
+                } => (
+                    "QuorumChallenge",
+                    format!(
+                        "ledger={}... spend={}...",
+                        &hex::encode(challenged_ledger_id)[..16],
+                        &hex::encode(challenged_txid)[..16]
+                    ),
+                ),
                 LedgerOperation::LedgerClose => ("LedgerClose", String::new()),
                 LedgerOperation::Batch(ops) => ("Batch", format!("{} inner ops", ops.len())),
                 LedgerOperation::TransferLock {

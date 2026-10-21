@@ -376,8 +376,8 @@ impl Node {
             }
         }
 
-        // DEP-03 §"Rotation ordering": a rotating QuorumBegin carries its signed
-        // rotation, which cosigners verify in place of an on-chain outpoint.
+        // DEP-03 §"Rotation ordering": a rotating QuorumBegin carries the unsigned rungs it
+        // names, which cosigners rebuild byte for byte in place of an on-chain outpoint.
         {
             use deposits_core::messages::LedgerOperation;
             use deposits_core::TlvDecode;
@@ -385,15 +385,20 @@ impl Node {
                 LedgerOperation::tlv_decode(&update.message),
                 Ok(LedgerOperation::QuorumBegin { .. })
             ) {
-                if let Some(tx) = self
+                if let Some(plan) = self
                     .handler
-                    .pending_rotation_txs
+                    .pending_rotation_plans
                     .lock()
                     .unwrap()
                     .get(ledger_id)
                 {
-                    params["rotation_tx"] =
-                        serde_json::json!(bitcoin::consensus::encode::serialize_hex(tx));
+                    if !plan.rungs.is_empty() {
+                        params["rotation_rungs_tx"] = serde_json::json!(plan
+                            .rungs
+                            .iter()
+                            .map(bitcoin::consensus::encode::serialize_hex)
+                            .collect::<Vec<_>>());
+                    }
                 }
             }
         }

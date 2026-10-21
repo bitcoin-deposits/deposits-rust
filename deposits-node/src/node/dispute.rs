@@ -3399,8 +3399,8 @@ impl Node {
             };
 
             let script_pubkey = reserves_addr.script_pubkey();
-            let utxo = match self.wallet.vault_utxo(
-                deposits_core::rotation_order::vault_at_fork(&paginated_updates),
+            let utxo = match self.wallet.vault_utxo_rungs(
+                &deposits_core::rotation_order::vault_rungs_at_fork(&paginated_updates),
                 &script_pubkey,
             ) {
                 Ok(Some(u)) => u,
@@ -3486,6 +3486,12 @@ impl Node {
                 }
             };
             let _ = fee;
+            // DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point.
+            let Some(anchor) = deposits_core::rotation_order::dispute_anchor(&paginated_updates)
+            else {
+                tracing::error!("Confiscation of {}: no DisputeEnter to anchor it", ledger_prefix);
+                continue;
+            };
             let mut confiscation_tx = deposits_core::tapscript_reserves::build_confiscation_tx(
                 &deposits_core::tapscript_reserves::ConfiscationTxParams {
                     vault: (reserves_outpoint, reserves_amount),
@@ -3498,6 +3504,7 @@ impl Node {
                     residue_sats: obligations.residue_sats,
                     splice_outs: obligations.splice_outs.clone(),
                     operator: original_operator,
+                    anchor,
                 },
             );
 

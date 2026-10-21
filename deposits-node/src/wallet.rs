@@ -558,6 +558,24 @@ impl Wallet {
         }
     }
 
+    /// DEP-03 §Fee ladder: the vault's UTXO among a rotation's rungs (output 0 of whichever
+    /// confirmed, rung 0 first); with none recorded, the UTXO at the script.
+    pub fn vault_utxo_rungs(
+        &self,
+        rungs: &[OutPoint],
+        script: &bitcoin::ScriptBuf,
+    ) -> Result<Option<(OutPoint, u64)>, Error> {
+        if rungs.is_empty() {
+            return self.find_utxo_for_script(script);
+        }
+        for o in rungs {
+            if let Some(found) = self.vault_utxo(Some(*o), script)? {
+                return Ok(Some(found));
+            }
+        }
+        Ok(None)
+    }
+
     /// Find an unspent UTXO for a given script pubkey
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.
