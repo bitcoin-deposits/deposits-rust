@@ -471,21 +471,38 @@ pub fn vault_at_fork(updates: &[SignedLedgerUpdate]) -> Option<OutPoint> {
         .map(|(_, o)| o)
 }
 
-/// DEP-03 §On-Chain State Anchor: a confiscation's anchor, the chain hash of the disputed ledger's
-/// update at the dispute's fork point: the `previous_hash` of the `DisputeEnter` naming the lowest
-/// `last_valid_sequence` (it extends that update); with none in `updates`, the original operator's
-/// update at the lowest fork point found. Mirrors cl-deposits' `dispute-anchor`.
+/// DEP-03 §On-Chain State Anchor: a confiscation's anchor from the update at the dispute's fork
+/// point, `tagged_hash("deposits/fork-point", cosign_data)`: signatures are left out, so every
+/// variant of the update (one cosignature set or another) gives the same anchor.
+pub fn fork_point_anchor(update: &SignedLedgerUpdate) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash as _};
+    let tag = sha256::Hash::hash(b"deposits/fork-point").to_byte_array();
+    let mut data = Vec::with_capacity(64 + 200);
+    data.extend_from_slice(&tag);
+    data.extend_from_slice(&tag);
+    data.extend_from_slice(&update.cosign_data());
+    sha256::Hash::hash(&data).to_byte_array()
+}
+
+/// A confiscation's anchor ([`fork_point_anchor`]) from the original operator's update at the
+/// dispute's fork point (the lowest `last_valid_sequence` any `DisputeEnter` in `updates` names).
+/// Mirrors cl-deposits' `dispute-anchor`.
 pub fn dispute_anchor(updates: &[SignedLedgerUpdate]) -> Option<[u8; 32]> {
-    let enters = updates
+    let operator = updates.iter().find(|u| u.sequence_number == 0)?.operator_id;
+    let lvs = updates
         .iter()
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::DisputeEnter {
                 last_valid_sequence,
                 ..
-            }) => Some((last_valid_sequence, u.previous_hash)),
+            }) => Some(last_valid_sequence),
             _ => None,
-        });
-    enters.min_by_key(|(lvs, _)| *lvs).map(|(_, h)| h)
+        })
+        .min()?;
+    updates
+        .iter()
+        .find(|u| u.sequence_number == lvs && u.operator_id == operator)
+        .map(fork_point_anchor)
 }
 
 /// Every DEP-20 output a rotation at `height` pays after the new vault: the due exits (each
