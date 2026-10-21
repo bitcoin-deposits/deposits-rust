@@ -940,7 +940,9 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
     ) -> (bool, Option<String>, Option<String>) {
-        use deposits_core::tapscript_reserves::{ReservesSpendBuilder, TapscriptReservesBuilder, VoterSet};
+        use deposits_core::tapscript_reserves::{
+            ReservesSpendBuilder, TapscriptReservesBuilder, VoterSet,
+        };
         use deposits_core::{LedgerOperation, QuorumState, TlvDecode};
         use deposits_signer_api::{SigPurpose, SignContext};
 
@@ -954,10 +956,14 @@ impl Node {
             .params
             .get("quorum_begin")
             .and_then(|v| v.as_str())
-            .and_then(|b| base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok())
+            .and_then(|b| {
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, b).ok()
+            })
             .and_then(|b| deposits_core::types::SignedLedgerUpdate::tlv_decode(&b).ok())
         else {
-            return refuse("no quorum_begin: a member signs only rungs a final QuorumBegin names".into());
+            return refuse(
+                "no quorum_begin: a member signs only rungs a final QuorumBegin names".into(),
+            );
         };
         let rungs: Vec<bitcoin::Transaction> = request
             .params
@@ -1027,7 +1033,8 @@ impl Node {
         let Some(tip) = history.last() else {
             return refuse("empty replica".into());
         };
-        if tip.sequence_number + 1 != qb.sequence_number || state.chain_tip_hash != qb.previous_hash {
+        if tip.sequence_number + 1 != qb.sequence_number || state.chain_tip_hash != qb.previous_hash
+        {
             return refuse("the QuorumBegin does not extend our replica".into());
         }
         if qb.verify_operator_signature().is_err() {
@@ -1096,7 +1103,10 @@ impl Node {
                 )
             })
             .collect();
-        let (vault_outpoint, vault_sats) = match self.wallet.vault_utxo_rungs(&rung_outpoints, &reserves_script) {
+        let (vault_outpoint, vault_sats) = match self
+            .wallet
+            .vault_utxo_rungs(&rung_outpoints, &reserves_script)
+        {
             Ok(Some(u)) => u,
             Ok(None) => return refuse("vault outpoint is spent or unknown".into()),
             Err(e) => return refuse(format!("vault lookup: {e}")),
@@ -1114,7 +1124,9 @@ impl Node {
             vault_override,
             qb.previous_hash,
         ) {
-            return refuse(format!("the rungs are not the ladder the QuorumBegin names: {e}"));
+            return refuse(format!(
+                "the rungs are not the ladder the QuorumBegin names: {e}"
+            ));
         }
         // The spent vault's tier leaf, for the sighashes.
         let voter_set = VoterSet::new(
@@ -1133,12 +1145,8 @@ impl Node {
         if rungs[0].lock_time.to_consensus_u32() != tier.timelock_blocks {
             return refuse("tier_index is not the rungs' tier".into());
         }
-        let builder = TapscriptReservesBuilder::new(
-            voter_set,
-            config,
-            self.wallet.network(),
-            gov_hash,
-        );
+        let builder =
+            TapscriptReservesBuilder::new(voter_set, config, self.wallet.network(), gov_hash);
         let leaf = match builder.build_threshold_leaf(&tier) {
             Ok(l) => l,
             Err(e) => return refuse(format!("tier leaf: {e:?}")),
@@ -1162,7 +1170,10 @@ impl Node {
                     .map_err(|e| format!("sighash: {e:?}"))?;
                     self.handler
                         .signer
-                        .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h.as_ref())
+                        .bip340_sign(
+                            &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                            h.as_ref(),
+                        )
                         .map(hex::encode)
                         .map_err(|e| format!("sign: {e}"))
                 })

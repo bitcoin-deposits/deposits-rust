@@ -105,14 +105,19 @@ fn proof_hash_matches_cl() {
 
 #[test]
 fn cl_signed_theft_verifies() {
-    verify_unauthorized_vault_spend(&proof(), &history([9; 32]), &|_| Some(1000), &|_, _, _| false).unwrap();
+    verify_unauthorized_vault_spend(&proof(), &history([9; 32]), &|_| Some(1000), &|_, _, _| {
+        false
+    })
+    .unwrap();
 }
 
 #[test]
 fn the_non_signer_is_not_accused() {
     let mut p = proof();
     p.accused = hex::encode(pubkey(4).serialize());
-    let err = verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false).unwrap_err();
+    let err =
+        verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false)
+            .unwrap_err();
     assert!(err.contains("not among the verified signers"), "{err}");
 }
 
@@ -128,14 +133,18 @@ fn an_unanchored_spend_is_theft_even_if_a_quorum_begin_names_it() {
     let txid = tx.compute_txid().to_byte_array();
     verify_unauthorized_vault_spend(&p, &history(txid), &|_| Some(1000), &|_, _, _| true).unwrap();
     // and a spend block the verifier does not know is no verdict
-    assert!(verify_unauthorized_vault_spend(&p, &history(txid), &|_| None, &|_, _, _| false).is_err());
+    assert!(
+        verify_unauthorized_vault_spend(&p, &history(txid), &|_| None, &|_, _, _| false).is_err()
+    );
 }
 
 #[test]
 fn reserves_must_match_the_governing_quorum_begin() {
     let mut h = history([9; 32]);
     h[1] = update(1, &qb([9; 32], 5001, "cltv-offset-v2"));
-    assert!(verify_unauthorized_vault_spend(&proof(), &h, &|_| Some(1000), &|_, _, _| false).is_err());
+    assert!(
+        verify_unauthorized_vault_spend(&proof(), &h, &|_| Some(1000), &|_, _, _| false).is_err()
+    );
     let mut p = proof();
     let FraudEvidence::UnauthorizedVaultSpend {
         governing_quorumbegin_seq,
@@ -145,7 +154,9 @@ fn reserves_must_match_the_governing_quorum_begin() {
         panic!()
     };
     *governing_quorumbegin_seq = 5;
-    let err = verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false).unwrap_err();
+    let err =
+        verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false)
+            .unwrap_err();
     assert!(err.contains("no such QuorumBegin"), "{err}");
 }
 
@@ -160,7 +171,10 @@ fn a_tampered_spend_does_not_verify() {
     let at = bytes.len() - 20;
     bytes[at] ^= 1;
     *spend_tx_hex = hex::encode(bytes);
-    assert!(verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false).is_err());
+    assert!(
+        verify_unauthorized_vault_spend(&p, &history([9; 32]), &|_| Some(1000), &|_, _, _| false)
+            .is_err()
+    );
 }
 
 struct Ledgers(Vec<SignedLedgerUpdate>);

@@ -54,9 +54,11 @@ pub(crate) fn recent_vaults(history: &[SignedLedgerUpdate]) -> Vec<(OutPoint, u6
     let mut qbs: Vec<(u64, Vec<OutPoint>)> = history
         .iter()
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-            Ok(op @ LedgerOperation::QuorumBegin {
-                new_outpoint_vout, ..
-            }) => Some((
+            Ok(
+                op @ LedgerOperation::QuorumBegin {
+                    new_outpoint_vout, ..
+                },
+            ) => Some((
                 u.sequence_number,
                 // DEP-03 §Fee ladder: output 0 of every rung (only one can confirm)
                 deposits_core::vault_spend::quorum_begin_rungs(&op)
@@ -380,7 +382,8 @@ impl crate::Node {
                 // it, found among our replica, the relay's copies and published answers; if none
                 // is found, we challenge, and prove only once the challenge lapses. A relay we
                 // cannot read holds the scan below this block, to judge it again next pass.
-                if let Some(anchor) = deposits_core::tapscript_reserves::anchor_of(&theft.spend.tx) {
+                if let Some(anchor) = deposits_core::tapscript_reserves::anchor_of(&theft.spend.tx)
+                {
                     let relay = self
                         .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
                         .await;
@@ -516,7 +519,12 @@ impl crate::Node {
             }
             let anchored = deposits_core::tapscript_reserves::anchor_of(&theft.spend.tx);
             let form = entry.form.clone().unwrap_or_else(|| {
-                if anchored.is_some() { "challenge" } else { "unanchored" }.into()
+                if anchored.is_some() {
+                    "challenge"
+                } else {
+                    "unanchored"
+                }
+                .into()
             });
             let mut lapsed: Option<(String, [u8; 32])> = None;
             if form == "challenge" {
@@ -528,7 +536,10 @@ impl crate::Node {
                     .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
                     .await;
                 if self.spend_answered(&theft, &anchor, relay).await {
-                    tracing::info!("the challenge of {}'s spend is answered; nothing to prove", key);
+                    tracing::info!(
+                        "the challenge of {}'s spend is answered; nothing to prove",
+                        key
+                    );
                     self.owed_vault_spends.lock().unwrap().remove(&key);
                     self.reported_vault_spends.lock().unwrap().insert(key);
                     continue;
@@ -858,7 +869,11 @@ impl crate::Node {
         )
         .is_some()
             || self
-                .authorised_confiscation_spend(&theft.ledger_id, &theft.spend.tx, Some(theft.spend.height))
+                .authorised_confiscation_spend(
+                    &theft.ledger_id,
+                    &theft.spend.tx,
+                    Some(theft.spend.height),
+                )
                 .await
     }
 
@@ -868,7 +883,12 @@ impl crate::Node {
         let mut map = self.handler.spend_answers.lock().unwrap();
         let have = map.entry(ledger_id.to_string()).or_default();
         for a in answers {
-            for b in a.get("updates").and_then(|u| u.as_array()).into_iter().flatten() {
+            for b in a
+                .get("updates")
+                .and_then(|u| u.as_array())
+                .into_iter()
+                .flatten()
+            {
                 let Some(u) = b
                     .as_str()
                     .and_then(|s| base64::engine::general_purpose::STANDARD.decode(s).ok())
@@ -877,7 +897,10 @@ impl crate::Node {
                     continue;
                 };
                 if hex::encode(u.ledger_id) == ledger_id
-                    && !have.iter().any(|h| h.content_hash == u.content_hash && h.operator_signature == u.operator_signature)
+                    && !have.iter().any(|h| {
+                        h.content_hash == u.content_hash
+                            && h.operator_signature == u.operator_signature
+                    })
                 {
                     have.push(u);
                 }
@@ -915,12 +938,17 @@ impl crate::Node {
             challenged_anchor: *anchor,
         };
         if let Err(e) = self.commit_operation(&own, op).await {
-            tracing::warn!("vault watch: recording the challenge failed (retrying): {}", e);
+            tracing::warn!(
+                "vault watch: recording the challenge failed (retrying): {}",
+                e
+            );
             return None;
         }
         let u = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers.get(&own).and_then(|l| l.read().unwrap().history.last().cloned())?
+            ledgers
+                .get(&own)
+                .and_then(|l| l.read().unwrap().history.last().cloned())?
         };
         let b64 = base64::engine::general_purpose::STANDARD.encode(u.tlv_encode());
         let _ = self
@@ -973,13 +1001,23 @@ impl crate::Node {
             };
             for c in challenges {
                 let (Some(txid), Some(anchor)) = (
-                    c.get("txid").and_then(|v| v.as_str()).and_then(|h| hex::decode(h).ok()),
-                    c.get("anchor").and_then(|v| v.as_str()).and_then(|h| hex::decode(h).ok()),
+                    c.get("txid")
+                        .and_then(|v| v.as_str())
+                        .and_then(|h| hex::decode(h).ok()),
+                    c.get("anchor")
+                        .and_then(|v| v.as_str())
+                        .and_then(|h| hex::decode(h).ok()),
                 ) else {
                     continue;
                 };
                 let key = format!("{}:{}", id, hex::encode(&txid));
-                if self.handler.answered_challenges.lock().unwrap().contains(&key) {
+                if self
+                    .handler
+                    .answered_challenges
+                    .lock()
+                    .unwrap()
+                    .contains(&key)
+                {
                     continue;
                 }
                 let answer = history.iter().find(|u| {
@@ -1235,16 +1273,21 @@ mod tests {
     }
 
     #[test]
-    fn a_recorded_rotation_or_known_confiscation_is_not_theft() {
+    fn an_unanchored_spend_is_found_even_if_named_and_a_known_confiscation_is_not() {
         let (_, spend) = cl_theft();
         let txid = spend.tx.compute_txid().to_byte_array();
-        assert!(find_vault_thefts(
-            &ledgers(txid),
-            std::slice::from_ref(&spend),
-            &HashSet::new(),
-            &HashSet::new()
-        )
-        .is_empty());
+        // DEP-06: every authorised spend carries an anchor; one without is theft on its face,
+        // whatever a QuorumBegin names.
+        assert_eq!(
+            find_vault_thefts(
+                &ledgers(txid),
+                std::slice::from_ref(&spend),
+                &HashSet::new(),
+                &HashSet::new()
+            )
+            .len(),
+            1
+        );
         assert!(find_vault_thefts(
             &ledgers([9; 32]),
             &[spend],
@@ -1310,12 +1353,13 @@ mod tests {
         .pop()
         .unwrap();
         let accused = PublicKey::from_slice(&hex::decode(&cl.accused).unwrap()).unwrap();
-        let b = proof_against(&accused, &cl.ledger_id, &theft);
+        let b = proof_against(&accused, &cl.ledger_id, &theft, None);
         assert_eq!(hex::encode(b.proof.proof_hash()), CL_PROOF_HASH);
         deposits_core::vault_spend::verify_unauthorized_vault_spend(
             &b.proof,
             &history([9; 32]),
-            &[],
+            &|_| Some(10),
+            &|_, _, _| false,
         )
         .unwrap();
     }
@@ -1325,7 +1369,7 @@ mod tests {
     /// it must be the DEP-03 rotation the QuorumBegin names).
     #[test]
     fn a_rotating_quorum_begin_is_checked_against_its_rotation() {
-        use deposits_core::rotation_order::{rotating_quorum_begin_seq, verify_rotation_tx};
+        use deposits_core::rotation_order::{rotating_quorum_begin_seq, verify_rotation_rungs};
         let h = history([9; 32]);
         assert_eq!(rotating_quorum_begin_seq(&h), Some(1));
         let mut acquired = h.clone();
@@ -1374,14 +1418,16 @@ mod tests {
             String::new(),
             0,
         );
+        let rungs = [spend.tx.clone()];
         assert!(
-            verify_rotation_tx(&h, &st, 0, &qb([7; 32]), &spend.tx, net, None)
+            verify_rotation_rungs(&h, &st, 0, &qb([7; 32]), &rungs, net, None, None, [0; 32])
                 .unwrap_err()
                 .contains("new outpoint")
         );
-        // A validly signed spend of the vault that is not the DEP-03 rotation.
-        let e = verify_rotation_tx(&h, &st, 0, &qb(txid), &spend.tx, net, None).unwrap_err();
-        assert!(e.contains("differs from the DEP-03 rotation"), "{e}");
+        // A validly signed spend of the vault that is not the DEP-03 ladder.
+        let e = verify_rotation_rungs(&h, &st, 0, &qb(txid), &rungs, net, None, None, [0; 32])
+            .unwrap_err();
+        assert!(e.contains("differ from the DEP-03 ladder"), "{e}");
     }
 
     /// DEP-03 §"Rotation ordering": a node that did not cosign takes the rotation a

@@ -2011,6 +2011,7 @@ fn describe_op(op: &deposits_core::messages::LedgerOperation, me: &[u8; 16]) -> 
         | L::DisputeAcquire { .. }
         | L::DisputeYield => row("Dispute", None, "(dispute lifecycle)".to_string()),
         L::DeliveryEmbed { .. } => row("DeliveryEmbed", None, "(delivery proof)".to_string()),
+        L::QuorumChallenge { .. } => row("QuorumChallenge", None, "(spend challenge)".to_string()),
         L::LedgerClose => row("LedgerClose", None, "ledger closed".to_string()),
         L::Batch(ops) => row("Batch", None, format!("{} inner ops", ops.len())),
     }

@@ -185,10 +185,15 @@ mod confiscation_outputs_tests {
             bitcoin::Txid::from_raw_hash(bitcoin::hashes::Hash::from_byte_array([0x11; 32])),
             1,
         );
-        let mut lines = vec![format!("VEC fee={}", fee)];
+        // DEP-03 §On-Chain State Anchor: the confiscation's last output.
+        let anchor = [0xe5u8; 32];
+        let mut lines = vec![
+            format!("VEC fee={}", fee),
+            format!("VEC anchor={}", hex::encode(anchor)),
+        ];
         for (name, respectful, locktime) in [("punitive", false, 0u32), ("respectful", true, 1234)]
         {
-            let outputs = build_expected_confiscation_outputs(
+            let mut outputs = build_expected_confiscation_outputs(
                 lottery.script_pubkey(),
                 pk(9),
                 Network::Signet,
@@ -198,6 +203,10 @@ mod confiscation_outputs_tests {
                 10_000_000,
             )
             .unwrap();
+            outputs.push(bitcoin::TxOut {
+                value: Amount::ZERO,
+                script_pubkey: deposits_core::tapscript_reserves::anchor_script(&anchor),
+            });
             let tx = bitcoin::Transaction {
                 version: bitcoin::transaction::Version::TWO,
                 lock_time: bitcoin::absolute::LockTime::from_consensus(locktime),
@@ -3489,7 +3498,10 @@ impl Node {
             // DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point.
             let Some(anchor) = deposits_core::rotation_order::dispute_anchor(&paginated_updates)
             else {
-                tracing::error!("Confiscation of {}: no DisputeEnter to anchor it", ledger_prefix);
+                tracing::error!(
+                    "Confiscation of {}: no DisputeEnter to anchor it",
+                    ledger_prefix
+                );
                 continue;
             };
             let mut confiscation_tx = deposits_core::tapscript_reserves::build_confiscation_tx(

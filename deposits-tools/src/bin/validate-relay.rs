@@ -443,6 +443,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DisputeYield => "DisputeYield",
         LedgerOperation::DisputeArmed { .. } => "DisputeArmed",
         LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
+        LedgerOperation::QuorumChallenge { .. } => "QuorumChallenge",
         LedgerOperation::LedgerClose => "LedgerClose",
         LedgerOperation::Batch(_) => "Batch",
     }

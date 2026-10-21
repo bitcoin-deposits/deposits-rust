@@ -136,7 +136,8 @@ impl Node {
         ledger_id: &str,
         operation: deposits_core::messages::LedgerOperation,
     ) -> Result<String, Error> {
-        self.commit_operation_with(ledger_id, |_| Ok(operation)).await
+        self.commit_operation_with(ledger_id, |_| Ok(operation))
+            .await
     }
 
     /// As [`Self::commit_operation`], the operation built by `build` from the chain hash of the

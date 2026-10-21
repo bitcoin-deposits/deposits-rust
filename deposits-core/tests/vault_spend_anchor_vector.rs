@@ -42,7 +42,10 @@ fn vector() -> Vector {
                 .updates
                 .push(SignedLedgerUpdate::tlv_decode(&hex::decode(w[1]).unwrap()).unwrap()),
             "block" => {
-                v.blocks.insert(hex::decode(w[1]).unwrap().try_into().unwrap(), w[2].parse().unwrap());
+                v.blocks.insert(
+                    hex::decode(w[1]).unwrap().try_into().unwrap(),
+                    w[2].parse().unwrap(),
+                );
             }
             "spend" => {
                 v.spends.insert(
@@ -78,7 +81,11 @@ fn answers_match_the_shared_vector() {
     for (name, anchor, want) in &v.answers {
         let tx = &v.spends[name];
         let a = anchor_of(tx);
-        assert_eq!(a.map(hex::encode).unwrap_or("none".into()), *anchor, "{name}: anchor");
+        assert_eq!(
+            a.map(hex::encode).unwrap_or("none".into()),
+            *anchor,
+            "{name}: anchor"
+        );
         for updates in [&v.updates, &rev] {
             let got = a.and_then(|a| {
                 rotation_answer(
@@ -90,7 +97,11 @@ fn answers_match_the_shared_vector() {
                     0,
                 )
             });
-            assert_eq!(got.map(chain_hash).unwrap_or("none".into()), *want, "{name}: answered by");
+            assert_eq!(
+                got.map(chain_hash).unwrap_or("none".into()),
+                *want,
+                "{name}: answered by"
+            );
         }
     }
 }

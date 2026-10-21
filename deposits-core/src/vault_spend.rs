@@ -171,7 +171,8 @@ fn governing_reserves(
         .ok_or("unknown ruleset")?;
     let voters = VoterSet::new(operator, quorum_members.iter().map(|m| m.pubkey).collect());
     let config = (rs.tier_config_factory)(voters.total_count(), quorum_expiry);
-    let builder = TapscriptReservesBuilder::new(voters, config.clone(), Network::Bitcoin, ledger_hash);
+    let builder =
+        TapscriptReservesBuilder::new(voters, config.clone(), Network::Bitcoin, ledger_hash);
     Ok((builder, config, operator))
 }
 
@@ -437,7 +438,10 @@ pub fn verify_unauthorized_vault_spend(
         .ok_or("the lapse block is not in our chain")?;
     let w = spend_window(spent_history, *governing_quorumbegin_seq);
     if lapse < cu.block_height.max(spend_height) + w {
-        return Err(format!("the challenge's window ({} blocks) has not lapsed", w));
+        return Err(format!(
+            "the challenge's window ({} blocks) has not lapsed",
+            w
+        ));
     }
     if answered(&txid, &anchor, tier_index) {
         return Err("the spend is answered".into());

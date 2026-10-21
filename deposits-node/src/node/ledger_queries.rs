@@ -1423,8 +1423,10 @@ impl Node {
                     plan.max_rungs,
                 )
                 .ok_or_else(|| Error::Wallet("rotation leaves the new vault below dust".into()))?;
-                let txids: Vec<[u8; 32]> =
-                    rungs.iter().map(|r| r.compute_txid().to_byte_array()).collect();
+                let txids: Vec<[u8; 32]> = rungs
+                    .iter()
+                    .map(|r| r.compute_txid().to_byte_array())
+                    .collect();
                 *txid_cell = Some(rungs[0].compute_txid());
                 plan.rungs = rungs;
                 let mut op = operation;
@@ -1679,7 +1681,12 @@ impl Node {
                     })
                     .unwrap_or_default()
                     .into_iter()
-                    .map(|t| bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(t), existing.outpoint.vout))
+                    .map(|t| {
+                        bitcoin::OutPoint::new(
+                            bitcoin::Txid::from_byte_array(t),
+                            existing.outpoint.vout,
+                        )
+                    })
                     .collect()
             };
             if rungs.first() == Some(&existing.outpoint) && rungs.len() > 1 {
@@ -1754,7 +1761,10 @@ impl Node {
                 .pending_rotation_splices
                 .lock()
                 .unwrap()
-                .insert(ledger_id.to_string(), (*stxid, *svout, prevout.value.to_sat()));
+                .insert(
+                    ledger_id.to_string(),
+                    (*stxid, *svout, prevout.value.to_sat()),
+                );
         }
 
         // DEP-03 §"Rotation ordering": nothing is signed yet. The QuorumBegin names every rung
@@ -1921,7 +1931,9 @@ impl Node {
                     .client()
                     .fetch_events(vec![filter], Some(std::time::Duration::from_secs(5)))
                     .await
-                    .map_err(|e| Error::Protocol(format!("fetch rotation_sign responses: {}", e)))?;
+                    .map_err(|e| {
+                        Error::Protocol(format!("fetch rotation_sign responses: {}", e))
+                    })?;
                 for event in events.iter() {
                     let ours = event.tags.iter().any(|t| {
                         t.kind() == nostr_sdk::TagKind::SingleLetter(crate::nostr::TAG_EVENT_REF)
@@ -1930,7 +1942,8 @@ impl Node {
                     if !ours {
                         continue;
                     }
-                    let Ok(resp) = serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
+                    let Ok(resp) =
+                        serde_json::from_str::<crate::nostr::LedgerResponse>(&event.content)
                     else {
                         continue;
                     };
@@ -1941,7 +1954,9 @@ impl Node {
                         );
                         continue;
                     }
-                    let Some(result) = resp.result.as_ref() else { continue };
+                    let Some(result) = resp.result.as_ref() else {
+                        continue;
+                    };
                     let Some(pk) = result
                         .get("signer")
                         .and_then(|v| v.as_str())
@@ -1989,7 +2004,9 @@ impl Node {
             } else {
                 for x in sorted.iter().rev() {
                     match sigs.iter().find(|(pk, _)| pk.x_only_public_key().0 == *x) {
-                        Some((_, (s0, s1))) => w.push(if splice_input { s1[rung] } else { s0[rung] }),
+                        Some((_, (s0, s1))) => {
+                            w.push(if splice_input { s1[rung] } else { s0[rung] })
+                        }
                         None => w.push([] as [u8; 0]),
                     }
                 }
@@ -2007,12 +2024,20 @@ impl Node {
             } else if let Some((_, _, prevout)) = &plan.splice {
                 use bitcoin::sighash::{EcdsaSighashType, SighashCache};
                 let h = SighashCache::new(&tx)
-                    .p2wpkh_signature_hash(1, &prevout.script_pubkey, prevout.value, EcdsaSighashType::All)
+                    .p2wpkh_signature_hash(
+                        1,
+                        &prevout.script_pubkey,
+                        prevout.value,
+                        EcdsaSighashType::All,
+                    )
                     .map_err(|e| Error::Protocol(format!("splice sighash: {}", e)))?;
                 let sig = self
                     .handler
                     .signer
-                    .ecdsa_sign_sighash(&SignContext::no_ledger(SigPurpose::OnchainSighash), h.as_ref())
+                    .ecdsa_sign_sighash(
+                        &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                        h.as_ref(),
+                    )
                     .map_err(|e| Error::Protocol(format!("splice sighash sign: {}", e)))?;
                 let mut der = sig.serialize_der().to_vec();
                 der.push(EcdsaSighashType::All as u8);
@@ -2024,11 +2049,15 @@ impl Node {
             signed.push(tx);
         }
         match self.wallet.broadcast(&signed[0]) {
-            Ok(t) => tracing::info!("auto_rotation: broadcast rung 0 {} after its QuorumBegin", t),
+            Ok(t) => tracing::info!(
+                "auto_rotation: broadcast rung 0 {} after its QuorumBegin",
+                t
+            ),
             Err(e) => tracing::warn!("rotation broadcast failed (members rebroadcast): {}", e),
         }
         for (i, tx) in signed.iter().enumerate() {
-            self.publish_rotation_rung(ledger_id, qb.sequence_number, i, tx).await;
+            self.publish_rotation_rung(ledger_id, qb.sequence_number, i, tx)
+                .await;
         }
         self.handler.inflight_rotations.lock().unwrap().insert(
             signed[0].compute_txid(),
@@ -2037,7 +2066,11 @@ impl Node {
                 qb_height: qb.block_height,
             },
         );
-        self.handler.pending_rotation_plans.lock().unwrap().remove(ledger_id);
+        self.handler
+            .pending_rotation_plans
+            .lock()
+            .unwrap()
+            .remove(ledger_id);
         Ok(signed)
     }
 
@@ -2426,7 +2459,11 @@ impl Node {
         tx: &bitcoin::Transaction,
     ) {
         let hex = bitcoin::consensus::encode::serialize_hex(tx);
-        if let Err(e) = self.nostr.publish_rotation_tx(ledger_id, seq, rung, &hex).await {
+        if let Err(e) = self
+            .nostr
+            .publish_rotation_tx(ledger_id, seq, rung, &hex)
+            .await
+        {
             tracing::debug!("Failed to publish rotation rung: {}", e);
         }
     }
@@ -2440,7 +2477,11 @@ impl Node {
         use bitcoin::hashes::Hash;
         use deposits_core::TlvDecode;
         // (ledger, its latest QuorumBegin update, rungs)
-        let wanted: Vec<(String, deposits_core::types::SignedLedgerUpdate, Vec<[u8; 32]>)> = {
+        let wanted: Vec<(
+            String,
+            deposits_core::types::SignedLedgerUpdate,
+            Vec<[u8; 32]>,
+        )> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .iter()
@@ -2481,7 +2522,13 @@ impl Node {
                 }
                 continue;
             }
-            if self.handler.inflight_rotations.lock().unwrap().contains_key(&rung0) {
+            if self
+                .handler
+                .inflight_rotations
+                .lock()
+                .unwrap()
+                .contains_key(&rung0)
+            {
                 continue;
             }
             if !self.handler.rotation_lookups.lock().unwrap().insert(rung0) {
@@ -2543,7 +2590,11 @@ impl Node {
                 )
             });
             if confirmed {
-                self.handler.inflight_rotations.lock().unwrap().remove(&rung0);
+                self.handler
+                    .inflight_rotations
+                    .lock()
+                    .unwrap()
+                    .remove(&rung0);
                 continue;
             }
             let want = ((tip.saturating_sub(r.qb_height) / Self::RUNG_BUMP_BLOCKS) as usize)

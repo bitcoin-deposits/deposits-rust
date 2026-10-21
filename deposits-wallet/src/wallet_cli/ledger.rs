@@ -415,6 +415,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::DisputeAcquire { .. } => ("DisputeAcquire".to_string(), None),
         LedgerOperation::DisputeYield => ("DisputeYield".to_string(), None),
         LedgerOperation::DeliveryEmbed { .. } => ("DeliveryEmbed".to_string(), None),
+        LedgerOperation::QuorumChallenge { .. } => ("QuorumChallenge".to_string(), None),
         LedgerOperation::LedgerClose => ("LedgerClose".to_string(), None),
         LedgerOperation::Batch(ops) => (format!("Batch ({} inner ops)", ops.len()), None),
     }

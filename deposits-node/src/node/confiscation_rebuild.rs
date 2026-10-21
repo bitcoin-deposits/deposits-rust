@@ -147,7 +147,11 @@ pub fn rebuild_matching(
                     quorum_members.iter().map(|m| m.pubkey).collect::<Vec<_>>(),
                     quorum_expiry,
                     protocol_version,
-                    (rungs, new_outpoint_vout, (amount + collateral_amount) / 1000),
+                    (
+                        rungs,
+                        new_outpoint_vout,
+                        (amount + collateral_amount) / 1000,
+                    ),
                 ))
             }
             _ => None,
@@ -160,7 +164,11 @@ pub fn rebuild_matching(
     // recorded amounts, a higher one what the chain says.
     let vault = {
         let (rungs, vout, recorded) = vault;
-        let input0 = spend.input.first().map(|i| i.previous_output).ok_or("no input")?;
+        let input0 = spend
+            .input
+            .first()
+            .map(|i| i.previous_output)
+            .ok_or("no input")?;
         let rung = rungs
             .iter()
             .position(|t| input0.txid.to_byte_array() == *t && input0.vout == vout)

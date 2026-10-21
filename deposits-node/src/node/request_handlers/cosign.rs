@@ -862,9 +862,8 @@ impl Node {
                         // DEP-03 §Fee ladder: the vault is output 0 of the governing ladder's
                         // confirmed rung (rung 0, at its recorded amounts, by default).
                         let vault = {
-                            let gov = deposits_core::rotation_order::rotating_quorum_begin_seq(
-                                &history,
-                            );
+                            let gov =
+                                deposits_core::rotation_order::rotating_quorum_begin_seq(&history);
                             let rungs_gov: Vec<[u8; 32]> = history
                                 .iter()
                                 .filter(|u| Some(u.sequence_number) == gov)

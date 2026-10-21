@@ -84,7 +84,9 @@ pub fn verify_rotation_rungs(
     else {
         return Err("not a QuorumBegin".into());
     };
-    let rung0 = rungs.first().ok_or("a rotating QuorumBegin must carry rotation_rungs_tx")?;
+    let rung0 = rungs
+        .first()
+        .ok_or("a rotating QuorumBegin must carry rotation_rungs_tx")?;
     if rung0.compute_txid().to_byte_array() != *new_outpoint_txid
         || *new_outpoint_vout != 0
         || spending_txid != new_outpoint_txid
@@ -126,7 +128,10 @@ pub fn verify_rotation_rungs(
     let config = (rs.tier_config_factory)(n_voters, quorum_expiry);
     let lock_time = rung0.lock_time.to_consensus_u32();
     if lock_time > height || !config.tiers.iter().any(|t| t.timelock_blocks == lock_time) {
-        return Err(format!("nLockTime {} names no tier open at {}", lock_time, height));
+        return Err(format!(
+            "nLockTime {} names no tier open at {}",
+            lock_time, height
+        ));
     }
     let vault_spk = TapscriptReservesBuilder::new(voters, config, network, ledger_hash)
         .build()
@@ -188,7 +193,10 @@ pub fn verify_rotation_rungs(
     if ours.len() != rungs.len() || ours.iter().zip(rungs).any(|(a, b)| *a != strip(b)) {
         return Err("rotation_rungs_tx differ from the DEP-03 ladder we build".into());
     }
-    let txids: Vec<[u8; 32]> = ours.iter().map(|t| t.compute_txid().to_byte_array()).collect();
+    let txids: Vec<[u8; 32]> = ours
+        .iter()
+        .map(|t| t.compute_txid().to_byte_array())
+        .collect();
     if txids != crate::vault_spend::quorum_begin_rungs(op) {
         return Err("rotation_rungs is not the ladder's txids".into());
     }
@@ -413,9 +421,11 @@ pub fn vault_rungs_at_fork(updates: &[SignedLedgerUpdate]) -> Vec<OutPoint> {
     updates
         .iter()
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-            Ok(op @ LedgerOperation::QuorumBegin {
-                new_outpoint_txid, ..
-            }) if Txid::from_byte_array(new_outpoint_txid) == v.txid => Some(
+            Ok(
+                op @ LedgerOperation::QuorumBegin {
+                    new_outpoint_txid, ..
+                },
+            ) if Txid::from_byte_array(new_outpoint_txid) == v.txid => Some(
                 crate::vault_spend::quorum_begin_rungs(&op)
                     .into_iter()
                     .map(|t| OutPoint::new(Txid::from_byte_array(t), v.vout))
@@ -466,13 +476,15 @@ pub fn vault_at_fork(updates: &[SignedLedgerUpdate]) -> Option<OutPoint> {
 /// `last_valid_sequence` (it extends that update); with none in `updates`, the original operator's
 /// update at the lowest fork point found. Mirrors cl-deposits' `dispute-anchor`.
 pub fn dispute_anchor(updates: &[SignedLedgerUpdate]) -> Option<[u8; 32]> {
-    let enters = updates.iter().filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-        Ok(LedgerOperation::DisputeEnter {
-            last_valid_sequence,
-            ..
-        }) => Some((last_valid_sequence, u.previous_hash)),
-        _ => None,
-    });
+    let enters = updates
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some((last_valid_sequence, u.previous_hash)),
+            _ => None,
+        });
     enters.min_by_key(|(lvs, _)| *lvs).map(|(_, h)| h)
 }
 

@@ -3820,8 +3820,14 @@ impl NostrTransport {
             content["updates"] = serde_json::json!(updates_b64);
         }
         let event = EventBuilder::new(Kind::Custom(kind), content.to_string())
-            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_REQ), [ledger_id]))
-            .tag(Tag::custom(TagKind::SingleLetter(TAG_LEDGER_ID), [ledger_tag(ledger_id)]))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_tag(ledger_id)],
+            ))
             .sign_with_keys(&self.keys)
             .map_err(|e| Error::Nostr(format!("Failed to sign challenge event: {}", e)))?;
         let event_id = event.id.to_hex();

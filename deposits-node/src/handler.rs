@@ -275,7 +275,10 @@ pub struct RotationPlan {
 
 impl DepositsHandler {
     /// DEP-06 §Spend challenge: the answers published to challenges of `ledger_id`'s spends.
-    pub fn spend_answers_for(&self, ledger_id: &str) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+    pub fn spend_answers_for(
+        &self,
+        ledger_id: &str,
+    ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
         self.spend_answers
             .lock()
             .unwrap()

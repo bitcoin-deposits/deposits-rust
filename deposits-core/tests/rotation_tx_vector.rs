@@ -27,7 +27,10 @@ fn cases() -> Vec<Case> {
         let (t, v) = s.split_once(':').unwrap();
         OutPoint::new(Txid::from_str(t).unwrap(), v.parse().unwrap())
     };
-    for line in text.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+    for line in text
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+    {
         let w: Vec<&str> = line.split(' ').collect();
         if w[0] == "case" {
             out.push(Case {
@@ -63,10 +66,10 @@ fn cases() -> Vec<Case> {
             "new_vault_spk" => c.p.new_vault_spk = ScriptBuf::from_hex(w[1]).unwrap(),
             "splice" => c.p.splice_in = Some((outpoint(w[1]), w[2].parse().unwrap())),
             "splice_vault" => c.p.splice_vault = w[1] == "1",
-            "out" => c
-                .p
-                .extra_outputs
-                .push((ScriptBuf::from_hex(w[1]).unwrap(), w[2].parse().unwrap())),
+            "out" => {
+                c.p.extra_outputs
+                    .push((ScriptBuf::from_hex(w[1]).unwrap(), w[2].parse().unwrap()))
+            }
             "anchor" => c.p.anchor = hex::decode(w[1]).unwrap().try_into().unwrap(),
             "collateral" => c.collateral = w[1].parse().unwrap(),
             "max_rungs" => c.max_rungs = w[1].parse().unwrap(),
@@ -100,7 +103,11 @@ fn rungs_follow_the_ladder_rules() {
     };
     assert!(rungs.iter().all(|t| anchor_of(t) == Some(c.p.anchor)));
     for w in rungs.windows(2) {
-        assert_eq!(fee(&w[1]), 2 * fee(&w[0]), "each rung doubles the fee (BIP-125)");
+        assert_eq!(
+            fee(&w[1]),
+            2 * fee(&w[0]),
+            "each rung doubles the fee (BIP-125)"
+        );
         assert_eq!(w[0].input, w[1].input);
         assert_eq!(
             w[0].output[1..].to_vec(),
@@ -108,7 +115,10 @@ fn rungs_follow_the_ladder_rules() {
             "rungs differ only in the new vault"
         );
     }
-    assert_eq!(rotation_vsize(8, &[34, 34], false, false) - rotation_vsize(8, &[34], false, false), 43);
+    assert_eq!(
+        rotation_vsize(8, &[34, 34], false, false) - rotation_vsize(8, &[34], false, false),
+        43
+    );
 }
 
 #[test]
