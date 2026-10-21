@@ -2228,6 +2228,9 @@ impl LedgerState {
             LedgerOperation::DeliveryEmbed { .. } => {
                 // No state changes — causal ordering only.
             }
+            LedgerOperation::QuorumChallenge { .. } => {
+                // DEP-06 §Spend challenge: a notice on the challenger's own ledger; no state.
+            }
             LedgerOperation::Batch(ops) => {
                 // Transactional: build on a scratch copy, commit only on full
                 // success. If any inner op fails, `?` returns Err and the

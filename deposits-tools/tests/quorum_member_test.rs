@@ -283,6 +283,7 @@ mod tests {
                 migration_receiver: None,
                 migration_vout: None,
                 consumed_notice: None,
+                rotation_rungs: vec![],
                 reserves_id: "bcrt1qtest_rotated".to_string(),
                 spending_txid: [0x11; 32],
                 new_outpoint_txid: [0x22; 32],

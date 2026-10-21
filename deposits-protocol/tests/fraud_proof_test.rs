@@ -2369,6 +2369,7 @@ mod quorum_expired_verifier {
             migration_receiver: None,
             migration_vout: None,
             consumed_notice: None,
+            rotation_rungs: vec![],
             reserves_id: "rid".into(),
             spending_txid: [0; 32],
             new_outpoint_txid: [0x11; 32],

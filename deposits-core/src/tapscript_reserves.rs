@@ -810,11 +810,30 @@ pub const MIN_ECONOMIC_FEE_MULTIPLE: u64 = 5;
 /// Default confiscation feerate (sat/vB) while no `reference_feerate_sat_vb` is recorded.
 pub const CONFISCATION_DEFAULT_FEERATE_SAT_VB: u64 = 2;
 
-/// DEP-03 §"Confiscation fee": `feerate × (120 + 30 × voters)` sats, where `voters`
-/// counts the vault's voters (members and operator). A deterministic bound on the
-/// confiscation's vsize at any tier, so every cosigner builds the same transaction.
+/// DEP-03 §"Confiscation fee": `feerate × (163 + 30 × voters)` sats, where `voters`
+/// counts the vault's voters (members and operator); 43 vB of it are the anchor. A
+/// deterministic bound on the confiscation's vsize at any tier, so every cosigner builds
+/// the same transaction.
 pub fn confiscation_fee_sats(voters: usize, feerate_sat_vb: u64) -> u64 {
-    feerate_sat_vb.saturating_mul(120 + 30 * voters as u64)
+    feerate_sat_vb.saturating_mul(163 + 30 * voters as u64)
+}
+
+/// DEP-03 §Fee ladder: a rotation is signed at m, 2m, 4m and 8m.
+pub const ROTATION_RUNGS: usize = 4;
+
+/// DEP-03 §On-Chain State Anchor: `OP_RETURN <H>`, the last output of every authorised vault spend.
+pub fn anchor_script(h: &[u8; 32]) -> ScriptBuf {
+    let mut b = vec![0x6a, 0x20];
+    b.extend_from_slice(h);
+    ScriptBuf::from_bytes(b)
+}
+
+/// The anchor `H` of `tx`: its last output, zero-valued, script exactly `6a20 ‖ H`; `None` if none.
+pub fn anchor_of(tx: &bitcoin::Transaction) -> Option<[u8; 32]> {
+    let o = tx.output.last()?;
+    let b = o.script_pubkey.as_bytes();
+    (o.value.to_sat() == 0 && b.len() == 34 && b[0] == 0x6a && b[1] == 0x20)
+        .then(|| b[2..34].try_into().unwrap())
 }
 
 /// DEP-03 §"Rotation transaction": the deterministic vsize bound from its outputs,
@@ -851,12 +870,16 @@ pub struct RotationTxParams {
     pub splice_vault: bool,
     /// Exit outputs in recorded order, then the migration output, as (spk, sats).
     pub extra_outputs: Vec<(ScriptBuf, u64)>,
+    /// DEP-03 §On-Chain State Anchor: the recording `QuorumBegin`'s `previous_hash`.
+    pub anchor: [u8; 32],
+    /// DEP-03 §Fee ladder: rung i pays `feerate × 2^i`.
+    pub rung: u32,
 }
 
 /// The unsigned rotation (DEP-03 §"Rotation transaction"): version 2, nLockTime the
 /// tier's CLTV, input 0 the vault and input 1 the splice-in (both `0xfffffffd`),
-/// output 0 the new vault, then the exit and migration outputs. `None` if the new
-/// vault would fall below 330 sats.
+/// output 0 the new vault, then the exit and migration outputs, last the anchor. `None`
+/// if the new vault would fall below 330 sats.
 pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
     use bitcoin::{
         absolute::LockTime, transaction::Version, Amount, Sequence, TxIn, TxOut, Witness,
@@ -877,12 +900,16 @@ pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
     }
     let mut lens = vec![p.new_vault_spk.len()];
     lens.extend(p.extra_outputs.iter().map(|(spk, _)| spk.len()));
-    let fee = p.feerate_sat_vb.saturating_mul(rotation_vsize(
-        p.voters,
-        &lens,
-        p.splice_in.is_some(),
-        p.splice_vault,
-    ));
+    lens.push(34); // the anchor: 9 + 34 = 43 vB
+    let fee = p
+        .feerate_sat_vb
+        .saturating_mul(1u64 << p.rung)
+        .saturating_mul(rotation_vsize(
+            p.voters,
+            &lens,
+            p.splice_in.is_some(),
+            p.splice_vault,
+        ));
     let paid_out: u64 = p.extra_outputs.iter().map(|(_, v)| *v).sum();
     let total = p.vault_sats + p.splice_in.map(|(_, v)| v).unwrap_or(0);
     let new_vault = total.checked_sub(paid_out)?.checked_sub(fee)?;
@@ -897,12 +924,39 @@ pub fn build_rotation_tx(p: &RotationTxParams) -> Option<bitcoin::Transaction> {
         value: Amount::from_sat(*v),
         script_pubkey: spk.clone(),
     }));
+    output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: anchor_script(&p.anchor),
+    });
     Some(bitcoin::Transaction {
         version: Version::TWO,
         lock_time: LockTime::from_consensus(p.lock_time),
         input,
         output,
     })
+}
+
+/// DEP-03 §Fee ladder: the rungs of a rotation, rung 0 first (`p.rung` is ignored). Rung i > 0
+/// exists only while its new vault is at least 330 sats and its extra fee over rung 0 is at most
+/// `collateral_msats / 1000` (the recording `QuorumBegin`'s `collateral_amount`); the ladder stops
+/// at the first rung that fails. `max_rungs` 1 for a rotation paying a migration output (its
+/// outpoint must not depend on which rung confirms). `None` if rung 0 is below dust.
+pub fn build_rotation_ladder(
+    p: &RotationTxParams,
+    collateral_msats: u64,
+    max_rungs: usize,
+) -> Option<Vec<bitcoin::Transaction>> {
+    let at = |rung: u32| build_rotation_tx(&RotationTxParams { rung, ..p.clone() });
+    let r0 = at(0)?;
+    let v0 = r0.output[0].value.to_sat();
+    let mut out = vec![r0];
+    for i in 1..ROTATION_RUNGS.min(max_rungs) {
+        match at(i as u32) {
+            Some(r) if (v0 - r.output[0].value.to_sat()) * 1000 <= collateral_msats => out.push(r),
+            _ => break,
+        }
+    }
+    Some(out)
 }
 
 /// The inputs DEP-03 §"Confiscation fee" and DEP-06 §Confiscation obligations fix the
@@ -925,20 +979,22 @@ pub struct ConfiscationTxParams {
     /// Obligation splice-outs, ascending by deposit id: (spk, sats).
     pub splice_outs: Vec<(ScriptBuf, u64)>,
     pub operator: bitcoin::secp256k1::PublicKey,
+    /// DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point.
+    pub anchor: [u8; 32],
 }
 
 /// The unsigned confiscation (DEP-03 / DEP-06): version 2, nLockTime the tier's CLTV; input 0 the
 /// vault, then the swept outputs, all `0xfffffffd`; output 0 the lottery (punitive: inputs − fee −
 /// splice-outs; respectful: `max(obligations + residue, 330)` and the rest to the operator's
-/// P2WPKH unless that is under 294), then the splice-outs. Fee `2 × (120 + 30 × voters +
-/// |swept| × (41 + 30 × voters))`. Mirrors cl-deposits' `confiscation-tx`.
+/// P2WPKH unless that is under 294), then the splice-outs, last the anchor. Fee `2 × (163 + 30 ×
+/// voters + |swept| × (41 + 30 × voters))`. Mirrors cl-deposits' `confiscation-tx`.
 pub fn build_confiscation_tx(p: &ConfiscationTxParams) -> bitcoin::Transaction {
     use bitcoin::{
         absolute::LockTime, transaction::Version, Amount, Sequence, TxIn, TxOut, Witness,
     };
     let v = p.voters as u64;
     let fee =
-        CONFISCATION_DEFAULT_FEERATE_SAT_VB * (120 + 30 * v + p.swept.len() as u64 * (41 + 30 * v));
+        CONFISCATION_DEFAULT_FEERATE_SAT_VB * (163 + 30 * v + p.swept.len() as u64 * (41 + 30 * v));
     let inputs: u64 = p.vault.1 + p.swept.iter().map(|(_, s)| *s).sum::<u64>();
     let paid: u64 = p.splice_outs.iter().map(|(_, s)| *s).sum();
     let reserves = inputs.saturating_sub(paid);
@@ -971,6 +1027,10 @@ pub fn build_confiscation_tx(p: &ConfiscationTxParams) -> bitcoin::Transaction {
         value: Amount::from_sat(*s),
         script_pubkey: spk.clone(),
     }));
+    output.push(TxOut {
+        value: Amount::ZERO,
+        script_pubkey: anchor_script(&p.anchor),
+    });
     let input = std::iter::once(p.vault.0)
         .chain(p.swept.iter().map(|(o, _)| *o))
         .map(|previous_output| TxIn {

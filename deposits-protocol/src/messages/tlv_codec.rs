@@ -179,6 +179,10 @@ mod ledger_op_tlv {
     pub const CONFISCATION_TXID: u64 = 352; // DisputeAcquire
     pub const SOURCE_LEDGER_ID: u64 = 354; // DormancyAccept
     pub const UNCREDITED_PROOF: u64 = 356; // ObligationRecord (payment form)
+    pub const ROTATION_RUNGS: u64 = 358; // QuorumBegin: repeated txid(32), rung 0 first (DEP-03 §Fee ladder)
+    pub const CHALLENGED_LEDGER_ID: u64 = 360; // QuorumChallenge (DEP-06 §Spend challenge)
+    pub const CHALLENGED_TXID: u64 = 362; // QuorumChallenge
+    pub const CHALLENGED_ANCHOR: u64 = 364; // QuorumChallenge
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -296,6 +300,7 @@ impl TlvEncode for LedgerOperation {
                 migration_receiver,
                 migration_vout,
                 consumed_notice,
+                rotation_rungs,
             } => {
                 // Pubkeys: concat of 33-byte compressed pubkeys (existing
                 // shape — kept for backwards compatibility).
@@ -377,6 +382,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(c) = consumed_notice {
                     builder = builder.bytes_field(CONSUMED_NOTICE, c);
+                }
+                if !rotation_rungs.is_empty() {
+                    builder = builder.bytes_field(ROTATION_RUNGS, &rotation_rungs.concat());
                 }
             }
             Self::DepositOpen {
@@ -947,6 +955,16 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(TARGET_LEDGER_ID, target_ledger_id)
                     .pubkey_field(TARGET_OPERATOR, target_operator);
             }
+            Self::QuorumChallenge {
+                challenged_ledger_id,
+                challenged_txid,
+                challenged_anchor,
+            } => {
+                builder = builder
+                    .bytes_field(CHALLENGED_LEDGER_ID, challenged_ledger_id)
+                    .bytes_field(CHALLENGED_TXID, challenged_txid)
+                    .bytes_field(CHALLENGED_ANCHOR, challenged_anchor);
+            }
             Self::DisputeYield => {}
             Self::LedgerClose => {}
             Self::Batch(ops) => {
@@ -1073,6 +1091,18 @@ impl TlvDecode for LedgerOperation {
                     )?,
                     migration_vout: reader.read_u32_opt(MIGRATION_VOUT)?,
                     consumed_notice: reader.read_bytes_opt(CONSUMED_NOTICE)?,
+                    rotation_rungs: match reader.read_raw_opt(ROTATION_RUNGS) {
+                        None => Vec::new(),
+                        Some(b) if !b.is_empty() && b.len() % 32 == 0 => {
+                            b.chunks(32).map(|c| c.try_into().unwrap()).collect()
+                        }
+                        Some(_) => {
+                            return Err(TlvError::InvalidFieldValue {
+                                field_type: ROTATION_RUNGS,
+                                reason: "rotation_rungs is not a list of 32-byte txids".into(),
+                            })
+                        }
+                    },
                 })
             }
             20 => Ok(Self::DepositOpen {
@@ -1349,6 +1379,11 @@ impl TlvDecode for LedgerOperation {
                 request_hash: reader.read_bytes(REQUEST_HASH)?,
                 target_ledger_id: reader.read_bytes(TARGET_LEDGER_ID)?,
                 target_operator: reader.read_pubkey(TARGET_OPERATOR)?,
+            }),
+            47 => Ok(Self::QuorumChallenge {
+                challenged_ledger_id: reader.read_bytes(CHALLENGED_LEDGER_ID)?,
+                challenged_txid: reader.read_bytes(CHALLENGED_TXID)?,
+                challenged_anchor: reader.read_bytes(CHALLENGED_ANCHOR)?,
             }),
             60 => Ok(Self::LedgerClose),
             90 => {

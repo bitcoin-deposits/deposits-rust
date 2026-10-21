@@ -218,6 +218,7 @@ impl ProtocolSim {
                     migration_receiver: None,
                     migration_vout: None,
                     consumed_notice: None,
+                    rotation_rungs: vec![],
                     reserves_id: format!("reserves_{}_rotated", i),
                     spending_txid: [0x11; 32],
                     new_outpoint_txid: [(0x20 + i as u8); 32],

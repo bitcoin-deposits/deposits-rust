@@ -472,6 +472,18 @@ pub enum FraudEvidence {
         /// One `"sats:scriptpubkeyhex"` per input of the spend, in order:
         /// the amounts and scripts the taproot sighash commits to.
         prevouts: Vec<String>,
+        /// DEP-06 lapsed form: the challenger's signed update carrying a `QuorumChallenge` of
+        /// the spend's anchor (DEP-02 encoding, hex). Absent in the unanchored form.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        challenge_update: Option<String>,
+        /// DEP-06 lapsed form: a block at least the spent ledger's service window past the
+        /// later of the challenge and the spend.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            with = "crate::types::serde_opt_32_hex"
+        )]
+        lapse_block_hash: Option<[u8; 32]>,
     },
 
     /// The operator BIP-340-signed a ledger update that is structurally
@@ -4041,12 +4053,19 @@ impl FraudEvidence {
                 governing_quorumbegin_seq,
                 spend_tx_hex,
                 spend_block_hash,
+                challenge_update,
+                lapse_block_hash,
                 ..
             } => {
                 out.extend_from_slice(spent_ledger_id.as_bytes());
                 out.extend_from_slice(&governing_quorumbegin_seq.to_le_bytes());
                 out.extend_from_slice(spend_tx_hex.as_bytes());
                 out.extend_from_slice(spend_block_hash);
+                // DEP-06: the lapsed form appends the challenge and the block ending its window
+                if let (Some(c), Some(b)) = (challenge_update, lapse_block_hash) {
+                    out.extend_from_slice(c.as_bytes());
+                    out.extend_from_slice(b);
+                }
             }
         }
         out

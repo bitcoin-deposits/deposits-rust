@@ -73,6 +73,7 @@ fn quorum_begin_op(staged_pks: &[PublicKey]) -> LedgerOperation {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
         reserves_id: "bcrt1ptest".to_string(),
         spending_txid: [0u8; 32],
         new_outpoint_txid: [0xAA; 32],

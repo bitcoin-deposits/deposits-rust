@@ -60,6 +60,7 @@ fn qb(spending_txid: [u8; 32], expiry: u32, version: &str) -> LedgerOperation {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
         reserves_id: String::new(),
         spending_txid,
         new_outpoint_txid: sha(&[0xf0, 0x0d]),

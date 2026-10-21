@@ -415,6 +415,7 @@ mod tests {
             migration_receiver: None,
             migration_vout: None,
             consumed_notice: None,
+            rotation_rungs: vec![],
             reserves_id: "bcrt1pdummy".to_string(),
             amount: 100_000_000,
             collateral_amount: 100_000_000,

@@ -370,6 +370,10 @@ pub enum LedgerOperation {
         migration_vout: Option<u32>,
         /// DEP-20 §8.3 (TLV 344): SHA256 of the consumed DormancyNotice's operation encoding.
         consumed_notice: Option<[u8; 32]>,
+        /// DEP-03 §Fee ladder (TLV 358): the txids of every rung of the rotation, rung 0 first
+        /// (rung 0's is `new_outpoint_txid`). Empty: one rung, `new_outpoint_txid`. The new vault
+        /// is output 0 of whichever rung confirms.
+        rotation_rungs: Vec<[u8; 32]>,
     },
 
     // ========== Settlement (DEP-20) ==========
@@ -767,6 +771,18 @@ pub enum LedgerOperation {
         membership_expires: u32,
     },
 
+    /// DEP-06 §Spend challenge (disc 47): appended to the challenger's own ledger, a public
+    /// notice that an anchored spend of another ledger's vault has no answer the challenger can
+    /// find. It starts no dispute; it becomes proof only when it lapses unanswered.
+    QuorumChallenge {
+        /// The ledger whose vault was spent (TLV 360).
+        challenged_ledger_id: [u8; 32],
+        /// The spend, internal byte order (TLV 362).
+        challenged_txid: [u8; 32],
+        /// The spend's anchor `H` (TLV 364).
+        challenged_anchor: [u8; 32],
+    },
+
     /// Off-chain consensus-version upgrade (DEP-18). A cosigned ledger op that
     /// moves the ledger's `active_ruleset_name` to a target ruleset in the SAME
     /// reserves-cascade family — an op-rules-only change (e.g. enabling the
@@ -988,6 +1004,7 @@ impl LedgerOperation {
             Self::QuorumAddMember { .. } => 43,
             Self::QuorumRemoveMember { .. } => 44,
             Self::QuorumJoin { .. } => 46,
+            Self::QuorumChallenge { .. } => 47,
             Self::QuorumUpgrade { .. } => 45,
             Self::FeeCollect { .. } => 50,
             // Custody dispute operations
@@ -1032,6 +1049,7 @@ impl LedgerOperation {
             Self::DisputeYield => consts::LEDGER_UPDATE,
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
+            Self::QuorumChallenge { .. } => consts::LEDGER_UPDATE,
             Self::ExitRequest { .. }
             | Self::ExitCancel { .. }
             | Self::DormancyNotice { .. }
@@ -1391,6 +1409,7 @@ impl BinaryCodec for LedgerOperation {
                 migration_receiver: _,
                 migration_vout: _,
                 consumed_notice: _,
+                rotation_rungs: _,
                 reserves_id,
                 spending_txid,
                 new_outpoint_txid,
@@ -1815,6 +1834,11 @@ impl BinaryCodec for LedgerOperation {
                     "DEP-20 exits have no legacy encoding; use TLV".into(),
                 ));
             }
+            Self::QuorumChallenge { .. } => {
+                return Err(CodecError::InvalidData(
+                    "QuorumChallenge (DEP-06) has no legacy encoding; use TLV".into(),
+                ));
+            }
             Self::DeliveryEmbed {
                 request_hash,
                 target_ledger_id,
@@ -1898,6 +1922,7 @@ impl BinaryCodec for LedgerOperation {
                     migration_receiver: None,
                     migration_vout: None,
                     consumed_notice: None,
+                    rotation_rungs: vec![],
                     reserves_id,
                     spending_txid,
                     new_outpoint_txid,

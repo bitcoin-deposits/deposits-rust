@@ -5546,6 +5546,7 @@ pub async fn recovery_rotate_to_quorum(args: &[String]) -> Result<(), Box<dyn st
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
         reserves_id: new_reserves_address.to_string(),
         spending_txid: txid_bytes,
         new_outpoint_txid: txid_bytes,

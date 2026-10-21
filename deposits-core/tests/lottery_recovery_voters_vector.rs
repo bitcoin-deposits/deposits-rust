@@ -55,6 +55,7 @@ fn qb(members: &[u8]) -> LedgerOperation {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
     }
 }
 

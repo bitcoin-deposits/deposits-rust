@@ -114,6 +114,29 @@ pub mod serde_32_hex {
     }
 }
 
+/// Serde helper for an optional 32-byte array as lowercase hex (absent when `None`; pair with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`).
+pub mod serde_opt_32_hex {
+    use serde::{Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<[u8; 32]>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match bytes {
+            Some(b) => super::serde_32_hex::serialize(b, serializer),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<[u8; 32]>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        super::serde_32_hex::deserialize(deserializer).map(Some)
+    }
+}
+
 /// Serde helper for 64-byte arrays
 pub mod serde_64 {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};

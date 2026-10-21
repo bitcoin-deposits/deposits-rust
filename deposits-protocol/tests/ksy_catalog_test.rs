@@ -762,6 +762,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 migration_receiver: None,
                 migration_vout: None,
                 consumed_notice: None,
+                rotation_rungs: vec![],
                 reserves_id: "bcrt1qtest".into(),
                 spending_txid: h32(),
                 new_outpoint_txid: h32(),

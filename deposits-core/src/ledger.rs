@@ -2896,6 +2896,7 @@ mod tests {
             migration_receiver: None,
             migration_vout: None,
             consumed_notice: None,
+            rotation_rungs: vec![],
             // (closure body unchanged below; quorum_members wraps each pubkey in
             //  QuorumMemberRef::pubkey_only — see the field assignment.)
             reserves_id: "rid".into(),

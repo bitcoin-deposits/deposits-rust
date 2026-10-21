@@ -262,6 +262,7 @@ fn exit_fold_semantics() {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
     };
     let wrong = apply(&mut st.clone(), ctx(103, 7, 7), qb(103, Vec::new()));
     assert!(
@@ -380,6 +381,7 @@ fn judge_height_matches_cl() {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
     };
     let fold = |height: u32| {
         let ctx = ApplyCtx {

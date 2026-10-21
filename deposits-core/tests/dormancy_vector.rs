@@ -257,6 +257,7 @@ fn dormancy_fold() {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
     };
     let e = with_apply_ctx(at(14), || st.apply(&qb(Vec::new()))).unwrap_err();
     assert!(
@@ -352,6 +353,7 @@ fn migration_receiver_fold() {
         migration_receiver: None,
         migration_vout: None,
         consumed_notice: None,
+        rotation_rungs: vec![],
     };
     let e = with_apply_ctx(at(20), || st.apply(&qb)).unwrap_err();
     assert!(format!("{e:?}").contains("migration_freeze"), "{e:?}");
