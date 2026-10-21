@@ -97,6 +97,7 @@ fn confiscation_obligations_match_cl() {
                     residue_sats: field("residue=").parse().unwrap(),
                     splice_outs: outs,
                     operator: kv["operator"].parse().unwrap(),
+                    anchor: hex::decode(&kv["anchor"]).unwrap().try_into().unwrap(),
                 });
                 assert_eq!(
                     serialize_hex(&tx),

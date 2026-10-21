@@ -1,115 +1,119 @@
-//! DEP-03 §"Rotation transaction": the unsigned rotation, byte for byte, pinned by the
-//! vector shared with cl-deposits (inspect/vectors/rotation_tx.txt there). Each case
-//! carries its own inputs, so the other implementation rebuilds from the file alone.
-//! `REGEN_ROTATION_VECTOR=1 cargo test --test rotation_tx_vector` rewrites the file.
+//! DEP-03 §"Rotation transaction" and §Fee ladder: every rung of the unsigned rotation, byte
+//! for byte, pinned by the vector shared with cl-deposits (inspect/vectors/rotation_tx.txt
+//! there, which writes the rung lines). Each case carries its own inputs (the vault, voters,
+//! feerate, locktime, new vault, extras, splice, anchor, the collateral bounding the ladder, at
+//! most how many rungs), so this implementation rebuilds from the file alone.
 
 use bitcoin::consensus::encode::serialize_hex;
 use bitcoin::{OutPoint, ScriptBuf, Txid};
-use deposits_core::tapscript_reserves::{build_rotation_tx, RotationTxParams};
+use deposits_core::tapscript_reserves::{
+    anchor_of, build_rotation_ladder, build_rotation_tx, rotation_vsize, RotationTxParams,
+    ROTATION_RUNGS,
+};
 use std::str::FromStr;
 
-fn outpoint(byte: u8, vout: u32) -> OutPoint {
-    OutPoint::new(
-        Txid::from_str(&format!("{:02x}", byte).repeat(32)).unwrap(),
-        vout,
-    )
-}
-fn p2tr(byte: u8) -> ScriptBuf {
-    ScriptBuf::from_hex(&format!("5120{}", format!("{:02x}", byte).repeat(32))).unwrap()
-}
-fn p2wpkh(byte: u8) -> ScriptBuf {
-    ScriptBuf::from_hex(&format!("0014{}", format!("{:02x}", byte).repeat(20))).unwrap()
+struct Case {
+    name: String,
+    p: RotationTxParams,
+    collateral: u64,
+    max_rungs: usize,
+    rungs: Vec<String>,
 }
 
-fn cases() -> Vec<(&'static str, RotationTxParams)> {
-    let base = RotationTxParams {
-        vault: outpoint(0xa1, 0),
-        vault_sats: 50_000_000,
-        voters: 8,
-        feerate_sat_vb: 2,
-        lock_time: 0,
-        new_vault_spk: p2tr(0xb2),
-        splice_in: None,
-        splice_vault: false,
-        extra_outputs: vec![],
+fn cases() -> Vec<Case> {
+    let text = include_str!("vectors/rotation_tx.txt");
+    let mut out: Vec<Case> = Vec::new();
+    let outpoint = |s: &str| {
+        let (t, v) = s.split_once(':').unwrap();
+        OutPoint::new(Txid::from_str(t).unwrap(), v.parse().unwrap())
     };
-    vec![
-        ("plain", base.clone()),
-        (
-            "exits",
-            RotationTxParams {
-                extra_outputs: vec![(p2wpkh(0xc3), 1_000_000), (p2tr(0xc4), 250_000)],
-                ..base.clone()
-            },
-        ),
-        (
-            "splice_in",
-            RotationTxParams {
-                splice_in: Some((outpoint(0xd5, 3), 7_500_000)),
-                splice_vault: false,
-                feerate_sat_vb: 5,
-                ..base.clone()
-            },
-        ),
-        (
-            "splice_in_vault",
-            RotationTxParams {
-                splice_in: Some((outpoint(0xd6, 2), 400_000)),
-                splice_vault: true,
-                feerate_sat_vb: 3,
-                ..base.clone()
-            },
-        ),
-        (
-            "migration_tier1",
-            RotationTxParams {
-                extra_outputs: vec![(p2wpkh(0xc3), 1_000_000), (p2tr(0xe6), 400_000)],
-                lock_time: 12_345,
-                voters: 6,
-                ..base.clone()
-            },
-        ),
-    ]
-}
-
-fn render() -> String {
-    let mut out =
-        String::from("# DEP-03 rotation transaction vector (shared cl-deposits / deposits-rust)\n");
-    for (name, p) in cases() {
-        out += &format!("case {name}\n");
-        out += &format!("vault {}:{} {}\n", p.vault.txid, p.vault.vout, p.vault_sats);
-        out += &format!(
-            "voters {}\nfeerate {}\nlocktime {}\n",
-            p.voters, p.feerate_sat_vb, p.lock_time
-        );
-        out += &format!("new_vault_spk {}\n", p.new_vault_spk.to_hex_string());
-        if let Some((op, sats)) = p.splice_in {
-            out += &format!("splice {}:{} {}\n", op.txid, op.vout, sats);
+    for line in text.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let w: Vec<&str> = line.split(' ').collect();
+        if w[0] == "case" {
+            out.push(Case {
+                name: w[1].to_string(),
+                p: RotationTxParams {
+                    vault: OutPoint::null(),
+                    vault_sats: 0,
+                    voters: 0,
+                    feerate_sat_vb: 0,
+                    lock_time: 0,
+                    new_vault_spk: ScriptBuf::new(),
+                    splice_in: None,
+                    splice_vault: false,
+                    extra_outputs: vec![],
+                    anchor: [0; 32],
+                    rung: 0,
+                },
+                collateral: 0,
+                max_rungs: ROTATION_RUNGS,
+                rungs: vec![],
+            });
+            continue;
         }
-        if p.splice_vault {
-            out += "splice_vault 1\n";
+        let c = out.last_mut().unwrap();
+        match w[0] {
+            "vault" => {
+                c.p.vault = outpoint(w[1]);
+                c.p.vault_sats = w[2].parse().unwrap();
+            }
+            "voters" => c.p.voters = w[1].parse().unwrap(),
+            "feerate" => c.p.feerate_sat_vb = w[1].parse().unwrap(),
+            "locktime" => c.p.lock_time = w[1].parse().unwrap(),
+            "new_vault_spk" => c.p.new_vault_spk = ScriptBuf::from_hex(w[1]).unwrap(),
+            "splice" => c.p.splice_in = Some((outpoint(w[1]), w[2].parse().unwrap())),
+            "splice_vault" => c.p.splice_vault = w[1] == "1",
+            "out" => c
+                .p
+                .extra_outputs
+                .push((ScriptBuf::from_hex(w[1]).unwrap(), w[2].parse().unwrap())),
+            "anchor" => c.p.anchor = hex::decode(w[1]).unwrap().try_into().unwrap(),
+            "collateral" => c.collateral = w[1].parse().unwrap(),
+            "max_rungs" => c.max_rungs = w[1].parse().unwrap(),
+            "rung" => c.rungs.push(w[2].to_string()),
+            k => panic!("unknown key {k}"),
         }
-        for (spk, sats) in &p.extra_outputs {
-            out += &format!("out {} {}\n", spk.to_hex_string(), sats);
-        }
-        out += &format!("tx {}\n", serialize_hex(&build_rotation_tx(&p).unwrap()));
     }
     out
 }
 
 #[test]
-fn rotation_tx_matches_shared_vector() {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/vectors/rotation_tx.txt");
-    let ours = render();
-    if std::env::var("REGEN_ROTATION_VECTOR").is_ok() {
-        std::fs::write(path, &ours).unwrap();
+fn rotation_ladder_matches_shared_vector() {
+    let cases = cases();
+    assert_eq!(cases.len(), 5, "five shapes");
+    for c in &cases {
+        let ours: Vec<String> = build_rotation_ladder(&c.p, c.collateral, c.max_rungs)
+            .unwrap()
+            .iter()
+            .map(serialize_hex)
+            .collect();
+        assert_eq!(ours, c.rungs, "{}", c.name);
     }
-    assert_eq!(std::fs::read_to_string(path).unwrap(), ours);
+}
+
+#[test]
+fn rungs_follow_the_ladder_rules() {
+    let c = &cases()[0];
+    let rungs = build_rotation_ladder(&c.p, c.collateral, c.max_rungs).unwrap();
+    let fee = |t: &bitcoin::Transaction| {
+        c.p.vault_sats - t.output.iter().map(|o| o.value.to_sat()).sum::<u64>()
+    };
+    assert!(rungs.iter().all(|t| anchor_of(t) == Some(c.p.anchor)));
+    for w in rungs.windows(2) {
+        assert_eq!(fee(&w[1]), 2 * fee(&w[0]), "each rung doubles the fee (BIP-125)");
+        assert_eq!(w[0].input, w[1].input);
+        assert_eq!(
+            w[0].output[1..].to_vec(),
+            w[1].output[1..].to_vec(),
+            "rungs differ only in the new vault"
+        );
+    }
+    assert_eq!(rotation_vsize(8, &[34, 34], false, false) - rotation_vsize(8, &[34], false, false), 43);
 }
 
 #[test]
 fn rotation_below_dust_is_refused() {
-    let mut p = cases().remove(0).1;
+    let mut p = cases().remove(0).p;
     p.vault_sats = 900;
     assert!(build_rotation_tx(&p).is_none());
 }

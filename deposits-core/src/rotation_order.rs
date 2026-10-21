@@ -8,10 +8,9 @@ use deposits_protocol::tlv::TlvDecode;
 use deposits_protocol::types::SignedLedgerUpdate;
 
 use crate::tapscript_reserves::{
-    build_rotation_tx, RotationTxParams, TapscriptReservesBuilder, VoterSet,
-    CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+    build_rotation_ladder, RotationTxParams, TapscriptReservesBuilder, VoterSet,
+    CONFISCATION_DEFAULT_FEERATE_SAT_VB, ROTATION_RUNGS,
 };
-use crate::vault_spend::vault_spend_signers;
 
 /// The sequence of the `QuorumBegin` whose vault the next `QuorumBegin` rotates:
 /// the latest one with no `DisputeAcquire` after it (an acquisition's first
@@ -20,6 +19,10 @@ use crate::vault_spend::vault_spend_signers;
 /// floor — or one bad exit makes the whole rotation unbroadcastable.
 pub fn check_relayable(tx: &Transaction) -> Result<(), String> {
     for (i, o) in tx.output.iter().enumerate() {
+        // DEP-03: the anchor, a zero-value OP_RETURN, last (standard: one 32-byte push)
+        if i + 1 == tx.output.len() && crate::tapscript_reserves::anchor_of(tx).is_some() {
+            continue;
+        }
         if !deposits_protocol::types::standard_output(o.script_pubkey.as_bytes(), o.value.to_sat())
         {
             return Err(format!(
@@ -46,21 +49,28 @@ pub fn rotating_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<u64> 
     seq
 }
 
-/// Verify `tx` is the rotation the rotating `QuorumBegin` `op` names, of the vault
-/// `history`'s governing `QuorumBegin` created: its txid and output 0; without its
-/// witness, byte-identical to the DEP-03 rotation; a witness satisfying a tier of the
-/// vault to threshold; output 0 worth the op's amounts.
-pub fn verify_rotation_tx(
+/// DEP-03 §Rotation ordering, step 2: `rungs` (unsigned, rung order) are, byte for byte, the
+/// fee ladder the rotating `QuorumBegin` `op` (extending the update whose chain hash is
+/// `anchor`) records, of the vault `history`'s governing `QuorumBegin` created: their txids are
+/// `op`'s `rotation_rungs` (rung 0's its new outpoint), every output relays, and rung 0's new
+/// vault is worth `op`'s amounts. `vault` is the vault's outpoint and sats when a higher rung of
+/// the governing ladder confirmed (default: its rung 0 at its recorded amounts). Nothing is signed
+/// yet, so there is no witness to check. Mirrors cl-deposits' `check-rotation-rungs`.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_rotation_rungs(
     history: &[SignedLedgerUpdate],
     state: &crate::types::LedgerState,
     height: u32,
     op: &LedgerOperation,
-    tx: &Transaction,
+    rungs: &[Transaction],
     network: Network,
     splice_prevout: Option<TxOut>,
+    vault: Option<(OutPoint, u64)>,
+    anchor: [u8; 32],
 ) -> Result<(), String> {
     let LedgerOperation::QuorumBegin {
         reserves_id,
+        spending_txid,
         new_outpoint_txid,
         new_outpoint_vout,
         amount,
@@ -68,13 +78,18 @@ pub fn verify_rotation_tx(
         exit_cutoff_height,
         splice_in_outpoint,
         splice_in_amount,
+        migration_manifest,
         ..
     } = op
     else {
         return Err("not a QuorumBegin".into());
     };
-    if tx.compute_txid().to_byte_array() != *new_outpoint_txid || *new_outpoint_vout != 0 {
-        return Err("rotation_tx is not the QuorumBegin's new outpoint".into());
+    let rung0 = rungs.first().ok_or("a rotating QuorumBegin must carry rotation_rungs_tx")?;
+    if rung0.compute_txid().to_byte_array() != *new_outpoint_txid
+        || *new_outpoint_vout != 0
+        || spending_txid != new_outpoint_txid
+    {
+        return Err("rung 0 is not the QuorumBegin's new outpoint".into());
     }
     let gov = rotating_quorum_begin_seq(history).ok_or("no vault to rotate")?;
     let mut operator = None;
@@ -109,16 +124,19 @@ pub fn verify_rotation_tx(
     let voters = VoterSet::new(operator, quorum_members.iter().map(|m| m.pubkey).collect());
     let n_voters = voters.total_count();
     let config = (rs.tier_config_factory)(n_voters, quorum_expiry);
+    let lock_time = rung0.lock_time.to_consensus_u32();
+    if lock_time > height || !config.tiers.iter().any(|t| t.timelock_blocks == lock_time) {
+        return Err(format!("nLockTime {} names no tier open at {}", lock_time, height));
+    }
     let vault_spk = TapscriptReservesBuilder::new(voters, config, network, ledger_hash)
         .build()
         .map_err(|e| e.to_string())?
         .script_pubkey();
-    let vault_sats = (vamount + vcoll) / 1000;
-    let prevout = TxOut {
-        value: Amount::from_sat(vault_sats),
-        script_pubkey: vault_spk,
-    };
-    // DEP-20 §4: a splice-in is input 1; its prevout (looked up by the caller) enters the sighash.
+    let (vault_outpoint, vault_sats) = vault.unwrap_or((
+        OutPoint::new(Txid::from_byte_array(vtxid), vvout),
+        (vamount + vcoll) / 1000,
+    ));
+    // DEP-20 §4: a splice-in is input 1; its prevout (looked up by the caller).
     let splice = match (splice_in_outpoint, splice_prevout) {
         (None, _) => None,
         (Some(_), None) => return Err("splice-in outpoint not found".into()),
@@ -129,47 +147,55 @@ pub fn verify_rotation_tx(
             Some((OutPoint::new(Txid::from_byte_array(*stxid), *svout), sp))
         }
     };
-    let vault_script = prevout.script_pubkey.clone();
     let splice_vault = splice
         .as_ref()
-        .is_some_and(|(_, sp)| sp.script_pubkey == vault_script);
-    let mut prevouts = vec![prevout];
-    if let Some((_, sp)) = &splice {
-        prevouts.push(sp.clone());
-        if splice_vault {
-            // DEP-20 §8.3: a migration output at the vault's script, spent through a tier.
-            crate::vault_spend::tier_signers_at(history, gov, tx, &prevouts, Some(1))?;
-        } else {
-            verify_simple_input(tx, 1, &prevouts)?;
-        }
-    }
-    vault_spend_signers(history, gov, tx, &prevouts)?;
+        .is_some_and(|(_, sp)| sp.script_pubkey == vault_spk);
     let new_vault_spk: ScriptBuf = reserves_id
         .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
         .map_err(|e| format!("reserves_id: {e}"))?
         .require_network(network)
         .map_err(|e| format!("reserves_id: {e}"))?
         .script_pubkey();
-    let ours = build_rotation_tx(&RotationTxParams {
-        vault: OutPoint::new(Txid::from_byte_array(vtxid), vvout),
-        vault_sats,
-        voters: n_voters,
-        feerate_sat_vb: state.rotation_feerate(),
-        lock_time: tx.lock_time.to_consensus_u32(),
-        new_vault_spk,
-        splice_in: splice.as_ref().map(|(o, sp)| (*o, sp.value.to_sat())),
-        splice_vault,
-        extra_outputs: settlement_outputs(state, height, *exit_cutoff_height).0,
-    })
+    let ours = build_rotation_ladder(
+        &RotationTxParams {
+            vault: vault_outpoint,
+            vault_sats,
+            voters: n_voters,
+            feerate_sat_vb: state.rotation_feerate(),
+            lock_time,
+            new_vault_spk,
+            splice_in: splice.as_ref().map(|(o, sp)| (*o, sp.value.to_sat())),
+            splice_vault,
+            extra_outputs: settlement_outputs(state, height, *exit_cutoff_height).0,
+            anchor,
+            rung: 0,
+        },
+        *collateral_amount,
+        if migration_manifest.is_empty() {
+            ROTATION_RUNGS
+        } else {
+            1
+        },
+    )
     .ok_or("the DEP-03 rotation leaves the vault below dust")?;
-    let mut stripped = tx.clone();
-    for i in &mut stripped.input {
-        i.witness = Witness::new();
+    let strip = |t: &Transaction| {
+        let mut t = t.clone();
+        for i in &mut t.input {
+            i.witness = Witness::new();
+        }
+        t
+    };
+    if ours.len() != rungs.len() || ours.iter().zip(rungs).any(|(a, b)| *a != strip(b)) {
+        return Err("rotation_rungs_tx differ from the DEP-03 ladder we build".into());
     }
-    if stripped != ours {
-        return Err("rotation_tx differs from the DEP-03 rotation we build".into());
+    let txids: Vec<[u8; 32]> = ours.iter().map(|t| t.compute_txid().to_byte_array()).collect();
+    if txids != crate::vault_spend::quorum_begin_rungs(op) {
+        return Err("rotation_rungs is not the ladder's txids".into());
     }
-    check_relayable(tx)?;
+    for r in rungs {
+        check_relayable(r)?;
+    }
+    let tx = rung0;
     let new_sats = tx.output[0].value.to_sat();
     if new_sats != (amount + collateral_amount) / 1000 {
         return Err("QuorumBegin amounts do not sum to the rotation's new vault".into());
