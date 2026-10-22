@@ -296,3 +296,57 @@ impl Authorizer for AllowAll {
         true
     }
 }
+
+/// DEP-17 §duplicate delivery: what an operator does with a request whose depositor-signed
+/// operation reuses a nonce. Pinned by `tests/vectors/nonce_delivery.json`, shared with
+/// cl-deposits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NonceVerdict {
+    /// Not seen within a live window: append it.
+    Accept,
+    /// The accepted operation with this nonce, still within its expiry, has this sighash: the
+    /// same operation delivered again. Answer with the original result; append nothing.
+    Duplicate,
+    /// A different operation reusing a live nonce: reject.
+    Replay,
+    /// Its expiry is below the height: reject.
+    Expired,
+}
+
+impl NonceVerdict {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::Duplicate => "duplicate",
+            Self::Replay => "replay",
+            Self::Expired => "expired",
+        }
+    }
+}
+
+/// Classify an operation carrying `(nonce, expiry, sighash)` at `height` against the deposit's
+/// accepted operations, each `(nonce, expiry, sighash)`. A lower nonce than the last is fine:
+/// only a nonce still live (its accepted operation's expiry at or above `height`) is taken.
+pub fn nonce_verdict(
+    accepted: &[(u64, u32, [u8; 32])],
+    nonce: u64,
+    expiry: u32,
+    sighash: &[u8; 32],
+    height: u32,
+) -> NonceVerdict {
+    if expiry < height {
+        return NonceVerdict::Expired;
+    }
+    let mut live = accepted
+        .iter()
+        .filter(|(n, e, _)| *n == nonce && *e >= height)
+        .peekable();
+    if live.peek().is_none() {
+        return NonceVerdict::Accept;
+    }
+    if live.any(|(_, _, h)| h == sighash) {
+        NonceVerdict::Duplicate
+    } else {
+        NonceVerdict::Replay
+    }
+}

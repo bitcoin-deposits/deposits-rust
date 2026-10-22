@@ -275,6 +275,48 @@ impl Node {
 
         // Get ledger and verify source deposit exists
         let ledger_id = &request.ledger_id;
+        // The operation, as the depositor signed it (amount_msats/fee_msats as parsed above)
+        let witness = DescriptorWitness {
+            stack: vec![signature.serialize().to_vec()],
+        };
+        let operation = LedgerOperation::TransferLock {
+            transfer_nonce,
+            source_deposit_id,
+            destination_deposit_id,
+            amount: amount_msats,
+            fee: fee_msats,
+            completion_script: completion_script.to_string(),
+            timeout_height,
+            transfer_id,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            witness,
+            commitment: None,
+        };
+
+        // DEP-17 §duplicate delivery: this lock is already committed (a relay redelivery or a
+        // retry). Answer as the original was answered and commit nothing. Checked before the
+        // balance preflight, which the original lock has already consumed.
+        if self.duplicate_of(ledger_id, &operation).is_some() {
+            tracing::debug!(
+                "transfer_lock {} delivered again: answering the original",
+                hex::encode(&transfer_id[..8])
+            );
+            return (
+                true,
+                Some(
+                    serde_json::json!({
+                        "transfer_id": transfer_id_hex,
+                        "amount": amount_msats,
+                        "fee": fee_msats,
+                        "message": "Transfer locked successfully"
+                    })
+                    .to_string(),
+                ),
+                None,
+            );
+        }
+
         // Block-scoped to keep the ledger lookup tight; we no longer
         // need the descriptor (conformance does the witness check at
         // stage time) but the block still does the deposit-exists
@@ -431,25 +473,6 @@ impl Node {
             }
         }
 
-        // Create and append the operation (amount_msats/fee_msats computed above in fee validation)
-        let witness = DescriptorWitness {
-            stack: vec![signature.serialize().to_vec()],
-        };
-        let operation = LedgerOperation::TransferLock {
-            transfer_nonce,
-            source_deposit_id,
-            destination_deposit_id,
-            amount: amount_msats,
-            fee: fee_msats,
-            completion_script: completion_script.to_string(),
-            timeout_height,
-            transfer_id,
-            nonce: op_nonce,
-            expiry: op_expiry,
-            witness,
-            commitment: None,
-        };
-
         // Append operation (applies state changes: deducts balance, adds to locked)
         let t_append = std::time::Instant::now();
         {
@@ -541,8 +564,11 @@ impl Node {
             use deposits_core::tlv::TlvEncode;
             op.tlv_encode()
         };
-        if let Err(e) = self.commit_operation(&ledger_id, op).await {
-            return (false, None, Some(format!("Failed to commit exit: {}", e)));
+        // DEP-17 §duplicate delivery: an exit already committed gets the original answer.
+        if self.duplicate_of(&ledger_id, &op).is_none() {
+            if let Err(e) = self.commit_operation(&ledger_id, op).await {
+                return (false, None, Some(format!("Failed to commit exit: {}", e)));
+            }
         }
         // DEP-20 §3: the request id is SHA256 of the ExitRequest operation's TLV bytes.
         let id = cancel_id.unwrap_or_else(|| {

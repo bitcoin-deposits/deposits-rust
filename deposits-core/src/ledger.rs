@@ -179,7 +179,114 @@ pub fn signing_header_after(
     (height, hash)
 }
 
+/// The deposit a depositor-signed operation is signed for, with its DEP-17 nonce and expiry:
+/// `deposit_id`, or `source_deposit_id` for a `TransferLock`. `None` for operations no
+/// depositor signs.
+pub fn signed_nonce(op: &LedgerOperation) -> Option<(crate::types::DepositId, u64, u32)> {
+    match op {
+        LedgerOperation::InvoiceLock {
+            deposit_id,
+            nonce,
+            expiry,
+            ..
+        }
+        | LedgerOperation::OnchainLock {
+            deposit_id,
+            nonce,
+            expiry,
+            ..
+        }
+        | LedgerOperation::DepositKeyRotate {
+            deposit_id,
+            nonce,
+            expiry,
+            ..
+        }
+        | LedgerOperation::ExitRequest {
+            deposit_id,
+            nonce,
+            expiry,
+            ..
+        }
+        | LedgerOperation::ExitCancel {
+            deposit_id,
+            nonce,
+            expiry,
+            ..
+        } => Some((*deposit_id, *nonce, *expiry)),
+        LedgerOperation::TransferLock {
+            source_deposit_id,
+            nonce,
+            expiry,
+            ..
+        } => Some((*source_deposit_id, *nonce, *expiry)),
+        _ => None,
+    }
+}
+
 impl Ledger {
+    /// DEP-17 §duplicate delivery: classify a depositor-signed `op` arriving at `height`.
+    /// On `Duplicate`, also the accepted original and the sequence of the update that carries
+    /// it. The deposit's seen nonces say whether a live operation shares `op`'s nonce; only
+    /// then is the history read for those operations' sighashes.
+    pub fn nonce_check(
+        &self,
+        op: &LedgerOperation,
+        height: u32,
+    ) -> (
+        deposits_protocol::types::NonceVerdict,
+        Option<(LedgerOperation, u64)>,
+    ) {
+        use crate::tlv::TlvDecode;
+        let Some((deposit_id, nonce, expiry)) = signed_nonce(op) else {
+            return (deposits_protocol::types::NonceVerdict::Accept, None);
+        };
+        let sighash = crate::dep16::operations::operation_sighash(op).unwrap_or([0; 32]);
+        let live = self
+            .state
+            .deposits
+            .get(&deposit_id)
+            .map(|d| {
+                d.seen_nonces
+                    .iter()
+                    .filter(|(n, e)| *n == nonce && *e >= height)
+                    .count()
+            })
+            .unwrap_or(0);
+        let mut accepted: Vec<(u64, u32, [u8; 32])> = Vec::new();
+        let mut original = None;
+        if live > 0 {
+            for u in self.history.iter().rev() {
+                let Ok(a) = LedgerOperation::tlv_decode(&u.message) else {
+                    continue;
+                };
+                let Some((d, n, e)) = signed_nonce(&a) else {
+                    continue;
+                };
+                if d != deposit_id || n != nonce {
+                    continue;
+                }
+                let Some(h) = crate::dep16::operations::operation_sighash(&a) else {
+                    continue;
+                };
+                accepted.push((n, e, h));
+                if original.is_none() && h == sighash {
+                    original = Some((a, u.sequence_number));
+                }
+                if accepted.iter().filter(|(_, e, _)| *e >= height).count() >= live {
+                    break;
+                }
+            }
+        }
+        let verdict =
+            deposits_protocol::types::nonce_verdict(&accepted, nonce, expiry, &sighash, height);
+        let original = if verdict == deposits_protocol::types::NonceVerdict::Duplicate {
+            original
+        } else {
+            None
+        };
+        (verdict, original)
+    }
     /// Create a new ledger as operator.
     pub fn new_as_operator(
         operator_key: PublicKey,

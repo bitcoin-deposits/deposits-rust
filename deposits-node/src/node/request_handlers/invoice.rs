@@ -631,6 +631,60 @@ impl Node {
                 )
             }
         };
+        // DEP-17 §duplicate delivery: this lock is already committed. Answer as the original
+        // does now (its settled outcome, or still pending) and never pay twice.
+        let signed_lock = LedgerOperation::InvoiceLock {
+            deposit_id,
+            amount: amount_msat,
+            payment_id,
+            sequence_number: 0,
+            nonce: op_nonce,
+            expiry: op_expiry,
+            timeout_height: None,
+            fee: fee_field,
+            witness: witness.clone(),
+            commitment: None,
+        };
+        // Checked before the fee and balance preflights, which the original has already passed
+        // and consumed; the sighash binds neither the sequence number nor the timeout.
+        if self.duplicate_of(ledger_id, &signed_lock).is_some() {
+            let ledger_arc = self.handler.ledgers.lock().unwrap().get(ledger_id).cloned();
+            let Some(ledger_arc) = ledger_arc else {
+                return (false, None, Some("Ledger not found".to_string()));
+            };
+            let ledger = ledger_arc.read().unwrap();
+            let preimage = ledger.history.iter().rev().find_map(|u| {
+                match deposits_core::tlv::TlvDecode::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::InvoiceFulfill {
+                        payment_id: p,
+                        preimage,
+                        ..
+                    }) if p == payment_id => Some(preimage),
+                    _ => None,
+                }
+            });
+            if let Some(preimage) = preimage {
+                let result = serde_json::json!({
+                    "payment_id": hex::encode(payment_id),
+                    "deposit_id": hex::encode(deposit_id),
+                    "amount_msat": amount_msat,
+                    "preimage": hex::encode(preimage),
+                    "status": "succeeded",
+                });
+                return (true, Some(result.to_string()), None);
+            }
+            let pending = ledger.state.open_invoice_locks.contains_key(&payment_id);
+            return (
+                false,
+                None,
+                Some(if pending {
+                    "payment pending; the lock stays until it settles or fails".to_string()
+                } else {
+                    "payment failed; lock released".to_string()
+                }),
+            );
+        }
+
         // The wallet must cover the operator's minimum fee (its advertised
         // invoice margin); a request that doesn't is rejected up front. The LN
         // routing cap is then `fee_msats`, so the operator never pays more

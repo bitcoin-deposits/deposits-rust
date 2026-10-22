@@ -1,0 +1,223 @@
+{
+ "_doc": "DEP-17 \u00a7nonce and expiry, \u00a7duplicate delivery: what an operator does with a request whose depositor-signed operation carries `op` at `height`, given the deposit's accepted operations (nonce, expiry, and the DEP-17 operation sighash). Verdicts: accept (append it), duplicate (already accepted: answer with the original result, append nothing), replay (a different operation on a live nonce: reject), expired (expiry below the height: reject). Shared cl-deposits / deposits-rust vector; sighashes are placeholders, since only equality matters.",
+ "cases": [
+  {
+   "name": "first operation on the deposit",
+   "accepted": [],
+   "op": {
+    "nonce": 7,
+    "expiry": 1000,
+    "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "height": 100,
+   "verdict": "accept"
+  },
+  {
+   "name": "the same operation delivered again",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 1000,
+    "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "height": 101,
+   "verdict": "duplicate"
+  },
+  {
+   "name": "a different operation reusing a live nonce",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 1200,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 101,
+   "verdict": "replay"
+  },
+  {
+   "name": "the nonce reused once the earlier expiry has passed",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 2000,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 1001,
+   "verdict": "accept"
+  },
+  {
+   "name": "the nonce reused at the earlier expiry itself",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 2000,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 1000,
+   "verdict": "replay"
+  },
+  {
+   "name": "a lower nonce than the last",
+   "accepted": [
+    {
+     "nonce": 9,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 3,
+    "expiry": 1000,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 100,
+   "verdict": "accept"
+  },
+  {
+   "name": "a higher nonce than the last",
+   "accepted": [
+    {
+     "nonce": 3,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 9,
+    "expiry": 1000,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 100,
+   "verdict": "accept"
+  },
+  {
+   "name": "a duplicate past its own expiry",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 1000,
+    "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   },
+   "height": 1001,
+   "verdict": "expired"
+  },
+  {
+   "name": "a fresh operation past its expiry",
+   "accepted": [],
+   "op": {
+    "nonce": 5,
+    "expiry": 99,
+    "sighash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   },
+   "height": 100,
+   "verdict": "expired"
+  },
+  {
+   "name": "expiry equal to the height",
+   "accepted": [],
+   "op": {
+    "nonce": 5,
+    "expiry": 100,
+    "sighash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   },
+   "height": 100,
+   "verdict": "accept"
+  },
+  {
+   "name": "a duplicate of the newer operation after the nonce was reused",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+     "nonce": 7,
+     "expiry": 2000,
+     "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 2000,
+    "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   },
+   "height": 1500,
+   "verdict": "duplicate"
+  },
+  {
+   "name": "another operation on the reused nonce while the newer one is live",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 1000,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+     "nonce": 7,
+     "expiry": 2000,
+     "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 2500,
+    "sighash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   },
+   "height": 1500,
+   "verdict": "replay"
+  },
+  {
+   "name": "the same nonce on other accepted operations does not matter once expired",
+   "accepted": [
+    {
+     "nonce": 7,
+     "expiry": 900,
+     "sighash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+     "nonce": 7,
+     "expiry": 950,
+     "sighash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+   ],
+   "op": {
+    "nonce": 7,
+    "expiry": 2000,
+    "sighash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+   },
+   "height": 1000,
+   "verdict": "accept"
+  }
+ ]
+}

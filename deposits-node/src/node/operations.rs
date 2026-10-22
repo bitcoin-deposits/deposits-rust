@@ -119,6 +119,31 @@ impl Node {
         lock.lock_owned().await
     }
 
+    /// DEP-17 §duplicate delivery: when `op` is a depositor-signed operation this ledger has
+    /// already accepted (same deposit, a live nonce, the same sighash), the accepted original and
+    /// the sequence of the update carrying it. The caller answers with the original result and
+    /// commits nothing; anything else goes through `commit_operation`, whose conformance check
+    /// rejects a replay or an expired operation.
+    pub(crate) fn duplicate_of(
+        &self,
+        ledger_id: &str,
+        op: &deposits_core::messages::LedgerOperation,
+    ) -> Option<(deposits_core::messages::LedgerOperation, u64)> {
+        let height = self.wallet.get_block_height().unwrap_or(0);
+        let ledger_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .cloned()?;
+        let ledger = ledger_arc.read().unwrap();
+        match ledger.nonce_check(op, height) {
+            (deposits_core::types::NonceVerdict::Duplicate, original) => original,
+            _ => None,
+        }
+    }
+
     /// The single correct way to create a new ledger update as an
     /// operator. The per-ledger actor drives the full commit flow
     /// (stage, cosig, sign, apply, persist, broadcast); this shim

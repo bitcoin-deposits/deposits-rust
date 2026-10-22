@@ -327,3 +327,49 @@ fn a_nonce_replayed_lock_is_proof() {
         verify_non_conforming_update(&proof_for(&fresh), &chain, &Dep16Authorizer::new()).is_err()
     );
 }
+
+/// DEP-17 §duplicate delivery: the operator's classification of a request against the ledger's
+/// accepted locks, by the DEP-17 sighash (`Ledger::nonce_check`).
+#[test]
+fn a_redelivered_lock_is_a_duplicate_not_a_replay() {
+    use deposits_core::types::NonceVerdict;
+    let mut chain = prefix();
+    let first = signed_update(
+        4,
+        chain[3].chain_hash(),
+        &signed_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
+    chain.push(first);
+    let mut ledger =
+        deposits_core::ledger::Ledger::new_as_partner(pubkey(OP), "bcrt1qreserves".to_string(), 0);
+    for u in &chain {
+        ledger.state.apply_update_in_place(u).unwrap();
+        ledger.history.push(u.clone());
+    }
+    let (v, original) = ledger.nonce_check(&signed_lock(1, HEIGHT + 10, 1), HEIGHT + 1);
+    assert_eq!(v, NonceVerdict::Duplicate);
+    assert_eq!(original.map(|(_, seq)| seq), Some(4));
+    let (v, original) = ledger.nonce_check(&signed_lock(1, HEIGHT + 10, 2), HEIGHT + 1);
+    assert_eq!((v, original.is_none()), (NonceVerdict::Replay, true));
+    assert_eq!(
+        ledger
+            .nonce_check(&signed_lock(0, HEIGHT + 10, 3), HEIGHT + 1)
+            .0,
+        NonceVerdict::Accept,
+        "a lower nonce than the last"
+    );
+    assert_eq!(
+        ledger
+            .nonce_check(&signed_lock(1, HEIGHT + 100, 2), HEIGHT + 11)
+            .0,
+        NonceVerdict::Accept,
+        "the nonce is free once the earlier expiry has passed"
+    );
+    assert_eq!(
+        ledger
+            .nonce_check(&signed_lock(1, HEIGHT + 10, 1), HEIGHT + 11)
+            .0,
+        NonceVerdict::Expired
+    );
+}
