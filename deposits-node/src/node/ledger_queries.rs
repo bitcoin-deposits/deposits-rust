@@ -2722,46 +2722,8 @@ impl Node {
             }
         };
 
-        for event in events.iter() {
-            let content: serde_json::Value = match serde_json::from_str(&event.content) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            // Path A: lightning_address → domain allowlist
-            if let Some(address) = content.get("lightning_address").and_then(|v| v.as_str()) {
-                if let Some(domain) = address.split('@').nth(1) {
-                    let domain_lower = domain.to_lowercase();
-                    if allowed_domains.contains(&domain_lower) {
-                        return Some(format!("domain={}", domain_lower));
-                    }
-                }
-            }
-
-            // Path B: allowlist_npub → manual pubkey allowlist (proclaim)
-            if let Some(npub) = content.get("allowlist_npub").and_then(|v| v.as_str()) {
-                let npub_lower = npub.to_lowercase();
-                if allowed_pubkeys.contains(&npub_lower) {
-                    return Some(format!(
-                        "allowlist_npub={}",
-                        &npub_lower[..16.min(npub_lower.len())]
-                    ));
-                }
-            }
-
-            // Path C: method = "ringsig" → trust the verifier wholesale.
-            // The verifier has already confirmed ring membership and the
-            // bound-pubkey binding proof; op0's job here is just to
-            // confirm the attestation is signed by the configured
-            // verifier (already enforced by the filter's `author`
-            // clause above). No domain or pubkey allowlist applies —
-            // the anonymity-set membership IS the access criterion.
-            if content.get("method").and_then(|v| v.as_str()) == Some("ringsig") {
-                return Some("method=ringsig".to_string());
-            }
-        }
-
-        None
+        let events: Vec<nostr_sdk::Event> = events.into_iter().collect();
+        match_attestation(&events, &verifier_pubkey, allowed_domains, allowed_pubkeys)
     }
 
     /// Reload all deposit access lists from disk.
@@ -3523,6 +3485,191 @@ fn newest_ruleset_supported_by(members: &[deposits_core::types::QuorumMember]) -
         })
         .unwrap_or(deposits_core::ruleset::CURRENT)
         .to_string()
+}
+
+/// The access decision of `check_attestation` over a set of kind 55502 events from
+/// the configured verifier (DEP-14).  Returns the matched reason, or `None`.
+///
+/// Revocation is applied first and is terminal: an attestation whose id appears in
+/// the `#e` tag of a `method = "revoked"` event signed by the same verifier is void,
+/// whatever either event's `created_at` or `verified_at` says (DEP-14, "Revocation"
+/// and "Time").  Ordering comes from that reference, never from timestamps.
+pub(crate) fn match_attestation(
+    events: &[nostr_sdk::Event],
+    verifier: &nostr_sdk::PublicKey,
+    allowed_domains: &std::collections::HashSet<String>,
+    allowed_pubkeys: &std::collections::HashSet<String>,
+) -> Option<String> {
+    fn content_of(event: &nostr_sdk::Event) -> Option<serde_json::Value> {
+        serde_json::from_str(&event.content).ok()
+    }
+
+    let revoked: std::collections::HashSet<nostr_sdk::EventId> = events
+        .iter()
+        .filter(|e| e.pubkey == *verifier)
+        .filter(|e| {
+            content_of(e).and_then(|c| {
+                c.get("method")
+                    .and_then(|m| m.as_str())
+                    .map(|m| m == "revoked")
+            }) == Some(true)
+        })
+        .flat_map(|e| e.tags.event_ids().copied().collect::<Vec<_>>())
+        .collect();
+
+    for event in events.iter() {
+        if event.pubkey != *verifier || revoked.contains(&event.id) {
+            continue;
+        }
+        let content = match content_of(event) {
+            Some(v) => v,
+            None => continue,
+        };
+        if content.get("method").and_then(|v| v.as_str()) == Some("revoked") {
+            continue;
+        }
+
+        // Path A: lightning_address → domain allowlist
+        if let Some(address) = content.get("lightning_address").and_then(|v| v.as_str()) {
+            if let Some(domain) = address.split('@').nth(1) {
+                let domain_lower = domain.to_lowercase();
+                if allowed_domains.contains(&domain_lower) {
+                    return Some(format!("domain={}", domain_lower));
+                }
+            }
+        }
+
+        // Path B: allowlist_npub → manual pubkey allowlist (proclaim)
+        if let Some(npub) = content.get("allowlist_npub").and_then(|v| v.as_str()) {
+            let npub_lower = npub.to_lowercase();
+            if allowed_pubkeys.contains(&npub_lower) {
+                return Some(format!(
+                    "allowlist_npub={}",
+                    &npub_lower[..16.min(npub_lower.len())]
+                ));
+            }
+        }
+
+        // Path C: method = "ringsig" → trust the verifier wholesale.
+        // The verifier has already confirmed ring membership and the
+        // bound-pubkey binding proof; op0's job here is just to
+        // confirm the attestation is signed by the configured
+        // verifier. No domain or pubkey allowlist applies —
+        // the anonymity-set membership IS the access criterion.
+        if content.get("method").and_then(|v| v.as_str()) == Some("ringsig") {
+            return Some("method=ringsig".to_string());
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod attestation_tests {
+    use super::match_attestation;
+    use nostr_sdk::{EventBuilder, Keys, Kind, Tag, Timestamp};
+    use std::collections::HashSet;
+
+    fn attestation(verifier: &Keys, subject: &Keys, content: &str, at: u64) -> nostr_sdk::Event {
+        EventBuilder::new(Kind::Custom(55502), content)
+            .tag(Tag::public_key(subject.public_key()))
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(verifier)
+            .unwrap()
+    }
+
+    fn revocation(
+        verifier: &Keys,
+        subject: &Keys,
+        of: &nostr_sdk::Event,
+        at: u64,
+    ) -> nostr_sdk::Event {
+        let content = format!(
+            r#"{{"npub":"{}","method":"revoked","revokes":"{}"}}"#,
+            subject.public_key().to_hex(),
+            of.id.to_hex()
+        );
+        EventBuilder::new(Kind::Custom(55502), content)
+            .tag(Tag::public_key(subject.public_key()))
+            .tag(Tag::event(of.id))
+            .custom_created_at(Timestamp::from(at))
+            .sign_with_keys(verifier)
+            .unwrap()
+    }
+
+    fn domains() -> HashSet<String> {
+        ["example.com".to_string()].into_iter().collect()
+    }
+
+    const NIP05: &str = r#"{"method":"nip05","lightning_address":"alice@example.com"}"#;
+
+    #[test]
+    fn an_attestation_is_accepted() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        assert_eq!(
+            match_attestation(&[a], &v.public_key(), &domains(), &HashSet::new()),
+            Some("domain=example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_revoked_attestation_is_void() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let r = revocation(&v, &s, &a, 2_000);
+        assert_eq!(
+            match_attestation(&[a, r], &v.public_key(), &domains(), &HashSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn revocation_does_not_depend_on_timestamps() {
+        // The attestation claims a date far in the future and the revocation one in the
+        // past: the revocation still wins, because it names the attestation's id.
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 4_000_000_000);
+        let r = revocation(&v, &s, &a, 1);
+        assert_eq!(
+            match_attestation(&[r, a], &v.public_key(), &domains(), &HashSet::new()),
+            None
+        );
+    }
+
+    #[test]
+    fn a_reissued_attestation_is_a_new_event() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let r = revocation(&v, &s, &a, 2_000);
+        let again = attestation(&v, &s, NIP05, 3_000);
+        assert_eq!(
+            match_attestation(&[a, r, again], &v.public_key(), &domains(), &HashSet::new()),
+            Some("domain=example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn only_the_verifier_can_revoke() {
+        let (v, s, other) = (Keys::generate(), Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let forged = revocation(&other, &s, &a, 2_000);
+        assert_eq!(
+            match_attestation(&[a, forged], &v.public_key(), &domains(), &HashSet::new()),
+            Some("domain=example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_revocation_is_not_itself_an_attestation() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let r = revocation(&v, &s, &a, 2_000);
+        assert_eq!(
+            match_attestation(&[r], &v.public_key(), &domains(), &HashSet::new()),
+            None
+        );
+    }
 }
 
 #[cfg(test)]
