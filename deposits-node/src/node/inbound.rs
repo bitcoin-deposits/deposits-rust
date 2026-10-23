@@ -1811,10 +1811,32 @@ impl Node {
 
         // 6. Auto-arm for dispute
         let reason = format!("fraud_proof:{:?}", broadcast.proof.proof_type);
-        match self
-            .auto_arm_for_dispute_on_proof(ledger_id, last_valid_seq, broadcast.proof.proof_hash())
+        // DEP-05 §Deposed operator: a dispute on a QuorumExpired proof is a `quorum_expired`
+        // dispute (anchored at the live tip, as our own expiry sweep's are), which does not
+        // freeze co-signing: the operator's re-establishing QuorumBegin is what its members
+        // must still sign. Entered as "auto_dispute" it froze every reference member, and an
+        // expired cl ledger could never rotate again (signet soak, 2026-10-23).
+        let armed = if broadcast.proof.proof_type.is_respectful() {
+            match self.wallet.fetch_block_info() {
+                Ok((h, hash)) => {
+                    self.auto_arm_for_dispute_with_anchor(
+                        ledger_id,
+                        last_valid_seq,
+                        Some((hash, h)),
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            self.auto_arm_for_dispute_on_proof(
+                ledger_id,
+                last_valid_seq,
+                broadcast.proof.proof_hash(),
+            )
             .await
-        {
+        };
+        match armed {
             Ok(()) => {
                 tracing::warn!("Successfully armed for dispute based on fraud proof");
 

@@ -827,6 +827,7 @@ impl Node {
                         None
                     };
                     if let Some((history, pre_state)) = rotating_history {
+                        let history = self.handler.complete_history(&request.ledger_id, history);
                         // DEP-03 §Rotation ordering: the unsigned rungs, rebuilt byte for byte.
                         let rungs: Vec<bitcoin::Transaction> = request
                             .params

@@ -1008,13 +1008,19 @@ impl Node {
             if qb.ledger_id != l.state.ledger_id || qb.operator_id != l.state.operator_key {
                 return refuse("the QuorumBegin is not this ledger's operator's".into());
             }
+            let applied = l
+                .history
+                .last()
+                .is_some_and(|u| u.sequence_number >= qb.sequence_number);
             let pre: Vec<deposits_core::types::SignedLedgerUpdate> = l
                 .history
                 .iter()
                 .filter(|u| u.sequence_number < qb.sequence_number)
                 .cloned()
                 .collect();
-            if pre.len() == l.history.len() {
+            // The genesis and the governing QuorumBegin may have left the capped in-memory history.
+            let pre = self.handler.complete_history(&request.ledger_id, pre);
+            if !applied {
                 (pre, l.state.clone())
             } else {
                 let mut st = deposits_core::LedgerState::new(

@@ -1445,6 +1445,32 @@ impl DepositsHandler {
     /// result is a clean, oldest-first chain. Returns `None` if the file is
     /// missing or unreadable (so callers can fall back to in-memory history);
     /// returns `Some(empty)` only if the file exists but has no `Update` rows.
+    /// `history` (in memory, capped at [`Self::history_retain`] entries) completed from the disk
+    /// log when it no longer starts at the genesis `LedgerOpen`. A check that reads the genesis
+    /// (the operator a vault's reserves are built for) or an old `QuorumBegin` needs the whole
+    /// chain: on a ledger past 50k updates every reference member refused a rotating
+    /// `QuorumBegin` with "governing QuorumBegin or LedgerOpen missing" (signet soak, 2026-10-23).
+    pub fn complete_history(
+        &self,
+        ledger_id: &str,
+        history: Vec<SignedLedgerUpdate>,
+    ) -> Vec<SignedLedgerUpdate> {
+        let Some(first) = history.first().map(|u| u.sequence_number) else {
+            return history;
+        };
+        if first == 0 {
+            return history;
+        }
+        match self.read_persisted_history_prefix(ledger_id, first) {
+            Some(mut older) => {
+                older.retain(|u| u.sequence_number < first);
+                older.extend(history);
+                older
+            }
+            None => history,
+        }
+    }
+
     pub fn read_persisted_history(&self, ledger_id: &str) -> Option<Vec<SignedLedgerUpdate>> {
         Self::read_persisted_history_at(&self.data_dir, ledger_id)
     }
@@ -3205,6 +3231,20 @@ mod tests {
         assert!(
             disk.iter().any(|u| u.content_hash[0] == QUORUM_TAG),
             "early QuorumBegin (seq 4) STILL on disk after compaction"
+        );
+
+        // (2b) complete_history restores what compaction took from RAM, for the checks that
+        // read the genesis or an old QuorumBegin (a rotating QuorumBegin's ladder).
+        let tail = arc.read().unwrap().history.clone();
+        let whole: Vec<u64> = handler
+            .complete_history(&ledger_id, tail)
+            .iter()
+            .map(|u| u.sequence_number)
+            .collect();
+        assert_eq!(
+            whole,
+            (0..CHAIN_LEN).collect::<Vec<_>>(),
+            "seq 0..9 again, in order"
         );
 
         // (3) A post-compaction append grows the disk chain without dropping or
