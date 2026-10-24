@@ -730,6 +730,11 @@ impl Node {
         let mut stalls = 0u32;
         let max_pages = Self::RELAY_FETCH_MAX_PAGES;
 
+        // Pages start small and grow: a member one update behind needs one
+        // short page, not 5000 updates (7-10 s of the run loop for +1 update on
+        // a 140k-update ledger, signet soak 2026-10-24); a member far behind
+        // still reaches its tip in a few pages.
+        let mut page_limit = Self::RELAY_FETCH_FIRST_PAGE;
         loop {
             let mut filter = Filter::new()
                 .kind(Kind::Custom(crate::nostr::KIND_LEDGER_UPDATE))
@@ -737,7 +742,7 @@ impl Node {
                     crate::nostr::TAG_LEDGER_ID,
                     [crate::nostr::ledger_tag(ledger_id)],
                 )
-                .limit(Self::RELAY_FETCH_PAGE_LIMIT);
+                .limit(page_limit);
 
             if let Some(ts) = until_ts {
                 filter = filter.until(Timestamp::from(ts));
@@ -777,6 +782,7 @@ impl Node {
             }
 
             pages += 1;
+            page_limit = (page_limit * 4).min(Self::RELAY_FETCH_PAGE_LIMIT);
             tracing::debug!(
                 "reimport_joined_ledger {}...: page {} fetched {} events ({} new, until_ts={:?}, min_ts={:?})",
                 &ledger_id[..16.min(ledger_id.len())], pages, page_count, fresh, until_ts, page_min_ts,
@@ -1219,9 +1225,11 @@ impl Node {
         // Lazy-spawn if needed (joined-ledger imports that haven't
         // yet had ensure_actor_for called).
         self.ensure_actor_for(ledger_id);
+        let mut dropped = false;
         if let Some(handle) = self.ledger_actors.lock().unwrap().get(ledger_id) {
             for update in to_append {
-                handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(update)));
+                dropped |=
+                    !handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(update)));
             }
         } else {
             tracing::debug!(
@@ -1230,6 +1238,12 @@ impl Node {
                 forwarded
             );
             return 0;
+        }
+        if dropped {
+            self.stale_joined_ledgers
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string());
         }
 
         if forwarded > 0 {
@@ -1956,12 +1970,23 @@ impl Node {
                     last_reload = tokio::time::Instant::now();
                 } else {
                     let reload_start = std::time::Instant::now();
+                    // Per-step timings, logged when the whole reload is slow, so a
+                    // slow reload names the step that made it slow.
+                    let mut reload_mark = std::time::Instant::now();
+                    let mut reload_steps: Vec<(&'static str, u128)> = Vec::new();
+                    macro_rules! reload_step {
+                        ($name:expr) => {{
+                            reload_steps.push(($name, reload_mark.elapsed().as_millis()));
+                            reload_mark = std::time::Instant::now();
+                        }};
+                    }
                     let discovered = self.handler.discover_new_ledgers();
                     if discovered > 0 {
                         // Force-invalidate: external process changed ledger files
                         self.invalidate_joined_ledger_cache();
                     }
                     // Otherwise, get_joined_ledger_ids() self-validates via version check
+                    reload_step!("discover");
 
                     // Single pass over ledgers: collect IDs, emit metrics, gather event store keys.
                     // This avoids two separate iterations and eliminates the nested
@@ -2016,6 +2041,7 @@ impl Node {
                         metrics::set_total_deposit_balance_sats(total_balance_sats);
                         metrics::set_history_memory_estimate_bytes(total_history_bytes);
                     }
+                    reload_step!("ledger_metrics");
 
                     // Emit event store validated tips — separate lock, no nesting
                     {
@@ -2031,6 +2057,7 @@ impl Node {
                     self.nostr
                         .set_interested_ledgers(all_ledger_ids.iter().cloned());
                     self.nostr.set_request_ledger_filter(all_ledger_ids.clone());
+                    reload_step!("store_tips_filters");
 
                     // Auto-import joined ledgers from Nostr (so we can validate their updates)
                     let joined_ids = self.get_joined_ledger_ids();
@@ -2047,6 +2074,7 @@ impl Node {
                             }
                         }
                     }
+                    reload_step!("auto_import");
 
                     // Subscribe with compacted global filters (5 filters instead of 36+ per-ledger).
                     // Per-ledger filtering happens in-process via interested_ledgers.
@@ -2089,6 +2117,8 @@ impl Node {
                             _ => {}
                         }
                     }
+
+                    reload_step!("subscribe");
 
                     // Background gap-fill for stale joined ledgers.
                     // Try event store first (free, in-memory), then fall back to relay fetch
@@ -2141,136 +2171,158 @@ impl Node {
                                             .unwrap_or(0)
                                     };
 
-                                    // Skip gap-fill if cosign requests are pending — the relay fetch
-                                    // blocks the run loop and prevents cosign responses from being processed.
-                                    if !self.pending_cosign_requests.lock().unwrap().is_empty() {
-                                        tracing::debug!(
-                                            "Skipping gap-fill for {}... (cosign pending)",
-                                            &stale_id[..16.min(stale_id.len())]
-                                        );
-                                        self.stale_joined_ledgers
-                                            .lock()
-                                            .unwrap()
-                                            .insert(stale_id.clone());
-                                        continue;
+                                    // Off the run loop: a deep ledger's fetch must never hold up
+                                    // requests and cosign replies behind it (25 s reloads with
+                                    // cosigns dropped as stale, signet soak 2026-10-24). One fetch
+                                    // per ledger in flight; the task re-queues on failure.
+                                    static INFLIGHT: std::sync::OnceLock<
+                                        std::sync::Mutex<std::collections::HashSet<String>>,
+                                    > = std::sync::OnceLock::new();
+                                    let inflight = INFLIGHT.get_or_init(Default::default);
+                                    if !inflight.lock().unwrap().insert(stale_id.clone()) {
+                                        continue; // already being fetched
                                     }
-
-                                    tracing::debug!(
-                                    "Background gap-fill: fetching ledger {}... from relay (local_seq={})",
-                                    &stale_id[..16.min(stale_id.len())], local_seq,
-                                );
-
-                                    match tokio::time::timeout(
-                                        std::time::Duration::from_secs(10),
-                                        self.reimport_joined_ledger(stale_id),
-                                    )
-                                    .await
-                                    {
-                                        Err(_) => {
-                                            tracing::error!(
-                                                "reimport_joined_ledger timed out for {}...",
-                                                &stale_id[..16.min(stale_id.len())]
-                                            );
-                                            // Re-queue for next cycle
-                                            self.stale_joined_ledgers
-                                                .lock()
-                                                .unwrap()
-                                                .insert(stale_id.clone());
+                                    let node = Arc::clone(self);
+                                    let stale_id = stale_id.clone();
+                                    tokio::spawn(async move {
+                                        struct Done(String);
+                                        impl Drop for Done {
+                                            fn drop(&mut self) {
+                                                if let Some(m) = INFLIGHT.get() {
+                                                    m.lock().unwrap().remove(&self.0);
+                                                }
+                                            }
                                         }
-                                        Ok(Ok(())) => {
-                                            let new_seq = {
-                                                let ledgers = self.handler.ledgers.lock().unwrap();
-                                                ledgers
-                                                    .get(stale_id)
-                                                    .map(|arc| arc.read().unwrap().next_sequence())
-                                                    .unwrap_or(0)
-                                            };
-                                            tracing::debug!(
-                                            "Background gap-fill: relay fetch succeeded for {}... (seq {} -> {})",
-                                            &stale_id[..16.min(stale_id.len())], local_seq, new_seq,
-                                        );
-                                            if new_seq > local_seq {
-                                                metrics::record_gap_fill("from_relay");
-                                                // Persist the updated ledger
-                                                self.dirty_ledgers
+                                        let _done = Done(stale_id.clone());
+                                        match tokio::time::timeout(
+                                            std::time::Duration::from_secs(120),
+                                            node.reimport_joined_ledger(&stale_id),
+                                        )
+                                        .await
+                                        {
+                                            Err(_) => {
+                                                tracing::error!(
+                                                    "reimport_joined_ledger timed out for {}...",
+                                                    &stale_id[..16.min(stale_id.len())]
+                                                );
+                                                // Re-queue for next cycle
+                                                node.stale_joined_ledgers
                                                     .lock()
                                                     .unwrap()
                                                     .insert(stale_id.clone());
-                                                continue; // Resolved — don't re-queue
                                             }
-                                            // Relay had no new events — ask operator to re-broadcast.
-                                            // Only resync every 5 minutes to avoid spamming.
-                                            let should_resync = {
-                                                let cooldown = std::time::Duration::from_secs(300);
-                                                let times =
-                                                    self.last_relay_fetch_times.lock().unwrap();
-                                                let last = times.get(stale_id).copied().unwrap_or(
-                                                    std::time::Instant::now() - cooldown,
-                                                );
-                                                last.elapsed() >= cooldown
-                                            };
-                                            if should_resync {
-                                                tracing::info!(
-                                                "Background gap-fill: relay had no new events for {}..., requesting resync",
-                                                &stale_id[..16.min(stale_id.len())],
-                                            );
-                                                metrics::record_gap_fill("relay_empty");
-                                                let _ = tokio::time::timeout(
-                                                    std::time::Duration::from_secs(5),
-                                                    self.send_resync_request_if_needed(stale_id),
-                                                )
-                                                .await;
-                                            } else {
+                                            Ok(Ok(())) => {
+                                                let new_seq = {
+                                                    let ledgers =
+                                                        node.handler.ledgers.lock().unwrap();
+                                                    ledgers
+                                                        .get(&stale_id)
+                                                        .map(|arc| {
+                                                            arc.read().unwrap().next_sequence()
+                                                        })
+                                                        .unwrap_or(0)
+                                                };
                                                 tracing::debug!(
-                                                "Background gap-fill: relay empty for {}..., resync on cooldown",
-                                                &stale_id[..16.min(stale_id.len())],
+                                                "Background gap-fill: relay fetch succeeded for {}... (seq {} -> {})",
+                                                &stale_id[..16.min(stale_id.len())], local_seq, new_seq,
                                             );
-                                            }
-                                            // Local tip == relay tip. Drop from the stale set;
-                                            // the inbound path (inbound.rs) will re-mark it
-                                            // stale if a future event arrives with a sequence
-                                            // gap. Without this, every joined ledger gets
-                                            // re-fetched every RELAY_FETCH_COOLDOWN forever.
-                                            continue;
-                                        }
-                                        Ok(Err(e)) => {
-                                            let err_str = format!("{}", e);
-                                            // Chain break = unbridgeable gap (operator history truncated).
-                                            // Don't resync — it will just repeat the same failure.
-                                            if err_str.contains("wrong previous_hash")
-                                                || err_str.contains("Chain break")
-                                            {
-                                                tracing::info!(
-                                                "Background gap-fill: chain break for {}... — dropping from stale queue (gap is unbridgeable)",
-                                                &stale_id[..16.min(stale_id.len())],
-                                            );
-                                                metrics::record_gap_fill("chain_break");
-                                                continue; // Don't re-queue
-                                            }
-                                            tracing::warn!(
-                                            "Background gap-fill: relay fetch failed for {}...: {}",
-                                            &stale_id[..16.min(stale_id.len())], e,
-                                        );
-                                            metrics::record_gap_fill("relay_failed");
-                                            // Only resync every 5 minutes
-                                            let should_resync = {
-                                                let cooldown = std::time::Duration::from_secs(300);
-                                                let times =
-                                                    self.last_relay_fetch_times.lock().unwrap();
-                                                let last = times.get(stale_id).copied().unwrap_or(
-                                                    std::time::Instant::now() - cooldown,
+                                                if new_seq > local_seq {
+                                                    metrics::record_gap_fill("from_relay");
+                                                    // Persist the updated ledger
+                                                    node.dirty_ledgers
+                                                        .lock()
+                                                        .unwrap()
+                                                        .insert(stale_id.clone());
+                                                    return; // Resolved — don't re-queue
+                                                }
+                                                // Relay had no new events — ask operator to re-broadcast.
+                                                // Only resync every 5 minutes to avoid spamming.
+                                                let should_resync = {
+                                                    let cooldown =
+                                                        std::time::Duration::from_secs(300);
+                                                    let times =
+                                                        node.last_relay_fetch_times.lock().unwrap();
+                                                    let last =
+                                                        times.get(&stale_id).copied().unwrap_or(
+                                                            std::time::Instant::now() - cooldown,
+                                                        );
+                                                    last.elapsed() >= cooldown
+                                                };
+                                                if should_resync {
+                                                    tracing::info!(
+                                                    "Background gap-fill: relay had no new events for {}..., requesting resync",
+                                                    &stale_id[..16.min(stale_id.len())],
                                                 );
-                                                last.elapsed() >= cooldown
-                                            };
-                                            if should_resync {
-                                                let _ = tokio::time::timeout(
-                                                    std::time::Duration::from_secs(5),
-                                                    self.send_resync_request_if_needed(stale_id),
-                                                )
-                                                .await;
+                                                    metrics::record_gap_fill("relay_empty");
+                                                    let _ = tokio::time::timeout(
+                                                        std::time::Duration::from_secs(5),
+                                                        node.send_resync_request_if_needed(
+                                                            &stale_id,
+                                                        ),
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    tracing::debug!(
+                                                    "Background gap-fill: relay empty for {}..., resync on cooldown",
+                                                    &stale_id[..16.min(stale_id.len())],
+                                                );
+                                                }
+                                                // Local tip == relay tip. Drop from the stale set;
+                                                // the inbound path (inbound.rs) will re-mark it
+                                                // stale if a future event arrives with a sequence
+                                                // gap. Without this, every joined ledger gets
+                                                // re-fetched every RELAY_FETCH_COOLDOWN forever.
+                                                return;
+                                            }
+                                            Ok(Err(e)) => {
+                                                let err_str = format!("{}", e);
+                                                // Chain break = unbridgeable gap (operator history truncated).
+                                                // Don't resync — it will just repeat the same failure.
+                                                if err_str.contains("wrong previous_hash")
+                                                    || err_str.contains("Chain break")
+                                                {
+                                                    tracing::info!(
+                                                    "Background gap-fill: chain break for {}... — dropping from stale queue (gap is unbridgeable)",
+                                                    &stale_id[..16.min(stale_id.len())],
+                                                );
+                                                    metrics::record_gap_fill("chain_break");
+                                                    return; // Don't re-queue
+                                                }
+                                                tracing::warn!(
+                                                "Background gap-fill: relay fetch failed for {}...: {}",
+                                                &stale_id[..16.min(stale_id.len())], e,
+                                            );
+                                                metrics::record_gap_fill("relay_failed");
+                                                // Only resync every 5 minutes
+                                                let should_resync = {
+                                                    let cooldown =
+                                                        std::time::Duration::from_secs(300);
+                                                    let times =
+                                                        node.last_relay_fetch_times.lock().unwrap();
+                                                    let last =
+                                                        times.get(&stale_id).copied().unwrap_or(
+                                                            std::time::Instant::now() - cooldown,
+                                                        );
+                                                    last.elapsed() >= cooldown
+                                                };
+                                                if should_resync {
+                                                    let _ = tokio::time::timeout(
+                                                        std::time::Duration::from_secs(5),
+                                                        node.send_resync_request_if_needed(
+                                                            &stale_id,
+                                                        ),
+                                                    )
+                                                    .await;
+                                                }
                                             }
                                         }
-                                    }
+                                        // Timed out or failed: try again on a later cycle.
+                                        node.stale_joined_ledgers
+                                            .lock()
+                                            .unwrap()
+                                            .insert(stale_id.clone());
+                                    });
+                                    continue;
                                 }
                             }
 
@@ -2290,6 +2342,7 @@ impl Node {
                         let remaining = self.stale_joined_ledgers.lock().unwrap().len();
                         metrics::set_stale_joined_ledgers(remaining);
                     }
+                    reload_step!("gap_fill");
 
                     // Emit event store stats
                     {
@@ -2299,10 +2352,13 @@ impl Node {
                         metrics::set_event_store_by_parent_size(store.by_parent_len());
                         metrics::set_event_store_evictions(store.evicted_total());
                     }
+                    reload_step!("event_store_stats");
 
                     // Emit process-level metrics (CPU, memory, I/O) + per-thread CPU
                     metrics::emit_process_metrics();
+                    reload_step!("process_metrics");
                     metrics::emit_thread_cpu_metrics();
+                    reload_step!("thread_cpu_metrics");
 
                     // Check for paid Lightning invoices — spawn as a task so it doesn't
                     // block the main loop (credit_deposit → sign_and_broadcast → request_cosign
@@ -2314,6 +2370,18 @@ impl Node {
                         });
                     }
 
+                    reload_step!("invoices");
+                    if reload_start.elapsed() >= std::time::Duration::from_secs(1) {
+                        let parts: Vec<String> = reload_steps
+                            .iter()
+                            .map(|(n, ms)| format!("{}={}ms", n, ms))
+                            .collect();
+                        tracing::warn!(
+                            "[RELOAD_BREAKDOWN] total={}ms {}",
+                            reload_start.elapsed().as_millis(),
+                            parts.join(" ")
+                        );
+                    }
                     metrics::record_run_loop_phase("reload", reload_start.elapsed());
                     last_reload = tokio::time::Instant::now();
                 } // else (reload body)
@@ -2493,19 +2561,32 @@ impl Node {
                         .lock()
                         .unwrap()
                         .insert(request.event_id.clone());
-                    tracing::info!(
-                        "RECV request: action={}, ledger={}..., sender={}..., age={:.0}ms",
-                        request.action,
-                        &request.ledger_id[..16.min(request.ledger_id.len())],
-                        &request.sender[..12.min(request.sender.len())],
-                        {
-                            let now = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs();
-                            (now.saturating_sub(request.timestamp) as f64) * 1000.0
-                        },
-                    );
+                    // Every request at DEBUG; a late one (2 s or more old when the
+                    // loop reaches it, a backed-up run loop) at INFO.
+                    let age_ms = {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        now.saturating_sub(request.timestamp) * 1000
+                    };
+                    if age_ms >= 2000 {
+                        tracing::info!(
+                            "RECV late request: action={}, ledger={}..., sender={}..., age={}ms",
+                            request.action,
+                            &request.ledger_id[..16.min(request.ledger_id.len())],
+                            &request.sender[..12.min(request.sender.len())],
+                            age_ms,
+                        );
+                    } else {
+                        tracing::debug!(
+                            "RECV request: action={}, ledger={}..., sender={}..., age={}ms",
+                            request.action,
+                            &request.ledger_id[..16.min(request.ledger_id.len())],
+                            &request.sender[..12.min(request.sender.len())],
+                            age_ms,
+                        );
+                    }
 
                     // Cosign requests: dispatch to per-ledger cosign worker (non-blocking)
                     // These are requests from PARTNERS asking US to co-sign their updates.
@@ -2685,7 +2766,7 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(response) = self.nostr.try_recv_response() {
-                    tracing::info!(
+                    tracing::debug!(
                         "RECV response: request={}..., success={}, error={:?}",
                         &response.request_id[..16.min(response.request_id.len())],
                         response.success,
@@ -2711,7 +2792,7 @@ impl Node {
             {
                 let phase_start = std::time::Instant::now();
                 while let Some(update) = self.nostr.try_recv_ledger_update() {
-                    tracing::info!(
+                    tracing::debug!(
                         "RECV update: ledger={}..., seq={}",
                         &update.ledger_id[..16.min(update.ledger_id.len())],
                         update.update.sequence_number

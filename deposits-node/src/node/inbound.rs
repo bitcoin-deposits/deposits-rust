@@ -21,7 +21,7 @@ impl Node {
             }
         };
         if is_own_event {
-            tracing::info!(
+            tracing::debug!(
                 "DROP own_event: action={}, ledger={}...",
                 request.action,
                 &request.ledger_id[..16.min(request.ledger_id.len())]
@@ -121,7 +121,7 @@ impl Node {
         if operator_only_actions.contains(&request.action.as_str())
             && !self.is_operator_of_ledger(&request.ledger_id)
         {
-            tracing::info!(
+            tracing::debug!(
                 "DROP not_operator: action={}, ledger={}...",
                 request.action,
                 &request.ledger_id[..16.min(request.ledger_id.len())]
@@ -130,7 +130,7 @@ impl Node {
         }
 
         if !is_our_ledger && !is_cross_ledger_sign && !is_cosign_request && !is_admin_request {
-            tracing::info!(
+            tracing::debug!(
                 "DROP not_ours: action={}, ledger={}...",
                 request.action,
                 &request.ledger_id[..16.min(request.ledger_id.len())]
@@ -200,10 +200,21 @@ impl Node {
                 };
                 self.handler.insert_event(&update.update);
                 self.ensure_actor_for(&update.ledger_id);
-                if let Some(handle) = self.ledger_actors.lock().unwrap().get(&update.ledger_id) {
-                    handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
-                        update.update,
-                    )));
+                let delivered = self
+                    .ledger_actors
+                    .lock()
+                    .unwrap()
+                    .get(&update.ledger_id)
+                    .map(|handle| {
+                        handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                            update.update,
+                        )))
+                    });
+                if delivered == Some(false) {
+                    self.stale_joined_ledgers
+                        .lock()
+                        .unwrap()
+                        .insert(update.ledger_id.clone());
                 }
                 drained += 1;
             }
@@ -460,7 +471,7 @@ impl Node {
         // Record request processing time
         let processing_time = start_time.elapsed();
         if !success || processing_time.as_millis() > 10 {
-            tracing::info!(
+            tracing::debug!(
                 "[PROFILE] handle_ledger_request action={} took {:.1}ms, age={:.1}ms (success={})",
                 request.action,
                 processing_time.as_secs_f64() * 1000.0,
@@ -498,7 +509,7 @@ impl Node {
         {
             tracing::error!("Failed to send response: {}", e);
         } else if success {
-            tracing::info!(
+            tracing::debug!(
                 "SEND response: action={}, ledger={}..., success=true, {:.0}ms",
                 request.action,
                 &request.ledger_id[..16.min(request.ledger_id.len())],
@@ -712,10 +723,21 @@ impl Node {
         // (which the rest of the daemon still queries synchronously)
         // sees the actor's writes through the shared `Arc<RwLock<Ledger>>`.
         self.ensure_actor_for(&inbound.ledger_id);
-        if let Some(handle) = self.ledger_actors.lock().unwrap().get(&inbound.ledger_id) {
-            handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
-                inbound.update.clone(),
-            )));
+        let delivered = self
+            .ledger_actors
+            .lock()
+            .unwrap()
+            .get(&inbound.ledger_id)
+            .map(|handle| {
+                handle.try_send(super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                    inbound.update.clone(),
+                )))
+            });
+        if delivered == Some(false) {
+            self.stale_joined_ledgers
+                .lock()
+                .unwrap()
+                .insert(inbound.ledger_id.clone());
         }
 
         // ── Equivocation detection ──────────────────────────────────────

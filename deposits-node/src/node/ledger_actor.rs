@@ -103,13 +103,22 @@ pub struct LedgerActorHandle {
 }
 
 impl LedgerActorHandle {
-    /// Try to send an event without awaiting; logs and drops on
-    /// closed channel. Used for fire-and-forget routing from the
-    /// coordinator's main loop where blocking the main loop on a
-    /// per-actor backlog would be the wrong shape.
-    pub fn try_send(&self, ev: LedgerEvent) {
-        if let Err(e) = self.inbox.try_send(ev) {
-            tracing::warn!("LedgerActor inbox send failed: {}", e);
+    /// Try to send an event without awaiting. Used for fire-and-forget
+    /// routing from the coordinator's main loop where blocking the main
+    /// loop on a per-actor backlog would be the wrong shape. `false` when
+    /// the event was not delivered (inbox full or closed): a caller
+    /// forwarding a ledger update marks the ledger stale, so the gap the
+    /// dropped update leaves is filled from the relay instead of sitting
+    /// until the next update exposes it (a member's replica three updates
+    /// short at a rotation, signet soak 2026-10-21).
+    #[must_use]
+    pub fn try_send(&self, ev: LedgerEvent) -> bool {
+        match self.inbox.try_send(ev) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!("LedgerActor inbox send failed: {}", e);
+                false
+            }
         }
     }
 }

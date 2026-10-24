@@ -40,7 +40,7 @@ impl Node {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        tracing::info!(
+        tracing::debug!(
             "PROC cosign_update: ledger={}...",
             &request.ledger_id[..16.min(request.ledger_id.len())]
         );
@@ -80,13 +80,27 @@ impl Node {
                         if let Ok(update) = deposits_core::SignedLedgerUpdate::tlv_decode(&tlv) {
                             self.handler.insert_event(&update);
                             self.ensure_actor_for(&request.ledger_id);
-                            if let Some(handle) =
-                                self.ledger_actors.lock().unwrap().get(&request.ledger_id)
-                            {
-                                handle.try_send(super::super::ledger_actor::LedgerEvent::Inbound(
-                                    Box::new(update),
-                                ));
-                                forwarded += 1;
+                            let delivered = self
+                                .ledger_actors
+                                .lock()
+                                .unwrap()
+                                .get(&request.ledger_id)
+                                .map(|handle| {
+                                    handle.try_send(
+                                        super::super::ledger_actor::LedgerEvent::Inbound(Box::new(
+                                            update,
+                                        )),
+                                    )
+                                });
+                            match delivered {
+                                Some(true) => forwarded += 1,
+                                Some(false) => {
+                                    self.stale_joined_ledgers
+                                        .lock()
+                                        .unwrap()
+                                        .insert(request.ledger_id.clone());
+                                }
+                                None => {}
                             }
                         }
                     }

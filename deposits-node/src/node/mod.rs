@@ -662,6 +662,9 @@ impl Node {
     const RELAY_FETCH_CLOCK_SKEW_SECS: u64 = 30;
     /// Events requested per relay page during joined-ledger reimport.
     const RELAY_FETCH_PAGE_LIMIT: usize = 5000;
+    /// First page of a catch-up fetch (`reimport_joined_ledger`), grown 4x per page up to
+    /// `RELAY_FETCH_PAGE_LIMIT`.
+    const RELAY_FETCH_FIRST_PAGE: usize = 250;
     /// Stop paginating if a page returns fewer than this many events.
     const RELAY_FETCH_MIN_PAGE: usize = 1000;
     /// Maximum pages before giving up (safety cap).

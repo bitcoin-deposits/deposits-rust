@@ -151,6 +151,12 @@ pub(crate) fn lottery_inputs_line(
     )
 }
 
+/// How long the re-arm pass waits on a ledger after `failures + 1` failed
+/// arms in a row: one minute, doubling, at most 30 minutes.
+pub(crate) fn rearm_backoff(failures: u32) -> std::time::Duration {
+    std::time::Duration::from_secs((60u64 << failures.min(5)).min(30 * 60))
+}
+
 #[cfg(test)]
 mod confiscation_outputs_tests {
     use super::*;
@@ -695,8 +701,29 @@ impl Node {
             out
         };
 
+        // Ledgers we already hold a dispute fork on: the fork is entered, and
+        // finishing its arm is `auto_rearm_disputes`'s job. Re-running the arm
+        // here every minute redid the expiry evidence and the collateral scan
+        // for nothing on each expired ledger (signet soak, 2026-10-24).
+        let our_pk16 = hex::encode(self.node_id.serialize())[..16].to_string();
+        let disputed: std::collections::HashSet<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .keys()
+                .filter(|k| k.len() > 64 && k.ends_with(&our_pk16))
+                .map(|k| k[..64].to_string())
+                .collect()
+        };
+
         for (ledger_id, tip_seq, operator) in candidates {
             let ledger_prefix = &ledger_id[..16.min(ledger_id.len())];
+            if disputed.contains(&ledger_id) {
+                tracing::debug!(
+                    "Auto-dispute: ledger {} is past quorum_expiry and already disputed by us",
+                    ledger_prefix
+                );
+                continue;
+            }
 
             // Judge only a current replica. One that missed the operator's
             // QuorumBegin shows the old expiry and would accuse an operator
@@ -788,7 +815,18 @@ impl Node {
                 })
                 .collect()
         };
+        // A failed arm (no collateral coin yet, most often) backs off per
+        // ledger: 1, 2, 4 ... up to 30 minutes, cleared by a success.
+        static BACKOFF: std::sync::OnceLock<
+            std::sync::Mutex<std::collections::HashMap<String, (std::time::Instant, u32)>>,
+        > = std::sync::OnceLock::new();
+        let backoff = BACKOFF.get_or_init(Default::default);
         for (ledger_id, last_valid_seq) in incomplete {
+            if let Some((next, _)) = backoff.lock().unwrap().get(&ledger_id) {
+                if std::time::Instant::now() < *next {
+                    continue;
+                }
+            }
             // A base the replica has since pulled back would make a second
             // fork; leave that to the triggers that know the new base.
             if dispute_base(
@@ -808,8 +846,25 @@ impl Node {
                 )
                 .await
             {
-                Ok(()) => tracing::debug!("Re-arm pass on {}... done", &ledger_id[..16]),
-                Err(e) => tracing::warn!("Re-arm pass on {}...: {}", &ledger_id[..16], e),
+                Ok(()) => {
+                    backoff.lock().unwrap().remove(&ledger_id);
+                    tracing::debug!("Re-arm pass on {}... done", &ledger_id[..16]);
+                }
+                Err(e) => {
+                    let mut b = backoff.lock().unwrap();
+                    let failures = b.get(&ledger_id).map(|(_, f)| f + 1).unwrap_or(0);
+                    let wait = rearm_backoff(failures);
+                    b.insert(
+                        ledger_id.clone(),
+                        (std::time::Instant::now() + wait, failures),
+                    );
+                    tracing::warn!(
+                        "Re-arm pass on {}...: {} (next try in {}s)",
+                        &ledger_id[..16],
+                        e,
+                        wait.as_secs()
+                    );
+                }
             }
         }
     }
@@ -4812,6 +4867,18 @@ mod arm_collateral_tests {
             ),
             ArmDecision::KeepPrior
         ));
+    }
+}
+
+#[cfg(test)]
+mod rearm_backoff_tests {
+    use super::rearm_backoff;
+
+    #[test]
+    fn doubles_from_a_minute_to_at_most_half_an_hour() {
+        let secs: Vec<u64> = (0..8).map(|f| rearm_backoff(f).as_secs()).collect();
+        assert_eq!(secs, vec![60, 120, 240, 480, 960, 1800, 1800, 1800]);
+        assert_eq!(rearm_backoff(u32::MAX).as_secs(), 1800);
     }
 }
 

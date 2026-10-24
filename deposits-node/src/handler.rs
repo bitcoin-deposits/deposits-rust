@@ -789,6 +789,30 @@ impl DepositsHandler {
     ///  - Subsequent lines: SignedLedgerUpdate (type: "Update")
     ///
     /// Parse a single JSONL file into a Ledger.
+    /// The highest `sequence_number` among the `Update` rows in the last few
+    /// megabytes of a ledger log, without parsing the file. `None` when the tail
+    /// holds no `Update` row (or the file cannot be read).
+    fn tail_update_seq(path: &std::path::Path) -> Option<u64> {
+        use std::io::{Read, Seek, SeekFrom};
+        const TAIL: u64 = 8 * 1024 * 1024;
+        let mut f = fs::File::open(path).ok()?;
+        let len = f.metadata().ok()?.len();
+        let from = len.saturating_sub(TAIL);
+        f.seek(SeekFrom::Start(from)).ok()?;
+        let mut buf = Vec::with_capacity((len - from) as usize);
+        f.read_to_end(&mut buf).ok()?;
+        let text = String::from_utf8_lossy(&buf);
+        const KEY: &str = "\"sequence_number\":";
+        text.lines()
+            .filter(|l| l.starts_with("{\"type\":\"Update\""))
+            .filter_map(|l| {
+                let at = l.find(KEY)? + KEY.len();
+                let digits: String = l[at..].chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse().ok()
+            })
+            .max()
+    }
+
     fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
         let contents = match fs::read_to_string(path) {
             Ok(c) => c,
@@ -1166,19 +1190,40 @@ impl DepositsHandler {
         let mut changes = 0;
         let mut new_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
+        // A known ledger is re-read only when its file runs past our tip. The
+        // daemon is the only writer of the ledgers it knows, but some of its
+        // own appends (the `CreatedAt` rows) change the mtime without going
+        // through the bookkeeping above, and re-reading a deep ledger's log
+        // (2 GB at 140k updates) took 25 s, under the ledgers lock, on every
+        // other reload (signet soak, 2026-10-24). The tail holds the newest
+        // `Update` rows, so it says whether the disk is ahead.
+        //
+        // Files are parsed before the ledgers lock is taken, not under it.
+        let mut loaded: Vec<(String, Ledger)> = Vec::new();
+        for (ledger_id, path) in &changed_files {
+            if let Some(&mem_tip) = known.get(ledger_id) {
+                match Self::tail_update_seq(path) {
+                    Some(disk_last) if disk_last >= mem_tip => {}
+                    _ => continue,
+                }
+            }
+            if let Some(l) = Self::load_single_ledger_from_jsonl(ledger_id, path) {
+                loaded.push((ledger_id.clone(), l));
+            }
+        }
+
         let mut ledgers = self.ledgers.lock().unwrap();
         let mut counts = self.persisted_next_seq.lock().unwrap();
 
-        // Read and parse ONLY the changed files (not all files)
-        for (ledger_id, path) in &changed_files {
-            let disk_ledger = match Self::load_single_ledger_from_jsonl(ledger_id, path) {
-                Some(l) => l,
-                None => continue,
-            };
+        for (ledger_id, disk_ledger) in loaded {
             let disk_tip = disk_ledger.next_sequence();
             let disk_len = disk_ledger.history.len();
+            // The tip as it is now: the ledger may have advanced while the file was parsed.
+            let mem_tip = ledgers
+                .get(&ledger_id)
+                .map(|arc| arc.read().unwrap().next_sequence());
 
-            if let Some(&mem_tip) = known.get(ledger_id) {
+            if let Some(mem_tip) = mem_tip {
                 // Existing ledger — update if disk has higher tip sequence
                 if disk_tip > mem_tip {
                     tracing::debug!(
@@ -2591,6 +2636,11 @@ impl DepositsHandler {
         let mut applied = 0;
 
         for update in updates {
+            // Already applied (by the ledger actor, while a catch-up fetch ran
+            // off the run loop): skip it rather than take it for a chain break.
+            if update.sequence_number < ledger.next_sequence() {
+                continue;
+            }
             // Verify this update follows the current chain. Stop (don't error
             // out) at the first non-chaining update so the validated prefix
             // before it is still applied and persisted — a single broken/forked
@@ -3072,6 +3122,88 @@ mod tests {
                 "created_at should survive restart so re-broadcast reuses it"
             );
         }
+    }
+
+    /// `tail_update_seq` reads the newest `Update` sequence from the end of the
+    /// log without parsing it: other row types and a torn first line are ignored.
+    #[test]
+    fn tail_update_seq_reads_the_newest_update_row() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("l.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{\"type\":\"Role\",\"role\":\"Operator\"}\n",
+                "{\"type\":\"State\",\"sequence\":9}\n",
+                "{\"type\":\"Update\",\"x\":[1],\"sequence_number\":10,\"y\":2}\n",
+                "{\"type\":\"Update\",\"x\":[1],\"sequence_number\":12,\"y\":2}\n",
+                "{\"type\":\"Update\",\"x\":[1],\"sequence_number\":11,\"y\":2}\n",
+                "{\"type\":\"CreatedAt\",\"content_hash\":\"00\",\"ts\":5}",
+            ),
+        )
+        .unwrap();
+        assert_eq!(DepositsHandler::tail_update_seq(&path), Some(12));
+
+        std::fs::write(&path, "{\"type\":\"State\",\"sequence\":9}\n").unwrap();
+        assert_eq!(DepositsHandler::tail_update_seq(&path), None);
+        assert_eq!(
+            DepositsHandler::tail_update_seq(&temp_dir.path().join("none")),
+            None
+        );
+    }
+
+    /// A known ledger whose file changed without running past our tip (a
+    /// `CreatedAt` append) is not re-read: the in-memory ledger stays the same
+    /// object. Re-reading a 2 GB log there cost 25 s under the ledgers lock.
+    #[test]
+    fn discover_does_not_reread_a_known_ledger_the_disk_is_not_ahead_of() {
+        let temp_dir = TempDir::new().unwrap();
+        let wallet = create_mock_wallet(&temp_dir);
+        let data_dir = temp_dir.path().to_path_buf();
+        let op_pk = {
+            let sk = SecretKey::from_slice(&[2u8; 32]).unwrap();
+            let secp = bitcoin::secp256k1::Secp256k1::new();
+            PublicKey::from_secret_key(&secp, &sk)
+        };
+        let (handler, _rx) =
+            DepositsHandler::new(test_local_signer(), wallet, data_dir.clone(), false);
+        let arc = handler.get_or_create_ledger(op_pk, "tb1qtest".to_string());
+        let ledger_id = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .keys()
+            .next()
+            .unwrap()
+            .clone();
+        for seq in 0..5u64 {
+            let u = mk_update(op_pk, seq, seq as u8);
+            arc.write().unwrap().history.push(u.clone());
+            handler.insert_event(&u);
+        }
+        handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        handler.record_created_at(&ledger_id, [4u8; 32], 1_700_000_000);
+        // As if the append had moved the mtime past the one we recorded.
+        handler.last_file_modtimes.lock().unwrap().clear();
+
+        assert_eq!(handler.discover_new_ledgers(), 0);
+        let now = handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(&ledger_id)
+            .cloned()
+            .unwrap();
+        assert!(
+            Arc::ptr_eq(&arc, &now),
+            "the ledger was not replaced by a re-read"
+        );
+        // The change is now recorded, so the next pass does not look again.
+        assert!(handler
+            .last_file_modtimes
+            .lock()
+            .unwrap()
+            .contains_key(&ledger_id));
     }
 
     /// Deep-ledger healing: the heal must diff+republish against the FULL

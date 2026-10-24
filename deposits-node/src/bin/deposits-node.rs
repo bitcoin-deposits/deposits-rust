@@ -66,9 +66,18 @@ async fn async_main() -> Result<(), Box<dyn std::error::Error>> {
         // payment_hash on the make_invoice/pay_invoice spans), every nested log
         // line is tagged with the correlation id, so a single payment can be
         // followed across handlers and grepped across processes.
+        //
+        // Off unless DEPOSITS_SPAN_CLOSE=1: at 140k-update ledgers the close
+        // lines, with the per-request RECV/DROP/SEND lines, grew each soak
+        // node's log to 3.3 GB (signet soak, 2026-10-24).
+        let span_events = if std::env::var("DEPOSITS_SPAN_CLOSE").as_deref() == Ok("1") {
+            tracing_subscriber::fmt::format::FmtSpan::CLOSE
+        } else {
+            tracing_subscriber::fmt::format::FmtSpan::NONE
+        };
         let fmt_layer = tracing_subscriber::fmt::layer()
             .with_writer(std::io::stderr)
-            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
+            .with_span_events(span_events);
 
         match std::env::var("TRACING_FLAME_PATH") {
             Ok(path) if !path.is_empty() => {
