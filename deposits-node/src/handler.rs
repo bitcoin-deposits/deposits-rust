@@ -969,6 +969,14 @@ impl DepositsHandler {
 
         let mut replayed = 0u64;
         for (seq, height, operation) in &ops_to_replay {
+            // The state before a QuorumBegin, for a member asked to sign its rungs after a
+            // restart (Ledger::pre_quorum_begin; replay from genesis is not always possible).
+            if matches!(
+                operation,
+                deposits_core::messages::LedgerOperation::QuorumBegin { .. }
+            ) {
+                ledger.pre_quorum_begin = Some((*seq, ledger.state.clone()));
+            }
             let ctx = deposits_core::types::ApplyCtx {
                 height: *height,
                 seq: *seq,
@@ -1470,6 +1478,62 @@ impl DepositsHandler {
             }
             None => history,
         }
+    }
+
+    /// The ledger state just before sequence `seq`, from the disk log: the latest `State`
+    /// snapshot row below it, advanced by the updates between. `None` when the log holds no such
+    /// snapshot or a gap follows it. A member signing a rotation's rungs after a restart needs
+    /// the state from before the `QuorumBegin`, and a replay from genesis is not possible on a
+    /// compacted log (the snapshot kept at apply, `Ledger::pre_quorum_begin`, is in memory only).
+    pub fn persisted_state_before(&self, ledger_id: &str, seq: u64) -> Option<LedgerState> {
+        use std::io::BufRead;
+        fn field(line: &str, key: &str) -> Option<u64> {
+            let at = line.find(key)? + key.len();
+            let digits: String = line[at..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            digits.parse().ok()
+        }
+        let ledger_file = self
+            .data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let reader = std::io::BufReader::new(fs::File::open(&ledger_file).ok()?);
+        let mut best: Option<(u64, String)> = None;
+        let mut updates: std::collections::BTreeMap<u64, String> = Default::default();
+        let window = seq.saturating_sub(5_000);
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if line.starts_with("{\"type\":\"State\"") {
+                if let Some(s) = field(&line, "\"sequence\":") {
+                    if s < seq && best.as_ref().is_none_or(|(b, _)| s > *b) {
+                        best = Some((s, line));
+                    }
+                }
+            } else if line.starts_with("{\"type\":\"Update\"") {
+                if let Some(n) = field(&line, "\"sequence_number\":") {
+                    if n < seq && n >= window {
+                        updates.entry(n).or_insert(line);
+                    }
+                }
+            }
+        }
+        let (from, state_line) = best?;
+        let LedgerLogRow::State(mut state) =
+            serde_json::from_str::<LedgerLogRow>(&state_line).ok()?
+        else {
+            return None;
+        };
+        for n in (from + 1)..seq {
+            let LedgerLogRow::Update(u) =
+                serde_json::from_str::<LedgerLogRow>(updates.get(&n)?).ok()?
+            else {
+                return None;
+            };
+            state.apply_update_in_place(&u).ok()?;
+        }
+        Some(state)
     }
 
     pub fn read_persisted_history(&self, ledger_id: &str) -> Option<Vec<SignedLedgerUpdate>> {

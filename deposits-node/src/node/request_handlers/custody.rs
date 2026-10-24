@@ -991,7 +991,7 @@ impl Node {
         };
 
         // Our replica as it stood before the QuorumBegin.
-        let (history, state) = {
+        let (pre, live, applied, snapshot) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let Some(arc) = ledgers.get(&request.ledger_id) else {
                 return refuse("ledger not locally held".into());
@@ -1018,30 +1018,35 @@ impl Node {
                 .filter(|u| u.sequence_number < qb.sequence_number)
                 .cloned()
                 .collect();
-            // The genesis and the governing QuorumBegin may have left the capped in-memory history.
-            let pre = self.handler.complete_history(&request.ledger_id, pre);
             let snapshot = l
                 .pre_quorum_begin
                 .as_ref()
                 .filter(|(seq, _)| *seq == qb.sequence_number)
                 .map(|(_, st)| st.clone());
-            if !applied {
-                (pre, l.state.clone())
-            } else if let Some(st) = snapshot {
-                (pre, st)
-            } else {
-                let mut st = deposits_core::LedgerState::new(
-                    l.state.operator_key,
-                    l.state.reserves_key.clone(),
-                    l.state.genesis_block,
-                );
-                for u in &pre {
-                    if let Err(e) = st.apply_update_in_place(u) {
-                        return refuse(format!("replay before the QuorumBegin: {e}"));
-                    }
+            (pre, l.state.clone(), applied, snapshot)
+        };
+        // Disk reads below, outside the ledgers lock. The genesis and the governing QuorumBegin
+        // may have left the capped in-memory history.
+        let history = self.handler.complete_history(&request.ledger_id, pre);
+        let state = if !applied {
+            live
+        } else if let Some(st) = snapshot.or_else(|| {
+            self.handler
+                .persisted_state_before(&request.ledger_id, qb.sequence_number)
+        }) {
+            st
+        } else {
+            let mut st = deposits_core::LedgerState::new(
+                live.operator_key,
+                live.reserves_key.clone(),
+                live.genesis_block,
+            );
+            for u in &history {
+                if let Err(e) = st.apply_update_in_place(u) {
+                    return refuse(format!("replay before the QuorumBegin: {e}"));
                 }
-                (pre, st)
             }
+            st
         };
         let Some(tip) = history.last() else {
             return refuse("empty replica".into());
