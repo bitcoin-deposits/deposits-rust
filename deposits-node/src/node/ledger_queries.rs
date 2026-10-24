@@ -880,13 +880,18 @@ impl Node {
             let lids: Vec<String> = source.iter().map(|m| m.ledger_id.clone()).collect();
 
             let current_block = self.wallet.get_block_height().unwrap_or(0);
-            // Caller-supplied override wins (used by tests that need a
-            // short-lived quorum); otherwise the standard 30-day window.
-            let default_expiry = current_block
-                + expiry_blocks_override.unwrap_or(crate::node::DEFAULT_QUORUM_EXPIRY_BLOCKS);
-
-            // TODO: Get actual expiries from quorum member info in ledger
-            let expiries: Vec<u32> = members.iter().map(|_| default_expiry).collect();
+            // Our window (a caller override, used by tests that need a
+            // short-lived quorum, or the standard 30 days), shortened to the
+            // members' commitments: DEP-05 lets the operator shorten a
+            // member's `membership_until` but never extend it, and every
+            // validator refuses a QuorumBegin past the shortest
+            // (`quorum_expiry_exceeds_commitment`).
+            let expiry = deposits_core::types::planned_quorum_expiry(
+                source.iter(),
+                current_block,
+                expiry_blocks_override.unwrap_or(crate::node::DEFAULT_QUORUM_EXPIRY_BLOCKS),
+            );
+            let expiries: Vec<u32> = members.iter().map(|_| expiry).collect();
 
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();

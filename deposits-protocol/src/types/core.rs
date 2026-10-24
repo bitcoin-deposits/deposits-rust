@@ -724,6 +724,26 @@ pub fn collateral_meets_floor(reserves: u64, collateral: u64, floor_bps: u16) ->
     (collateral as u128) * 10_000 >= (floor_bps as u128) * (reserves as u128 + collateral as u128)
 }
 
+/// DEP-05 §"Quorum expiry": the latest `quorum_expiry` a QuorumBegin may
+/// carry, the shortest `membership_until` among the members it seats.
+/// Members that declared no commitment impose none; `None` if no member did.
+pub fn quorum_expiry_ceiling<'a>(
+    members: impl IntoIterator<Item = &'a QuorumMember>,
+) -> Option<u32> {
+    members.into_iter().filter_map(|m| m.membership_until).min()
+}
+
+/// The `quorum_expiry` an operator proposes: its own window
+/// (`current_block + window_blocks`), shortened to the members' ceiling.
+pub fn planned_quorum_expiry<'a>(
+    members: impl IntoIterator<Item = &'a QuorumMember>,
+    current_block: u32,
+    window_blocks: u32,
+) -> u32 {
+    let own = current_block.saturating_add(window_blocks);
+    quorum_expiry_ceiling(members).map_or(own, |c| c.min(own))
+}
+
 /// Default compensation payout cadence: 2016 blocks (~2 weeks). Mirrors the
 /// default `frequency_blocks` on `FeeStructure`, so by default a member is
 /// paid once per operator fee-collection cycle.

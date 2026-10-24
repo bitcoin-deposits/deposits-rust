@@ -1513,10 +1513,11 @@ impl Ledger {
             // of the declared members' commitments — the most-impatient
             // member sets the deadline, since the on-chain script tree can
             // only encode one timelock.
-            let min_committed: Option<u32> = quorum_members
-                .iter()
-                .filter_map(|m| staged.get(&m.pubkey).and_then(|s| s.membership_until))
-                .min();
+            let min_committed: Option<u32> = deposits_protocol::types::quorum_expiry_ceiling(
+                quorum_members
+                    .iter()
+                    .filter_map(|m| staged.get(&m.pubkey).copied()),
+            );
             if let Some(ceiling) = min_committed {
                 if *quorum_expiry > ceiling {
                     return Err(DepositsError::ProtocolViolation {
