@@ -2133,6 +2133,12 @@ impl Node {
                         let relay_cooldown = Self::RELAY_FETCH_COOLDOWN;
 
                         for stale_id in &stale_ids {
+                            // Only a ledger id names relay history; a fork tracking key
+                            // (`<id>_<seq>_<pk>`) reaching the stale set failed its fetch
+                            // and was re-queued every cycle. Drop it.
+                            if stale_id.len() != 64 {
+                                continue;
+                            }
                             // Try event store first (free, in-memory)
                             let caught_up = self.catch_up_ledger_from_event_store(stale_id);
                             if caught_up > 0 {
