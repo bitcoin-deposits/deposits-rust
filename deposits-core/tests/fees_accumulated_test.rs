@@ -34,6 +34,7 @@ fn make_ledger() -> Ledger {
         role: LedgerRole::Operator,
         history: Vec::new(),
         created_at: Default::default(),
+        pre_quorum_begin: None,
     }
 }
 

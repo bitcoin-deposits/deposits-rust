@@ -157,6 +157,13 @@ pub struct Ledger {
     /// and persisted separately via `LedgerLogRow::CreatedAt` jsonl rows.
     #[serde(skip, default)]
     pub created_at: std::collections::HashMap<[u8; 32], u64>,
+    /// The state as it stood just before the latest `QuorumBegin` this replica applied, with
+    /// that `QuorumBegin`'s sequence. A member asked to sign a rotation's rungs after applying
+    /// its `QuorumBegin` checks them against this (DEP-03 §Rotation ordering): rebuilding it by
+    /// replay needs the whole chain, which a capped in-memory history and a compacted log no
+    /// longer hold on a long ledger. In memory only; after a restart, replay is the fallback.
+    #[serde(skip, default)]
+    pub pre_quorum_begin: Option<(u64, LedgerState)>,
 }
 
 /// DEP-02 §Block height and hash: the header an operator signs an update with after a
@@ -299,6 +306,7 @@ impl Ledger {
             role: LedgerRole::Operator,
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
+            pre_quorum_begin: None,
         }
     }
 
@@ -314,6 +322,7 @@ impl Ledger {
             role: LedgerRole::Partner,
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
+            pre_quorum_begin: None,
         }
     }
 
@@ -333,6 +342,7 @@ impl Ledger {
             role,
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
+            pre_quorum_begin: None,
         }
     }
 
@@ -1710,7 +1720,12 @@ impl Ledger {
             self.state
                 .apply_with_verifier(operation, &authorizer, current_height)
         })?;
-        self.state = new_state;
+        if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
+            let before = std::mem::replace(&mut self.state, new_state);
+            self.pre_quorum_begin = Some((update_seq, before));
+        } else {
+            self.state = new_state;
+        }
         Ok(violations)
     }
 
@@ -1805,6 +1820,7 @@ impl Ledger {
             role: LedgerRole::Partner, // Default role for reconstructed ledgers
             history: updates,
             created_at: std::collections::HashMap::new(),
+            pre_quorum_begin: None,
         }
     }
 

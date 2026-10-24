@@ -1020,8 +1020,15 @@ impl Node {
                 .collect();
             // The genesis and the governing QuorumBegin may have left the capped in-memory history.
             let pre = self.handler.complete_history(&request.ledger_id, pre);
+            let snapshot = l
+                .pre_quorum_begin
+                .as_ref()
+                .filter(|(seq, _)| *seq == qb.sequence_number)
+                .map(|(_, st)| st.clone());
             if !applied {
                 (pre, l.state.clone())
+            } else if let Some(st) = snapshot {
+                (pre, st)
             } else {
                 let mut st = deposits_core::LedgerState::new(
                     l.state.operator_key,

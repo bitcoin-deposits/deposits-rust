@@ -2116,6 +2116,7 @@ impl Node {
             role: deposits_core::ledger::LedgerRole::Operator, // We operate the fork
             history: truncated_history,
             created_at: Default::default(),
+            pre_quorum_begin: None,
         };
         drop(original);
 

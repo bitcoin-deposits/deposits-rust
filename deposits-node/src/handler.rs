@@ -944,6 +944,7 @@ impl DepositsHandler {
             role: ledger_role,
             history: updates,
             created_at,
+            pre_quorum_begin: None,
         };
 
         let ops_to_replay: Vec<_> = ledger

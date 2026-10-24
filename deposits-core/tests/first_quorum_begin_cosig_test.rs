@@ -57,6 +57,7 @@ fn ledger_with_staged(operator_pk: PublicKey, staged_pks: &[PublicKey]) -> Ledge
         role: LedgerRole::Operator,
         history: Vec::new(),
         created_at: Default::default(),
+        pre_quorum_begin: None,
     }
 }
 
@@ -276,4 +277,34 @@ fn quorum_begin_with_empty_staged_set_is_rejected_by_validator() {
         "expected rejection, got: {}",
         s
     );
+}
+
+// =========================================================================
+// DEP-03 §Rotation ordering: a replica keeps the state from before the QuorumBegin it applies
+// =========================================================================
+
+#[test]
+fn applying_a_quorum_begin_keeps_the_state_before_it() {
+    let (_, op_pk) = kp(1);
+    let (_, m1_pk) = kp(2);
+    let (_, m2_pk) = kp(3);
+    let (_, m3_pk) = kp(4);
+    let mut ledger = ledger_with_staged(op_pk, &[m1_pk, m2_pk, m3_pk]);
+    let before = ledger.state.clone();
+    let seq = ledger.state.sequence + 1;
+    let op = quorum_begin_op(&[m1_pk, m2_pk, m3_pk]);
+    // A member that applied the QuorumBegin and is then asked to sign its rungs checks them
+    // against this snapshot: replaying a long ledger's whole chain is not possible from a capped
+    // history (signet soak, 2026-10-24).
+    ledger
+        .apply_and_check_at(&op, 100, 100, seq)
+        .expect("the QuorumBegin applies");
+    let (s, st) = ledger
+        .pre_quorum_begin
+        .as_ref()
+        .expect("a snapshot of the state before the QuorumBegin");
+    assert_eq!(*s, seq);
+    assert_eq!(st.quorum_members.len(), before.quorum_members.len());
+    assert_eq!(st.quorum_state, before.quorum_state);
+    assert_ne!(ledger.state.quorum_state, st.quorum_state);
 }
