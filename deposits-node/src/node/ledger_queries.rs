@@ -3491,9 +3491,11 @@ fn newest_ruleset_supported_by(members: &[deposits_core::types::QuorumMember]) -
 /// the configured verifier (DEP-14).  Returns the matched reason, or `None`.
 ///
 /// Revocation is applied first and is terminal: an attestation whose id appears in
-/// the `#e` tag of a `method = "revoked"` event signed by the same verifier is void,
-/// whatever either event's `created_at` or `verified_at` says (DEP-14, "Revocation"
-/// and "Time").  Ordering comes from that reference, never from timestamps.
+/// the `#e` tag of a well-formed `method = "revoked"` event signed by the same
+/// verifier is void, whatever either event's `created_at` or `verified_at` says
+/// (DEP-14, "Revocation" and "Time").  Ordering comes from that reference, never
+/// from timestamps.  Well-formed means exactly one `#e` tag, equal to the content's
+/// `revokes`; any other revocation is ignored, so one event can't say two things.
 pub(crate) fn match_attestation(
     events: &[nostr_sdk::Event],
     verifier: &nostr_sdk::PublicKey,
@@ -3504,17 +3506,24 @@ pub(crate) fn match_attestation(
         serde_json::from_str(&event.content).ok()
     }
 
+    // The id a well-formed revocation voids: one `#e` tag, equal to `revokes`.
+    fn revoked_id(event: &nostr_sdk::Event) -> Option<nostr_sdk::EventId> {
+        let content = serde_json::from_str::<serde_json::Value>(&event.content).ok()?;
+        if content.get("method").and_then(|m| m.as_str()) != Some("revoked") {
+            return None;
+        }
+        let ids: Vec<nostr_sdk::EventId> = event.tags.event_ids().copied().collect();
+        let [id] = ids.as_slice() else {
+            return None;
+        };
+        let revokes = content.get("revokes").and_then(|r| r.as_str())?;
+        (revokes.eq_ignore_ascii_case(&id.to_hex())).then_some(*id)
+    }
+
     let revoked: std::collections::HashSet<nostr_sdk::EventId> = events
         .iter()
         .filter(|e| e.pubkey == *verifier)
-        .filter(|e| {
-            content_of(e).and_then(|c| {
-                c.get("method")
-                    .and_then(|m| m.as_str())
-                    .map(|m| m == "revoked")
-            }) == Some(true)
-        })
-        .flat_map(|e| e.tags.event_ids().copied().collect::<Vec<_>>())
+        .filter_map(revoked_id)
         .collect();
 
     for event in events.iter() {
@@ -3645,6 +3654,49 @@ mod attestation_tests {
         let again = attestation(&v, &s, NIP05, 3_000);
         assert_eq!(
             match_attestation(&[a, r, again], &v.public_key(), &domains(), &HashSet::new()),
+            Some("domain=example.com".to_string())
+        );
+    }
+
+    fn revocation_with(
+        verifier: &Keys,
+        subject: &Keys,
+        e_tags: &[nostr_sdk::EventId],
+        revokes: &str,
+    ) -> nostr_sdk::Event {
+        let content = format!(
+            r#"{{"npub":"{}","method":"revoked","revokes":"{}"}}"#,
+            subject.public_key().to_hex(),
+            revokes
+        );
+        let mut builder = EventBuilder::new(Kind::Custom(55502), content)
+            .tag(Tag::public_key(subject.public_key()));
+        for id in e_tags {
+            builder = builder.tag(Tag::event(*id));
+        }
+        builder.sign_with_keys(verifier).unwrap()
+    }
+
+    #[test]
+    fn a_revocation_whose_revokes_disagrees_with_its_e_tag_is_ignored() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let other = attestation(&v, &s, NIP05, 1_001);
+        let r = revocation_with(&v, &s, &[a.id], &other.id.to_hex());
+        assert_eq!(
+            match_attestation(&[a, r], &v.public_key(), &domains(), &HashSet::new()),
+            Some("domain=example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn a_revocation_with_two_e_tags_is_ignored() {
+        let (v, s) = (Keys::generate(), Keys::generate());
+        let a = attestation(&v, &s, NIP05, 1_000);
+        let b = attestation(&v, &s, NIP05, 1_001);
+        let r = revocation_with(&v, &s, &[a.id, b.id], &a.id.to_hex());
+        assert_eq!(
+            match_attestation(&[a, b, r], &v.public_key(), &domains(), &HashSet::new()),
             Some("domain=example.com".to_string())
         );
     }
