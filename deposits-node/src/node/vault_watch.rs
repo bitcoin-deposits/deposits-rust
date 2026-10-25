@@ -148,6 +148,24 @@ pub(crate) fn confiscation_txid_from_params(params: &serde_json::Value) -> Optio
     Some(tx.compute_txid().to_byte_array())
 }
 
+/// The txids of every rung in a `confiscation_sign` request's `unsigned_rungs` (DEP-03
+/// §Confiscation ladder); empty when the request predates the ladder.
+pub(crate) fn confiscation_rung_txids_from_params(params: &serde_json::Value) -> Vec<[u8; 32]> {
+    params
+        .get("unsigned_rungs")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| hex::decode(h.as_str()?).ok())
+                .filter_map(|b| {
+                    bitcoin::consensus::encode::deserialize::<bitcoin::Transaction>(&b).ok()
+                })
+                .map(|tx| tx.compute_txid().to_byte_array())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn proof_against(
     accused: &bitcoin::secp256k1::PublicKey,
     target_ledger_id: &str,

@@ -21,6 +21,75 @@ use super::*;
 /// `P2WPKH_DUST_LIMIT_SATS` for the operator, we collapse to a single
 /// lottery output rather than emit unspendable change.
 /// A tier-leaf witness: [sig_{n-1} .. sig_0 (empty where absent), leaf, control block].
+/// DEP-03 §Confiscation ladder: the rung a holder broadcasts while none has confirmed,
+/// `min(n − 1, ⌊(tip − h_c) / 6⌋)`.
+pub(crate) fn ladder_rung_due(n: usize, h_c: u32, height: u32) -> usize {
+    if n == 0 || height <= h_c {
+        return 0;
+    }
+    (((height - h_c) / 6) as usize).min(n - 1)
+}
+
+/// A `confiscation_sign` answer's signatures, per rung and per input, each verified against
+/// `rung_sighashes`: the longest prefix of rungs it signed in full. A signer that predates the
+/// ladder answers rung 0 alone (`signature`, `sweep_signatures`). `None` if not even rung 0.
+pub(crate) fn confiscation_response_signatures(
+    result: &serde_json::Value,
+    rung_sighashes: &[Vec<[u8; 32]>],
+) -> Option<(bitcoin::secp256k1::PublicKey, Vec<Vec<[u8; 64]>>)> {
+    use bitcoin::secp256k1::{schnorr::Signature, Message, Secp256k1};
+    let signer: bitcoin::secp256k1::PublicKey = result.get("signer")?.as_str()?.parse().ok()?;
+    let sig64 = |v: &serde_json::Value| -> Option<[u8; 64]> {
+        hex::decode(v.as_str()?).ok()?.try_into().ok()
+    };
+    let list = |v: Option<&serde_json::Value>| -> Vec<[u8; 64]> {
+        v.and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(sig64).collect())
+            .unwrap_or_default()
+    };
+    let per_rung: Vec<Vec<[u8; 64]>> =
+        match result.get("rung_signatures").and_then(|v| v.as_array()) {
+            Some(r0s) => {
+                let sweeps = result
+                    .get("rung_sweep_signatures")
+                    .and_then(|v| v.as_array());
+                r0s.iter()
+                    .enumerate()
+                    .map_while(|(i, s)| {
+                        let mut v = vec![sig64(s)?];
+                        v.extend(list(sweeps.and_then(|a| a.get(i))));
+                        Some(v)
+                    })
+                    .collect()
+            }
+            None => {
+                let mut v = vec![sig64(result.get("signature")?)?];
+                v.extend(list(result.get("sweep_signatures")));
+                vec![v]
+            }
+        };
+    let secp = Secp256k1::verification_only();
+    let xonly = signer.x_only_public_key().0;
+    let verified: Vec<Vec<[u8; 64]>> = per_rung
+        .into_iter()
+        .zip(rung_sighashes)
+        .map_while(|(sigs, hashes)| {
+            (sigs.len() == hashes.len()
+                && sigs.iter().zip(hashes).all(|(s, h)| {
+                    Signature::from_slice(s)
+                        .ok()
+                        .map(|sig| {
+                            secp.verify_schnorr(&sig, &Message::from_digest(*h), &xonly)
+                                .is_ok()
+                        })
+                        .unwrap_or(false)
+                }))
+            .then_some(sigs)
+        })
+        .collect();
+    (!verified.is_empty()).then_some((signer, verified))
+}
+
 pub(crate) fn tier_witness(
     voter_set: &deposits_core::VoterSet,
     sigs: &std::collections::HashMap<bitcoin::secp256k1::PublicKey, [u8; 64]>,
@@ -2942,6 +3011,10 @@ impl Node {
         // Phase 1: Check for pending confiscations that need signature collection
         self.collect_confiscation_signatures().await;
 
+        // DEP-03 §Confiscation ladder: push the scheduled rung of every confiscation we
+        // assembled until one confirms.
+        self.bump_confiscations().await;
+
         // Phase 2: Initiate new confiscations for armed ledgers that don't have one pending
         self.initiate_confiscations().await;
     }
@@ -3031,35 +3104,15 @@ impl Node {
                     {
                         if response.success {
                             if let Some(result) = &response.result {
-                                if let (Some(signer_hex), Some(sig_hex)) = (
-                                    result.get("signer").and_then(|v| v.as_str()),
-                                    result.get("signature").and_then(|v| v.as_str()),
-                                ) {
-                                    if let (Ok(signer), Ok(sig_bytes)) =
-                                        (signer_hex.parse::<PublicKey>(), hex::decode(sig_hex))
+                                if let Some((signer, sigs)) =
+                                    confiscation_response_signatures(result, &pc.rung_sighashes)
+                                {
+                                    if let std::collections::hash_map::Entry::Vacant(e) =
+                                        pc.signatures.entry(signer)
                                     {
-                                        let sweeps: Vec<[u8; 64]> = result
-                                            .get("sweep_signatures")
-                                            .and_then(|v| v.as_array())
-                                            .map(|a| {
-                                                a.iter()
-                                                    .filter_map(|x| x.as_str())
-                                                    .filter_map(|h| hex::decode(h).ok())
-                                                    .filter_map(|b| b.try_into().ok())
-                                                    .collect()
-                                            })
-                                            .unwrap_or_default();
-                                        if sig_bytes.len() == 64
-                                            && !pc.signatures.contains_key(&signer)
-                                            && sweeps.len() + 1 == pc.confiscation_tx.input.len()
-                                        {
-                                            let mut sig_arr = [0u8; 64];
-                                            sig_arr.copy_from_slice(&sig_bytes);
-                                            pc.sweep_signatures.insert(signer, sweeps);
-                                            pc.signatures.insert(signer, sig_arr);
-                                            tracing::info!("  Confiscation {}: received signature from {}... ({}/{})",
-                                                &prefix, &signer.to_string()[..16], pc.signatures.len(), required_sigs);
-                                        }
+                                        e.insert(sigs);
+                                        tracing::info!("  Confiscation {}: received signature from {}... ({}/{})",
+                                            &prefix, &signer.to_string()[..16], pc.signatures.len(), required_sigs);
                                     }
                                 }
                             }
@@ -3080,19 +3133,22 @@ impl Node {
 
     /// Build witness and broadcast a confiscation transaction that has enough signatures.
     pub(crate) async fn broadcast_confiscation(&self, prefix: &str) {
-        use bitcoin::Witness;
-
         let pc = match self.pending_confiscations.lock().unwrap().remove(prefix) {
             Some(pc) => pc,
             None => return,
         };
-
         tracing::info!(
             "  Building witness with {} signatures for {}...",
             pc.signatures.len(),
             prefix
         );
+        self.assemble_and_broadcast_confiscation(pc);
+    }
 
+    /// DEP-03 §Confiscation ladder: assemble every rung (the longest prefix) that has the tier's
+    /// threshold of signatures, keep the ladder for rebroadcast, and broadcast the rung the
+    /// schedule names.
+    fn assemble_and_broadcast_confiscation(&self, pc: PendingConfiscation) {
         let control_block = match pc.taproot_output.control_block_for_tier(pc.tier_index) {
             Some(cb) => cb,
             None => {
@@ -3100,50 +3156,55 @@ impl Node {
                 return;
             }
         };
-
-        let mut witness = Witness::new();
-        let sorted_keys = pc.voter_set.sorted_x_only_pubkeys();
-
-        for x_only in sorted_keys.iter().rev() {
-            for voter in pc.voter_set.all_voters() {
-                if voter.x_only_public_key().0 == *x_only {
-                    if let Some(sig) = pc.signatures.get(&voter) {
-                        witness.push(sig);
-                    } else {
-                        witness.push(&[] as &[u8]);
-                    }
-                    break;
-                }
-            }
-        }
-
-        witness.push(pc.leaf_script.as_bytes());
-        witness.push(control_block.serialize());
-
-        let mut confiscation_tx = pc.confiscation_tx;
-        confiscation_tx.input[0].witness = witness;
-        for i in 1..confiscation_tx.input.len() {
-            confiscation_tx.input[i].witness = tier_witness(
-                &pc.voter_set,
-                &pc.sweep_signatures
+        let mut assembled: Vec<bitcoin::Transaction> = Vec::new();
+        for (i, rung) in pc.rungs.iter().enumerate() {
+            let signers: std::collections::HashMap<bitcoin::secp256k1::PublicKey, &Vec<[u8; 64]>> =
+                pc.signatures
                     .iter()
-                    .filter_map(|(k, v)| v.get(i - 1).map(|s| (*k, *s)))
-                    .collect(),
-                &pc.leaf_script,
-                &control_block,
-            );
+                    .filter_map(|(k, v)| v.get(i).map(|s| (*k, s)))
+                    .collect();
+            if signers.len() < pc.required_sigs {
+                break;
+            }
+            let mut tx = rung.clone();
+            for input in 0..tx.input.len() {
+                tx.input[input].witness = tier_witness(
+                    &pc.voter_set,
+                    &signers
+                        .iter()
+                        .filter_map(|(k, v)| v.get(input).map(|s| (*k, *s)))
+                        .collect(),
+                    &pc.leaf_script,
+                    &control_block,
+                );
+            }
+            assembled.push(tx);
         }
+        if assembled.is_empty() {
+            tracing::error!(
+                "Confiscation {}: only {} of {} signatures on rung 0",
+                pc.ledger_prefix,
+                pc.signatures.len(),
+                pc.required_sigs
+            );
+            return;
+        }
+        let height = self.wallet.get_block_height().ok().unwrap_or(0);
+        let i = ladder_rung_due(assembled.len(), pc.h_c, height);
+        self.broadcast_confiscation_rung(&assembled[i], &pc.ledger_prefix, i);
+        tracing::info!("  Lottery address: {}", pc.lottery_address);
+        self.confiscation_ladders
+            .lock()
+            .unwrap()
+            .insert(pc.ledger_prefix.clone(), (assembled, pc.h_c));
+    }
 
-        // Broadcast
-        tracing::info!("  Broadcasting confiscation transaction...");
-
-        // "Transaction already in block chain" or "already in mempool"
-        // from bitcoind means another disputant got there first — the
-        // tx is in fact confirmed/queued, so treat it as the same
-        // happy-path as a fresh broadcast (write the marker, log).
-        let broadcast_result = self.wallet.broadcast(&confiscation_tx);
-        let confiscation_txid = confiscation_tx.compute_txid();
-        let broadcast_succeeded = match &broadcast_result {
+    fn broadcast_confiscation_rung(&self, tx: &bitcoin::Transaction, prefix: &str, rung: usize) {
+        // "Transaction already in block chain" or "already in mempool" from bitcoind means
+        // another disputant got there first: the same happy path as a fresh broadcast.
+        let broadcast_result = self.wallet.broadcast(tx);
+        let txid = tx.compute_txid();
+        let ok = match &broadcast_result {
             Ok(_) => true,
             Err(e) => {
                 let msg = e.to_string();
@@ -3152,14 +3213,48 @@ impl Node {
                     || msg.contains("Transaction already in mempool")
             }
         };
-        if broadcast_succeeded {
+        if ok {
             tracing::info!(
-                "Confiscation transaction in chain! Txid: {}",
-                confiscation_txid
+                "Confiscation of {} broadcast, rung {}: {}",
+                prefix,
+                rung,
+                txid
             );
-            tracing::info!("  Lottery address: {}", pc.lottery_address);
         } else if let Err(e) = broadcast_result {
-            tracing::error!("Failed to broadcast confiscation TX: {}", e);
+            tracing::error!(
+                "Failed to broadcast confiscation of {} (rung {}): {}",
+                prefix,
+                rung,
+                e
+            );
+        }
+    }
+
+    /// DEP-03 §Confiscation ladder: while no rung of a confiscation we assembled has confirmed,
+    /// broadcast the rung the schedule names (a BIP-125 replacement of the one below). Once one
+    /// confirms, the ladder is dropped.
+    pub(crate) async fn bump_confiscations(&self) {
+        let ladders: Vec<(String, Vec<bitcoin::Transaction>, u32)> = self
+            .confiscation_ladders
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, (r, h))| (k.clone(), r.clone(), *h))
+            .collect();
+        let height = self.wallet.get_block_height().ok().unwrap_or(0);
+        for (prefix, rungs, h_c) in ladders {
+            let confirmed = rungs.iter().any(|r| {
+                matches!(
+                    self.wallet.get_outpoint_value_and_confs(r.compute_txid(), 0),
+                    Ok(Some((_, c))) if c >= 1
+                )
+            });
+            if confirmed {
+                self.confiscation_ladders.lock().unwrap().remove(&prefix);
+                continue;
+            }
+            let i = ladder_rung_due(rungs.len(), h_c, height);
+            self.broadcast_confiscation_rung(&rungs[i], &prefix, i);
         }
     }
 
@@ -3227,10 +3322,17 @@ impl Node {
                 continue;
             }
 
-            // Skip if we already have a pending confiscation for this ledger
+            // Skip if we already have a pending confiscation for this ledger, or an assembled
+            // ladder that bump_confiscations is pushing.
             {
                 let pending = self.pending_confiscations.lock().unwrap();
-                if pending.contains_key(ledger_prefix) {
+                if pending.contains_key(ledger_prefix)
+                    || self
+                        .confiscation_ladders
+                        .lock()
+                        .unwrap()
+                        .contains_key(ledger_prefix)
+                {
                     continue;
                 }
             }
@@ -3277,6 +3379,8 @@ impl Node {
             let mut latest_quorum_begin_seq: Option<u64> = None;
             let mut quorum_expiry_at_qb: u32 = 0;
             let mut ruleset_at_qb: Option<String> = None;
+            let mut feerate_at_qb: Option<u32> = None;
+            let mut collateral_at_qb: u64 = 0;
             let mut armed_heights: HashMap<XOnlyPublicKey, u32> = HashMap::new();
 
             for update in &paginated_updates {
@@ -3299,6 +3403,8 @@ impl Node {
                             quorum_members: qm,
                             quorum_expiry,
                             protocol_version,
+                            reference_feerate,
+                            collateral_amount,
                             ..
                         } => {
                             // Keep the latest QuorumBegin (highest sequence) since
@@ -3313,6 +3419,8 @@ impl Node {
                                 quorum_members = qm.into_iter().map(|m| m.pubkey).collect();
                                 quorum_expiry_at_qb = quorum_expiry;
                                 ruleset_at_qb = protocol_version;
+                                feerate_at_qb = reference_feerate;
+                                collateral_at_qb = collateral_amount;
                             }
                         }
                         LedgerOperation::DisputeArmed { armed_block, .. } => {
@@ -3559,21 +3667,24 @@ impl Node {
                 );
                 continue;
             };
-            let mut confiscation_tx = deposits_core::tapscript_reserves::build_confiscation_tx(
-                &deposits_core::tapscript_reserves::ConfiscationTxParams {
-                    vault: (reserves_outpoint, reserves_amount),
-                    swept: obligations.swept.clone(),
-                    lottery_spk: lottery_output.script_pubkey(),
-                    voters: quorum_members.len() + 1,
-                    lock_time: 0,
-                    respectful: is_respectful,
-                    obligations_sats,
-                    residue_sats: obligations.residue_sats,
-                    splice_outs: obligations.splice_outs.clone(),
-                    operator: original_operator,
-                    anchor,
-                },
-            );
+            // DEP-03 §Confiscation ladder: the nLockTime is the tier's (set below, before the
+            // ladder is built from these parameters).
+            let mut ladder_params = deposits_core::tapscript_reserves::ConfiscationTxParams {
+                vault: (reserves_outpoint, reserves_amount),
+                swept: obligations.swept.clone(),
+                lottery_spk: lottery_output.script_pubkey(),
+                voters: quorum_members.len() + 1,
+                lock_time: 0,
+                respectful: is_respectful,
+                obligations_sats,
+                residue_sats: obligations.residue_sats,
+                splice_outs: obligations.splice_outs.clone(),
+                operator: original_operator,
+                anchor,
+                feerate_sat_vb: deposits_core::tapscript_reserves::confiscation_feerate(
+                    feerate_at_qb,
+                ),
+            };
 
             // Build the Taproot reserves structure for signing using
             // the ruleset that the disputed ledger committed to in
@@ -3671,12 +3782,17 @@ impl Node {
                 tier.timelock_blocks,
             );
 
-            // Patch the TX's nLockTime to match the tier's CLTV target.
-            // Tier 0 has timelock_blocks=0 → unchanged. Tier 1+ require
-            // nLockTime ≥ quorum_expiry + offset so the OP_CLTV in the
-            // tier's leaf script is satisfied.
-            confiscation_tx.lock_time =
-                bitcoin::absolute::LockTime::from_consensus(tier.timelock_blocks);
+            // The nLockTime is the tier's CLTV target. Tier 0 has timelock_blocks=0. Tier 1+
+            // require nLockTime ≥ quorum_expiry + offset so the OP_CLTV in the tier's leaf
+            // script is satisfied.
+            ladder_params.lock_time = tier.timelock_blocks;
+            let rungs = deposits_core::tapscript_reserves::build_confiscation_ladder(
+                &ladder_params,
+                collateral_at_qb,
+            );
+            let confiscation_tx = rungs[0].clone();
+            // DEP-03 §Confiscation ladder: the broadcast schedule counts from max(nLockTime, E).
+            let h_c = tier.timelock_blocks.max(armer_set.snapshot);
 
             // Build leaf script and compute sighash
             let leaf_script = match taproot_builder.build_threshold_leaf(&tier) {
@@ -3700,77 +3816,58 @@ impl Node {
                 value: Amount::from_sat(*sats),
                 script_pubkey: reserves_addr.script_pubkey(),
             }));
-            // One sighash per swept input (inputs 1..), same leaf.
-            let sweep_sighashes: Vec<[u8; 32]> = {
-                let mut c = SighashCache::new(&confiscation_tx);
-                let mut v = Vec::new();
-                for i in 1..confiscation_tx.input.len() {
-                    match c.taproot_script_spend_signature_hash(
-                        i,
-                        &bitcoin::sighash::Prevouts::All(&prevouts),
-                        leaf_hash,
-                        TapSighashType::Default,
-                    ) {
-                        Ok(h) => v.push(*h.as_ref()),
-                        Err(e) => {
-                            tracing::error!("Failed to compute sweep sighash: {}", e);
-                            break;
-                        }
-                    }
-                }
-                v
-            };
-            if sweep_sighashes.len() + 1 != confiscation_tx.input.len() {
-                continue;
-            }
-
-            let mut sighash_cache = SighashCache::new(&confiscation_tx);
-            let sighash = match sighash_cache.taproot_script_spend_signature_hash(
-                0,
-                &bitcoin::sighash::Prevouts::All(&prevouts),
-                leaf_hash,
-                TapSighashType::Default,
-            ) {
-                Ok(sh) => sh,
+            // Per rung: one sighash per input (input 0 the vault, then the swept outputs), same leaf.
+            let rung_sighashes: Vec<Vec<[u8; 32]>> = match rungs
+                .iter()
+                .map(|r| {
+                    let mut c = SighashCache::new(r);
+                    (0..r.input.len())
+                        .map(|i| {
+                            c.taproot_script_spend_signature_hash(
+                                i,
+                                &bitcoin::sighash::Prevouts::All(&prevouts),
+                                leaf_hash,
+                                TapSighashType::Default,
+                            )
+                            .map(|h| *h.as_ref())
+                        })
+                        .collect::<Result<Vec<[u8; 32]>, _>>()
+                })
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(v) => v,
                 Err(e) => {
-                    tracing::error!("Failed to compute sighash: {}", e);
+                    tracing::error!("Failed to compute confiscation sighash: {}", e);
                     continue;
                 }
             };
+            let sighash_bytes: [u8; 32] = rung_sighashes[0][0];
+            let sweep_sighashes: Vec<[u8; 32]> = rung_sighashes[0][1..].to_vec();
 
-            let sighash_bytes: [u8; 32] = *sighash.as_ref();
-
-            // Sign with our key — Taproot script-spend on confiscation tx.
-            let our_signature = match self.handler.signer.bip340_sign(
-                &SignContext::no_ledger(SigPurpose::OnchainSighash),
-                &sighash_bytes,
-            ) {
-                Ok(s) => s,
+            // Sign every rung with our key — Taproot script-spend.
+            let ours: Result<Vec<Vec<[u8; 64]>>, _> = rung_sighashes
+                .iter()
+                .map(|hs| {
+                    hs.iter()
+                        .map(|h| {
+                            self.handler
+                                .signer
+                                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .collect();
+            let ours = match ours {
+                Ok(o) => o,
                 Err(e) => {
                     tracing::error!("Confiscation sighash sign failed: {}", e);
                     continue;
                 }
             };
+            let mut signatures: HashMap<PublicKey, Vec<Vec<[u8; 64]>>> = HashMap::new();
+            signatures.insert(our_pubkey, ours);
 
-            let mut signatures: HashMap<PublicKey, [u8; 64]> = HashMap::new();
-            signatures.insert(our_pubkey, our_signature);
-            let mut sweep_signatures: HashMap<PublicKey, Vec<[u8; 64]>> = HashMap::new();
-            {
-                let mut ours = Vec::new();
-                for h in &sweep_sighashes {
-                    match self
-                        .handler
-                        .signer
-                        .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
-                    {
-                        Ok(s) => ours.push(s),
-                        Err(e) => tracing::error!("Sweep sighash sign failed: {}", e),
-                    }
-                }
-                sweep_signatures.insert(our_pubkey, ours);
-            }
-
-            tracing::info!("  Signed with our key");
+            tracing::info!("  Signed {} rungs with our key", rungs.len());
 
             // Request signatures from other quorum members via Nostr
             let required_sigs = tier.threshold;
@@ -3780,75 +3877,36 @@ impl Node {
                 voter_count
             );
 
-            // If we already have enough signatures (e.g., threshold=1), broadcast immediately
+            // If we already have enough signatures (e.g., threshold=1), assemble and broadcast
+            // immediately.
             if signatures.len() >= required_sigs {
-                let control_block = match taproot_output.control_block_for_tier(tier_index) {
-                    Some(cb) => cb,
-                    None => {
-                        tracing::error!("Failed to get control block for tier");
-                        continue;
-                    }
+                let pc = PendingConfiscation {
+                    request_id: String::new(),
+                    rungs: rungs.clone(),
+                    rung_sighashes: rung_sighashes.clone(),
+                    signatures,
+                    required_sigs,
+                    voter_set,
+                    tier_index,
+                    leaf_script,
+                    taproot_output,
+                    lottery_address: lottery_output.address.to_string(),
+                    ledger_prefix: ledger_prefix.to_string(),
+                    created_at: std::time::Instant::now(),
+                    h_c,
                 };
-
-                let mut witness = bitcoin::Witness::new();
-                let sorted_keys = voter_set.sorted_x_only_pubkeys();
-
-                for x_only in sorted_keys.iter().rev() {
-                    for voter in voter_set.all_voters() {
-                        if voter.x_only_public_key().0 == *x_only {
-                            if let Some(sig) = signatures.get(&voter) {
-                                witness.push(sig);
-                            } else {
-                                witness.push(&[] as &[u8]);
-                            }
-                            break;
-                        }
-                    }
-                }
-
-                witness.push(leaf_script.as_bytes());
-                witness.push(control_block.serialize());
-
-                let mut confiscation_tx = confiscation_tx;
-                confiscation_tx.input[0].witness = witness;
-                for i in 1..confiscation_tx.input.len() {
-                    confiscation_tx.input[i].witness = super::dispute::tier_witness(
-                        &voter_set,
-                        &sweep_signatures
-                            .iter()
-                            .filter_map(|(k, v)| v.get(i - 1).map(|s| (*k, *s)))
-                            .collect(),
-                        &leaf_script,
-                        &control_block,
-                    );
-                }
-
-                tracing::info!("  Broadcasting confiscation transaction (enough sigs locally)...");
-                // See note at finalize_confiscation: an "already in
-                // block chain / mempool" error means another disputant
-                // beat us to the broadcast — still a success outcome.
-                let broadcast_result = self.wallet.broadcast(&confiscation_tx);
-                let txid = confiscation_tx.compute_txid();
-                let broadcast_succeeded = match &broadcast_result {
-                    Ok(_) => true,
-                    Err(e) => {
-                        let msg = e.to_string();
-                        msg.contains("Transaction already in block chain")
-                            || msg.contains("txn-already-in-mempool")
-                            || msg.contains("Transaction already in mempool")
-                    }
-                };
-                if broadcast_succeeded {
-                    tracing::info!("Confiscation transaction in chain! Txid: {}", txid);
-                } else if let Err(e) = broadcast_result {
-                    tracing::error!("Failed to broadcast confiscation TX: {}", e);
-                }
+                tracing::info!("  Broadcasting confiscation (enough sigs locally)...");
+                self.assemble_and_broadcast_confiscation(pc);
                 continue;
             }
 
             // Send the request and store pending state (non-blocking)
             let unsigned_tx_bytes = bitcoin::consensus::encode::serialize(&confiscation_tx);
             let unsigned_tx_hex = hex::encode(&unsigned_tx_bytes);
+            let unsigned_rungs: Vec<String> = rungs
+                .iter()
+                .map(|r| hex::encode(bitcoin::consensus::encode::serialize(r)))
+                .collect();
 
             // Pull last_valid_sequence out of the fork compound key
             // (format `{ledger_id:64}_{fork_seq:06}_{op_prefix:16}`).
@@ -3877,6 +3935,8 @@ impl Node {
                 "tier_index": tier_index,
                 // DEP-06: one signature per swept migration output (inputs 1..)
                 "sweep_sighashes": sweep_sighashes.iter().map(hex::encode).collect::<Vec<_>>(),
+                // DEP-03 §Confiscation ladder: every rung, rung 0 first
+                "unsigned_rungs": unsigned_rungs,
             });
 
             let request_id = match self
@@ -3900,10 +3960,9 @@ impl Node {
             // Store pending state — signatures will be collected on subsequent periodic cycles
             let pending = PendingConfiscation {
                 request_id,
-                confiscation_tx,
-                sighash_bytes,
+                rungs: rungs.clone(),
+                rung_sighashes,
                 signatures,
-                sweep_signatures,
                 required_sigs,
                 voter_set,
                 tier_index,
@@ -3912,14 +3971,15 @@ impl Node {
                 lottery_address: lottery_output.address.to_string(),
                 ledger_prefix: ledger_prefix.to_string(),
                 created_at: std::time::Instant::now(),
+                h_c,
             };
 
             {
                 use bitcoin::hashes::Hash;
-                self.known_confiscation_txids
-                    .lock()
-                    .unwrap()
-                    .insert(pending.confiscation_tx.compute_txid().to_byte_array());
+                let mut known = self.known_confiscation_txids.lock().unwrap();
+                for r in &pending.rungs {
+                    known.insert(r.compute_txid().to_byte_array());
+                }
             }
             self.pending_confiscations
                 .lock()

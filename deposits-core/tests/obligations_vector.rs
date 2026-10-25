@@ -98,6 +98,8 @@ fn confiscation_obligations_match_cl() {
                     splice_outs: outs,
                     operator: kv["operator"].parse().unwrap(),
                     anchor: hex::decode(&kv["anchor"]).unwrap().try_into().unwrap(),
+                    feerate_sat_vb:
+                        deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
                 });
                 assert_eq!(
                     serialize_hex(&tx),

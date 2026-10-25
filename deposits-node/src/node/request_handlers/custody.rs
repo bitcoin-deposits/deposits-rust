@@ -328,7 +328,7 @@ impl Node {
         // reshape outputs to drain the UTXO into their own pubkey while
         // claiming the dispute resolved respectfully. Refuses (and
         // surfaces a structured reason) on any mismatch.
-        let sweep_sighashes = match self
+        let per_rung = match self
             .verify_proposed_confiscation_tx(request, &sighash_bytes)
             .await
         {
@@ -364,29 +364,45 @@ impl Node {
         };
 
         // A confiscation we cosign spends this vault legitimately; without
-        // this, our own vault watch would accuse its signers.
+        // this, our own vault watch would accuse its signers.  Every rung of it.
         if let Some(txid) = crate::node::vault_watch::confiscation_txid_from_params(&request.params)
         {
             self.known_confiscation_txids.lock().unwrap().insert(txid);
         }
-
-        // DEP-06: one signature per swept migration output (inputs 1..).
-        let mut sweep_signatures = Vec::new();
-        for h in &sweep_sighashes {
-            match self
-                .handler
-                .signer
-                .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
-            {
-                Ok(s) => sweep_signatures.push(hex::encode(s)),
-                Err(e) => return (false, None, Some(format!("sweep sighash sign: {}", e))),
-            }
+        for txid in crate::node::vault_watch::confiscation_rung_txids_from_params(&request.params) {
+            self.known_confiscation_txids.lock().unwrap().insert(txid);
         }
-        let result = serde_json::json!({
+
+        // Per rung: input 0's signature, then one per swept migration output (DEP-06).
+        let mut rung_signatures: Vec<String> = Vec::new();
+        let mut rung_sweep_signatures: Vec<Vec<String>> = Vec::new();
+        for hashes in &per_rung {
+            let mut sigs = Vec::new();
+            for h in hashes {
+                match self
+                    .handler
+                    .signer
+                    .bip340_sign(&SignContext::no_ledger(SigPurpose::OnchainSighash), h)
+                {
+                    Ok(s) => sigs.push(hex::encode(s)),
+                    Err(e) => return (false, None, Some(format!("sighash sign: {}", e))),
+                }
+            }
+            rung_signatures.push(sigs[0].clone());
+            rung_sweep_signatures.push(sigs[1..].to_vec());
+        }
+        let laddered = request.params.get("unsigned_rungs").is_some();
+        let mut result = serde_json::json!({
             "signer": self.node_id_hex.clone(),
             "signature": hex::encode(signature_bytes),
-            "sweep_signatures": sweep_signatures,
+            "sweep_signatures": rung_sweep_signatures[0].clone(),
         });
+        if laddered {
+            result["rung_signatures"] = serde_json::json!(rung_signatures);
+            if per_rung[0].len() > 1 {
+                result["rung_sweep_signatures"] = serde_json::json!(rung_sweep_signatures);
+            }
+        }
 
         tracing::info!(
             "Signed confiscation sighash for ledger {}...",
@@ -1295,7 +1311,7 @@ impl Node {
         &self,
         request: &crate::nostr::LedgerRequest,
         expected_sighash: &[u8; 32],
-    ) -> Result<Vec<[u8; 32]>, String> {
+    ) -> Result<Vec<Vec<[u8; 32]>>, String> {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use bitcoin::sighash::{SighashCache, TapSighashType};
         use bitcoin::taproot::{LeafVersion, TapLeafHash};
@@ -1396,12 +1412,15 @@ impl Node {
 
         // 5. Replay through last_valid_sequence to capture obligations + latest QB
         let mut state = LedgerState::new(original_operator, String::new(), 0);
+        #[allow(clippy::type_complexity)]
         let mut latest_qb: Option<(
             String,
             [u8; 32],
             Vec<bitcoin::secp256k1::PublicKey>,
             u32,
             Option<String>,
+            Option<u32>,
+            u64,
         )> = None;
         let mut latest_qb_seq: i64 = -1;
         for u in &updates {
@@ -1419,6 +1438,8 @@ impl Node {
                 quorum_members,
                 quorum_expiry,
                 protocol_version,
+                reference_feerate,
+                collateral_amount,
                 ..
             } = &op
             {
@@ -1430,6 +1451,8 @@ impl Node {
                         quorum_members.iter().map(|m| m.pubkey).collect(),
                         *quorum_expiry,
                         protocol_version.clone(),
+                        *reference_feerate,
+                        *collateral_amount,
                     ));
                 }
             }
@@ -1437,8 +1460,15 @@ impl Node {
                 .apply_for(u, &op)
                 .map_err(|e| format!("replay seq {}: {:?}", u.sequence_number, e))?;
         }
-        let (qb_reserves_id, qb_ledger_hash, qb_members, qb_expiry, qb_ruleset) =
-            latest_qb.ok_or_else(|| "no QuorumBegin observed".to_string())?;
+        let (
+            qb_reserves_id,
+            qb_ledger_hash,
+            qb_members,
+            qb_expiry,
+            qb_ruleset,
+            qb_reference_feerate,
+            qb_collateral_msats,
+        ) = latest_qb.ok_or_else(|| "no QuorumBegin observed".to_string())?;
         let obligations_sats = state.total_deposit_balance() / 1000;
 
         // 6. Lottery participants: the DEP-03 eligibility cut.
@@ -1503,18 +1533,9 @@ impl Node {
 
         // 8. The fee is the DEP-03 rule, not the proposer's choice: every cosigner
         //    rebuilds the identical transaction.
-        let fee = deposits_core::tapscript_reserves::confiscation_fee_sats(
-            qb_members
-                .iter()
-                .filter(|pk| **pk != original_operator)
-                .count()
-                + 1,
-            deposits_core::tapscript_reserves::CONFISCATION_DEFAULT_FEERATE_SAT_VB,
-        );
-
-        let _ = fee;
-        // DEP-03: sign only a byte-identical rebuild (lock_time is checked against the tier below).
-        let rebuilt = deposits_core::tapscript_reserves::build_confiscation_tx(
+        // DEP-03: sign only a byte-identical rebuild (lock_time is checked against the tier below),
+        // every rung of its fee ladder (§Confiscation ladder).
+        let ladder = deposits_core::tapscript_reserves::build_confiscation_ladder(
             &deposits_core::tapscript_reserves::ConfiscationTxParams {
                 vault: (reserves_outpoint, reserves_amount),
                 swept: obligations.swept.clone(),
@@ -1533,8 +1554,13 @@ impl Node {
                 // DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point
                 anchor: deposits_core::rotation_order::dispute_anchor(&updates)
                     .ok_or("no DisputeEnter to anchor the confiscation")?,
+                feerate_sat_vb: deposits_core::tapscript_reserves::confiscation_feerate(
+                    qb_reference_feerate,
+                ),
             },
+            qb_collateral_msats,
         );
+        let rebuilt = ladder[0].clone();
         if rebuilt != proposed_tx {
             return Err(format!(
                 "the proposed confiscation is not the one we rebuild (inputs {} vs {}, outputs {} vs {})",
@@ -1606,29 +1632,59 @@ impl Node {
             script_pubkey: reserves_script.clone(),
         }));
 
-        let mut sighash_cache = SighashCache::new(&proposed_tx);
-        let mut sweep_sighashes: Vec<[u8; 32]> = Vec::new();
-        for i in 1..proposed_tx.input.len() {
-            let h = sighash_cache
-                .taproot_script_spend_signature_hash(
-                    i,
-                    &bitcoin::sighash::Prevouts::All(&prevouts),
-                    leaf_hash,
-                    TapSighashType::Default,
-                )
-                .map_err(|e| format!("compute sweep sighash: {}", e))?;
-            sweep_sighashes.push(h.to_byte_array());
-        }
-        let derived_sighash = sighash_cache
-            .taproot_script_spend_signature_hash(
-                0,
-                &bitcoin::sighash::Prevouts::All(&prevouts),
-                leaf_hash,
-                TapSighashType::Default,
-            )
-            .map_err(|e| format!("compute sighash: {}", e))?;
-        let derived_bytes: [u8; 32] = derived_sighash.to_byte_array();
+        // DEP-03 §Confiscation ladder: a proposer sends every rung as `unsigned_rungs` (rung 0
+        // first); each must be our rung i. One that predates the ladder sends rung 0 alone.
+        let proposed_rungs: Vec<Transaction> = match request
+            .params
+            .get("unsigned_rungs")
+            .and_then(|v| v.as_array())
+        {
+            Some(a) => a
+                .iter()
+                .map(|h| {
+                    let b = hex::decode(h.as_str().ok_or("unsigned_rungs: not a string")?)
+                        .map_err(|e| format!("unsigned_rungs hex: {e}"))?;
+                    bitcoin::consensus::encode::deserialize::<Transaction>(&b)
+                        .map_err(|e| format!("unsigned_rungs parse: {e}"))
+                })
+                .collect::<Result<_, String>>()?,
+            None => Vec::new(),
+        };
+        let to_sign: Vec<Transaction> = if proposed_rungs.is_empty() {
+            vec![proposed_tx.clone()]
+        } else {
+            if proposed_rungs.len() != ladder.len() {
+                return Err(format!(
+                    "the proposal has {} rungs; our ladder has {}",
+                    proposed_rungs.len(),
+                    ladder.len()
+                ));
+            }
+            if let Some(i) = (0..ladder.len()).find(|i| proposed_rungs[*i] != ladder[*i]) {
+                return Err(format!("rung {i} is not our rebuild's"));
+            }
+            ladder
+        };
 
+        // Per rung: input 0's sighash, then each swept input's (same leaf).
+        let mut per_rung: Vec<Vec<[u8; 32]>> = Vec::new();
+        for rung in &to_sign {
+            let mut sighash_cache = SighashCache::new(rung);
+            let mut hashes = Vec::new();
+            for i in 0..rung.input.len() {
+                let h = sighash_cache
+                    .taproot_script_spend_signature_hash(
+                        i,
+                        &bitcoin::sighash::Prevouts::All(&prevouts),
+                        leaf_hash,
+                        TapSighashType::Default,
+                    )
+                    .map_err(|e| format!("compute sighash: {}", e))?;
+                hashes.push(h.to_byte_array());
+            }
+            per_rung.push(hashes);
+        }
+        let derived_bytes = per_rung[0][0];
         if &derived_bytes != expected_sighash {
             return Err(format!(
                 "sighash mismatch: derived={}, claimed={}",
@@ -1637,7 +1693,7 @@ impl Node {
             ));
         }
 
-        Ok(sweep_sighashes)
+        Ok(per_rung)
     }
 
     pub(crate) async fn process_custodian_query_request(

@@ -330,14 +330,12 @@ pub struct PendingInvoice {
 struct PendingConfiscation {
     /// Nostr event ID of our confiscation_sign request
     request_id: String,
-    /// The unsigned confiscation transaction
-    confiscation_tx: bitcoin::Transaction,
-    /// Sighash bytes that all signers sign
-    sighash_bytes: [u8; 32],
-    /// Signatures collected so far (signer pubkey -> 64-byte Schnorr sig)
-    signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, [u8; 64]>,
-    /// DEP-06: each signer's signatures on the swept inputs (1..), in input order.
-    sweep_signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, Vec<[u8; 64]>>,
+    /// DEP-03 §Confiscation ladder: every rung, unsigned, rung 0 first.
+    rungs: Vec<bitcoin::Transaction>,
+    /// Per rung, the sighash of each input (input 0 the vault, then the swept outputs).
+    rung_sighashes: Vec<Vec<[u8; 32]>>,
+    /// Signatures collected so far: signer -> per rung (a prefix of the ladder), per input.
+    signatures: std::collections::HashMap<bitcoin::secp256k1::PublicKey, Vec<Vec<[u8; 64]>>>,
     /// Number of signatures required
     required_sigs: usize,
     /// The VoterSet for building the witness
@@ -354,6 +352,9 @@ struct PendingConfiscation {
     ledger_prefix: String,
     /// When we sent the request (for timeout)
     created_at: std::time::Instant,
+    /// DEP-03 §Confiscation ladder: the height the broadcast schedule counts from,
+    /// `max(nLockTime, E)`.
+    h_c: u32,
 }
 
 /// A deposits-node node
@@ -568,6 +569,9 @@ pub struct Node {
     /// Pending confiscation requests awaiting co-signatures from quorum members.
     /// Key is the ledger prefix (from custody_armed marker).
     pending_confiscations: Mutex<HashMap<String, PendingConfiscation>>,
+    /// DEP-03 §Confiscation ladder: assembled rungs of confiscations we proposed, by ledger
+    /// prefix, with `h_c`, rebroadcast on schedule until one confirms.
+    confiscation_ladders: Mutex<HashMap<String, (Vec<bitcoin::Transaction>, u32)>>,
 
     /// Pending `lottery_subset_attest` requests for revealer-subset claims,
     /// keyed by ledger id (see `lottery_recovery`).

@@ -113,14 +113,14 @@ pub fn rebuild_matching(
     spend_height: Option<u32>,
 ) -> Result<(), String> {
     use deposits_core::tapscript_reserves::{
-        build_confiscation_tx, ConfiscationTxParams, LotteryScriptBuilder,
+        build_confiscation_ladder, confiscation_feerate, ConfiscationTxParams, LotteryScriptBuilder,
     };
     let view = dispute_view(ledger_id, updates).ok_or("no LedgerOpen for this ledger")?;
     let origin = view[0].operator_id;
     let fork_point = dispute_last_valid_sequence(&view).ok_or("no DisputeEnter")?;
 
     // The governing QuorumBegin: the original operator's newest at or before the fork point.
-    let (qb_members, qb_expiry, qb_ruleset, vault) = view
+    let (qb_members, qb_expiry, qb_ruleset, vault, qb_feerate, qb_collateral) = view
         .iter()
         .filter(|u| u.operator_id == origin && u.sequence_number <= fork_point)
         .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
@@ -137,6 +137,7 @@ pub fn rebuild_matching(
                     quorum_members,
                     quorum_expiry,
                     protocol_version,
+                    reference_feerate,
                     ..
                 } = op
                 else {
@@ -152,12 +153,14 @@ pub fn rebuild_matching(
                         new_outpoint_vout,
                         (amount + collateral_amount) / 1000,
                     ),
+                    reference_feerate,
+                    collateral_amount,
                 ))
             }
             _ => None,
         })
         .max_by_key(|(seq, ..)| *seq)
-        .map(|(_, m, e, r, v)| (m, e, r, v))
+        .map(|(_, m, e, r, v, f, c)| (m, e, r, v, f, c))
         .ok_or("no QuorumBegin at or before the fork point")?;
 
     // DEP-03 §Fee ladder: the vault is output 0 of whichever rung confirmed; rung 0 holds the
@@ -260,22 +263,29 @@ pub fn rebuild_matching(
         .build()
         .map_err(|e| format!("lottery: {e:?}"))?;
         let obligations = confiscation_obligations(chain, &view, &set)?;
-        let rebuilt = build_confiscation_tx(&ConfiscationTxParams {
-            vault,
-            swept: obligations.swept.clone(),
-            lottery_spk: lottery.script_pubkey(),
-            voters: voters_n,
-            lock_time,
-            respectful,
-            obligations_sats,
-            residue_sats: obligations.residue_sats,
-            splice_outs: obligations.splice_outs.clone(),
-            operator: origin,
-            anchor,
-        });
-        if rebuilt.compute_txid() == spend.compute_txid() {
+        // DEP-06: byte-identical to any rung of the ladder (DEP-03 §Confiscation ladder).
+        let ladder = build_confiscation_ladder(
+            &ConfiscationTxParams {
+                vault,
+                swept: obligations.swept.clone(),
+                lottery_spk: lottery.script_pubkey(),
+                voters: voters_n,
+                lock_time,
+                respectful,
+                obligations_sats,
+                residue_sats: obligations.residue_sats,
+                splice_outs: obligations.splice_outs.clone(),
+                operator: origin,
+                anchor,
+                feerate_sat_vb: confiscation_feerate(qb_feerate),
+            },
+            qb_collateral,
+        );
+        let spend_txid = spend.compute_txid();
+        if ladder.iter().any(|r| r.compute_txid() == spend_txid) {
             return Ok(());
         }
+        let rebuilt = ladder[0].clone();
         if closest.is_none() {
             closest = Some(format!(
                 "{}; lottery {}",

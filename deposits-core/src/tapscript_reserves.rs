@@ -981,6 +981,29 @@ pub struct ConfiscationTxParams {
     pub operator: bitcoin::secp256k1::PublicKey,
     /// DEP-03 §On-Chain State Anchor: the chain hash at the dispute's fork point.
     pub anchor: [u8; 32],
+    /// DEP-03 §"Confiscation fee": the governing `QuorumBegin`'s `reference_feerate_sat_vb`, or
+    /// [`CONFISCATION_DEFAULT_FEERATE_SAT_VB`] when none is recorded.
+    pub feerate_sat_vb: u64,
+}
+
+/// DEP-03 §"Confiscation fee": the feerate a confiscation pays, the governing `QuorumBegin`'s
+/// `reference_feerate_sat_vb`, or [`CONFISCATION_DEFAULT_FEERATE_SAT_VB`] when none (or 0) is recorded.
+pub fn confiscation_feerate(reference_feerate: Option<u32>) -> u64 {
+    match reference_feerate {
+        Some(f) if f > 0 => f as u64,
+        _ => CONFISCATION_DEFAULT_FEERATE_SAT_VB,
+    }
+}
+
+/// DEP-03 §Confiscation ladder: a confiscation is signed at 1, 2, 4 and 8 times the rule fee.
+pub const CONFISCATION_RUNGS: usize = 4;
+
+/// DEP-03 §"Confiscation fee": rung 0's fee, `feerate × (163 + 30 × voters + |swept| × (41 + 30 ×
+/// voters))`.
+pub fn confiscation_rule_fee(p: &ConfiscationTxParams) -> u64 {
+    let v = p.voters as u64;
+    p.feerate_sat_vb
+        .saturating_mul(163 + 30 * v + p.swept.len() as u64 * (41 + 30 * v))
 }
 
 /// The unsigned confiscation (DEP-03 / DEP-06): version 2, nLockTime the tier's CLTV; input 0 the
@@ -989,12 +1012,14 @@ pub struct ConfiscationTxParams {
 /// P2WPKH unless that is under 294), then the splice-outs, last the anchor. Fee `2 × (163 + 30 ×
 /// voters + |swept| × (41 + 30 × voters))`. Mirrors cl-deposits' `confiscation-tx`.
 pub fn build_confiscation_tx(p: &ConfiscationTxParams) -> bitcoin::Transaction {
+    build_confiscation_tx_at(p, confiscation_rule_fee(p))
+}
+
+/// The confiscation paying `fee` (rung i pays `2^i ×` the rule fee, DEP-03 §Confiscation ladder).
+fn build_confiscation_tx_at(p: &ConfiscationTxParams, fee: u64) -> bitcoin::Transaction {
     use bitcoin::{
         absolute::LockTime, transaction::Version, Amount, Sequence, TxIn, TxOut, Witness,
     };
-    let v = p.voters as u64;
-    let fee =
-        CONFISCATION_DEFAULT_FEERATE_SAT_VB * (163 + 30 * v + p.swept.len() as u64 * (41 + 30 * v));
     let inputs: u64 = p.vault.1 + p.swept.iter().map(|(_, s)| *s).sum::<u64>();
     let paid: u64 = p.splice_outs.iter().map(|(_, s)| *s).sum();
     let reserves = inputs.saturating_sub(paid);
@@ -1046,6 +1071,50 @@ pub fn build_confiscation_tx(p: &ConfiscationTxParams) -> bitcoin::Transaction {
         input,
         output,
     }
+}
+
+/// DEP-03 §Confiscation ladder: the rungs of a confiscation, rung 0 first, rung i paying `2^i ×`
+/// the rule fee. Rung i > 0 keeps rung 0's outputs (same count and scripts, so the shape never
+/// collapses mid-ladder) with only the output that pays for it lower, the lottery (punitive) or the
+/// operator's change (respectful); it exists only while that output stays at its floor (330 or 294
+/// sats) and its extra fee is at most `collateral_msats / 1000`. The ladder stops at the first rung
+/// that fails. Mirrors cl-deposits' `confiscation-ladder`.
+pub fn build_confiscation_ladder(
+    p: &ConfiscationTxParams,
+    collateral_msats: u64,
+) -> Vec<bitcoin::Transaction> {
+    let fee0 = confiscation_rule_fee(p);
+    let r0 = build_confiscation_tx_at(p, fee0);
+    // The output whose value moves between rungs: the change when the respectful shape survived.
+    let pay = if p.respectful && r0.output.len() > 2 + p.splice_outs.len() {
+        1
+    } else {
+        0
+    };
+    let floor = if pay == 1 { 294 } else { 330 };
+    let mut out = vec![r0];
+    for i in 1..CONFISCATION_RUNGS {
+        let delta = fee0.saturating_mul((1u64 << i) - 1);
+        let r = build_confiscation_tx_at(p, fee0.saturating_mul(1u64 << i));
+        let r0 = &out[0];
+        let same_shape = r.output.len() == r0.output.len()
+            && r.output
+                .iter()
+                .zip(&r0.output)
+                .all(|(a, b)| a.script_pubkey == b.script_pubkey);
+        // A shortfall would saturate to zero in the builder: compare against what it should pay.
+        let paid = r.output[pay].value.to_sat();
+        let should = r0.output[pay].value.to_sat().checked_sub(delta);
+        if !same_shape
+            || should != Some(paid)
+            || paid < floor
+            || delta.saturating_mul(1000) > collateral_msats
+        {
+            break;
+        }
+        out.push(r);
+    }
+    out
 }
 
 /// DEP-03 `claim_fee_floor` with no `reference_feerate_sat_vb` recorded: the lottery
