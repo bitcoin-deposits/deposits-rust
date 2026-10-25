@@ -3190,13 +3190,28 @@ impl Node {
             return;
         }
         let height = self.wallet.get_block_height().ok().unwrap_or(0);
-        let i = ladder_rung_due(assembled.len(), pc.h_c, height);
+        // The schedule counts from our first broadcast of this ladder.
+        let h_c = match self
+            .confiscation_ladders
+            .lock()
+            .unwrap()
+            .get(&pc.ledger_prefix)
+        {
+            Some((prior, h))
+                if prior.first().map(|t| t.compute_txid())
+                    == assembled.first().map(|t| t.compute_txid()) =>
+            {
+                *h
+            }
+            _ => height.max(pc.h_c),
+        };
+        let i = ladder_rung_due(assembled.len(), h_c, height);
         self.broadcast_confiscation_rung(&assembled[i], &pc.ledger_prefix, i);
         tracing::info!("  Lottery address: {}", pc.lottery_address);
         self.confiscation_ladders
             .lock()
             .unwrap()
-            .insert(pc.ledger_prefix.clone(), (assembled, pc.h_c));
+            .insert(pc.ledger_prefix.clone(), (assembled, h_c));
     }
 
     fn broadcast_confiscation_rung(&self, tx: &bitcoin::Transaction, prefix: &str, rung: usize) {
@@ -3791,8 +3806,9 @@ impl Node {
                 collateral_at_qb,
             );
             let confiscation_tx = rungs[0].clone();
-            // DEP-03 §Confiscation ladder: the broadcast schedule counts from max(nLockTime, E).
-            let h_c = tier.timelock_blocks.max(armer_set.snapshot);
+            // DEP-03 §Confiscation ladder: the broadcast schedule counts from our first broadcast
+            // (set when the rungs are assembled).
+            let h_c = 0u32;
 
             // Build leaf script and compute sighash
             let leaf_script = match taproot_builder.build_threshold_leaf(&tier) {

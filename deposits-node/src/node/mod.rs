@@ -352,8 +352,8 @@ struct PendingConfiscation {
     ledger_prefix: String,
     /// When we sent the request (for timeout)
     created_at: std::time::Instant,
-    /// DEP-03 §Confiscation ladder: the height the broadcast schedule counts from,
-    /// `max(nLockTime, E)`.
+    /// DEP-03 §Confiscation ladder: a floor for the height the broadcast schedule counts from,
+    /// which is our first broadcast of the ladder.
     h_c: u32,
 }
 
