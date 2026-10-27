@@ -191,7 +191,10 @@ pub fn verify_rotation_rungs(
         t
     };
     if ours.len() != rungs.len() || ours.iter().zip(rungs).any(|(a, b)| *a != strip(b)) {
-        return Err("rotation_rungs_tx differ from the DEP-03 ladder we build".into());
+        return Err(format!(
+            "rotation_rungs_tx differ from the DEP-03 ladder we build: {}",
+            ladder_difference(&ours, &rungs.iter().map(strip).collect::<Vec<_>>())
+        ));
     }
     let txids: Vec<[u8; 32]> = ours
         .iter()
@@ -579,4 +582,57 @@ pub fn dormancy_entries(
 /// DEP-03 Reference feerate bounds for median m: [max(1, m/2), max(2, 2m)].
 pub fn feerate_bounds(m: u64) -> (u64, u64) {
     ((m / 2).max(1), (2 * m).max(2))
+}
+
+/// The first place two rotation ladders differ, for the refusal message: a refused rotation
+/// otherwise says nothing about which side built what.
+pub fn ladder_difference(ours: &[Transaction], theirs: &[Transaction]) -> String {
+    if ours.len() != theirs.len() {
+        return format!("{} rungs, theirs {}", ours.len(), theirs.len());
+    }
+    for (i, (a, b)) in ours.iter().zip(theirs).enumerate() {
+        if a == b {
+            continue;
+        }
+        if a.version != b.version || a.lock_time != b.lock_time {
+            return format!(
+                "rung {i}: version/locktime {:?}/{} vs {:?}/{}",
+                a.version, a.lock_time, b.version, b.lock_time
+            );
+        }
+        if a.input.len() != b.input.len() {
+            return format!("rung {i}: {} inputs vs {}", a.input.len(), b.input.len());
+        }
+        for (j, (x, y)) in a.input.iter().zip(&b.input).enumerate() {
+            if x.previous_output != y.previous_output || x.sequence != y.sequence {
+                return format!(
+                    "rung {i} input {j}: {} seq {} vs {} seq {}",
+                    x.previous_output, x.sequence, y.previous_output, y.sequence
+                );
+            }
+        }
+        if a.output.len() != b.output.len() {
+            let fmt = |t: &Transaction| {
+                t.output
+                    .iter()
+                    .map(|o| format!("{}:{}", o.value.to_sat(), o.script_pubkey.to_hex_string()))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            return format!("rung {i}: outputs [{}] vs [{}]", fmt(a), fmt(b));
+        }
+        for (j, (x, y)) in a.output.iter().zip(&b.output).enumerate() {
+            if x != y {
+                return format!(
+                    "rung {i} output {j}: {} {} vs {} {}",
+                    x.value.to_sat(),
+                    x.script_pubkey.to_hex_string(),
+                    y.value.to_sat(),
+                    y.script_pubkey.to_hex_string()
+                );
+            }
+        }
+        return format!("rung {i}: differs elsewhere");
+    }
+    "no difference".into()
 }
