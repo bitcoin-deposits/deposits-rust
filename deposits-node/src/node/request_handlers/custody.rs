@@ -1067,6 +1067,20 @@ impl Node {
         let Some(tip) = history.last() else {
             return refuse("empty replica".into());
         };
+        // A replica behind the QuorumBegin is a gap, not a mismatch: queue it for the background
+        // gap-fill (off the run loop) and answer "not yet"; the operator asks again for a recorded
+        // rotation, and by then we judge it on the caught-up replica (signet soak, 2026-10-28:
+        // members refused K's rungs for good while their replicas lagged).
+        if tip.sequence_number + 1 < qb.sequence_number {
+            self.stale_joined_ledgers
+                .lock()
+                .unwrap()
+                .insert(request.ledger_id.clone());
+            return refuse(format!(
+                "not yet: our replica is at seq {}, behind the QuorumBegin at {}; catching up, retry",
+                tip.sequence_number, qb.sequence_number
+            ));
+        }
         if tip.sequence_number + 1 != qb.sequence_number || state.chain_tip_hash != qb.previous_hash
         {
             return refuse("the QuorumBegin does not extend our replica".into());

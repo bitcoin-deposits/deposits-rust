@@ -682,12 +682,34 @@ impl Node {
         ledger_id: &str,
         last_valid_seq: u64,
         proof_hash: [u8; 32],
+        reason: &str,
     ) -> Result<(), Error> {
         self.arm_dispute(
             ledger_id,
             last_valid_seq,
             None,
             Some(proof_hash),
+            Some(reason),
+            &crate::chain_backend::ScanRetry::quick(),
+        )
+        .await
+    }
+
+    /// Dispute on a fault we found ourselves (an equivocation, a non-conforming cosigned
+    /// update), labelled with its ground (DEP-05 §Deposed operator) rather than a generic
+    /// reason a peer could not tell from an expiry dispute.
+    pub(crate) async fn auto_arm_for_dispute_with_reason(
+        &self,
+        ledger_id: &str,
+        last_valid_seq: u64,
+        reason: &str,
+    ) -> Result<(), Error> {
+        self.arm_dispute(
+            ledger_id,
+            last_valid_seq,
+            None,
+            None,
+            Some(reason),
             &crate::chain_backend::ScanRetry::quick(),
         )
         .await
@@ -911,6 +933,7 @@ impl Node {
                     last_valid_seq,
                     None,
                     None,
+                    None,
                     &crate::chain_backend::ScanRetry::default(),
                 )
                 .await
@@ -961,6 +984,7 @@ impl Node {
             last_valid_seq,
             anchor,
             None,
+            None,
             &crate::chain_backend::ScanRetry::quick(),
         )
         .await
@@ -972,6 +996,7 @@ impl Node {
         last_valid_seq: u64,
         anchor: Option<([u8; 32], u32)>,
         fraud_proof_hash: Option<[u8; 32]>,
+        reason: Option<&str>,
         scan_retry: &crate::chain_backend::ScanRetry,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{hash160, Hash};
@@ -1055,7 +1080,7 @@ impl Node {
                     reason: if anchor.is_some() {
                         "quorum_expired".to_string()
                     } else {
-                        "auto_dispute".to_string()
+                        reason.unwrap_or("auto_dispute").to_string()
                     },
                     anchor_block_hash,
                     anchor_block_height,

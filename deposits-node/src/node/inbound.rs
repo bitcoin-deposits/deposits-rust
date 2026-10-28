@@ -546,7 +546,7 @@ impl Node {
         let last_valid = equiv_seq.saturating_sub(1);
 
         match self
-            .auto_arm_for_dispute_with_anchor(&accused_ledger, last_valid, None)
+            .auto_arm_for_dispute_with_reason(&accused_ledger, last_valid, "equivocation")
             .await
         {
             Ok(()) => tracing::warn!(
@@ -853,7 +853,11 @@ impl Node {
                 let fault = inbound.update.clone();
                 tokio::spawn(async move {
                     if let Err(e) = node
-                        .auto_arm_for_dispute_with_anchor(&ledger_id, last_valid, None)
+                        .auto_arm_for_dispute_with_reason(
+                            &ledger_id,
+                            last_valid,
+                            "non_conforming_update",
+                        )
                         .await
                     {
                         tracing::error!(
@@ -1855,6 +1859,7 @@ impl Node {
                 ledger_id,
                 last_valid_seq,
                 broadcast.proof.proof_hash(),
+                broadcast.proof.proof_type.dispute_reason(),
             )
             .await
         };

@@ -108,6 +108,36 @@ pub(crate) fn latest_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<
 }
 
 /// The `reason` of the `DisputeEnter` on a fork branch, if it holds one.
+/// The newest `DisputeEnter` of a fork's history judged by its ground (DEP-05 §"The ground of a
+/// dispute"): `Some(true)` for a `quorum_expired` dispute, whatever label a legacy record carries.
+/// `governing_quorum_expiry` is the base ledger's: only disputes at or after its latest
+/// `QuorumBegin` count, and that is the one governing them.
+pub(crate) fn dispute_enter_is_expiry(
+    history: &[SignedLedgerUpdate],
+    governing_quorum_expiry: Option<u32>,
+) -> Option<bool> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history
+        .iter()
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                reason,
+                anchor_block_height,
+                fraud_proof_hash,
+                ..
+            }) => Some(deposits_core::types::dispute_is_expiry(
+                &reason,
+                anchor_block_height.is_some(),
+                fraud_proof_hash.is_some(),
+                u.block_height,
+                governing_quorum_expiry,
+            )),
+            _ => None,
+        })
+}
+
 pub(crate) fn dispute_enter_reason(history: &[SignedLedgerUpdate]) -> Option<String> {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::TlvDecode;
@@ -180,13 +210,14 @@ impl Node {
                     {
                         return None;
                     }
-                    let reason = dispute_enter_reason(&fork.history)?;
-                    if !is_expiry_reason(&reason) {
-                        return None;
-                    }
                     let base_id = key[..64].to_string();
                     let base = ledgers.get(&base_id);
                     let base_expiry = base.and_then(|b| b.read().unwrap().state.quorum_expiry);
+                    if !dispute_enter_is_expiry(&fork.history, base_expiry)? {
+                        return None;
+                    }
+                    // Stood down as the expiry dispute it is, whatever label it was written with.
+                    let reason = "quorum_expired".to_string();
                     // DEP-05 §"When a quorum_expired dispute ends": a QuorumBegin after the
                     // fork point answers the dispute's ground, whatever the tip says now.
                     let reestablished = match (dispute_enter_last_valid(&fork.history), base) {

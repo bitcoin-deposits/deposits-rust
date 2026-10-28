@@ -762,6 +762,42 @@ pub fn quorum_expiry_ok<'a>(
         && !quorum_born_expired(expiry, block_height)
 }
 
+/// The `DisputeEnter` reasons that name a freezing ground (DEP-06 proof types, snake_case).
+pub const PUNITIVE_DISPUTE_REASONS: &[&str] = &[
+    "uncredited_onchain_payment",
+    "uncredited_lightning_payment",
+    "stale_cosignature",
+    "dispute_dereliction",
+    "non_conforming_update",
+    "winner_collateral_deviation",
+    "equivocation",
+    "non_conforming_cosignature",
+    "unauthorized_vault_spend",
+    "unhonoured_obligation",
+];
+
+/// DEP-05 §"The ground of a dispute": whether a `DisputeEnter` is a `quorum_expired` dispute.
+/// Its reason decides when it names a ground. A generic reason (`auto_dispute`, `fraud`, written
+/// before reasons named grounds) is read from the record: the ground is the expiry when the
+/// `DisputeEnter` carries an expiry anchor, or cites no fraud proof and was entered past the
+/// `quorum_expiry` of the `QuorumBegin` governing at its fork point. Vector `dispute_ground.json`.
+pub fn dispute_is_expiry(
+    reason: &str,
+    has_anchor: bool,
+    cites_proof: bool,
+    enter_block_height: u32,
+    governing_quorum_expiry: Option<u32>,
+) -> bool {
+    let r = reason.replace('-', "_");
+    if r == "quorum_expired" {
+        return true;
+    }
+    if PUNITIVE_DISPUTE_REASONS.contains(&r.as_str()) {
+        return false;
+    }
+    has_anchor || (!cites_proof && governing_quorum_expiry.is_some_and(|e| enter_block_height > e))
+}
+
 /// DEP-05 §"When a quorum_expired dispute ends": a `QuorumBegin` after the
 /// dispute's fork point (re-establishment) ends it, unless its confiscation
 /// already confirmed. Judged from the ledger, never the chain tip: the

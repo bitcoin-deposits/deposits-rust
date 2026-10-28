@@ -137,6 +137,25 @@ impl FraudProofType {
         matches!(self, Self::QuorumExpired)
     }
 
+    /// The `DisputeEnter.reason` a dispute on this ground carries (DEP-05 §Deposed operator):
+    /// the variant in snake_case, so a peer can tell a `quorum_expired` dispute from a freezing
+    /// one by its label alone.
+    pub fn dispute_reason(&self) -> &'static str {
+        match self {
+            Self::UncreditedOnchainPayment => "uncredited_onchain_payment",
+            Self::UncreditedLightningPayment => "uncredited_lightning_payment",
+            Self::StaleCosignature => "stale_cosignature",
+            Self::DisputeDereliction => "dispute_dereliction",
+            Self::NonConformingUpdate => "non_conforming_update",
+            Self::QuorumExpired => "quorum_expired",
+            Self::WinnerCollateralDeviation => "winner_collateral_deviation",
+            Self::Equivocation => "equivocation",
+            Self::NonConformingCosignature => "non_conforming_cosignature",
+            Self::UnauthorizedVaultSpend => "unauthorized_vault_spend",
+            Self::UnhonouredObligation => "unhonoured_obligation",
+        }
+    }
+
     /// Whether a broadcast of this proof type must carry an embedding and
     /// causal chain (DEP-06), or is *self-evident*.
     ///

@@ -1,0 +1,15 @@
+{
+  "description": "DEP-05 §The ground of a dispute: a DisputeEnter is a quorum_expired dispute (non-freezing) when its reason is quorum_expired, never when its reason names a punitive ground (a DEP-06 proof type in snake_case), and, for a generic reason written before reasons named grounds, when it carries an expiry anchor or cites no fraud proof and was entered past the quorum_expiry of the QuorumBegin governing at its fork point.",
+  "cases": [
+    {"name": "quorum_expired", "reason": "quorum_expired", "has_anchor": true, "cites_proof": false, "enter_block_height": 5000, "governing_quorum_expiry": 4990, "expiry": true},
+    {"name": "cl's older spelling", "reason": "quorum-expired", "has_anchor": false, "cites_proof": true, "enter_block_height": 5000, "governing_quorum_expiry": 4990, "expiry": true},
+    {"name": "a punitive ground after the expiry still freezes", "reason": "non_conforming_update", "has_anchor": false, "cites_proof": true, "enter_block_height": 5000, "governing_quorum_expiry": 4990, "expiry": false},
+    {"name": "equivocation, no proof cited", "reason": "equivocation", "has_anchor": false, "cites_proof": false, "enter_block_height": 5000, "governing_quorum_expiry": 4990, "expiry": false},
+    {"name": "legacy auto_dispute on a received QuorumExpired proof (soak, 2026-10-23)", "reason": "auto_dispute", "has_anchor": false, "cites_proof": false, "enter_block_height": 6380, "governing_quorum_expiry": 6365, "expiry": true},
+    {"name": "legacy auto_dispute with an anchor", "reason": "auto_dispute", "has_anchor": true, "cites_proof": false, "enter_block_height": 4000, "governing_quorum_expiry": 4990, "expiry": true},
+    {"name": "legacy auto_dispute on a cited proof", "reason": "auto_dispute", "has_anchor": false, "cites_proof": true, "enter_block_height": 6380, "governing_quorum_expiry": 6365, "expiry": false},
+    {"name": "legacy auto_dispute before the expiry", "reason": "auto_dispute", "has_anchor": false, "cites_proof": false, "enter_block_height": 4000, "governing_quorum_expiry": 4990, "expiry": false},
+    {"name": "legacy auto_dispute at the expiry block itself", "reason": "auto_dispute", "has_anchor": false, "cites_proof": false, "enter_block_height": 4990, "governing_quorum_expiry": 4990, "expiry": false},
+    {"name": "legacy fraud, no QuorumBegin governs", "reason": "fraud", "has_anchor": false, "cites_proof": false, "enter_block_height": 5000, "governing_quorum_expiry": null, "expiry": false}
+  ]
+}

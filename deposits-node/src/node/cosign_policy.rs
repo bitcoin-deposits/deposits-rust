@@ -68,7 +68,17 @@ pub(crate) fn refusal_for(
         .filter(|(k, _)| k.starts_with(&prefix))
         .filter_map(|(_, arc)| {
             let fork = arc.read().ok()?;
-            let reason = super::expiry_watch::dispute_enter_reason(&fork.history)?;
+            // DEP-05 §"The ground of a dispute": read from the record, not only its label, so
+            // a legacy generic reason on an expiry dispute stops freezing co-signing.
+            let label = super::expiry_watch::dispute_enter_reason(&fork.history)?;
+            let reason = if super::expiry_watch::dispute_enter_is_expiry(
+                &fork.history,
+                base.state.quorum_expiry,
+            )? {
+                "quorum_expired".to_string()
+            } else {
+                label
+            };
             let acquired = fork.history.iter().any(|u| {
                 matches!(
                     LedgerOperation::tlv_decode(&u.message),
