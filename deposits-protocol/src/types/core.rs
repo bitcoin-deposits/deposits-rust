@@ -744,6 +744,24 @@ pub fn planned_quorum_expiry<'a>(
     quorum_expiry_ceiling(members).map_or(own, |c| c.min(own))
 }
 
+/// DEP-05 §"Born expired": a `QuorumBegin` whose `quorum_expiry` is at or below its
+/// own `block_height` seats a quorum past expiry from its first update. A height of 0
+/// (an unsigned header) judges nothing.
+pub fn quorum_born_expired(quorum_expiry: u32, block_height: u32) -> bool {
+    block_height > 0 && quorum_expiry <= block_height
+}
+
+/// DEP-05: `expiry` is a valid `quorum_expiry` for a `QuorumBegin` seating `members`
+/// at `block_height`: within the shortest commitment, and not born expired.
+pub fn quorum_expiry_ok<'a>(
+    members: impl IntoIterator<Item = &'a QuorumMember>,
+    expiry: u32,
+    block_height: u32,
+) -> bool {
+    quorum_expiry_ceiling(members).is_none_or(|c| expiry <= c)
+        && !quorum_born_expired(expiry, block_height)
+}
+
 /// DEP-05 §"When a quorum_expired dispute ends": a `QuorumBegin` after the
 /// dispute's fork point (re-establishment) ends it, unless its confiscation
 /// already confirmed. Judged from the ledger, never the chain tip: the

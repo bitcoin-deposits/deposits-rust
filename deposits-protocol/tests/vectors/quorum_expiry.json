@@ -1,15 +1,13 @@
 {
-  "comment": "DEP-05 \"Quorum expiry\": a QuorumBegin's quorum_expiry must not exceed the shortest membership_until among the members it seats (members with no commitment impose none). An operator proposes min(current_block + its window, that ceiling). Shared with cl-deposits (inspect/vectors/quorum_expiry.json).",
+  "comment": "DEP-05 \"Quorum expiry\": a QuorumBegin's quorum_expiry must not exceed the shortest membership_until among the members it seats (members with no commitment impose none). An operator proposes min(current_block + its window, that ceiling). A QuorumBegin whose quorum_expiry is at or below its block_height (current_block) is non-conforming: born expired; an operator whose plan is not after the block (rotatable false) collects fresh consents first. Shared with deposits-rust (deposits-protocol/tests/vectors/quorum_expiry.json).",
   "cases": [
-    {"name": "soak 2026-10-24: a 30-day window past the shortest commitment is cut to it", "commitments": [5921, 6100, 7000, 6500], "current_block": 4593, "window_blocks": 4320, "ceiling": 5921, "planned": 5921,
-     "checks": [{"expiry": 8913, "ok": false}, {"expiry": 5921, "ok": true}, {"expiry": 5920, "ok": true}]},
-    {"name": "every commitment beyond the window: the window stands", "commitments": [20000, 19000, 30000], "current_block": 10000, "window_blocks": 4320, "ceiling": 19000, "planned": 14320,
-     "checks": [{"expiry": 14320, "ok": true}, {"expiry": 19000, "ok": true}, {"expiry": 19001, "ok": false}]},
-    {"name": "members without a commitment impose none", "commitments": [null, 9000, null], "current_block": 8000, "window_blocks": 4320, "ceiling": 9000, "planned": 9000,
-     "checks": [{"expiry": 9000, "ok": true}, {"expiry": 9001, "ok": false}]},
-    {"name": "no member committed: no ceiling, the window stands", "commitments": [null, null, null], "current_block": 8000, "window_blocks": 4320, "ceiling": null, "planned": 12320,
-     "checks": [{"expiry": 12320, "ok": true}, {"expiry": 99999, "ok": true}]},
-    {"name": "an operator may always shorten", "commitments": [7000, 7000, 7000], "current_block": 5000, "window_blocks": 144, "ceiling": 7000, "planned": 5144,
-     "checks": [{"expiry": 5144, "ok": true}, {"expiry": 7000, "ok": true}, {"expiry": 7001, "ok": false}]}
+    {"name": "soak 2026-10-24: a 30-day window past the shortest commitment is cut to it", "commitments": [5921, 6100, 7000, 6500], "current_block": 4593, "window_blocks": 4320, "ceiling": 5921, "planned": 5921, "checks": [{"expiry": 8913, "ok": false}, {"expiry": 5921, "ok": true}, {"expiry": 5920, "ok": true}], "rotatable": true},
+    {"name": "every commitment beyond the window: the window stands", "commitments": [20000, 19000, 30000], "current_block": 10000, "window_blocks": 4320, "ceiling": 19000, "planned": 14320, "checks": [{"expiry": 14320, "ok": true}, {"expiry": 19000, "ok": true}, {"expiry": 19001, "ok": false}], "rotatable": true},
+    {"name": "members without a commitment impose none", "commitments": [null, 9000, null], "current_block": 8000, "window_blocks": 4320, "ceiling": 9000, "planned": 9000, "checks": [{"expiry": 9000, "ok": true}, {"expiry": 9001, "ok": false}], "rotatable": true},
+    {"name": "no member committed: no ceiling, the window stands", "commitments": [null, null, null], "current_block": 8000, "window_blocks": 4320, "ceiling": null, "planned": 12320, "checks": [{"expiry": 12320, "ok": true}, {"expiry": 99999, "ok": true}], "rotatable": true},
+    {"name": "an operator may always shorten", "commitments": [7000, 7000, 7000], "current_block": 5000, "window_blocks": 144, "ceiling": 7000, "planned": 5144, "checks": [{"expiry": 5144, "ok": true}, {"expiry": 7000, "ok": true}, {"expiry": 7001, "ok": false}], "rotatable": true},
+    {"name": "born_expired: soak 2026-10-28, stale commitments below the block", "commitments": [7181, 7300, 7250, 7400], "current_block": 9341, "window_blocks": 4320, "ceiling": 7181, "planned": 7181, "rotatable": false, "checks": [{"expiry": 7181, "ok": false}, {"expiry": 9341, "ok": false}, {"expiry": 9342, "ok": false}]},
+    {"name": "expiry_at_block: a commitment ending at the block is already lapsed", "commitments": [6000, 6500, 7000], "current_block": 6000, "window_blocks": 4320, "ceiling": 6000, "planned": 6000, "rotatable": false, "checks": [{"expiry": 6000, "ok": false}, {"expiry": 5999, "ok": false}, {"expiry": 6001, "ok": false}]},
+    {"name": "one block after the block is the earliest valid expiry", "commitments": [6001, 6500], "current_block": 6000, "window_blocks": 4320, "ceiling": 6001, "planned": 6001, "rotatable": true, "checks": [{"expiry": 6001, "ok": true}, {"expiry": 6000, "ok": false}, {"expiry": 6002, "ok": false}]}
   ]
 }

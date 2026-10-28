@@ -1,6 +1,9 @@
 //! DEP-05 §"Quorum expiry", against the vector shared with cl-deposits.
 
-use deposits_protocol::types::{planned_quorum_expiry, quorum_expiry_ceiling, QuorumMember};
+use deposits_protocol::types::{
+    planned_quorum_expiry, quorum_born_expired, quorum_expiry_ceiling, quorum_expiry_ok,
+    QuorumMember,
+};
 
 fn member(until: Option<u32>) -> QuorumMember {
     let pk = bitcoin::secp256k1::PublicKey::from_secret_key(
@@ -54,9 +57,17 @@ fn quorum_expiry_matches_the_shared_vector() {
             "{}",
             name
         );
+        let current = case["current_block"].as_u64().unwrap() as u32;
+        // DEP-05 §"Born expired": the operator rotates only to an expiry after the block.
+        assert_eq!(
+            !quorum_born_expired(planned, current),
+            case["rotatable"].as_bool().unwrap(),
+            "{}: rotatable",
+            name
+        );
         for chk in case["checks"].as_array().unwrap() {
             let e = chk["expiry"].as_u64().unwrap() as u32;
-            let ok = ceiling.map_or(true, |c| e <= c);
+            let ok = quorum_expiry_ok(members.iter(), e, current);
             assert_eq!(ok, chk["ok"].as_bool().unwrap(), "{}: expiry {}", name, e);
         }
     }

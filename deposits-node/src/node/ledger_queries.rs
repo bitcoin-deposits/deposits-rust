@@ -910,6 +910,19 @@ impl Node {
                 "No quorum members to rotate to. Add quorum members first.".to_string(),
             ));
         }
+        // DEP-05 §"Born expired": members whose commitments end at or below the
+        // current block would seat a quorum already past expiry; every validator
+        // refuses it. Collect fresh consents (auto_quorum_refresh) first.
+        if let Some(&expiry) = quorum_expiries.first() {
+            let current_block = self.wallet.get_block_height().unwrap_or(0);
+            if deposits_core::types::quorum_born_expired(expiry, current_block) {
+                return Err(Error::Protocol(format!(
+                    "quorum_expiry_not_after_block: the members' commitments end at {} \
+                     (current block {}); collect fresh consents before rotating",
+                    expiry, current_block
+                )));
+            }
+        }
 
         // Resolve which ruleset this rotation will commit to and check
         // that this binary can actually enforce it. Migrating to an

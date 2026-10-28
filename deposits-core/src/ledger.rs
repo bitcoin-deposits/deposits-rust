@@ -1236,6 +1236,7 @@ impl Ledger {
             ));
         }
         let (block_height, block_hash) = self.signing_header(block_height, block_hash);
+        self.check_quorum_begin_at(&operation, block_height)?;
 
         // Author-side role guards. These check whether THIS NODE is
         // entitled to author the operation onto THIS ledger — a check
@@ -1844,6 +1845,28 @@ impl Ledger {
     /// the operator's own apply path — operators are free to attempt
     /// degraded re-establishment by collecting their own signatures
     /// against this helper's permission gate.
+    /// DEP-05 §"Born expired": refuse a `QuorumBegin` whose `quorum_expiry` is at or
+    /// below the update's own signed `block_height`.
+    pub fn check_quorum_begin_at(
+        &self,
+        operation: &LedgerOperation,
+        block_height: u32,
+    ) -> DepositsResult<()> {
+        if let LedgerOperation::QuorumBegin { quorum_expiry, .. } = operation {
+            if deposits_protocol::types::quorum_born_expired(*quorum_expiry, block_height) {
+                return Err(DepositsError::ProtocolViolation {
+                    violation_type: "quorum_expiry_not_after_block".to_string(),
+                    details: format!(
+                        "QuorumBegin quorum_expiry={} is not after its block_height={}: the \
+                         quorum would be born expired. Collect fresh member consents first.",
+                        quorum_expiry, block_height
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate_for_cosign(
         &self,
         operation: &LedgerOperation,

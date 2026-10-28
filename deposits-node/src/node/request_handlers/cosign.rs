@@ -647,7 +647,11 @@ impl Node {
                         // — fresh enough since the wallet syncs every
                         // periodic_interval.
                         let current_block_height = self.wallet.get_block_height().unwrap_or(0);
-                        if let Err(e) = ledger.validate_for_cosign(&operation, current_block_height)
+                        if let Err(e) = ledger
+                            .validate_for_cosign(&operation, current_block_height)
+                            .and_then(|()| {
+                                ledger.check_quorum_begin_at(&operation, fields.block_height)
+                            })
                         {
                             tracing::warn!(
                                 "Cosign validation FAILED (policy/expiry): seq={} op={} error={}",
