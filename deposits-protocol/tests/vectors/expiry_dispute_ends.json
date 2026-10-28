@@ -1,0 +1,16 @@
+{
+  "description": "DEP-05 §When a quorum_expired dispute ends: a QuorumBegin after the dispute's fork point (last_valid_sequence) ends it unless its confiscation already confirmed; a quorum_expired DisputeEnter is armed on only while its ground stands (anchor past the governing expiry, no re-establishment since). Judged from the ledger, never the chain tip.",
+  "ended": [
+    {"name": "no re-establishment", "last_valid_sequence": 100, "latest_quorum_begin_sequence": 50, "confiscation_confirmed": false, "ended": false},
+    {"name": "re-established after the fork point", "last_valid_sequence": 100, "latest_quorum_begin_sequence": 120, "confiscation_confirmed": false, "ended": true},
+    {"name": "re-established, but the confiscation confirmed first", "last_valid_sequence": 100, "latest_quorum_begin_sequence": 120, "confiscation_confirmed": true, "ended": false},
+    {"name": "the QuorumBegin at the fork point is the one the dispute is about", "last_valid_sequence": 100, "latest_quorum_begin_sequence": 100, "confiscation_confirmed": false, "ended": false},
+    {"name": "soak ledger A: disputed at 72257 (expiry 4373), re-established at 73657, expired again", "last_valid_sequence": 72256, "latest_quorum_begin_sequence": 73657, "confiscation_confirmed": false, "ended": true}
+  ],
+  "arm": [
+    {"name": "ground stands", "anchor_block_height": 4377, "governing_quorum_expiry": 4373, "last_valid_sequence": 72256, "latest_quorum_begin_sequence": 67113, "arm": true},
+    {"name": "anchor not past the expiry", "anchor_block_height": 4373, "governing_quorum_expiry": 4373, "last_valid_sequence": 72256, "latest_quorum_begin_sequence": 67113, "arm": false},
+    {"name": "re-established since: the soak's stale anchor", "anchor_block_height": 4377, "governing_quorum_expiry": 4373, "last_valid_sequence": 72256, "latest_quorum_begin_sequence": 73657, "arm": false},
+    {"name": "a fresh dispute on the later expiry", "anchor_block_height": 6830, "governing_quorum_expiry": 6822, "last_valid_sequence": 75423, "latest_quorum_begin_sequence": 73657, "arm": true}
+  ]
+}

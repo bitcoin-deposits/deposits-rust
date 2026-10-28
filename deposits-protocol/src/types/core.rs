@@ -744,6 +744,33 @@ pub fn planned_quorum_expiry<'a>(
     quorum_expiry_ceiling(members).map_or(own, |c| c.min(own))
 }
 
+/// DEP-05 §"When a quorum_expired dispute ends": a `QuorumBegin` after the
+/// dispute's fork point (re-establishment) ends it, unless its confiscation
+/// already confirmed. Judged from the ledger, never the chain tip: the
+/// re-established quorum may itself have expired since, which is a new ground
+/// for a new dispute. Vector `expiry_dispute_ends.json`.
+pub fn expiry_dispute_ended(
+    last_valid_sequence: u64,
+    latest_quorum_begin_sequence: u64,
+    confiscation_confirmed: bool,
+) -> bool {
+    !confiscation_confirmed && latest_quorum_begin_sequence > last_valid_sequence
+}
+
+/// DEP-05: a `quorum_expired` `DisputeEnter` is armed on only while its
+/// ground stands: its anchor is past the expiry of the `QuorumBegin`
+/// governing at its fork point, and no `QuorumBegin` since has re-established
+/// the quorum.
+pub fn arm_on_expiry_dispute(
+    anchor_block_height: u32,
+    governing_quorum_expiry: u32,
+    last_valid_sequence: u64,
+    latest_quorum_begin_sequence: u64,
+) -> bool {
+    anchor_block_height > governing_quorum_expiry
+        && !expiry_dispute_ended(last_valid_sequence, latest_quorum_begin_sequence, false)
+}
+
 /// Default compensation payout cadence: 2016 blocks (~2 weeks). Mirrors the
 /// default `frequency_blocks` on `FeeStructure`, so by default a member is
 /// paid once per operator fee-collection cycle.

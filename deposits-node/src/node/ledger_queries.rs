@@ -1694,13 +1694,35 @@ impl Node {
                     })
                     .collect()
             };
-            if rungs.first() == Some(&existing.outpoint) && rungs.len() > 1 {
-                match self.wallet.vault_utxo_rungs(&rungs, &prev_script_pubkey)? {
-                    Some((o, sats)) if o != existing.outpoint => (o, sats),
-                    _ => (existing.outpoint, existing.amount),
-                }
-            } else {
+            // The ledger names the vault, not the wallet's record of it: a rotation planned but
+            // never recorded (its QuorumBegin refused) once left the record on that plan's
+            // rung 0, a transaction that never existed, and every later rotation spent it
+            // while each member, rightly, built from the governing QuorumBegin's ladder
+            // (signet soak, 2026-10-25 to 27: every reference rotation refused).
+            if rungs.is_empty() {
                 (existing.outpoint, existing.amount)
+            } else {
+                match self.wallet.vault_utxo_rungs(&rungs, &prev_script_pubkey)? {
+                    Some((o, sats)) => {
+                        if o != existing.outpoint {
+                            tracing::warn!(
+                                "rotation of {}...: the governing ladder's unspent rung is {} \
+                                 (the wallet recorded {}); spending the ladder's",
+                                &ledger_id[..16.min(ledger_id.len())],
+                                o,
+                                existing.outpoint
+                            );
+                        }
+                        (o, sats)
+                    }
+                    None => {
+                        return Err(Error::Protocol(format!(
+                            "no rung of the governing QuorumBegin's ladder is unspent on chain \
+                             (rung 0 {}); not rotating a vault the ledger does not name",
+                            rungs[0]
+                        )))
+                    }
+                }
             }
         };
         let splice_vault = splice

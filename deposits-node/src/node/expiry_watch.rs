@@ -78,6 +78,35 @@ pub(crate) fn expiry_dispute_stands_down(
     is_expiry_reason(reason) && base_quorum_expiry.is_some_and(|expiry| height <= expiry)
 }
 
+/// The `last_valid_sequence` of the `DisputeEnter` on a fork branch, if it holds one.
+pub(crate) fn dispute_enter_last_valid(history: &[SignedLedgerUpdate]) -> Option<u64> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history
+        .iter()
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some(last_valid_sequence),
+            _ => None,
+        })
+}
+
+/// The sequence of the latest `QuorumBegin` in a ledger's history.
+pub(crate) fn latest_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<u64> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history.iter().rev().find_map(|u| {
+        matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::QuorumBegin { .. })
+        )
+        .then_some(u.sequence_number)
+    })
+}
+
 /// The `reason` of the `DisputeEnter` on a fork branch, if it holds one.
 pub(crate) fn dispute_enter_reason(history: &[SignedLedgerUpdate]) -> Option<String> {
     use deposits_core::messages::LedgerOperation;
@@ -133,9 +162,9 @@ impl Node {
     /// `DisputeYield` only once armed) and is simply no longer pursued: the
     /// watch does not re-fire on a quorum that has not expired.
     pub(crate) async fn stand_down_reestablished_expiry_disputes(&self) {
-        // (fork key, base id, reason, base expiry, fork state) for every fork
-        // of ours still live that was opened for a lapsed quorum.
-        type Live = (String, String, String, Option<u32>, DisputeState);
+        // (fork key, base id, reason, base expiry, fork state, re-established since the fork
+        // point) for every fork of ours still live that was opened for a lapsed quorum.
+        type Live = (String, String, String, Option<u32>, DisputeState, bool);
         let live: Vec<Live> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -156,15 +185,24 @@ impl Node {
                         return None;
                     }
                     let base_id = key[..64].to_string();
-                    let base_expiry = ledgers
-                        .get(&base_id)
-                        .and_then(|b| b.read().unwrap().state.quorum_expiry);
+                    let base = ledgers.get(&base_id);
+                    let base_expiry = base.and_then(|b| b.read().unwrap().state.quorum_expiry);
+                    // DEP-05 §"When a quorum_expired dispute ends": a QuorumBegin after the
+                    // fork point answers the dispute's ground, whatever the tip says now.
+                    let reestablished = match (dispute_enter_last_valid(&fork.history), base) {
+                        (Some(lvs), Some(b)) => latest_quorum_begin_seq(&b.read().unwrap().history)
+                            .is_some_and(|qb| {
+                                deposits_core::types::expiry_dispute_ended(lvs, qb, false)
+                            }),
+                        _ => false,
+                    };
                     Some((
                         key.clone(),
                         base_id,
                         reason,
                         base_expiry,
                         fork.state.dispute_state,
+                        reestablished,
                     ))
                 })
                 .collect()
@@ -178,11 +216,13 @@ impl Node {
             Ok((h, _)) => h,
             Err(_) => return,
         };
-        let candidates = live.into_iter().filter(|(_, _, reason, expiry, _)| {
-            expiry_dispute_stands_down(reason, *expiry, height)
-        });
+        let candidates = live
+            .into_iter()
+            .filter(|(_, _, reason, expiry, _, reestablished)| {
+                *reestablished || expiry_dispute_stands_down(reason, *expiry, height)
+            });
 
-        for (fork_key, ledger_id, _, expiry, state) in candidates {
+        for (fork_key, ledger_id, _, expiry, state, _) in candidates {
             let prefix = &ledger_id[..16];
 
             if state != DisputeState::Armed {
