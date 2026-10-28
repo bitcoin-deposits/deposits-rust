@@ -1007,7 +1007,7 @@ impl Node {
         };
 
         // Our replica as it stood before the QuorumBegin.
-        let (pre, live, applied, snapshot) = {
+        let (pre, live, applied, snapshot, holds_qb) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let Some(arc) = ledgers.get(&request.ledger_id) else {
                 return refuse("ledger not locally held".into());
@@ -1028,6 +1028,16 @@ impl Node {
                 .history
                 .last()
                 .is_some_and(|u| u.sequence_number >= qb.sequence_number);
+            // Our replica already took this very QuorumBegin (same operator-signed message).
+            // Its parent may then be another cosignature variant of the same update than the
+            // one the QuorumBegin's previous_hash names (the content hash covers the
+            // cosignatures): the chain was judged when we applied it, not something to judge
+            // again from our copy's hash (signet soak, 2026-10-28: K's rungs refused for good).
+            let holds_qb = l.history.iter().rev().any(|u| {
+                u.sequence_number == qb.sequence_number
+                    && u.operator_signature == qb.operator_signature
+                    && u.message == qb.message
+            });
             let pre: Vec<deposits_core::types::SignedLedgerUpdate> = l
                 .history
                 .iter()
@@ -1039,7 +1049,7 @@ impl Node {
                 .as_ref()
                 .filter(|(seq, _)| *seq == qb.sequence_number)
                 .map(|(_, st)| st.clone());
-            (pre, l.state.clone(), applied, snapshot)
+            (pre, l.state.clone(), applied, snapshot, holds_qb)
         };
         // Disk reads below, outside the ledgers lock. The genesis and the governing QuorumBegin
         // may have left the capped in-memory history.
@@ -1081,9 +1091,18 @@ impl Node {
                 tip.sequence_number, qb.sequence_number
             ));
         }
-        if tip.sequence_number + 1 != qb.sequence_number || state.chain_tip_hash != qb.previous_hash
+        if tip.sequence_number + 1 != qb.sequence_number
+            || (state.chain_tip_hash != qb.previous_hash && !holds_qb)
         {
-            return refuse("the QuorumBegin does not extend our replica".into());
+            return refuse(format!(
+                "the QuorumBegin does not extend our replica: it is seq {} on {}, our tip before it \
+                 is seq {} at {} ({})",
+                qb.sequence_number,
+                hex::encode(&qb.previous_hash[..8]),
+                tip.sequence_number,
+                hex::encode(&state.chain_tip_hash[..8]),
+                if applied { "rebuilt" } else { "live" }
+            ));
         }
         if qb.verify_operator_signature().is_err() {
             return refuse("the QuorumBegin's operator signature does not verify".into());
