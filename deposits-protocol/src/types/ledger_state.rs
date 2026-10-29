@@ -36,24 +36,31 @@ pub fn ruleset_enforces_fee_cap(_ruleset_name: &str) -> bool {
 
 /// DEP-18: the ruleset that carries October 2026's convicting rules.
 pub const ANCHOR_LADDER_V5: &str = "anchor-ladder-v5";
+/// DEP-18: `anchor-ladder-v5`'s rules plus `balance-commit-v4`'s `MissingBalanceCommitment`.
+pub const BALANCE_ANCHOR_V6: &str = "balance-anchor-v6";
+
+/// Whether a ruleset carries `anchor-ladder-v5`'s gated rules (v5 itself, and v6).
+fn carries_v5_rules(ruleset_name: &str) -> bool {
+    ruleset_name == ANCHOR_LADDER_V5 || ruleset_name == BALANCE_ANCHOR_V6
+}
 
 /// DEP-18 gated rules of `anchor-ladder-v5`. Each is dormant under any other
 /// ruleset, and under none (`""`, a ledger before its first ruleset).
 pub fn ruleset_requires_signed_header(ruleset_name: &str) -> bool {
-    ruleset_name == ANCHOR_LADDER_V5
+    carries_v5_rules(ruleset_name)
 }
 /// Born expired (DEP-05), judged under the ruleset the `QuorumBegin` names.
 pub fn ruleset_forbids_born_expired(ruleset_name: &str) -> bool {
-    ruleset_name == ANCHOR_LADDER_V5
+    carries_v5_rules(ruleset_name)
 }
 /// The collateral floor (DEP-05), judged under the ruleset the `QuorumBegin` names.
 pub fn ruleset_requires_collateral_floor(ruleset_name: &str) -> bool {
-    ruleset_name == ANCHOR_LADDER_V5
+    carries_v5_rules(ruleset_name)
 }
 /// Proof 10 and spend challenges (DEP-06), judged under the ruleset of the
 /// vault's governing `QuorumBegin`.
 pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
-    ruleset_name == ANCHOR_LADDER_V5
+    carries_v5_rules(ruleset_name)
 }
 
 /// Whether a ledger's active ruleset REQUIRES a balance commitment on every
@@ -64,7 +71,7 @@ pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
 /// match the replayed state) is intrinsic to every ruleset and is NOT gated by
 /// this — see `check_conformance`.
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "balance-commit-v4")
+    matches!(ruleset_name, "balance-commit-v4" | "balance-anchor-v6")
 }
 
 /// Whether this binary knows the named ruleset at all. Mirrors the
@@ -83,9 +90,8 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 /// the `cltv-offset-v2` cascade.
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
-        "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5" => {
-            "cltv-offset-v2"
-        }
+        "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5"
+        | "balance-anchor-v6" => "cltv-offset-v2",
         _ => "",
     }
 }
@@ -134,17 +140,20 @@ pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> Ru
 }
 
 /// The ruleset a new ledger names, and the reference policy's default target.
-pub const POLICY_TARGET_RULESET: &str = "anchor-ladder-v5";
+pub const POLICY_TARGET_RULESET: &str = BALANCE_ANCHOR_V6;
 
 /// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
-/// next `QuorumBegin`. A `balance-commit-v4` ledger keeps it (`anchor-ladder-v5`
-/// lacks `MissingBalanceCommitment`); otherwise the policy target when every
-/// member declares it, else the current ruleset, else `cltv-offset-v2`.
+/// next `QuorumBegin`. `balance-anchor-v6` when every member declares it;
+/// otherwise a `balance-commit-v4` ledger keeps it (`anchor-ladder-v5` lacks
+/// `MissingBalanceCommitment`), any other moves to `anchor-ladder-v5` when every
+/// member declares it; else the current ruleset, else `cltv-offset-v2`.
 pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
-    if current == "balance-commit-v4" {
-        current.to_string()
-    } else if every_declares(POLICY_TARGET_RULESET, declarations) {
+    if every_declares(POLICY_TARGET_RULESET, declarations) {
         POLICY_TARGET_RULESET.to_string()
+    } else if current == "balance-commit-v4" {
+        current.to_string()
+    } else if every_declares(ANCHOR_LADDER_V5, declarations) {
+        ANCHOR_LADDER_V5.to_string()
     } else if !current.is_empty() {
         current.to_string()
     } else {
@@ -2402,11 +2411,27 @@ impl LedgerState {
     /// surface the same error at real commit time), are returned unchanged.
     pub fn fill_balance_commitments(
         &self,
+        op: crate::messages::LedgerOperation,
+    ) -> crate::messages::LedgerOperation {
+        let h = apply_ctx().height;
+        self.fill_balance_commitments_at(op, h)
+    }
+
+    /// [`Self::fill_balance_commitments`] for the update at `height`: the declared
+    /// pair is the state after the whole update, including the exit requests its
+    /// height releases before the operation (DEP-20 §3, DEP-02 §Semantics).
+    pub fn fill_balance_commitments_at(
+        &self,
         mut op: crate::messages::LedgerOperation,
+        height: u32,
     ) -> crate::messages::LedgerOperation {
         use crate::messages::{BalanceCommitment, LedgerOperation as Op};
 
-        let next = match self.apply(&op) {
+        let ctx = ApplyCtx {
+            height,
+            ..apply_ctx()
+        };
+        let next = match with_apply_ctx(ctx, || self.apply(&op)) {
             Ok(n) => n,
             Err(_) => return op,
         };

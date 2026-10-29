@@ -28,3 +28,13 @@ plan balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder
 plan fee-cap-v3 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 anchor-ladder-v5
 plan fee-cap-v3 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3 fee-cap-v3
 plan - cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 cltv-offset-v2
+seat balance-anchor-v6 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 ok
+seat balance-anchor-v6 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 unsupported
+upgrade balance-commit-v4 balance-anchor-v6 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 ok
+upgrade anchor-ladder-v5 balance-anchor-v6 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 unsupported
+plan balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+plan balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 balance-commit-v4
+plan anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+plan anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+plan - cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+plan cltv-offset-v2 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5

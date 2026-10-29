@@ -432,7 +432,9 @@ impl LedgerActor {
             // operator declares the post-op (balance, locked_balance) it
             // computes; cosigners recompute and compare (verify-when-present,
             // intrinsic to every ruleset). Safe unconditionally per DEP-18.
-            let operation = ledger.state.fill_balance_commitments(operation);
+            let operation = ledger
+                .state
+                .fill_balance_commitments_at(operation, block_height);
             // Speculative-apply conformance during stage uses the same
             // chain_tip the StagedUpdate carries — so descriptor
             // `after(N)` checks on the operator side match what

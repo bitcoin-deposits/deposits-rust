@@ -112,5 +112,5 @@ fn ruleset_gating_matches_cl() {
             other => panic!("unknown line {other}"),
         }
     }
-    assert_eq!(counts, [4, 12, 8, 12]);
+    assert_eq!(counts, [5, 15, 10, 16]);
 }
