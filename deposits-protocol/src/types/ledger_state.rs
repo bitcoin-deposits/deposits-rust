@@ -90,6 +90,68 @@ pub fn reserves_family(ruleset_name: &str) -> &'static str {
     }
 }
 
+/// DEP-18 (consensus) verdict on naming a ruleset. Rulesets are named, not
+/// ordered: nothing here compares names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesetVerdict {
+    Ok,
+    /// Not in the registry.
+    Unknown,
+    /// A `QuorumUpgrade` target in a different reserves-cascade family (only a
+    /// `QuorumBegin` may cross families).
+    Family,
+    /// A member did not declare the named ruleset.
+    Unsupported,
+}
+
+fn every_declares(ruleset: &str, declarations: &[Vec<String>]) -> bool {
+    declarations.iter().all(|d| d.iter().any(|s| s == ruleset))
+}
+
+/// DEP-18: a `QuorumBegin` naming `ruleset` that seats members with `declarations`.
+pub fn seat_verdict(ruleset: &str, declarations: &[Vec<String>]) -> RulesetVerdict {
+    if !ruleset_known(ruleset) {
+        RulesetVerdict::Unknown
+    } else if !every_declares(ruleset, declarations) {
+        RulesetVerdict::Unsupported
+    } else {
+        RulesetVerdict::Ok
+    }
+}
+
+/// DEP-18: a `QuorumUpgrade` from `from` ("" for none) to `to`, with the current
+/// quorum's `declarations`.
+pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> RulesetVerdict {
+    if !ruleset_known(to) {
+        RulesetVerdict::Unknown
+    } else if reserves_family(to) != reserves_family(from) {
+        RulesetVerdict::Family
+    } else if !every_declares(to, declarations) {
+        RulesetVerdict::Unsupported
+    } else {
+        RulesetVerdict::Ok
+    }
+}
+
+/// The ruleset a new ledger names, and the reference policy's default target.
+pub const POLICY_TARGET_RULESET: &str = "anchor-ladder-v5";
+
+/// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
+/// next `QuorumBegin`. A `balance-commit-v4` ledger keeps it (`anchor-ladder-v5`
+/// lacks `MissingBalanceCommitment`); otherwise the policy target when every
+/// member declares it, else the current ruleset, else `cltv-offset-v2`.
+pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
+    if current == "balance-commit-v4" {
+        current.to_string()
+    } else if every_declares(POLICY_TARGET_RULESET, declarations) {
+        POLICY_TARGET_RULESET.to_string()
+    } else if !current.is_empty() {
+        current.to_string()
+    } else {
+        "cltv-offset-v2".to_string()
+    }
+}
+
 // ============================================================================
 // DEP-20 §3 exits
 // ============================================================================
@@ -2985,6 +3047,23 @@ impl LedgerState {
                         from: pre.active_ruleset_name.clone(),
                         to: new_protocol_version.clone(),
                     });
+                } else {
+                    // DEP-18: every current member declared the target.
+                    let declarations: Vec<Vec<String>> = pre
+                        .quorum_members
+                        .iter()
+                        .map(|m| m.supported_rulesets.clone())
+                        .collect();
+                    if upgrade_verdict(
+                        &pre.active_ruleset_name,
+                        new_protocol_version,
+                        &declarations,
+                    ) == RulesetVerdict::Unsupported
+                    {
+                        violations.push(ConformanceViolation::RulesetUnsupportedByMember {
+                            ruleset: new_protocol_version.clone(),
+                        });
+                    }
                 }
             }
         }

@@ -2043,6 +2043,7 @@ pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
         | V::BalanceCommitmentMismatch { .. }
         | V::MissingBalanceCommitment { .. }
         | V::RulesetFamilyMismatch { .. }
+        | V::RulesetUnsupportedByMember { .. }
         | V::DescriptorTooLarge { .. }
         | V::NonceReplay { .. }
         | V::ExpiryPassed { .. }

@@ -1,0 +1,30 @@
+# DEP-18 ruleset naming (shared cl-deposits / deposits-rust).  Rulesets are named, not ordered.
+# Each member's declaration is a comma-separated list of ruleset names (- for none); members
+# are separated by ';'.  A current ruleset of - means the ledger has none yet.
+#   seat TARGET MEMBERS VERDICT        consensus: a QuorumBegin naming TARGET that seats MEMBERS.
+#                                      ok | unknown | unsupported
+#   upgrade FROM TO MEMBERS VERDICT    consensus: a QuorumUpgrade from FROM to TO with quorum MEMBERS.
+#                                      ok | unknown | family | unsupported
+#   plan CURRENT MEMBERS NAME          operator policy (DEP-18 §operator policy), not consensus: the
+#                                      ruleset the reference policy names at the next QuorumBegin.
+seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 ok
+seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 unsupported
+seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;- unsupported
+seat cltv-offset-v2 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 ok
+seat balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 unsupported
+seat balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 ok
+seat anchor-ladder-v6 anchor-ladder-v6;anchor-ladder-v6 unknown
+upgrade cltv-offset-v2 anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 ok
+upgrade cltv-offset-v2 anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 unsupported
+upgrade cltv-offset-v2 anchor-ladder-v6 anchor-ladder-v6;anchor-ladder-v6 unknown
+upgrade - anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 family
+upgrade balance-commit-v4 anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 ok
+plan - cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+plan cltv-offset-v2 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+plan anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+plan anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 anchor-ladder-v5
+plan cltv-offset-v2 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 cltv-offset-v2
+plan balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 balance-commit-v4
+plan fee-cap-v3 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 anchor-ladder-v5
+plan fee-cap-v3 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5;cltv-offset-v2,fee-cap-v3 fee-cap-v3
+plan - cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 cltv-offset-v2

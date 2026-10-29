@@ -95,7 +95,18 @@ impl Node {
         // The ruleset proposed to the member: the one the next QuorumBegin
         // will commit to (rotations move to the current ruleset rather than
         // inheriting); a later QuorumBegin reaffirms it.
-        let chosen_ruleset = deposits_core::ruleset::CURRENT.to_string();
+        // DEP-18 §operator policy: a balance-commit-v4 ledger stays on it
+        // (anchor-ladder-v5 lacks MissingBalanceCommitment); otherwise propose
+        // the policy target. Naming is policy; members' declarations are what
+        // the QuorumBegin is judged on.
+        let chosen_ruleset = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let current = ledgers
+                .get(&ledger_id)
+                .map(|l| l.read().unwrap().state.active_ruleset_name.clone())
+                .unwrap_or_default();
+            deposits_core::types::planned_ruleset(&current, &[])
+        };
 
         let proposed_terms = crate::node::coordination::ConsentProposedTerms {
             chosen_ruleset: &chosen_ruleset,

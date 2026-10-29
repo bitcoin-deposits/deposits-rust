@@ -896,11 +896,18 @@ impl Node {
             let hash = ledger.hash();
             let collateral = ledger.state.total_collateral();
 
-            // Every QuorumBegin, first or rotation, takes the newest ruleset
-            // every incoming member supports (rotations do not inherit), so a
-            // ledger moves onto the current cascade at its next rotation. Every
-            // pending member's support is checked below.
-            let rs = newest_ruleset_supported_by(source);
+            // DEP-18 §operator policy (naming is policy, not consensus): keep a
+            // balance-commit-v4 ledger on it, else name anchor-ladder-v5 when
+            // every incoming member declares it, else keep the current ruleset.
+            // Every pending member's support is checked below.
+            let declarations: Vec<Vec<String>> = source
+                .iter()
+                .map(|m| m.supported_rulesets.clone())
+                .collect();
+            let rs = deposits_core::types::planned_ruleset(
+                &ledger.state.active_ruleset_name,
+                &declarations,
+            );
 
             (members, lids, expiries, hash, collateral, rs)
         };
@@ -3547,70 +3554,5 @@ async fn wait_for_outpoint_confs(
             )));
         }
         tokio::time::sleep(poll_interval).await;
-    }
-}
-
-/// The newest registered ruleset that every member declares support for
-/// (an empty declaration means legacy only); legacy if none newer is shared.
-fn newest_ruleset_supported_by(members: &[deposits_core::types::QuorumMember]) -> String {
-    deposits_core::ruleset::all_supported_names()
-        .into_iter()
-        .rev()
-        .find(|name| {
-            members
-                .iter()
-                .all(|m| deposits_core::ruleset::member_supports(&m.supported_rulesets, name))
-        })
-        .unwrap_or(deposits_core::ruleset::CURRENT)
-        .to_string()
-}
-
-#[cfg(test)]
-mod first_ruleset_tests {
-    use super::newest_ruleset_supported_by;
-    use deposits_core::types::QuorumMember;
-
-    fn member(supported: &[&str]) -> QuorumMember {
-        let secp = bitcoin::secp256k1::Secp256k1::new();
-        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[7u8; 32]).unwrap();
-        QuorumMember {
-            min_collateral_bps: None,
-            dormancy_blocks: None,
-            dormancy_notice_blocks: None,
-            pubkey: bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk),
-            ledger_id: String::new(),
-            min_fee_bps: None,
-            min_fee_fixed: None,
-            max_fee_period: None,
-            membership_until: None,
-            dispute_response_blocks: None,
-            dispute_arm_blocks: None,
-            service_response_blocks: None,
-            max_transfer_timeout_blocks: None,
-            max_descriptor_bytes: None,
-            compensation_bps: None,
-            compensation_deposit_id: None,
-            compensation_frequency_blocks: None,
-            supported_rulesets: supported.iter().map(|s| s.to_string()).collect(),
-        }
-    }
-
-    #[test]
-    fn first_quorum_takes_the_newest_shared_ruleset() {
-        let all = deposits_core::ruleset::all_supported_names();
-        let newest = *all.last().unwrap();
-        assert_eq!(
-            newest_ruleset_supported_by(&[member(&all), member(&all)]),
-            newest
-        );
-        assert_eq!(
-            newest_ruleset_supported_by(&[member(&all), member(&["cltv-offset-v2"])]),
-            "cltv-offset-v2"
-        );
-        // Nothing shared: the current ruleset, which the support check then refuses.
-        assert_eq!(
-            newest_ruleset_supported_by(&[member(&all), member(&[])]),
-            deposits_core::ruleset::CURRENT
-        );
     }
 }

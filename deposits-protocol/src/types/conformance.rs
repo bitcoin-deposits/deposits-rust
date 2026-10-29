@@ -104,6 +104,10 @@ pub enum ConformanceViolation {
     /// requires a QuorumBegin (reserves rotation), not an off-chain upgrade.
     RulesetFamilyMismatch { from: String, to: String },
 
+    /// QuorumUpgrade (DEP-18) named a ruleset a current member did not declare
+    /// in its signed `supported_rulesets`.
+    RulesetUnsupportedByMember { ruleset: String },
+
     /// DepositOpen's `descriptor` exceeded the active quorum's
     /// `max_descriptor_bytes` policy. Without this, an outsized
     /// descriptor could bloat every cosigner's signing path.
@@ -189,6 +193,11 @@ impl std::fmt::Display for ConformanceViolation {
                 f,
                 "quorum_upgrade {:?}->{:?} changes reserves-cascade family (use quorum_begin)",
                 from, to,
+            ),
+            Self::RulesetUnsupportedByMember { ruleset } => write!(
+                f,
+                "quorum_upgrade names {:?}, which a current member did not declare",
+                ruleset,
             ),
             Self::DescriptorTooLarge { actual, max } => write!(
                 f,
