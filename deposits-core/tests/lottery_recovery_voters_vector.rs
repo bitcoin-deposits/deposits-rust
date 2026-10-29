@@ -66,6 +66,7 @@ fn open() -> LedgerOperation {
         genesis_block: 0,
         reserves_amount: 0,
         collateral_amount: 0,
+        protocol_version: None,
     }
 }
 

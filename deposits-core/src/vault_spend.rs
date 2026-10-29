@@ -221,6 +221,30 @@ pub fn vault_spend_signers(
 }
 
 /// As [`vault_spend_signers`], with the tier index the witness uses.
+/// DEP-18: the ruleset that judges spends of the vault created by the `QuorumBegin` at
+/// `governing_seq` (the one it names; `""` when it names none or is absent). Proof 10 and spend
+/// challenges exist only where it is `anchor-ladder-v5`.
+pub fn vault_ruleset(spent_history: &[SignedLedgerUpdate], governing_seq: u64) -> String {
+    spent_history
+        .iter()
+        .filter(|u| u.sequence_number == governing_seq)
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                protocol_version, ..
+            }) => Some(protocol_version.unwrap_or_default()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Whether spends of that vault are provable at all (DEP-18).
+pub fn vault_spends_provable(spent_history: &[SignedLedgerUpdate], governing_seq: u64) -> bool {
+    deposits_protocol::types::ruleset_proves_vault_spends(&vault_ruleset(
+        spent_history,
+        governing_seq,
+    ))
+}
+
 pub fn vault_spend_witness(
     spent_history: &[SignedLedgerUpdate],
     governing_quorumbegin_seq: u64,
@@ -397,6 +421,14 @@ pub fn verify_unauthorized_vault_spend(
     let spend_height = height_of_block(spend_block_hash).ok_or("spend block not in our chain")?;
     let (signers, tier_index) =
         vault_spend_witness(spent_history, *governing_quorumbegin_seq, &tx, &prevouts)?;
+    // DEP-18: proof 10 is a rule of anchor-ladder-v5, judged under the vault's ruleset.
+    if !vault_spends_provable(spent_history, *governing_quorumbegin_seq) {
+        let rs = vault_ruleset(spent_history, *governing_quorumbegin_seq);
+        return Err(format!(
+            "the vault's ruleset ({}) has no UnauthorizedVaultSpend",
+            if rs.is_empty() { "none" } else { &rs }
+        ));
+    }
     let accused = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
     let accused = bitcoin::secp256k1::PublicKey::from_slice(&accused)
         .map_err(|e| format!("accused pubkey: {}", e))?

@@ -1852,8 +1852,18 @@ impl Ledger {
         operation: &LedgerOperation,
         block_height: u32,
     ) -> DepositsResult<()> {
-        if let LedgerOperation::QuorumBegin { quorum_expiry, .. } = operation {
-            if deposits_protocol::types::quorum_born_expired(*quorum_expiry, block_height) {
+        if let LedgerOperation::QuorumBegin {
+            quorum_expiry,
+            protocol_version,
+            ..
+        } = operation
+        {
+            // DEP-18: a rule of anchor-ladder-v5, judged under the ruleset the QuorumBegin names.
+            let gated = deposits_protocol::types::ruleset_forbids_born_expired(
+                protocol_version.as_deref().unwrap_or(""),
+            );
+            if gated && deposits_protocol::types::quorum_born_expired(*quorum_expiry, block_height)
+            {
                 return Err(DepositsError::ProtocolViolation {
                     violation_type: "quorum_expiry_not_after_block".to_string(),
                     details: format!(
@@ -2577,6 +2587,7 @@ mod tests {
             genesis_block: 0,
             reserves_amount: 100_000,
             collateral_amount: 0,
+            protocol_version: None,
         };
 
         let update = ledger.apply_operation(&open).unwrap();
@@ -2646,6 +2657,7 @@ mod tests {
                 genesis_block: 0,
                 reserves_amount: 100_000,
                 collateral_amount: 0,
+                protocol_version: None,
             })
             .unwrap();
         let tip = SignedLedgerUpdate {
@@ -2728,6 +2740,7 @@ mod tests {
             genesis_block: 0,
             reserves_amount: 100_000,
             collateral_amount: 0,
+            protocol_version: None,
         };
         ledger.apply_operation(&open).unwrap();
 

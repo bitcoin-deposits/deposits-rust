@@ -878,6 +878,7 @@ mod tests {
             genesis_block: 100,
             reserves_amount: 1_000_000_000,
             collateral_amount: 0,
+            protocol_version: None,
         };
         let message = op.tlv_encode();
         let mut u = SignedLedgerUpdate {

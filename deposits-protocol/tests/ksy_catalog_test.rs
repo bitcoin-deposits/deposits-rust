@@ -747,6 +747,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 genesis_block: 100,
                 reserves_amount: 100_000_000,
                 collateral_amount: 0,
+                protocol_version: None,
             },
         ),
         (

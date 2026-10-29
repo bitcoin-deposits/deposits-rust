@@ -89,9 +89,10 @@ fn history(spending_txid: [u8; 32]) -> Vec<SignedLedgerUpdate> {
                 genesis_block: 0,
                 reserves_amount: 0,
                 collateral_amount: 0,
+                protocol_version: None,
             },
         ),
-        update(1, &qb(spending_txid, 5000, "cltv-offset-v2")),
+        update(1, &qb(spending_txid, 5000, "anchor-ladder-v5")),
     ]
 }
 
@@ -109,6 +110,16 @@ fn cl_signed_theft_verifies() {
         false
     })
     .unwrap();
+}
+
+#[test]
+fn a_vault_under_cltv_offset_v2_is_not_provable() {
+    // DEP-18: proof 10 is a rule of anchor-ladder-v5, judged under the vault's own ruleset.
+    let mut h = history([9; 32]);
+    h[1] = update(1, &qb([9; 32], 5000, "cltv-offset-v2"));
+    let err = verify_unauthorized_vault_spend(&proof(), &h, &|_| Some(1000), &|_, _, _| false)
+        .unwrap_err();
+    assert!(err.contains("has no UnauthorizedVaultSpend"), "{err}");
 }
 
 #[test]
@@ -141,7 +152,7 @@ fn an_unanchored_spend_is_theft_even_if_a_quorum_begin_names_it() {
 #[test]
 fn reserves_must_match_the_governing_quorum_begin() {
     let mut h = history([9; 32]);
-    h[1] = update(1, &qb([9; 32], 5001, "cltv-offset-v2"));
+    h[1] = update(1, &qb([9; 32], 5001, "anchor-ladder-v5"));
     assert!(
         verify_unauthorized_vault_spend(&proof(), &h, &|_| Some(1000), &|_, _, _| false).is_err()
     );

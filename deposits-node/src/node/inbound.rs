@@ -2624,6 +2624,7 @@ mod fork_point_collateral_tests {
                 genesis_block: 0,
                 reserves_amount: RESERVES,
                 collateral_amount: COLLATERAL,
+                protocol_version: None,
             },
             LedgerOperation::QuorumBegin {
                 exit_cutoff_height: None,

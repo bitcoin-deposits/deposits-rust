@@ -1151,6 +1151,7 @@ mod tests {
             genesis_block: 0,
             reserves_amount: 1,
             collateral_amount: 1,
+            protocol_version: None,
         });
         let qb = update_with(&LedgerOperation::QuorumBegin {
             exit_cutoff_height: None,
@@ -1199,6 +1200,7 @@ mod tests {
                     genesis_block: 0,
                     reserves_amount: 0,
                     collateral_amount: 0,
+                    protocol_version: None,
                 }
                 .discriminant(),
                 12,

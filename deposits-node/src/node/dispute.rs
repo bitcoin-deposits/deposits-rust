@@ -504,6 +504,7 @@ mod recovery_voter_derivation_tests {
                     genesis_block: 0,
                     reserves_amount: 100_000,
                     collateral_amount: 0,
+                    protocol_version: None,
                 },
             ),
             // Fork-time QuorumAddMember rows the old code would have folded in.
@@ -613,6 +614,7 @@ mod recovery_voter_derivation_tests {
                     genesis_block: 0,
                     reserves_amount: 100_000,
                     collateral_amount: 0,
+                    protocol_version: None,
                 },
             ),
             update(4, operator, qb(&[operator, m1, m2, m3])),
@@ -4422,6 +4424,7 @@ mod recovery_chaining_tests {
             genesis_block: 0,
             reserves_amount: 1_000_000,
             collateral_amount: 0,
+            protocol_version: None,
         }
     }
 

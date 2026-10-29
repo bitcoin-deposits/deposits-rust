@@ -284,7 +284,11 @@ impl LedgerActor {
         // for descriptor `after()` checks. Matches the on-chain
         // perspective that `apply_and_check` is replaying.
         // DEP-02 §Block height and hash: a height below its predecessor's, or no block.
-        if let Some(v) = deposits_core::fraud::header_violation(ledger.history.last(), &update) {
+        if let Some(v) = deposits_core::fraud::header_violation(
+            ledger.history.last(),
+            &update,
+            deposits_core::fraud::signed_header_applies(Some(&ledger.state), &update),
+        ) {
             tracing::warn!(
                 ledger_id = %self.ledger_id,
                 seq = update.sequence_number,

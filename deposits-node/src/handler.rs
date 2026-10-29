@@ -1420,6 +1420,8 @@ impl DepositsHandler {
                     genesis_block,
                     reserves_amount: reserves_msats,
                     collateral_amount: collateral_msats,
+                    // DEP-18: a new ledger is under the newest ruleset from its first update.
+                    protocol_version: Some(deposits_core::ruleset::CURRENT.to_string()),
                 };
                 // DEP-02 §Block height and hash: even the genesis names its block.
                 let genesis_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
@@ -3525,6 +3527,7 @@ mod tests {
                 genesis_block: 0,
                 reserves_amount: 20_000_000_000,
                 collateral_amount: 30_000_000_000,
+                protocol_version: None,
             },
             LedgerOperation::QuorumBegin {
                 exit_cutoff_height: None,

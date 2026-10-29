@@ -142,6 +142,7 @@ impl ProtocolSim {
                         genesis_block: 0,
                         reserves_amount: 400_000,
                         collateral_amount: 600_000,
+                        protocol_version: None,
                     })
                     .unwrap();
 
@@ -702,6 +703,7 @@ fn ledger_shell(state: &LedgerState) -> Ledger {
         role: LedgerRole::Partner,
         history: Vec::new(),
         created_at: Default::default(),
+        pre_quorum_begin: Default::default(),
     }
 }
 
@@ -2538,6 +2540,7 @@ fn credit_lock_credit_fail_stays_within_reserves() {
             genesis_block: 0,
             reserves_amount,
             collateral_amount: 0,
+            protocol_version: None,
         })
         .unwrap();
 

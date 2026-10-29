@@ -299,6 +299,9 @@ pub enum LedgerOperation {
         reserves_amount: u64,
         /// Collateral amount in millisatoshis (security bond portion of UTXO)
         collateral_amount: u64,
+        /// DEP-18: the ruleset in force before the first `QuorumBegin` (TLV 286). `None`: no
+        /// active ruleset until then, and gated rules are dormant.
+        protocol_version: Option<String>,
     },
 
     // ========== Reserves Operations (1) ==========
@@ -1390,6 +1393,7 @@ impl BinaryCodec for LedgerOperation {
                 genesis_block,
                 reserves_amount,
                 collateral_amount,
+                protocol_version: _,
             } => {
                 write_pubkey(w, operator_id)?;
                 write_string(w, reserves_id)?;
@@ -1897,6 +1901,7 @@ impl BinaryCodec for LedgerOperation {
                     genesis_block,
                     reserves_amount,
                     collateral_amount,
+                    protocol_version: None,
                 })
             }
             // QuorumBegin (12) — formerly ReservesRotate

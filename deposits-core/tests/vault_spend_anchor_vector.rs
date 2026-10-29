@@ -75,7 +75,7 @@ fn chain_hash(u: &SignedLedgerUpdate) -> String {
 #[test]
 fn answers_match_the_shared_vector() {
     let v = vector();
-    assert_eq!((v.answers.len(), v.proofs.len()), (5, 8));
+    assert_eq!((v.answers.len(), v.proofs.len()), (5, 10));
     let mut rev = v.updates.clone();
     rev.reverse();
     for (name, anchor, want) in &v.answers {

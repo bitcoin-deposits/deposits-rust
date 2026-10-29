@@ -271,6 +271,7 @@ impl TlvEncode for LedgerOperation {
                 genesis_block,
                 reserves_amount,
                 collateral_amount,
+                protocol_version,
             } => {
                 builder = builder
                     .pubkey_field(OPERATOR_ID, operator_id)
@@ -278,6 +279,9 @@ impl TlvEncode for LedgerOperation {
                     .u32_field(GENESIS_BLOCK, *genesis_block)
                     .u64_field(RESERVES_AMOUNT, *reserves_amount)
                     .u64_field(TOTAL_COLLATERAL, *collateral_amount);
+                if let Some(v) = protocol_version {
+                    builder = builder.string_field(PROTOCOL_VERSION, v);
+                }
             }
             Self::QuorumBegin {
                 reserves_id,
@@ -999,6 +1003,7 @@ impl TlvDecode for LedgerOperation {
                 genesis_block: reader.read_u32_opt(GENESIS_BLOCK)?.unwrap_or(0),
                 reserves_amount: reader.read_u64_opt(RESERVES_AMOUNT)?.unwrap_or(0),
                 collateral_amount: reader.read_u64_opt(TOTAL_COLLATERAL)?.unwrap_or(0),
+                protocol_version: reader.read_string_opt(PROTOCOL_VERSION)?,
             }),
             12 => {
                 let members_bytes = reader.read_raw_opt(QUORUM_MEMBERS).unwrap_or(&[]);

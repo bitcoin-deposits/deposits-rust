@@ -1602,7 +1602,12 @@ pub fn verify_non_conforming_cosignature(
 pub fn header_violation(
     predecessor: Option<&crate::types::SignedLedgerUpdate>,
     update: &crate::types::SignedLedgerUpdate,
+    enforce: bool,
 ) -> Option<String> {
+    // A rule of anchor-ladder-v5 (DEP-18): `enforce` is whether it judges this update.
+    if !enforce {
+        return None;
+    }
     if update.block_hash == [0u8; 32] {
         return Some(format!(
             "MissingBlockHash: seq {} names no block",
@@ -1616,6 +1621,31 @@ pub fn header_violation(
         )),
         _ => None,
     }
+}
+
+/// DEP-18: does the signed-header rule judge `update`? Under `state`, the ledger's state before
+/// it (its active ruleset); a `LedgerOpen` at sequence 0 under the ruleset it names itself.
+/// Mirrors cl-deposits' `signed-header-applies-p`; vector `tests/vectors/ruleset_gating.txt`.
+pub fn signed_header_applies(
+    state: Option<&crate::types::LedgerState>,
+    update: &crate::types::SignedLedgerUpdate,
+) -> bool {
+    use crate::messages::LedgerOperation;
+    use crate::tlv::TlvDecode;
+    let ruleset = if update.sequence_number == 0 {
+        match LedgerOperation::tlv_decode(&update.message) {
+            Ok(LedgerOperation::LedgerOpen {
+                protocol_version: Some(v),
+                ..
+            }) => v,
+            _ => String::new(),
+        }
+    } else {
+        state
+            .map(|s| s.active_ruleset_name.clone())
+            .unwrap_or_default()
+    };
+    crate::types::ruleset_requires_signed_header(&ruleset)
 }
 
 pub fn verify_non_conforming_update(
@@ -1710,7 +1740,7 @@ pub fn verify_non_conforming_update(
                     .into(),
             );
         }
-        if header_violation(None, &fault).is_some() {
+        if header_violation(None, &fault, signed_header_applies(None, &fault)).is_some() {
             return Ok(());
         }
         return if fault.previous_hash == [0u8; 32] {
@@ -2035,7 +2065,11 @@ fn fault_rejection(
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
 
-    if let Some(v) = header_violation(predecessor, fault) {
+    if let Some(v) = header_violation(
+        predecessor,
+        fault,
+        signed_header_applies(Some(state), fault),
+    ) {
         return Ok(Some(v));
     }
 
@@ -2154,7 +2188,7 @@ fn first_rule_break<'a>(
         .find_map(|t| index.chain_to_genesis(t, ledger_id).ok())?;
 
     let mut state = replay_canonical(&chain[..1]).ok()?;
-    if let Some(reason) = header_violation(None, chain[0]) {
+    if let Some(reason) = header_violation(None, chain[0], signed_header_applies(None, chain[0])) {
         if eligible(chain[0]) && confirm(chain[0]) {
             return Some((chain[0], reason));
         }
@@ -2177,7 +2211,11 @@ fn first_rule_break<'a>(
         }
         let u = chain[seq];
         // DEP-02 §Block height and hash: judged before the state machine sees it.
-        if let Some(reason) = header_violation(Some(chain[seq - 1]), u) {
+        if let Some(reason) = header_violation(
+            Some(chain[seq - 1]),
+            u,
+            signed_header_applies(Some(&state), u),
+        ) {
             if eligible(u) && confirm(u) {
                 return Some((u, reason));
             }

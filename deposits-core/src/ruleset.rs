@@ -59,19 +59,20 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "cltv-offset-v2" => Some(&CLTV_OFFSET_V2),
         "fee-cap-v3" => Some(&FEE_CAP_V3),
         "balance-commit-v4" => Some(&BALANCE_COMMIT_V4),
+        "anchor-ladder-v5" => Some(&ANCHOR_LADDER_V5),
         _ => None,
     }
 }
 
 /// The ruleset new ledgers and rotations commit to when every member supports it.
-pub const CURRENT: &str = "balance-commit-v4";
+pub const CURRENT: &str = "anchor-ladder-v5";
 
 /// Resolve a name to a ruleset, falling back to [`CURRENT`] for a missing or
 /// unknown name. Acceptance paths reject unknown names before calling this
 /// (a `QuorumBegin` without `protocol_version` is refused at apply), so the
 /// fallback only covers display and pre-`QuorumBegin` state.
 pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
-    name.and_then(lookup).unwrap_or(&BALANCE_COMMIT_V4)
+    name.and_then(lookup).unwrap_or(&ANCHOR_LADDER_V5)
 }
 
 /// All ruleset names this binary knows how to enforce. Order is the
@@ -79,7 +80,12 @@ pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
 /// `QuorumMemberResponse` so an operator can pick a `protocol_version`
 /// at `quorum begin` time that every member can validate.
 pub fn all_supported_names() -> Vec<&'static str> {
-    vec![CLTV_OFFSET_V2.name, FEE_CAP_V3.name, BALANCE_COMMIT_V4.name]
+    vec![
+        CLTV_OFFSET_V2.name,
+        FEE_CAP_V3.name,
+        BALANCE_COMMIT_V4.name,
+        ANCHOR_LADDER_V5.name,
+    ]
 }
 
 /// Decide whether a candidate member's declared `supported_rulesets`
@@ -154,6 +160,16 @@ pub static FEE_CAP_V3: Ruleset = Ruleset {
 /// `balance-commit-v4` to the v2 cascade.
 pub static BALANCE_COMMIT_V4: Ruleset = Ruleset {
     name: "balance-commit-v4",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// DEP-18 §anchor-ladder-v5: the `cltv-offset-v2` reserves cascade (same family,
+/// reachable by `QuorumUpgrade`), plus October 2026's convicting rules, gated in
+/// deposits-protocol: the signed header, born expired, the collateral floor, and
+/// vault-spend proofs (`ruleset_requires_signed_header` and friends). It does not
+/// carry `balance-commit-v4`'s `MissingBalanceCommitment`.
+pub static ANCHOR_LADDER_V5: Ruleset = Ruleset {
+    name: "anchor-ladder-v5",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

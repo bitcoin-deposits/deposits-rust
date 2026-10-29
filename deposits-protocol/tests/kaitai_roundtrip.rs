@@ -96,6 +96,7 @@ fn ledger_open() {
         genesis_block: 100,
         reserves_amount: 100_000_000,
         collateral_amount: 0,
+        protocol_version: None,
     });
 }
 

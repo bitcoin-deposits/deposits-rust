@@ -122,7 +122,11 @@ pub(crate) fn find_vault_thefts(
                 ) else {
                     continue;
                 };
-                if signers.is_empty() {
+                // DEP-18: a vault created under a ruleset without vault-spend proofs is never
+                // proven against and opens no challenge (dormant: it can only excuse).
+                if signers.is_empty()
+                    || !deposits_core::vault_spend::vault_spends_provable(history, seq)
+                {
                     continue;
                 }
                 out.push(VaultTheft {
@@ -1174,6 +1178,7 @@ mod tests {
                     genesis_block: 0,
                     reserves_amount: 0,
                     collateral_amount: 0,
+                    protocol_version: None,
                 },
             ),
             update(
@@ -1204,7 +1209,7 @@ mod tests {
                         })
                         .collect(),
                     collateral_amount: 0,
-                    protocol_version: Some("cltv-offset-v2".into()),
+                    protocol_version: Some("anchor-ladder-v5".into()),
                 },
             ),
         ]
@@ -1425,7 +1430,7 @@ mod tests {
             ledger_hash: sha(&[0xbb]),
             quorum_members: Vec::new(),
             collateral_amount: 0,
-            protocol_version: Some("cltv-offset-v2".into()),
+            protocol_version: Some("anchor-ladder-v5".into()),
         };
         let net = bitcoin::Network::Bitcoin;
         let st = deposits_core::types::LedgerState::new(

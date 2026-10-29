@@ -76,6 +76,7 @@ fn genesis_op() -> LedgerOperation {
         genesis_block: 0,
         reserves_amount: RESERVES,
         collateral_amount: COLLATERAL,
+        protocol_version: None,
     }
 }
 const OP: u8 = 7;
@@ -763,6 +764,7 @@ fn ledger_x() -> Vec<SignedLedgerUpdate> {
             genesis_block: 0,
             reserves_amount: RESERVES,
             collateral_amount: COLLATERAL,
+            protocol_version: None,
         },
         LedgerOperation::DepositOpen {
             deposit_id: DEPOSIT,

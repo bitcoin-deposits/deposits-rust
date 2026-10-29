@@ -148,6 +148,7 @@ fn test_full_sync_flow() {
         genesis_block: 0,
         reserves_amount: 1_000_000,
         collateral_amount: 0,
+        protocol_version: None,
     };
     operator.apply_operation(&ledger_open).unwrap();
     partner.apply_operation(&ledger_open).unwrap();

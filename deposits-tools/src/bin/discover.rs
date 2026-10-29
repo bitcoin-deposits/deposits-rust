@@ -155,6 +155,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 role: deposits_core::ledger::LedgerRole::Operator,
                 history: updates,
                 created_at: Default::default(),
+                pre_quorum_begin: Default::default(),
             };
             for i in 0..ledger.history.len() {
                 let u = &ledger.history[i];

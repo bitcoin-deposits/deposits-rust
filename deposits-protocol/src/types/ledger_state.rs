@@ -28,10 +28,32 @@ fn default_ruleset_name() -> String {
 /// `fee-cap-v3`, so an upgraded node never retroactively faults a pre-upgrade
 /// `FeeCollect` and trips the DEP-06 confiscation cascade. Keyed by ruleset name
 /// (the reserves half of `fee-cap-v3` lives in `deposits-core::ruleset`).
-pub fn ruleset_enforces_fee_cap(ruleset_name: &str) -> bool {
-    // `balance-commit-v4` is a strict superset of `fee-cap-v3` (its rules plus
-    // the balance-commitment requirement), so it enforces the fee cap too.
-    matches!(ruleset_name, "fee-cap-v3" | "balance-commit-v4")
+pub fn ruleset_enforces_fee_cap(_ruleset_name: &str) -> bool {
+    // DEP-07: the cap is a rule of every ruleset (FINDINGS L6), whatever the
+    // ledger's active ruleset (DEP-18 §intrinsic changes of october 2026).
+    true
+}
+
+/// DEP-18: the ruleset that carries October 2026's convicting rules.
+pub const ANCHOR_LADDER_V5: &str = "anchor-ladder-v5";
+
+/// DEP-18 gated rules of `anchor-ladder-v5`. Each is dormant under any other
+/// ruleset, and under none (`""`, a ledger before its first ruleset).
+pub fn ruleset_requires_signed_header(ruleset_name: &str) -> bool {
+    ruleset_name == ANCHOR_LADDER_V5
+}
+/// Born expired (DEP-05), judged under the ruleset the `QuorumBegin` names.
+pub fn ruleset_forbids_born_expired(ruleset_name: &str) -> bool {
+    ruleset_name == ANCHOR_LADDER_V5
+}
+/// The collateral floor (DEP-05), judged under the ruleset the `QuorumBegin` names.
+pub fn ruleset_requires_collateral_floor(ruleset_name: &str) -> bool {
+    ruleset_name == ANCHOR_LADDER_V5
+}
+/// Proof 10 and spend challenges (DEP-06), judged under the ruleset of the
+/// vault's governing `QuorumBegin`.
+pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
+    ruleset_name == ANCHOR_LADDER_V5
 }
 
 /// Whether a ledger's active ruleset REQUIRES a balance commitment on every
@@ -61,7 +83,9 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 /// the `cltv-offset-v2` cascade.
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
-        "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" => "cltv-offset-v2",
+        "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5" => {
+            "cltv-offset-v2"
+        }
         _ => "",
     }
 }
@@ -996,7 +1020,21 @@ impl LedgerState {
                 genesis_block,
                 reserves_amount,
                 collateral_amount,
+                protocol_version,
             } => {
+                // DEP-18: a LedgerOpen may name the ruleset in force before the first QuorumBegin.
+                if let Some(v) = protocol_version {
+                    if !ruleset_known(v) {
+                        return Err(crate::DepositsError::ProtocolViolation {
+                            violation_type: "unknown_ruleset".to_string(),
+                            details: format!(
+                                "LedgerOpen protocol_version '{}' is not a known ruleset",
+                                v
+                            ),
+                        });
+                    }
+                    next.active_ruleset_name = v.clone();
+                }
                 next.operator_key = *operator_id;
                 next.reserves_key = reserves_id.clone();
                 next.genesis_block = *genesis_block;
@@ -2698,7 +2736,11 @@ impl LedgerState {
                     });
                 }
             }
-            LedgerOperation::QuorumBegin { .. } => {
+            // DEP-18: a rule of anchor-ladder-v5, judged under the ruleset the QuorumBegin
+            // names (the post-state's active ruleset).
+            LedgerOperation::QuorumBegin { .. }
+                if ruleset_requires_collateral_floor(&self.active_ruleset_name) =>
+            {
                 let floor_bps = crate::types::collateral_floor_bps(self.quorum_members.iter());
                 if !crate::types::collateral_meets_floor(
                     self.reserves_amount,

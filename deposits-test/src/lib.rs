@@ -60,6 +60,7 @@ impl TestNetwork {
                     genesis_block: 0,
                     reserves_amount,
                     collateral_amount: reserves_amount, // 50/50 split
+                    protocol_version: None,
                 };
                 ledger.append_operation(open_op).unwrap();
 
