@@ -7,6 +7,8 @@
 #                                      ok | unknown | family | unsupported
 #   plan CURRENT MEMBERS NAME          operator policy (DEP-18 §operator policy), not consensus: the
 #                                      ruleset the reference policy names at the next QuorumBegin.
+#   propose CURRENT DECLARATION NAME   operator policy: the ruleset a consent request proposes to one
+#                                      member, given its last signed DECLARATION (- if none is known).
 seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2,anchor-ladder-v5 ok
 seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;cltv-offset-v2 unsupported
 seat anchor-ladder-v5 cltv-offset-v2,anchor-ladder-v5;- unsupported
@@ -38,3 +40,13 @@ plan anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-
 plan anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
 plan - cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
 plan cltv-offset-v2 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6;cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+propose anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 anchor-ladder-v5
+propose anchor-ladder-v5 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+propose anchor-ladder-v5 - anchor-ladder-v5
+propose - - cltv-offset-v2
+propose - cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+propose balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5 balance-commit-v4
+propose balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6 balance-anchor-v6
+propose cltv-offset-v2 cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+propose cltv-offset-v2 cltv-offset-v2 cltv-offset-v2
+propose balance-anchor-v6 cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5

@@ -99,13 +99,31 @@ impl Node {
         // (anchor-ladder-v5 lacks MissingBalanceCommitment); otherwise propose
         // the policy target. Naming is policy; members' declarations are what
         // the QuorumBegin is judged on.
+        // DEP-18 §operator policy (proposed_ruleset): propose what this member is known to
+        // support, from its last signed declaration on this ledger (staged, else seated). A
+        // member on an older release refuses a ruleset it does not know, so proposing the
+        // policy target blind failed every rotation while versions were mixed.
         let chosen_ruleset = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            let current = ledgers
+            ledgers
                 .get(&ledger_id)
-                .map(|l| l.read().unwrap().state.active_ruleset_name.clone())
-                .unwrap_or_default();
-            deposits_core::types::planned_ruleset(&current, &[])
+                .map(|l| {
+                    let st = &l.read().unwrap().state;
+                    let declaration = st
+                        .next_quorum_members
+                        .iter()
+                        .chain(st.quorum_members.iter())
+                        .find(|m| m.pubkey == quorum_member)
+                        .map(|m| m.supported_rulesets.clone());
+                    let current =
+                        if st.active_ruleset_name.is_empty() && st.quorum_members.is_empty() {
+                            deposits_core::types::POLICY_TARGET_RULESET.to_string()
+                        } else {
+                            st.active_ruleset_name.clone()
+                        };
+                    deposits_core::types::proposed_ruleset(&current, declaration.as_deref())
+                })
+                .unwrap_or_else(|| deposits_core::types::POLICY_TARGET_RULESET.to_string())
         };
 
         let proposed_terms = crate::node::coordination::ConsentProposedTerms {
