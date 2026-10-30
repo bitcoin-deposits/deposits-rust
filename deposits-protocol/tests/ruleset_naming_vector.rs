@@ -2,7 +2,9 @@
 //! rulesets are named, not ordered. Seating and upgrade verdicts are consensus; the
 //! planned name is the reference operator policy.
 
-use deposits_protocol::types::{planned_ruleset, seat_verdict, upgrade_verdict, RulesetVerdict};
+use deposits_protocol::types::{
+    planned_ruleset, proposed_ruleset, seat_verdict, upgrade_verdict, RulesetVerdict,
+};
 
 fn ruleset(s: &str) -> String {
     if s == "-" {
@@ -59,9 +61,18 @@ fn ruleset_naming_vector() {
                 f[3],
                 "{line}"
             ),
+            "propose" => {
+                let d = declarations(f[2]).into_iter().next().unwrap_or_default();
+                let decl = if d.is_empty() {
+                    None
+                } else {
+                    Some(d.as_slice())
+                };
+                assert_eq!(proposed_ruleset(&ruleset(f[1]), decl), f[3], "{line}")
+            }
             other => panic!("unknown case {other}"),
         }
         n += 1;
     }
-    assert_eq!(n, 31);
+    assert_eq!(n, 41);
 }

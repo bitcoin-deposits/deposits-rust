@@ -161,6 +161,28 @@ pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
     }
 }
 
+/// DEP-18 §operator policy, not consensus: the ruleset a consent request proposes to one
+/// member. A proposal is not the QuorumBegin's choice ([`planned_ruleset`] over every member's
+/// fresh declaration), and a member may refuse a proposal it does not support, as releases
+/// before balance-anchor-v6 do. So the operator proposes only what the member is known to
+/// support: the policy target for that member when its last signed `declaration` (None if none
+/// is known) lists it, otherwise the ledger's `current` ruleset, else cltv-offset-v2. Without
+/// this an upgraded operator proposed balance-anchor-v6 to members still on an older release,
+/// which refused, and its rotations failed while versions were mixed (signet soak, 2026-10-30).
+pub fn proposed_ruleset(current: &str, declaration: Option<&[String]>) -> String {
+    if let Some(decl) = declaration.filter(|d| !d.is_empty()) {
+        let target = planned_ruleset(current, &[decl.to_vec()]);
+        if decl.iter().any(|r| r == &target) {
+            return target;
+        }
+    }
+    if !current.is_empty() {
+        current.to_string()
+    } else {
+        "cltv-offset-v2".to_string()
+    }
+}
+
 // ============================================================================
 // DEP-20 §3 exits
 // ============================================================================
