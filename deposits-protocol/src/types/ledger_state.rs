@@ -2974,24 +2974,22 @@ impl LedgerState {
             }
         }
 
-        // DepositKeyRotate: the new descriptor must parse — otherwise
-        // the post-rotation deposit becomes unspendable through the
-        // normal authorization path.
-        if let LedgerOperation::DepositKeyRotate { new_descriptor, .. } = operation {
-            if let Some(detail) = authorizer.validate_descriptor(new_descriptor) {
-                violations.push(ConformanceViolation::UnparseableDescriptor {
-                    operation: "DepositKeyRotate",
-                    detail,
-                });
+        // DEP-16 §Descriptor validity: a descriptor entering the ledger
+        // (DepositOpen, DepositKeyRotate) must be valid and fit within the
+        // smallest size cap a member of the quorum declared. Members refuse
+        // to cosign otherwise; neither is a fraud ground
+        // (`proves_non_conformance`).
+        let entering = match operation {
+            LedgerOperation::DepositOpen { descriptor, .. } => Some(("DepositOpen", descriptor)),
+            LedgerOperation::DepositKeyRotate { new_descriptor, .. } => {
+                Some(("DepositKeyRotate", new_descriptor))
             }
-        }
-
-        // DepositOpen: the descriptor must parse and (if a quorum is
-        // active) fit within the smallest member-declared size cap.
-        if let LedgerOperation::DepositOpen { descriptor, .. } = operation {
+            _ => None,
+        };
+        if let Some((op_name, descriptor)) = entering {
             if let Some(detail) = authorizer.validate_descriptor(descriptor) {
                 violations.push(ConformanceViolation::UnparseableDescriptor {
-                    operation: "DepositOpen",
+                    operation: op_name,
                     detail,
                 });
             }

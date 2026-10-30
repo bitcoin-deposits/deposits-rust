@@ -20,6 +20,7 @@
 
 pub mod authorizer;
 pub mod operations;
+pub mod validity;
 
 pub use authorizer::{Dep16Authorizer, ReceiveWitness};
 

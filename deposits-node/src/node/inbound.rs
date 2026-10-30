@@ -829,7 +829,11 @@ impl Node {
                                         .join("; ")
                                 );
                             }
-                            !violations.is_empty()
+                            // Only a violation the signed evidence proves arms
+                            // a dispute; the others were grounds to refuse.
+                            violations
+                                .iter()
+                                .any(deposits_core::fraud::proves_non_conformance)
                         })
                         .map(|_| {
                             deposits_core::fraud::governing_quorum_begin_seq(

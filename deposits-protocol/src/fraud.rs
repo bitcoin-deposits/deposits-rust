@@ -2008,8 +2008,9 @@ fn check_accused_operates(
 }
 
 /// Whether a conformance violation proves non-conformance on the signed
-/// evidence alone. Under the v2 signing (DEP-02 §Signing) every one does, the
-/// height-dependent ones included:
+/// evidence alone. Under the v2 signing (DEP-02 §Signing) every one does except
+/// the two descriptor-validity refusals (below), the height-dependent ones
+/// included:
 ///
 /// - `ExpiryPassed` and `NonceReplay` are judged at the fault's own
 ///   `block_height`, which is in its `cosign_data`, so in its `content_hash`
@@ -2035,7 +2036,6 @@ pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
         | V::InvalidWitness { .. }
         | V::ZeroAmount { .. }
         | V::EmptyDestination
-        | V::UnparseableDescriptor { .. }
         | V::CollateralBelowFloor { .. }
         | V::FeeWindowNotElapsed { .. }
         | V::FeeExceedsAssessment { .. }
@@ -2044,11 +2044,16 @@ pub fn proves_non_conformance(v: &crate::types::ConformanceViolation) -> bool {
         | V::MissingBalanceCommitment { .. }
         | V::RulesetFamilyMismatch { .. }
         | V::RulesetUnsupportedByMember { .. }
-        | V::DescriptorTooLarge { .. }
         | V::NonceReplay { .. }
         | V::ExpiryPassed { .. }
         | V::ProtocolRule { .. }
         | V::StateMachineRejected { .. } => true,
+        // DEP-16 §Descriptor validity: grounds to refuse a cosignature, never
+        // to convict. The descriptor is the depositor's own; an invalid one
+        // harms only that deposit, and cl-deposits admitted such descriptors
+        // until the shared validity vector existed, so convicting on them
+        // would convict history recorded before the rule.
+        V::UnparseableDescriptor { .. } | V::DescriptorTooLarge { .. } => false,
     }
 }
 

@@ -56,10 +56,7 @@ impl Authorizer for Dep16Authorizer {
     }
 
     fn validate_descriptor(&self, descriptor: &str) -> Option<String> {
-        match miniscript::calculus::parse::<PublicKey>(descriptor) {
-            Ok(_) => None,
-            Err(e) => Some(format!("{}", e)),
-        }
+        super::validity::descriptor_violation(descriptor)
     }
 }
 
