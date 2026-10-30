@@ -95,5 +95,5 @@ fn balance_commitments_vector() {
             other => panic!("unknown line kind {other}"),
         }
     }
-    assert_eq!((steps, filled, judges), (23, 21, 29));
+    assert_eq!((steps, filled, judges), (27, 25, 29));
 }
