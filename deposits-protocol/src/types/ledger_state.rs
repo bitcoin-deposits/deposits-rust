@@ -1609,6 +1609,9 @@ impl LedgerState {
                             let mut d = Deposit::new(e.descriptor.clone(), None);
                             d.deposit_id = e.deposit_id;
                             d.fees = e.fees.clone();
+                            // DEP-20 §8.3: opened, and fee-assessed from, the credit's height.
+                            d.opened_at_block = h;
+                            d.last_fee_assessment = h;
                             d.last_signed_activity = h;
                             next.deposits.insert(e.deposit_id, d);
                         }
