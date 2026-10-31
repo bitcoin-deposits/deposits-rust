@@ -704,6 +704,7 @@ fn ledger_shell(state: &LedgerState) -> Ledger {
         history: Vec::new(),
         created_at: Default::default(),
         pre_quorum_begin: Default::default(),
+        verified_checkpoint: Default::default(),
     }
 }
 

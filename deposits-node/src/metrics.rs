@@ -353,6 +353,11 @@ fn describe_metrics() {
 // Connection metrics
 // ============================================================================
 
+/// A checkpoint whose replay disagreed with the live state (Ledger::verify_checkpoint).
+pub fn record_checkpoint_mismatch() {
+    counter!("ledger_checkpoint_mismatch_total").increment(1);
+}
+
 /// Record a new connection to a Nostr relay.
 pub fn record_connection() {
     counter!("nostr_connections_total").increment(1);

@@ -612,6 +612,21 @@ impl Node {
         let arc = self.handler.ledgers.lock().unwrap().get(ledger_id).cloned();
         let Some(arc) = arc else { return };
         let mut l = arc.write().unwrap();
+        match l.repair_from_checkpoint() {
+            Ok(n) => {
+                tracing::warn!(
+                    "replica {}... rebuilt from its verified checkpoint (+{} updates)",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    n
+                );
+                return;
+            }
+            Err(e) => tracing::debug!(
+                "replica {}...: no checkpoint repair ({}); trying a replay",
+                &ledger_id[..16.min(ledger_id.len())],
+                e
+            ),
+        }
         if l.history.first().is_some_and(|u| u.sequence_number == 0) {
             match l.recompute_state() {
                 Ok(()) => tracing::warn!(
@@ -1472,6 +1487,48 @@ impl Node {
         &self,
         broadcast: &deposits_core::fraud::FraudBroadcast,
     ) -> Result<(), String> {
+        // DEP-06 "Verify before publishing": a NonConformingUpdate on a ledger we hold is judged
+        // from our newest verified checkpoint (made by replay, never copied from the live state)
+        // and the updates after it, so a long ledger whose early history we no longer hold can
+        // still be judged. When the checkpoint cannot judge it (the fault is older, or does not
+        // chain onto what we hold), fall through to the full-history verification below.
+        if let deposits_core::fraud::FraudEvidence::NonConformingUpdate { .. } =
+            &broadcast.proof.evidence
+        {
+            let arc = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .get(&broadcast.proof.ledger_id)
+                .cloned();
+            if let Some(arc) = arc {
+                let l = arc.read().unwrap();
+                if let Some(cp) = &l.verified_checkpoint {
+                    let first = l.history.first().map_or(0, |u| u.sequence_number);
+                    let start = cp.seq.checked_sub(first).map(|i| i as usize);
+                    if let Some(seg) = start.and_then(|i| l.history.get(i..)) {
+                        if seg.first().is_some_and(|u| u.sequence_number == cp.seq) {
+                            let authorizer = deposits_core::dep16::Dep16Authorizer::new();
+                            match deposits_core::fraud::verify_non_conforming_update_from(
+                                &broadcast.proof,
+                                &cp.state,
+                                seg,
+                                &authorizer,
+                            ) {
+                                Ok(verdict) => return verdict,
+                                Err(why) => tracing::debug!(
+                                    "checkpoint cannot judge the proof on {}… ({}); full history",
+                                    &broadcast.proof.ledger_id
+                                        [..16.min(broadcast.proof.ledger_id.len())],
+                                    why
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
         // 0. Gap-fill any referenced ledgers we don't already have.
         //    `verify_fraud_broadcast` queries the LedgerProvider for the
         //    accused ledger, the embedding ledger AND every causal-chain
@@ -2233,6 +2290,7 @@ impl Node {
             history: truncated_history,
             created_at: Default::default(),
             pre_quorum_begin: None,
+            verified_checkpoint: Default::default(),
         };
         drop(original);
 

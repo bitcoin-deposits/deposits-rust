@@ -1135,3 +1135,70 @@ fn a_wrong_replica_state_is_not_a_proof() {
         "a replay of the history accepts the update, so it is not a NonConformingUpdate"
     );
 }
+
+// --- DEP-06 "Verify before publishing" from a checkpoint ---------------------------------------
+// A node judges its own NonConformingUpdate from a checkpoint it replayed itself and the updates
+// after it, so it need not hold the whole history. Same verdicts as from genesis.
+
+fn replayed_after(
+    prefix: &[SignedLedgerUpdate],
+    seq: usize,
+) -> deposits_protocol::types::LedgerState {
+    let mut s = deposits_protocol::fraud::genesis_state(&prefix[0]).unwrap();
+    for u in &prefix[..=seq] {
+        s.apply_update_in_place(u).unwrap();
+    }
+    s
+}
+
+#[test]
+fn a_fault_is_proven_from_a_checkpoint() {
+    use deposits_protocol::fraud::verify_non_conforming_update_from;
+    let prefix = ledger_c_prefix();
+    let fraud = ledger_c_fraud(&prefix, OP);
+    let cp = replayed_after(&prefix, 1);
+    verify_non_conforming_update_from(&proof_for(&fraud), &cp, &prefix[1..], &AllowAll)
+        .expect("the checkpoint and segment can judge it")
+        .expect("and the fault is proven");
+}
+
+#[test]
+fn a_conforming_update_is_not_proven_from_a_checkpoint() {
+    use deposits_protocol::fraud::verify_non_conforming_update_from;
+    let prefix = ledger_c_prefix();
+    let ok_credit = signed_update(
+        4,
+        ledger(),
+        prefix[3].chain_hash(),
+        OP,
+        &credit(3, 1_000_000_000).tlv_encode(),
+        false,
+    );
+    let cp = replayed_after(&prefix, 1);
+    let verdict =
+        verify_non_conforming_update_from(&proof_for(&ok_credit), &cp, &prefix[1..], &AllowAll)
+            .expect("the checkpoint and segment can judge it");
+    assert!(verdict.unwrap_err().contains("applies cleanly"));
+}
+
+#[test]
+fn a_checkpoint_off_the_segment_cannot_judge() {
+    use deposits_protocol::fraud::verify_non_conforming_update_from;
+    let prefix = ledger_c_prefix();
+    let fraud = ledger_c_fraud(&prefix, OP);
+    // A checkpoint at seq 1 offered with a segment starting at seq 2: not the same chain point.
+    let cp = replayed_after(&prefix, 1);
+    assert!(
+        verify_non_conforming_update_from(&proof_for(&fraud), &cp, &prefix[2..], &AllowAll)
+            .is_err()
+    );
+    // A fault at or before the checkpoint: back to the full history.
+    let cp3 = replayed_after(&prefix, 3);
+    assert!(verify_non_conforming_update_from(
+        &proof_for(&prefix[3]),
+        &cp3,
+        &prefix[3..],
+        &AllowAll
+    )
+    .is_err());
+}

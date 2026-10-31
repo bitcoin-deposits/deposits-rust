@@ -335,12 +335,34 @@ impl LedgerActor {
             }
             _ => {}
         }
+        // The post-hook a replay runs (LedgerState::apply_update_in_place): without it a
+        // replica's state differs from a replay of its own chain after every QuorumBegin.
+        if matches!(op, LedgerOperation::QuorumBegin { .. }) {
+            ledger.state.note_quorum_begin(
+                update.block_height,
+                update.sequence_number,
+                update.content_hash,
+            );
+        }
         ledger.state.sequence = update.sequence_number;
         ledger.state.chain_tip_hash = update.chain_hash();
         ledger.history.push(update.clone());
+        // Every CHECKPOINT_EVERY updates: replay the segment since the previous checkpoint and
+        // compare it with the live state (Ledger::verify_checkpoint).
+        let checkpoint = ledger.verify_checkpoint(deposits_core::ledger::CHECKPOINT_EVERY);
+        let checkpoint_to_save = match &checkpoint {
+            deposits_core::ledger::CheckpointOutcome::Taken
+            | deposits_core::ledger::CheckpointOutcome::Mismatch
+            | deposits_core::ledger::CheckpointOutcome::Bootstrapped(_) => {
+                ledger.verified_checkpoint.clone()
+            }
+            _ => None,
+        };
         // Drop the write lock before doing disk I/O: persist_ledger_to_disk
         // takes its own read lock through the same Arc.
         drop(ledger);
+        self.handler
+            .note_checkpoint(&self.ledger_id, &checkpoint, checkpoint_to_save.as_ref());
 
         // Wake any cosign dispatchers waiting for state to catch up to
         // this seq. notify_waiters fires once for every pending waiter;

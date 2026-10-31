@@ -164,7 +164,42 @@ pub struct Ledger {
     /// longer hold on a long ledger. In memory only; after a restart, replay is the fallback.
     #[serde(skip, default)]
     pub pre_quorum_begin: Option<(u64, LedgerState)>,
+    /// The newest checkpoint: the state after `seq`, made by replaying the updates since the
+    /// previous checkpoint from it, never copied from `state` (see [`Ledger::verify_checkpoint`]).
+    /// Persisted beside the ledger log; in memory here.
+    #[serde(skip, default)]
+    pub verified_checkpoint: Option<VerifiedCheckpoint>,
 }
+
+/// A ledger state made by replay, at the update with `chain_hash`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VerifiedCheckpoint {
+    pub seq: u64,
+    pub chain_hash: [u8; 32],
+    pub state: LedgerState,
+    /// Taken from the live state, once, because no replayable base existed (a compacted log
+    /// after an upgrade). Every later checkpoint replays forward from it.
+    pub bootstrapped: bool,
+}
+
+/// What [`Ledger::verify_checkpoint`] did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum CheckpointOutcome {
+    /// The tip is not a checkpoint sequence, or one is already taken there.
+    NotDue,
+    /// The replay agreed with the live state.
+    Taken,
+    /// No replayable base: the live state was taken as the first checkpoint.
+    Bootstrapped(String),
+    /// The replay disagreed with the live state, which has been replaced by the replay. Our
+    /// own fault: nobody is accused.
+    Mismatch,
+    /// The segment could not be replayed (a gap, or an update that does not apply).
+    Unavailable(String),
+}
+
+/// Updates between checkpoints.
+pub const CHECKPOINT_EVERY: u64 = 1024;
 
 /// DEP-02 §Block height and hash: the header an operator signs an update with after a
 /// predecessor at (`height`, `hash`): never below it (a reorganisation that lowered our tip
@@ -307,6 +342,7 @@ impl Ledger {
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
             pre_quorum_begin: None,
+            verified_checkpoint: None,
         }
     }
 
@@ -323,6 +359,7 @@ impl Ledger {
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
             pre_quorum_begin: None,
+            verified_checkpoint: None,
         }
     }
 
@@ -343,6 +380,7 @@ impl Ledger {
             history: Vec::new(),
             created_at: std::collections::HashMap::new(),
             pre_quorum_begin: None,
+            verified_checkpoint: None,
         }
     }
 
@@ -925,6 +963,110 @@ impl Ledger {
             .last()
             .map(|u| u.chain_hash())
             .unwrap_or([0u8; 32])
+    }
+
+    /// Every `every` updates, replay the segment since the previous checkpoint from it and
+    /// compare the result with the live `state`, which is kept up to date update by update
+    /// through code a replay does not share (on 2026-10-30 a cl replica applied one transfer
+    /// twice and published a false proof from the doubled balance). A difference is our own
+    /// fault: the live state is replaced by the replay and the caller logs it, accusing no one.
+    /// Proofs we publish are judged from these checkpoints, never from the live state. Cost:
+    /// one replay of `every` updates and one state comparison per checkpoint.
+    pub fn verify_checkpoint(&mut self, every: u64) -> CheckpointOutcome {
+        let Some(tip) = self.history.last() else {
+            return CheckpointOutcome::NotDue;
+        };
+        let seq = tip.sequence_number;
+        let tip_hash = tip.chain_hash();
+        if every == 0
+            || seq % every != 0
+            || self.state.sequence != seq
+            || self
+                .verified_checkpoint
+                .as_ref()
+                .is_some_and(|c| c.seq >= seq)
+        {
+            return CheckpointOutcome::NotDue;
+        }
+        let first = self.history.first().map_or(0, |u| u.sequence_number);
+        let base = match &self.verified_checkpoint {
+            Some(c) if c.seq + 1 >= first => Some((c.state.clone(), c.seq + 1)),
+            _ if first == 0 => match deposits_protocol::fraud::genesis_state(&self.history[0]) {
+                Ok(s) => Some((s, 0)),
+                Err(e) => return CheckpointOutcome::Unavailable(e),
+            },
+            _ => None,
+        };
+        let Some((mut state, from)) = base else {
+            self.verified_checkpoint = Some(VerifiedCheckpoint {
+                seq,
+                chain_hash: tip_hash,
+                state: self.state.clone(),
+                bootstrapped: true,
+            });
+            return CheckpointOutcome::Bootstrapped(format!(
+                "no replayable base below seq {} (history starts at {})",
+                seq, first
+            ));
+        };
+        for u in self.history[(from - first) as usize..].iter() {
+            if u.sequence_number > seq {
+                break;
+            }
+            if let Err(e) = state.apply_update_in_place(u) {
+                return CheckpointOutcome::Unavailable(format!(
+                    "the segment does not replay at seq {}: {}",
+                    u.sequence_number, e
+                ));
+            }
+        }
+        if state.sequence != seq {
+            return CheckpointOutcome::Unavailable(format!(
+                "the segment reached seq {}, not {}",
+                state.sequence, seq
+            ));
+        }
+        let outcome = if state != self.state {
+            self.state = state.clone();
+            CheckpointOutcome::Mismatch
+        } else {
+            CheckpointOutcome::Taken
+        };
+        self.verified_checkpoint = Some(VerifiedCheckpoint {
+            seq,
+            chain_hash: tip_hash,
+            state,
+            bootstrapped: false,
+        });
+        outcome
+    }
+
+    /// Rebuild the live state from the newest verified checkpoint and the updates after it.
+    /// `Err` when there is no checkpoint on what the history holds, or the segment does not
+    /// replay; the caller falls back to a replay from genesis or a relay catch-up.
+    pub fn repair_from_checkpoint(&mut self) -> Result<u64, String> {
+        let cp = self
+            .verified_checkpoint
+            .as_ref()
+            .ok_or("no verified checkpoint")?;
+        let first = self.history.first().map_or(0, |u| u.sequence_number);
+        let i = cp
+            .seq
+            .checked_sub(first)
+            .ok_or("the checkpoint is older than the history held")? as usize;
+        if self.history.get(i).map(|u| u.chain_hash()) != Some(cp.chain_hash) {
+            return Err("the checkpoint is not on the history held".into());
+        }
+        let mut state = cp.state.clone();
+        let mut n = 0u64;
+        for u in &self.history[i + 1..] {
+            state
+                .apply_update_in_place(u)
+                .map_err(|e| format!("seq {}: {}", u.sequence_number, e))?;
+            n += 1;
+        }
+        self.state = state;
+        Ok(n)
     }
 
     /// Get the next expected sequence number.
@@ -1805,6 +1947,7 @@ impl Ledger {
             history: updates,
             created_at: std::collections::HashMap::new(),
             pre_quorum_begin: None,
+            verified_checkpoint: None,
         }
     }
 

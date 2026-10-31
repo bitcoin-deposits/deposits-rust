@@ -58,6 +58,7 @@ fn ledger_with_staged(operator_pk: PublicKey, staged_pks: &[PublicKey]) -> Ledge
         history: Vec::new(),
         created_at: Default::default(),
         pre_quorum_begin: None,
+        verified_checkpoint: None,
     }
 }
 

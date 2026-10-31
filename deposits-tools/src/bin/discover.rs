@@ -156,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 history: updates,
                 created_at: Default::default(),
                 pre_quorum_begin: Default::default(),
+                verified_checkpoint: Default::default(),
             };
             for i in 0..ledger.history.len() {
                 let u = &ledger.history[i];

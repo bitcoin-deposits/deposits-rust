@@ -29,6 +29,7 @@ fn make_ledger() -> Ledger {
         history: Vec::new(),
         created_at: Default::default(),
         pre_quorum_begin: None,
+        verified_checkpoint: Default::default(),
     }
 }
 

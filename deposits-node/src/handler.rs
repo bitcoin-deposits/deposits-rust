@@ -969,6 +969,7 @@ impl DepositsHandler {
             history: updates,
             created_at,
             pre_quorum_begin: None,
+            verified_checkpoint: Default::default(),
         };
 
         let ops_to_replay: Vec<_> = ledger
@@ -977,7 +978,7 @@ impl DepositsHandler {
             .filter(|u| (u.sequence_number as i64) > replay_after_seq)
             .filter_map(|u| {
                 match deposits_core::messages::LedgerOperation::tlv_decode(&u.message) {
-                    Ok(op) => Some((u.sequence_number, u.block_height, op)),
+                    Ok(op) => Some((u.sequence_number, u.block_height, u.content_hash, op)),
                     Err(e) => {
                         tracing::warn!(
                             "Ledger {} seq {}: failed to decode operation for replay: {}",
@@ -992,7 +993,7 @@ impl DepositsHandler {
             .collect();
 
         let mut replayed = 0u64;
-        for (seq, height, operation) in &ops_to_replay {
+        for (seq, height, content_hash, operation) in &ops_to_replay {
             // The state before a QuorumBegin, for a member asked to sign its rungs after a
             // restart (Ledger::pre_quorum_begin; replay from genesis is not always possible).
             if matches!(
@@ -1016,6 +1017,13 @@ impl DepositsHandler {
                     e
                 );
             } else {
+                // As LedgerState::apply_update_in_place does after a QuorumBegin.
+                if matches!(
+                    operation,
+                    deposits_core::messages::LedgerOperation::QuorumBegin { .. }
+                ) {
+                    ledger.state.note_quorum_begin(*height, *seq, *content_hash);
+                }
                 replayed += 1;
             }
         }
@@ -1077,7 +1085,129 @@ impl DepositsHandler {
             );
         }
 
+        if let Some(dir) = path.parent() {
+            Self::attach_checkpoint(&mut ledger, ledger_id, dir);
+        }
         Some(ledger)
+    }
+
+    fn checkpoint_path(ledgers_dir: &std::path::Path, ledger_id: &str) -> PathBuf {
+        ledgers_dir.join(format!("{}.ckpt.json", ledger_id))
+    }
+
+    /// The verified checkpoint persisted beside a ledger's log, if its digest holds and it sits
+    /// on this chain (the update at its sequence has its chain hash). The next checkpoint then
+    /// replays forward from it, so a state reloaded from a snapshot row is itself checked.
+    fn attach_checkpoint(ledger: &mut Ledger, ledger_id: &str, ledgers_dir: &std::path::Path) {
+        use bitcoin::hashes::{sha256, Hash};
+        let path = Self::checkpoint_path(ledgers_dir, ledger_id);
+        let Ok(text) = fs::read_to_string(&path) else {
+            return;
+        };
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&text);
+        let Ok(v) = parsed else { return };
+        let (Some(seq), Some(hash_hex), Some(digest), Some(state_v)) = (
+            v.get("seq").and_then(|x| x.as_u64()),
+            v.get("chain_hash").and_then(|x| x.as_str()),
+            v.get("digest").and_then(|x| x.as_str()),
+            v.get("state"),
+        ) else {
+            return;
+        };
+        let Ok(state_bytes) = serde_json::to_vec(state_v) else {
+            return;
+        };
+        if hex::encode(sha256::Hash::hash(&state_bytes).to_byte_array()) != digest {
+            tracing::warn!(
+                "checkpoint for {}…: digest mismatch, ignored",
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+            return;
+        }
+        let Ok(state) = serde_json::from_value::<LedgerState>(state_v.clone()) else {
+            return;
+        };
+        let on_chain = ledger
+            .history
+            .iter()
+            .find(|u| u.sequence_number == seq)
+            .is_some_and(|u| hex::encode(u.chain_hash()) == hash_hex);
+        if !on_chain || state.sequence != seq {
+            tracing::warn!(
+                "checkpoint for {}… at seq {} is not on this chain; ignored",
+                &ledger_id[..16.min(ledger_id.len())],
+                seq
+            );
+            return;
+        }
+        let mut chain_hash = [0u8; 32];
+        if let Ok(b) = hex::decode(hash_hex) {
+            if b.len() == 32 {
+                chain_hash.copy_from_slice(&b);
+            }
+        }
+        ledger.verified_checkpoint = Some(deposits_core::ledger::VerifiedCheckpoint {
+            seq,
+            chain_hash,
+            state,
+            bootstrapped: false,
+        });
+    }
+
+    /// Log and persist what `Ledger::verify_checkpoint` did.
+    pub fn note_checkpoint(
+        &self,
+        ledger_id: &str,
+        outcome: &deposits_core::ledger::CheckpointOutcome,
+        save: Option<&deposits_core::ledger::VerifiedCheckpoint>,
+    ) {
+        use deposits_core::ledger::CheckpointOutcome as C;
+        let short = &ledger_id[..16.min(ledger_id.len())];
+        match outcome {
+            C::NotDue => return,
+            C::Taken => tracing::debug!("checkpoint {}…: verified", short),
+            C::Bootstrapped(why) => {
+                tracing::info!(
+                    "checkpoint {}…: first checkpoint taken from the live state ({})",
+                    short,
+                    why
+                )
+            }
+            C::Mismatch => {
+                metrics::record_checkpoint_mismatch();
+                tracing::warn!(
+                    "CHECKPOINT MISMATCH on {}… at seq {}: the live state differs from a replay; \
+                     replaced by the replay (our fault, no one accused)",
+                    short,
+                    save.map_or(0, |c| c.seq)
+                );
+            }
+            C::Unavailable(why) => tracing::warn!("checkpoint {}…: not taken ({})", short, why),
+        }
+        let Some(cp) = save else { return };
+        use bitcoin::hashes::{sha256, Hash};
+        let Ok(state_v) = serde_json::to_value(&cp.state) else {
+            return;
+        };
+        let Ok(state_bytes) = serde_json::to_vec(&state_v) else {
+            return;
+        };
+        let doc = serde_json::json!({
+            "seq": cp.seq,
+            "chain_hash": hex::encode(cp.chain_hash),
+            "digest": hex::encode(sha256::Hash::hash(&state_bytes).to_byte_array()),
+            "bootstrapped": cp.bootstrapped,
+            "state": state_v,
+        });
+        let dir = self.data_dir.join("ledgers");
+        let path = Self::checkpoint_path(&dir, ledger_id);
+        let tmp = path.with_extension("tmp");
+        if fs::write(&tmp, doc.to_string())
+            .and_then(|_| fs::rename(&tmp, &path))
+            .is_err()
+        {
+            tracing::warn!("checkpoint {}…: could not be written", short);
+        }
     }
 
     fn load_ledgers_from_jsonl(ledgers_dir: &PathBuf) -> HashMap<String, Arc<RwLock<Ledger>>> {

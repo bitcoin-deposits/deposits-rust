@@ -1797,6 +1797,115 @@ pub fn verify_non_conforming_update(
     }
 }
 
+/// [`verify_non_conforming_update`], judged from a checkpoint instead of from genesis: the
+/// state after the update at `segment[0]` (`checkpoint`, which the caller replayed itself,
+/// never copied from a replica's live state), and the updates that follow it. The fault must
+/// chain, link by link, onto that segment. DEP-06 "Verify before publishing": a node judges its
+/// own proof this way before publishing it, so a long ledger whose early history it no longer
+/// holds can still be judged, and judged from replayed state.
+///
+/// Outer `Err`: this checkpoint and segment cannot judge the proof (the fault is at or before the
+/// checkpoint, or does not chain onto the segment); fall back to the full history. Inner result:
+/// the verdict.
+pub fn verify_non_conforming_update_from(
+    proof: &FraudProof,
+    checkpoint: &crate::types::LedgerState,
+    segment: &[crate::types::SignedLedgerUpdate],
+    authorizer: &impl crate::types::Authorizer,
+) -> Result<Result<(), String>, String> {
+    use crate::tlv::TlvDecode;
+    let FraudEvidence::NonConformingUpdate {
+        fault_sequence,
+        fault_update_hex,
+    } = &proof.evidence
+    else {
+        return Err("not a NonConformingUpdate".into());
+    };
+    let bytes =
+        hex::decode(fault_update_hex).map_err(|e| format!("fault_update hex decode: {}", e))?;
+    let fault = crate::types::SignedLedgerUpdate::tlv_decode(&bytes)
+        .map_err(|e| format!("fault_update TLV decode: {:?}", e))?;
+    let base = segment.first().ok_or("empty segment")?;
+    if base.chain_hash() != checkpoint.chain_tip_hash || base.sequence_number != checkpoint.sequence
+    {
+        return Err("the segment does not start at the checkpoint".into());
+    }
+    if fault.sequence_number <= base.sequence_number {
+        return Err("the fault is at or before the checkpoint".into());
+    }
+    // The update the fault follows, and the chain back from it to the checkpoint.
+    let by_hash: std::collections::HashMap<[u8; 32], usize> = segment
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (u.chain_hash(), i))
+        .collect();
+    let Some(&anchor_i) = by_hash.get(&fault.previous_hash) else {
+        return Err("the fault does not follow an update of this segment".into());
+    };
+    let mut i = anchor_i;
+    while i > 0 {
+        let u = &segment[i];
+        match by_hash.get(&u.previous_hash) {
+            Some(&p) if segment[p].sequence_number + 1 == u.sequence_number => i = p,
+            _ => return Err("the segment does not chain back to the checkpoint".into()),
+        }
+    }
+    // The checks that need no history: the same as `verify_non_conforming_update` (1)-(5).
+    if fault.sequence_number != *fault_sequence {
+        return Ok(Err(
+            "evidence.fault_sequence does not match the fault update".into(),
+        ));
+    }
+    let outer = hex::decode(&proof.ledger_id).map_err(|e| format!("ledger_id hex: {}", e))?;
+    if outer.len() != 32 || outer[..] != fault.ledger_id[..] {
+        return Ok(Err("outer ledger_id does not match the fault update".into()));
+    }
+    let accused = hex::decode(&proof.accused).map_err(|e| format!("accused hex: {}", e))?;
+    if accused != fault.operator_id.serialize() {
+        return Ok(Err("the accused did not sign the fault update".into()));
+    }
+    if let Err(e) = fault.verify_operator_signature() {
+        return Ok(Err(format!("fault update signature verification: {}", e)));
+    }
+    if fault.content_hash != fault.compute_hash() {
+        return Ok(Ok(()));
+    }
+    // Replay from the checkpoint through the anchor, then judge as from genesis.
+    let mut state = checkpoint.clone();
+    let mut j = 1;
+    while j <= anchor_i {
+        let u = &segment[j];
+        if u.sequence_number != base.sequence_number + j as u64 {
+            return Err("the segment is not contiguous".into());
+        }
+        state.apply_update_in_place(u).map_err(|e| {
+            format!(
+                "the segment does not replay at seq {}: {}",
+                u.sequence_number, e
+            )
+        })?;
+        j += 1;
+    }
+    let anchor = &segment[anchor_i];
+    if let Err(e) = check_accused_operates(&state, &fault, &fault.operator_id) {
+        return Ok(Err(e));
+    }
+    if anchor.sequence_number + 1 != fault.sequence_number {
+        return Ok(Ok(()));
+    }
+    Ok(
+        match fault_rejection(&state, Some(anchor), &fault, authorizer) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err(format!(
+                "fault update at seq {} chains onto its predecessor and applies cleanly with no \
+             conformance violation — conforming, proof not demonstrated",
+                fault.sequence_number
+            )),
+            Err(e) => Err(e),
+        },
+    )
+}
+
 /// An operator's updates below a sequence, indexed by `chain_hash` and by
 /// sequence in one pass. Nothing here checks signatures: a chain walked
 /// backwards by `previous_hash` from an update whose signature is checked is
@@ -1954,24 +2063,32 @@ fn update_binds_to_ledger(
 /// fresh state at its seq-0 `LedgerOpen` with the same step as every other
 /// replay (`LedgerState::apply_update_in_place`). An update that fails to
 /// replay is an error: a verdict on the fault needs the exact state before it.
-fn replay_canonical(
-    chain: &[&crate::types::SignedLedgerUpdate],
+/// The empty state a ledger's seq-0 `LedgerOpen` starts from, before it is applied.
+pub fn genesis_state(
+    genesis: &crate::types::SignedLedgerUpdate,
 ) -> Result<crate::types::LedgerState, String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::TlvDecode;
+    match LedgerOperation::tlv_decode(&genesis.message) {
+        Ok(LedgerOperation::LedgerOpen {
+            operator_id,
+            reserves_id,
+            genesis_block,
+            ..
+        }) => Ok(crate::types::LedgerState::new(
+            operator_id,
+            reserves_id,
+            genesis_block,
+        )),
+        _ => Err("canonical seq 0 is not a LedgerOpen".into()),
+    }
+}
 
+fn replay_canonical(
+    chain: &[&crate::types::SignedLedgerUpdate],
+) -> Result<crate::types::LedgerState, String> {
     let genesis = chain.first().ok_or("empty canonical chain")?;
-    let (operator_id, reserves_id, genesis_block) =
-        match LedgerOperation::tlv_decode(&genesis.message) {
-            Ok(LedgerOperation::LedgerOpen {
-                operator_id,
-                reserves_id,
-                genesis_block,
-                ..
-            }) => (operator_id, reserves_id, genesis_block),
-            _ => return Err("canonical seq 0 is not a LedgerOpen".into()),
-        };
-    let mut state = crate::types::LedgerState::new(operator_id, reserves_id, genesis_block);
+    let mut state = genesis_state(genesis)?;
     for u in chain {
         state.apply_update_in_place(u).map_err(|e| {
             format!(
