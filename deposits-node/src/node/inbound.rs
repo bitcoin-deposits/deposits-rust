@@ -605,6 +605,60 @@ impl Node {
         (merge_ledger_ids(advertised, held), ok)
     }
 
+    /// Rebuild a replica's state by replaying its history from genesis, when the
+    /// history we hold is complete; otherwise queue it for a relay catch-up. Used when
+    /// the replica's verdict on an update disagrees with a replay of the history.
+    pub(crate) fn repair_replica(&self, ledger_id: &str) {
+        let arc = self.handler.ledgers.lock().unwrap().get(ledger_id).cloned();
+        let Some(arc) = arc else { return };
+        let mut l = arc.write().unwrap();
+        if l.history.first().is_some_and(|u| u.sequence_number == 0) {
+            match l.recompute_state() {
+                Ok(()) => tracing::warn!(
+                    "replica {}... rebuilt from its history ({} updates)",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    l.history.len()
+                ),
+                Err(e) => tracing::error!(
+                    "replica {}... rebuild failed: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                ),
+            }
+        } else {
+            drop(l);
+            self.stale_joined_ledgers
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string());
+        }
+    }
+
+    /// DEP-06 "Verify before publishing": publish a proof only once it passes the same
+    /// verification any receiver applies (from the history, never from the replica state
+    /// that refused the update). A proof its own author can't verify is a false
+    /// accusation, or a judgment made without the data, and is not published; a caller
+    /// that tracks delivery treats the refusal as "not yet" and retries later.
+    pub(crate) async fn publish_fraud_proof(
+        &self,
+        broadcast: &deposits_core::fraud::FraudBroadcast,
+    ) -> Result<String, String> {
+        if let Err(e) = self.verify_fraud_broadcast_locally(broadcast).await {
+            tracing::warn!(
+                "not publishing {:?} against {}... on {}...: our own proof does not verify: {}",
+                broadcast.proof.proof_type,
+                &broadcast.proof.accused[..16.min(broadcast.proof.accused.len())],
+                &broadcast.proof.ledger_id[..16.min(broadcast.proof.ledger_id.len())],
+                e
+            );
+            return Err(format!("own proof does not verify: {}", e));
+        }
+        self.nostr
+            .broadcast_fraud_proof(broadcast)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// Contagion (DEP-19 §5–6): everyone who signed the non-conforming
     /// `fault` (its operator and each cosigner), against every other ledger
     /// it operates. One self-evident kind:9101 `NonConformingCosignature` per
@@ -645,7 +699,7 @@ impl Node {
                 fault.sequence_number,
                 &b.proof.ledger_id[..16.min(b.proof.ledger_id.len())],
             );
-            if let Err(e) = self.nostr.broadcast_fraud_proof(b).await {
+            if let Err(e) = self.publish_fraud_proof(b).await {
                 tracing::error!("Contagion: fraud broadcast failed: {}", e);
             }
         }
@@ -856,6 +910,37 @@ impl Node {
                 let ledger_id = inbound.ledger_id.clone();
                 let fault = inbound.update.clone();
                 tokio::spawn(async move {
+                    // DEP-06 "Verify before publishing": the verdict above came from our
+                    // replica's state, which can be wrong. Verify the fault as any verifier
+                    // would, from the history, before disputing or publishing anything; a
+                    // history that accepts the update means the fault is our replica's.
+                    let ncu = deposits_core::fraud::FraudBroadcast {
+                        proof: deposits_core::fraud::FraudProof {
+                            proof_type: deposits_core::fraud::FraudProofType::NonConformingUpdate,
+                            accused: hex::encode(fault.operator_id.serialize()),
+                            ledger_id: ledger_id.clone(),
+                            evidence: deposits_core::fraud::FraudEvidence::NonConformingUpdate {
+                                fault_sequence: fault.sequence_number,
+                                fault_update_hex: {
+                                    use deposits_core::TlvEncode;
+                                    hex::encode(fault.tlv_encode())
+                                },
+                            },
+                        },
+                        embedding: None,
+                        causal_chain: Vec::new(),
+                    };
+                    if let Err(e) = node.verify_fraud_broadcast_locally(&ncu).await {
+                        tracing::warn!(
+                            "Non-conforming-cosig on {}... seq {}: the history does not prove it \
+                             ({}); our replica's state is suspect — repairing it, accusing no one",
+                            &ledger_id[..16.min(ledger_id.len())],
+                            fault.sequence_number,
+                            e
+                        );
+                        node.repair_replica(&ledger_id);
+                        return;
+                    }
                     if let Err(e) = node
                         .auto_arm_for_dispute_with_reason(
                             &ledger_id,

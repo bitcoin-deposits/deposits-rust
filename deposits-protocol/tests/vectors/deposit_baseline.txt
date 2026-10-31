@@ -1,0 +1,11 @@
+# DEP-07 deposit baselines (shared cl-deposits / deposits-rust).
+# A DepositOpen in an update at OPEN_HEIGHT, on a ledger whose genesis_block is GENESIS, opens the
+# deposit at OPEN_HEIGHT and starts its fee baseline there (at GENESIS when OPEN_HEIGHT is 0).
+# The first conforming FeeCollect, with frequency_blocks 2016, is at baseline + 2016.
+# Judged by every path that applies a DepositOpen: operator commit, replica apply, replay.
+# genesis open_height opened_at_block last_fee_assessment first_fee_collect
+264 301 301 301 2317
+264 0 0 264 2280
+0 0 0 0 2016
+1000 1000 1000 1000 3016
+840000 840123 840123 840123 842139

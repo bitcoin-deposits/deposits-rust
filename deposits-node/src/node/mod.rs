@@ -623,6 +623,10 @@ pub struct Node {
     /// Rate-limiter for background relay fetches of stale joined ledgers.
     /// Tracks when each ledger was last fetched from relay (30s cooldown per ledger).
     last_relay_fetch_times: Mutex<HashMap<String, std::time::Instant>>,
+    /// FeeCollects members refused, by (ledger, deposit): the block from which to
+    /// propose again. A refused FeeCollect held the cosign pipeline for its timeout on
+    /// every cycle, and the transfers behind it timed out (signet soak, 2026-10-31).
+    fee_collect_backoff: Mutex<HashMap<(String, [u8; 16]), u32>>,
 
     /// Cache mapping target_ledger_id → our member ledger key (in the ledgers HashMap).
     /// Populated on first cosign request per target, invalidated with joined_ledger_cache.

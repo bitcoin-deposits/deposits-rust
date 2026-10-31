@@ -303,7 +303,7 @@ impl crate::Node {
                     &faulted_ledger_id[..16.min(faulted_ledger_id.len())],
                     &broadcast.proof.ledger_id[..16.min(broadcast.proof.ledger_id.len())],
                 );
-                match self.nostr.broadcast_fraud_proof(broadcast).await {
+                match self.publish_fraud_proof(broadcast).await {
                     // marked only once published: a failed publish is retried next pass
                     Ok(_) => {
                         self.reported_derelictions

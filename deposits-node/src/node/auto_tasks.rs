@@ -220,6 +220,9 @@ impl Node {
         }
     }
 
+    /// Blocks a refused FeeCollect waits before the operator proposes it again.
+    pub(crate) const FEE_COLLECT_BACKOFF_BLOCKS: u32 = 6;
+
     /// Auto-collect fees from deposits when due
     ///
     /// This checks all operated ledgers for deposits that have fees due (based on
@@ -258,6 +261,15 @@ impl Node {
                     .deposits
                     .iter()
                     .filter_map(|(deposit_id, deposit)| {
+                        if self
+                            .fee_collect_backoff
+                            .lock()
+                            .unwrap()
+                            .get(&(ledger_id.clone(), *deposit_id))
+                            .is_some_and(|&until| current_block < until)
+                        {
+                            return None;
+                        }
                         let fee = deposit.calculate_fees_due(current_block);
                         let available = deposit.balance.saturating_sub(deposit.locked_balance);
                         if fee > 0 && fee <= available {
@@ -290,9 +302,14 @@ impl Node {
 
                 if let Err(e) = self.commit_operation(&ledger_id, operation).await {
                     tracing::warn!(
-                        "Failed to collect fee from deposit {}...: {}",
+                        "Failed to collect fee from deposit {}...: {} (not proposing it again for {} blocks)",
                         hex::encode(&deposit_id[..8]),
-                        e
+                        e,
+                        Self::FEE_COLLECT_BACKOFF_BLOCKS
+                    );
+                    self.fee_collect_backoff.lock().unwrap().insert(
+                        (ledger_id.clone(), deposit_id),
+                        current_block.saturating_add(Self::FEE_COLLECT_BACKOFF_BLOCKS),
                     );
                     continue;
                 }

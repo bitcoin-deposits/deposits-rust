@@ -1065,3 +1065,73 @@ fn custody_follows_dispute_acquire() {
     verify_non_conforming_update(&proof_for(&ledger_c_fraud(&chain, OP)), &chain, &AllowAll)
         .unwrap();
 }
+
+/// DEP-06 "Verify before publishing" (signet soak, 2026-10-30): a replica whose
+/// state is wrong (here it missed the DepositOpen, as a replica that applied an
+/// update twice or skipped one would hold the wrong balances) refuses the
+/// operator's next update, but the history accepts it. A node judges from the
+/// history before it publishes, so this is no proof, and its author must not
+/// publish one.
+#[test]
+fn a_wrong_replica_state_is_not_a_proof() {
+    let did = [4u8; 16];
+    let g = signed_update(
+        0,
+        ledger(),
+        [0u8; 32],
+        OP,
+        &genesis_op().tlv_encode(),
+        false,
+    );
+    let open = LedgerOperation::DepositOpen {
+        deposit_id: did,
+        descriptor: "pk(0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798)"
+            .to_string(),
+        fees: None,
+        transfer_fees: None,
+        payment_hash: None,
+        invoice: None,
+        cosigner_guarantee_signature: None,
+        receive_requires_sig: false,
+        fee_change_after_blocks: None,
+        fee_change_notice_blocks: None,
+        fee_change_limit_bps: None,
+        commitment: None,
+    };
+    let u1 = signed_update(1, ledger(), g.chain_hash(), OP, &open.tlv_encode(), false);
+    let credit = LedgerOperation::InvoiceCredit {
+        payment_hash: [9u8; 32],
+        deposit_id: did,
+        amount: 1_000,
+        invoice_id: "i".to_string(),
+        sequence_number: 0,
+        wallet_authorization: None,
+        commitment: None,
+    };
+    let fault = signed_update(
+        2,
+        ledger(),
+        u1.chain_hash(),
+        OP,
+        &credit.tlv_encode(),
+        false,
+    );
+
+    // The replica that missed seq 1 refuses the credit.
+    let mut replica =
+        deposits_protocol::types::LedgerState::new(pubkey(OP), "bcrt1qreserves".to_string(), 0);
+    replica.apply_update_in_place(&g).unwrap();
+    assert!(
+        !replica
+            .check_speculative_at(&credit, &AllowAll, 0, 0)
+            .is_empty(),
+        "the wrong replica state refuses the update"
+    );
+
+    // The history accepts it: no proof.
+    let history = vec![g, u1];
+    assert!(
+        verify_non_conforming_update(&proof_for(&fault), &history, &AllowAll).is_err(),
+        "a replay of the history accepts the update, so it is not a NonConformingUpdate"
+    );
+}

@@ -1192,15 +1192,6 @@ impl Ledger {
         // chain_hash() after operator signing via finalize_chain_hash()
         self.state.chain_tip_hash = new_hash;
 
-        // Set opened_at_block and initial last_fee_assessment for new deposits
-        if let LedgerOperation::DepositOpen { deposit_id, .. } = &operation {
-            if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                deposit.opened_at_block = block_height;
-                if deposit.last_fee_assessment == 0 {
-                    deposit.last_fee_assessment = block_height;
-                }
-            }
-        }
         // Record the QuorumBegin's location (for duration / entry-link).
         if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
             self.state
@@ -1341,15 +1332,6 @@ impl Ledger {
         let new_state = self.state.apply_signed(&staged.update, &authorizer)?;
         self.state = new_state;
 
-        // Set opened_at_block and initial last_fee_assessment for new deposits
-        if let LedgerOperation::DepositOpen { deposit_id, .. } = &staged.operation {
-            if let Some(deposit) = self.state.deposits.get_mut(deposit_id) {
-                deposit.opened_at_block = staged.update.block_height;
-                if deposit.last_fee_assessment == 0 {
-                    deposit.last_fee_assessment = staged.update.block_height;
-                }
-            }
-        }
         // Record the QuorumBegin's location (for duration / entry-link).
         if matches!(staged.operation, LedgerOperation::QuorumBegin { .. }) {
             self.state.note_quorum_begin(

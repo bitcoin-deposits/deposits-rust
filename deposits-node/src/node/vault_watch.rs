@@ -698,7 +698,7 @@ impl crate::Node {
                         embedding: None,
                         causal_chain: Vec::new(),
                     };
-                    if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
+                    if let Err(e) = self.publish_fraud_proof(&b).await {
                         tracing::error!("migration watch: fraud broadcast failed: {}", e);
                     }
                 }
@@ -847,7 +847,7 @@ impl crate::Node {
                     embedding: None,
                     causal_chain: Vec::new(),
                 };
-                if let Err(e) = self.nostr.broadcast_fraud_proof(&b).await {
+                if let Err(e) = self.publish_fraud_proof(&b).await {
                     tracing::error!("obligation watch: fraud broadcast failed: {}", e);
                 }
             }
@@ -1111,7 +1111,7 @@ impl crate::Node {
                         &t[..8.min(t.len())]
                     );
                     let b = proof_against(&pk, &t, theft, lapsed);
-                    match self.nostr.broadcast_fraud_proof(&b).await {
+                    match self.publish_fraud_proof(&b).await {
                         Ok(_) => {
                             published.insert(pkey);
                         }

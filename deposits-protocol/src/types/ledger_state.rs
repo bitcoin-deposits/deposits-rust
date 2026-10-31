@@ -966,16 +966,6 @@ impl LedgerState {
             hash: update.chain_hash(),
         };
         with_apply_ctx(ctx, || self.apply_in_place(&op))?;
-        if let LedgerOperation::DepositOpen { deposit_id, .. } = &op {
-            if update.block_height > 0 {
-                if let Some(deposit) = self.deposits.get_mut(deposit_id) {
-                    deposit.opened_at_block = update.block_height;
-                    if deposit.last_fee_assessment == 0 {
-                        deposit.last_fee_assessment = update.block_height;
-                    }
-                }
-            }
-        }
         if matches!(op, LedgerOperation::QuorumBegin { .. }) {
             self.note_quorum_begin(
                 update.block_height,
@@ -1775,6 +1765,15 @@ impl LedgerState {
                 deposit.fee_change_after_blocks = *fee_change_after_blocks;
                 deposit.fee_change_notice_blocks = *fee_change_notice_blocks;
                 deposit.fee_change_limit_bps = *fee_change_limit_bps;
+                // DEP-07: the open block is the DepositOpen envelope's block_height, and
+                // the fee baseline starts there (the ledger's genesis_block if that is 0).
+                // Stamped here, in the transition every path runs (operator commit,
+                // replica apply, replay), not in one caller: a replica that left both at 0
+                // judged fees due at 0 + frequency_blocks, and its operator proposed
+                // FeeCollects every cl member refused (signet soak, 2026-10-31).
+                let h = apply_ctx().height;
+                deposit.opened_at_block = h;
+                deposit.last_fee_assessment = if h == 0 { next.genesis_block } else { h };
                 let opened_balance = deposit.balance;
                 next.deposits.insert(*deposit_id, deposit);
                 // Deposits open at zero balance today; fold in whatever they
