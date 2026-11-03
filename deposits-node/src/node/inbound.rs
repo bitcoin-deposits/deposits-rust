@@ -545,8 +545,32 @@ impl Node {
         let equiv_seq = update_a.sequence_number;
         let last_valid = equiv_seq.saturating_sub(1);
 
+        // DEP-03 §Grounded arms: the DisputeEnter carries the equivocation proof as its grounds.
+        let proof = {
+            use deposits_core::TlvEncode;
+            deposits_core::fraud::FraudBroadcast {
+                proof: deposits_core::fraud::FraudProof {
+                    proof_type: deposits_core::fraud::FraudProofType::Equivocation,
+                    accused: hex::encode(update_a.operator_id.serialize()),
+                    ledger_id: accused_ledger.clone(),
+                    evidence: deposits_core::fraud::FraudEvidence::Equivocation {
+                        sequence: equiv_seq,
+                        update_a_hex: hex::encode(update_a.tlv_encode()),
+                        update_b_hex: hex::encode(_update_b.tlv_encode()),
+                    },
+                },
+                embedding: None,
+                causal_chain: Vec::new(),
+            }
+        };
+        remember_broadcast(&proof);
         match self
-            .auto_arm_for_dispute_with_reason(&accused_ledger, last_valid, "equivocation")
+            .auto_arm_for_dispute_on_proof(
+                &accused_ledger,
+                last_valid,
+                proof.proof.proof_hash(),
+                "equivocation",
+            )
             .await
         {
             Ok(()) => tracing::warn!(
@@ -957,9 +981,10 @@ impl Node {
                         return;
                     }
                     if let Err(e) = node
-                        .auto_arm_for_dispute_with_reason(
+                        .auto_arm_for_dispute_on_proof(
                             &ledger_id,
                             last_valid,
+                            ncu.proof.proof_hash(),
                             "non_conforming_update",
                         )
                         .await
@@ -1490,16 +1515,27 @@ impl Node {
         &self,
         broadcast: &deposits_core::fraud::FraudBroadcast,
     ) -> Result<(), String> {
-        let r = self.verify_fraud_broadcast_inner(broadcast).await;
+        let r = self.verify_fraud_broadcast_inner(broadcast, false).await;
         if r.is_ok() {
             remember_broadcast(broadcast);
         }
         r
     }
 
+    /// DEP-03 §Grounded arms: a carried proof's evidence verifies (DEP-06 §Verification, the
+    /// per-type check). Its embedding is not asked for: the `DisputeEnter` that carries it is a
+    /// signed, dated update on a fork of the accused ledger, which is what an embedding gives.
+    pub(crate) async fn verify_fraud_grounds(
+        &self,
+        broadcast: &deposits_core::fraud::FraudBroadcast,
+    ) -> Result<(), String> {
+        self.verify_fraud_broadcast_inner(broadcast, true).await
+    }
+
     async fn verify_fraud_broadcast_inner(
         &self,
         broadcast: &deposits_core::fraud::FraudBroadcast,
+        evidence_only: bool,
     ) -> Result<(), String> {
         // DEP-06 "Verify before publishing": a NonConformingUpdate on a ledger we hold is judged
         // from our newest verified checkpoint (made by replay, never copied from the live state)
@@ -1759,7 +1795,21 @@ impl Node {
         // the replica's apply_and_check uses: a proof of a forged spend
         // verifies here whether or not we watched the update land.
         let authorizer = deposits_core::dep16::Dep16Authorizer::new();
-        deposits_core::fraud::verify_fraud_broadcast(broadcast, &provider, &oracle, &authorizer)?;
+        if evidence_only {
+            deposits_core::fraud::verify_fraud_evidence(
+                &broadcast.proof,
+                &provider,
+                &oracle,
+                &authorizer,
+            )?;
+        } else {
+            deposits_core::fraud::verify_fraud_broadcast(
+                broadcast,
+                &provider,
+                &oracle,
+                &authorizer,
+            )?;
+        }
 
         // WinnerCollateralDeviation's evidence is the on-chain claim TX,
         // which the pure verifier can't fetch. The type is self-evident, so
@@ -3017,7 +3067,7 @@ impl crate::node::Node {
             let v = match class {
                 GroundsClass::Expiry => (Verdict::Grounded, "an expiry ground".to_string()),
                 GroundsClass::Ungrounded(w) => (Verdict::Ungrounded, w),
-                GroundsClass::Verify(b) => match self.verify_fraud_broadcast_locally(&b).await {
+                GroundsClass::Verify(b) => match self.verify_fraud_grounds(&b).await {
                     Ok(()) => (Verdict::Grounded, "its proof verifies".to_string()),
                     Err(e) if e.contains("not available") => (Verdict::Unknown, e),
                     Err(e) => (

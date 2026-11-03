@@ -1057,6 +1057,19 @@ impl Node {
         // Track whether we actually added new operations (to avoid re-broadcast loops)
         let mut added_new_operations = false;
 
+        // DEP-03 §Grounded arms: a punitive DisputeEnter carries the broadcast it acts on.
+        // Joining another member's dispute without a proof of our own, we cite theirs:
+        // the grounds of any other DisputeEnter on this ledger whose carried proof we have
+        // verified (motive is never examined, the grounds are).
+        let (fraud_proof_hash, fraud_proof, reason) = match fraud_proof_hash {
+            Some(h) => (Some(h), super::inbound::known_broadcast_json(&h), reason),
+            None if anchor.is_none() => match self.cited_grounds(ledger_id).await {
+                Some((h, body, r)) => (Some(h), Some(body), Some(r)),
+                None => (None, None, reason),
+            },
+            None => (None, None, reason),
+        };
+        let reason = reason.map(|r| r.to_string());
         // 1. Publish DisputeEnter on the fork
         {
             let mut fork_ledger = fork_arc.write().unwrap();
@@ -1077,16 +1090,12 @@ impl Node {
                     Some((h, n)) => (Some(h), Some(n)),
                     None => (None, None),
                 };
-                // DEP-03 §Grounded arms: a punitive DisputeEnter carries the broadcast it acts on.
-                let fraud_proof = fraud_proof_hash
-                    .as_ref()
-                    .and_then(super::inbound::known_broadcast_json);
                 let dispute_op = LedgerOperation::DisputeEnter {
                     last_valid_sequence: last_valid_seq,
                     reason: if anchor.is_some() {
                         "quorum_expired".to_string()
                     } else {
-                        reason.unwrap_or("auto_dispute").to_string()
+                        reason.unwrap_or_else(|| "auto_dispute".to_string())
                     },
                     anchor_block_hash,
                     anchor_block_height,
@@ -5025,5 +5034,49 @@ mod dispute_base_tests {
         assert_eq!(dispute_base(17_839, Some(17_840)), 17_839);
         assert_eq!(dispute_base(9_000, Some(17_840)), 9_000);
         assert_eq!(dispute_base(20_181, None), 20_181);
+    }
+}
+
+impl crate::node::Node {
+    /// DEP-03 §Grounded arms: another disputant's carried proof on `ledger_id` whose evidence
+    /// verifies here, as (hash, body, reason), so a member joining that dispute cites the same
+    /// grounds. Motive is never examined, the grounds are.
+    pub(crate) async fn cited_grounds(
+        &self,
+        ledger_id: &str,
+    ) -> Option<([u8; 32], String, &'static str)> {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+        let candidates: Vec<([u8; 32], String)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let mut c = Vec::new();
+            for (key, arc) in ledgers.iter() {
+                if !key.starts_with(ledger_id) || key.len() == ledger_id.len() {
+                    continue;
+                }
+                let l = arc.read().unwrap();
+                for u in l.history.iter().rev() {
+                    if let Ok(LedgerOperation::DisputeEnter {
+                        fraud_proof_hash: Some(h),
+                        fraud_proof: Some(body),
+                        ..
+                    }) = LedgerOperation::tlv_decode(&u.message)
+                    {
+                        c.push((h, body));
+                        break;
+                    }
+                }
+            }
+            c
+        };
+        for (h, body) in candidates {
+            let Ok(b) = serde_json::from_str::<deposits_core::fraud::FraudBroadcast>(&body) else {
+                continue;
+            };
+            if b.proof.proof_hash() == h && self.verify_fraud_grounds(&b).await.is_ok() {
+                return Some((h, body, b.proof.proof_type.dispute_reason()));
+            }
+        }
+        None
     }
 }
