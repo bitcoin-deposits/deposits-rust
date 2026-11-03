@@ -368,6 +368,76 @@ pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 3
         .map(|(_, t)| t)
 }
 
+/// DEP-03 §"The dispute": the updates of a disputed ledger (its operator's and every
+/// disputant's, as the relay or our forks hold them) reduced to the current dispute. A disputant
+/// may hold an older `DisputeEnter` on a vault the ledger has since rotated away (a dispute that
+/// went dormant, or was entered on a proof that did not verify); it is no part of this one. Let
+/// Q be the sequence of the operator's latest `QuorumBegin` at or below the highest
+/// `last_valid_sequence` any `DisputeEnter` names: the vault being confiscated. A disputant
+/// counts only through its latest `DisputeEnter` whose `last_valid_sequence` is at or above Q,
+/// and only its updates past that fork point; a disputant with none drops out. The operator's
+/// updates are kept. Every builder, cosigner, watch and verifier judges the dispute through
+/// this (fork point, arms, shape, obligations), so they cannot disagree on which disputes count
+/// (signet soak, 2026-11-02: a stale DisputeEnter moved the watch's fork point, its anchor
+/// missed the confiscation, and its challenge lapsed into contagion against honest members).
+/// Vector `tests/vectors/dispute_scope.txt`.
+pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> {
+    let Some(origin) = updates
+        .iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id)
+    else {
+        return updates.to_vec();
+    };
+    let enters: Vec<(bitcoin::secp256k1::PublicKey, u64, u64)> = updates
+        .iter()
+        .filter(|u| u.operator_id != origin)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some((u.operator_id, u.sequence_number, last_valid_sequence)),
+            _ => None,
+        })
+        .collect();
+    let Some(top) = enters.iter().map(|e| e.2).max() else {
+        return updates.to_vec();
+    };
+    let q = updates
+        .iter()
+        .filter(|u| u.operator_id == origin && u.sequence_number <= top)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            )
+        })
+        .map(|u| u.sequence_number)
+        .max()
+        .unwrap_or(0);
+    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q
+    let mut fork_of: std::collections::HashMap<[u8; 33], (u64, u64)> = Default::default();
+    for (op, seq, lvs) in &enters {
+        if *lvs < q {
+            continue;
+        }
+        let e = fork_of.entry(op.serialize()).or_insert((*seq, *lvs));
+        if *seq > e.0 {
+            *e = (*seq, *lvs);
+        }
+    }
+    updates
+        .iter()
+        .filter(|u| {
+            u.operator_id == origin
+                || fork_of
+                    .get(&u.operator_id.serialize())
+                    .is_some_and(|(_, lvs)| u.sequence_number > *lvs)
+        })
+        .cloned()
+        .collect()
+}
+
 /// DEP-06 recovery voters: the members, other than the original operator (author of sequence
 /// 0), of the latest `QuorumBegin` the original operator authored at a sequence at or below the
 /// dispute's fork point (the lowest `last_valid_sequence` any `DisputeEnter` names; with no

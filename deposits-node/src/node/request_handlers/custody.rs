@@ -1293,6 +1293,8 @@ impl Node {
         if updates.is_empty() {
             return Err("failed to fetch ledger updates from relay".to_string());
         }
+        // DEP-03 §"The dispute": only the current dispute's DisputeEnters and arms count.
+        updates = deposits_core::rotation_order::dispute_scope(&updates);
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
 
         // DEP-03: the participant set is the eligibility cut. A failing
@@ -1435,6 +1437,8 @@ impl Node {
         if updates.is_empty() {
             return Err("fetch updates: relay returned no events".to_string());
         }
+        // DEP-03 §"The dispute": only the current dispute's DisputeEnters and arms count.
+        updates = deposits_core::rotation_order::dispute_scope(&updates);
         updates.sort_by_key(|u| (u.sequence_number, u.operator_id));
 
         let original_operator = updates

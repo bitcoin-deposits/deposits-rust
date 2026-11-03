@@ -103,8 +103,32 @@ pub fn is_authorised_confiscation(
     rebuild_matching(chain, ledger_id, updates, network, spend, spend_height).is_ok()
 }
 
-/// The verdict with its reason (for logs and tests): `Ok(())` when `spend` is a rebuild.
+/// The verdict with its reason (for logs and tests): `Ok(())` when `spend` is a rebuild of the
+/// current dispute (DEP-03 §"The dispute", [`dispute_scope`]). A confiscation built before that
+/// rule, over every DisputeEnter a disputant ever made, is also excused: the reading only ever
+/// excuses more, never convicts more, so it holds under every ruleset (DEP-18).
+///
+/// [`dispute_scope`]: deposits_core::rotation_order::dispute_scope
 pub fn rebuild_matching(
+    chain: &dyn ChainBackend,
+    ledger_id: &[u8; 32],
+    updates: &[SignedLedgerUpdate],
+    network: bitcoin::Network,
+    spend: &Transaction,
+    spend_height: Option<u32>,
+) -> Result<(), String> {
+    let scoped = deposits_core::rotation_order::dispute_scope(updates);
+    match rebuild_matching_in(chain, ledger_id, &scoped, network, spend, spend_height) {
+        Ok(()) => Ok(()),
+        Err(e) if scoped.len() != updates.len() => {
+            rebuild_matching_in(chain, ledger_id, updates, network, spend, spend_height)
+                .map_err(|e2| format!("{}; and under every DisputeEnter: {}", e, e2))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn rebuild_matching_in(
     chain: &dyn ChainBackend,
     ledger_id: &[u8; 32],
     updates: &[SignedLedgerUpdate],

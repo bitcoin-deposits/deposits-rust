@@ -3402,6 +3402,9 @@ impl Node {
             if paginated_updates.is_empty() {
                 continue;
             }
+            // DEP-03 §"The dispute": only the current dispute's DisputeEnters and arms count.
+            let paginated_updates =
+                deposits_core::rotation_order::dispute_scope(&paginated_updates);
 
             // Extract DisputeArmed participants, quorum members, and reserves info.
             //
@@ -4112,7 +4115,9 @@ impl Node {
         // Paginated relay fetch — bloated forks would otherwise
         // hide DisputeArmed at the tail beyond a single 500-event
         // window.
-        let paginated_updates = self.fetch_lottery_updates(ledger_id).await;
+        let paginated_updates = deposits_core::rotation_order::dispute_scope(
+            &self.fetch_lottery_updates(ledger_id).await,
+        );
         if paginated_updates.is_empty() {
             return Err(Error::Protocol(
                 "Failed to fetch ledger updates from relay".to_string(),

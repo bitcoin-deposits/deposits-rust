@@ -1,0 +1,59 @@
+# DEP-03 §"The dispute": a disputed ledger's updates reduced to its current dispute.
+# Q = the operator's latest QuorumBegin at or below the highest last_valid_sequence any
+# DisputeEnter names. A disputant counts only through its latest DisputeEnter (by sequence) whose
+# last_valid_sequence >= Q, and only its updates past that fork point; the operator's are kept.
+#
+#   u <who> <seq> open|qb|enter <lvs>|other     (who: o = the operator, a..z = disputants)
+#   expect <who>:<seq> ...                       (the kept updates, in input order)
+#   end
+#
+# 1. The soak case (2026-11-02): a's old dispute (on a vault since rotated) and its arm drop;
+#    its new DisputeEnter and everything after it stay.
+case stale-enter-drops
+u o 0 open
+u o 5 qb
+u a 9 enter 8
+u a 10 other
+u o 20 qb
+u o 30 other
+u a 31 enter 30
+u b 31 enter 30
+u b 32 other
+u a 32 other
+expect o:0 o:5 o:20 o:30 a:31 b:31 b:32 a:32
+end
+# 2. A disputant with only a stale DisputeEnter drops out entirely.
+case only-stale-drops-out
+u o 0 open
+u o 5 qb
+u c 7 enter 6
+u c 8 other
+u o 20 qb
+u b 21 enter 20
+expect o:0 o:5 o:20 b:21
+end
+# 3. Two DisputeEnters at or above Q: the latest by sequence is the fork point.
+case latest-enter-counts
+u o 0 open
+u o 5 qb
+u a 11 enter 10
+u a 12 other
+u a 13 enter 12
+u a 14 other
+expect o:0 o:5 a:13 a:14
+end
+# 4. No QuorumBegin below the dispute (Q = 0): every DisputeEnter is in scope.
+case no-quorum-begin
+u o 0 open
+u a 3 enter 2
+u b 5 enter 4
+u b 6 other
+expect o:0 a:3 b:5 b:6
+end
+# 5. No dispute: unchanged.
+case no-dispute
+u o 0 open
+u o 5 qb
+u o 6 other
+expect o:0 o:5 o:6
+end
