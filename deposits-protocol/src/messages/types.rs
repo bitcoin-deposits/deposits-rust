@@ -841,6 +841,10 @@ pub enum LedgerOperation {
         /// discloses the proof on the defrauded ledger and anchors when it was known:
         /// a co-member's dereliction is measured from it. Absent on expiry disputes.
         fraud_proof_hash: Option<[u8; 32]>,
+        /// The broadcast proof `fraud_proof_hash` names, in the DEP-06 JSON form (DEP-02 TLV 345,
+        /// odd). Under `grounded-arms-v7` it is the arm's grounds: carried on the fork, so the
+        /// eligibility cut judges them without a lookup (DEP-03 §Grounded arms).
+        fraud_proof: Option<String>,
     },
 
     /// Signal readiness for custody competition. This is a PRE-COMMITMENT that
@@ -1787,6 +1791,7 @@ impl BinaryCodec for LedgerOperation {
                 anchor_block_hash: _,
                 anchor_block_height: _,
                 fraud_proof_hash: _,
+                fraud_proof: _,
             } => {
                 // Legacy binary format doesn't encode the optional
                 // anchor fields — they're TLV-only. Replays through the
@@ -2249,6 +2254,7 @@ impl BinaryCodec for LedgerOperation {
                 anchor_block_hash: None,
                 anchor_block_height: None,
                 fraud_proof_hash: None,
+                fraud_proof: None,
             }),
             // DisputeAcquire (55)
             55 => Ok(Self::DisputeAcquire {

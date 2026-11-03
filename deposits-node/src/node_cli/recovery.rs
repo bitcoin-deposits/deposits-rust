@@ -1360,6 +1360,7 @@ pub async fn recovery_prepare(args: &[String]) -> Result<(), Box<dyn std::error:
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();
@@ -1793,6 +1794,7 @@ pub async fn recovery_dispute(args: &[String]) -> Result<(), Box<dyn std::error:
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
 
     let message_bytes = custody_dispute.tlv_encode();

@@ -77,6 +77,7 @@ fn enter(last_valid: u64) -> LedgerOperation {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     }
 }
 

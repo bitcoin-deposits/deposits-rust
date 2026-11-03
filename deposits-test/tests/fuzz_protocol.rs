@@ -852,6 +852,7 @@ impl ProtocolSim {
             anchor_block_hash: None,
             anchor_block_height: None,
             fraud_proof_hash: None,
+            fraud_proof: None,
         };
         let replica = match self.operators[disputer].replicas.get(&victim) {
             Some(r) => r.clone(),
@@ -1919,6 +1920,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 anchor_block_hash: None,
                 anchor_block_height: None,
                 fraud_proof_hash: None,
+                fraud_proof: None,
             },
             1 => LedgerOperation::DisputeArmed {
                 armed_block: sim.block_height,
@@ -2458,6 +2460,7 @@ fn adv_majority_quorum_can_take_over_honest_ledger() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     assert_eq!(
         sim.adversary_propose_on_victim(victim, attacker, enter),

@@ -45,6 +45,7 @@ fn dispute_enter_changes_state() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger
@@ -86,6 +87,7 @@ fn dispute_arm_after_enter_succeeds() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger
@@ -133,6 +135,7 @@ fn dispute_acquire_returns_to_normal() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger
@@ -186,6 +189,7 @@ fn dispute_yield_tombstones_ledger() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger
@@ -234,6 +238,7 @@ fn normal_operations_rejected_during_dispute() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger

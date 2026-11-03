@@ -100,7 +100,17 @@ pub fn is_authorised_confiscation(
     spend: &Transaction,
     spend_height: Option<u32>,
 ) -> bool {
-    rebuild_matching(chain, ledger_id, updates, network, spend, spend_height).is_ok()
+    let grounds = crate::node::armers::GroundsVerdicts::pure(updates);
+    rebuild_matching(
+        chain,
+        ledger_id,
+        updates,
+        network,
+        spend,
+        spend_height,
+        &grounds,
+    )
+    .is_ok()
 }
 
 /// The verdict with its reason (for logs and tests): `Ok(())` when `spend` is a rebuild of the
@@ -116,14 +126,29 @@ pub fn rebuild_matching(
     network: bitcoin::Network,
     spend: &Transaction,
     spend_height: Option<u32>,
+    grounds: &crate::node::armers::GroundsVerdicts,
 ) -> Result<(), String> {
     let scoped = deposits_core::rotation_order::dispute_scope(updates);
-    match rebuild_matching_in(chain, ledger_id, &scoped, network, spend, spend_height) {
+    match rebuild_matching_in(
+        chain,
+        ledger_id,
+        &scoped,
+        network,
+        spend,
+        spend_height,
+        grounds,
+    ) {
         Ok(()) => Ok(()),
-        Err(e) if scoped.len() != updates.len() => {
-            rebuild_matching_in(chain, ledger_id, updates, network, spend, spend_height)
-                .map_err(|e2| format!("{}; and under every DisputeEnter: {}", e, e2))
-        }
+        Err(e) if scoped.len() != updates.len() => rebuild_matching_in(
+            chain,
+            ledger_id,
+            updates,
+            network,
+            spend,
+            spend_height,
+            grounds,
+        )
+        .map_err(|e2| format!("{}; and under every DisputeEnter: {}", e, e2)),
         Err(e) => Err(e),
     }
 }
@@ -135,6 +160,7 @@ fn rebuild_matching_in(
     network: bitcoin::Network,
     spend: &Transaction,
     spend_height: Option<u32>,
+    grounds: &crate::node::armers::GroundsVerdicts,
 ) -> Result<(), String> {
     use deposits_core::tapscript_reserves::{
         build_confiscation_ladder, confiscation_feerate, ConfiscationTxParams, LotteryScriptBuilder,
@@ -249,12 +275,18 @@ fn rebuild_matching_in(
     let (recovery_voters, recovery_threshold) =
         deposits_core::rotation_order::lottery_recovery_voters(&view)
             .ok_or("no recovery voters")?;
-    let respectful = dispute_is_respectful(&view);
+    // DEP-03 §Grounded arms: under grounded-arms-v7 the shape counts grounded DisputeEnters only.
+    let respectful = match grounds.respectful() {
+        Some(r) => r?,
+        None => dispute_is_respectful(&view),
+    };
     let required = required_sats(&view, None)?;
 
     // The arms that count as of the spend's block; the cut of each subset of them (the full
     // set first: the cut every member computes once the relay has delivered every arm).
-    let armers = collect_armers_until(&view, spend_height);
+    // DEP-03 §Grounded arms: an arm without grounds is disregarded (a judge that cannot judge
+    // one yet reaches no verdict, the error).
+    let (armers, _) = grounds.filter(collect_armers_until(&view, spend_height))?;
     if armers.is_empty() || armers.len() > 8 {
         return Err(format!("{} armers", armers.len()));
     }
@@ -401,8 +433,11 @@ impl crate::node::Node {
         let chain = self.wallet.chain_backend();
         let network = self.wallet.network();
         let tx = tx.clone();
+        // DEP-03 §Grounded arms: each disputant's grounds, judged here before the rebuild.
+        // Boxed: judging a carried vault-spend proof can ask this again for the spend it cites.
+        let grounds = Box::pin(self.grounds_verdicts(&updates)).await;
         let verdict = tokio::task::spawn_blocking(move || {
-            rebuild_matching(&*chain, &lid, &updates, network, &tx, height)
+            rebuild_matching(&*chain, &lid, &updates, network, &tx, height, &grounds)
         })
         .await;
         match verdict {
@@ -550,6 +585,7 @@ mod tests {
                 bitcoin::Network::Signet,
                 &tx,
                 Some(h),
+                &crate::node::armers::GroundsVerdicts::pure(&updates),
             );
             assert_eq!(v.is_ok(), excused, "{name}: {v:?}");
         }

@@ -219,6 +219,7 @@ fn attack_operate_during_dispute() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger
@@ -279,6 +280,7 @@ fn attack_false_custody_claim() {
         anchor_block_hash: None,
         anchor_block_height: None,
         fraud_proof_hash: None,
+        fraud_proof: None,
     };
     net.op_mut("alice")
         .ledger

@@ -604,11 +604,13 @@ impl Node {
                 }
             }
         }
+        let grounds = self.grounds_verdicts(&updates).await;
         let participants: Vec<(XOnlyPublicKey, [u8; 20])> =
-            match crate::node::armers::eligible_armers(
+            match crate::node::armers::eligible_armers_grounded(
                 &*self.wallet.chain_backend(),
                 &updates,
                 None,
+                &grounds,
             ) {
                 Ok(set) => set
                     .participants
@@ -1299,8 +1301,13 @@ impl Node {
 
         // DEP-03: the participant set is the eligibility cut. A failing
         // declaration excludes its armer; it is never a reason to refuse.
-        let set =
-            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?;
+        let grounds = self.grounds_verdicts(&updates).await;
+        let set = crate::node::armers::eligible_armers_grounded(
+            &*self.wallet.chain_backend(),
+            &updates,
+            None,
+            &grounds,
+        )?;
         if set.participants.is_empty() {
             return Err(format!(
                 "only {} of {} armers are lottery participants (snapshot {})",
@@ -1509,8 +1516,19 @@ impl Node {
         let obligations_sats = state.total_deposit_balance() / 1000;
 
         // 6. Lottery participants: the DEP-03 eligibility cut.
-        let armer_set =
-            crate::node::armers::eligible_armers(&*self.wallet.chain_backend(), &updates, None)?;
+        // DEP-03 §Grounded arms: each disputant's grounds, judged before the cut.
+        let grounds = self.grounds_verdicts(&updates).await;
+        let armer_set = crate::node::armers::eligible_armers_grounded(
+            &*self.wallet.chain_backend(),
+            &updates,
+            None,
+            &grounds,
+        )?;
+        // DEP-03 §Grounded arms: the shape from the grounded DisputeEnters alone.
+        let is_respectful = match grounds.respectful() {
+            Some(r) => r?,
+            None => is_respectful,
+        };
         let participants: Vec<LotteryParticipant> = armer_set.lottery_participants();
         // DEP-06 §Confiscation obligations: the swept inputs and splice-outs every builder adds.
         let obligations = crate::node::armers::confiscation_obligations(

@@ -1005,6 +1005,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 anchor_block_hash: None,
                 anchor_block_height: None,
                 fraud_proof_hash: None,
+                fraud_proof: None,
             },
         ),
         (

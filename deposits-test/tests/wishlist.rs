@@ -526,6 +526,7 @@ fn tier3_3_lottery_griefing() {
             anchor_block_hash: None,
             anchor_block_height: None,
             fraud_proof_hash: None,
+            fraud_proof: None,
         })
         .unwrap();
 

@@ -1077,6 +1077,10 @@ impl Node {
                     Some((h, n)) => (Some(h), Some(n)),
                     None => (None, None),
                 };
+                // DEP-03 §Grounded arms: a punitive DisputeEnter carries the broadcast it acts on.
+                let fraud_proof = fraud_proof_hash
+                    .as_ref()
+                    .and_then(super::inbound::known_broadcast_json);
                 let dispute_op = LedgerOperation::DisputeEnter {
                     last_valid_sequence: last_valid_seq,
                     reason: if anchor.is_some() {
@@ -1087,6 +1091,7 @@ impl Node {
                     anchor_block_hash,
                     anchor_block_height,
                     fraud_proof_hash,
+                    fraud_proof,
                 };
 
                 fork_ledger
@@ -3527,45 +3532,49 @@ impl Node {
             // DEP-03 eligibility cut: armers whose replacement collateral
             // fails are excluded from the lottery rather than stalling it.
             let armer_set: super::armers::ArmerSet;
-            let participants: Vec<LotteryParticipant> = match super::armers::eligible_armers(
-                &*self.wallet.chain_backend(),
-                &paginated_updates,
-                None,
-            ) {
-                Ok(set) if !set.participants.is_empty() => {
-                    // The set and E, comparable with cl-deposits' "participants of" line.
-                    tracing::info!(
-                        "lottery participants of {} at snapshot {}: [{}]; excluded: [{}]",
-                        ledger_prefix,
-                        set.snapshot,
-                        set.participants
-                            .iter()
-                            .map(|a| a.key.to_string()[..16].to_string())
-                            .collect::<Vec<_>>()
-                            .join(" "),
-                        set.excluded
-                            .iter()
-                            .map(|(a, why)| format!("{} ({})", &a.key.to_string()[..16], why))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    );
-                    armer_set = set.clone();
-                    set.lottery_participants()
-                }
-                Ok(set) => {
-                    tracing::info!(
-                        "Only {} of {} armers of ledger {} are lottery participants; waiting",
-                        set.participants.len(),
-                        armed_heights.len(),
-                        ledger_prefix
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    tracing::debug!("Lottery participants for {}: {}", ledger_prefix, e);
-                    continue;
-                }
-            };
+            // DEP-03 §Grounded arms: each disputant's grounds, judged before the cut.
+            let grounds = self.grounds_verdicts(&paginated_updates).await;
+            let participants: Vec<LotteryParticipant> =
+                match super::armers::eligible_armers_grounded(
+                    &*self.wallet.chain_backend(),
+                    &paginated_updates,
+                    None,
+                    &grounds,
+                ) {
+                    Ok(set) if !set.participants.is_empty() => {
+                        // The set and E, comparable with cl-deposits' "participants of" line.
+                        tracing::info!(
+                            "lottery participants of {} at snapshot {}: [{}]; excluded: [{}]",
+                            ledger_prefix,
+                            set.snapshot,
+                            set.participants
+                                .iter()
+                                .map(|a| a.key.to_string()[..16].to_string())
+                                .collect::<Vec<_>>()
+                                .join(" "),
+                            set.excluded
+                                .iter()
+                                .map(|(a, why)| format!("{} ({})", &a.key.to_string()[..16], why))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        armer_set = set.clone();
+                        set.lottery_participants()
+                    }
+                    Ok(set) => {
+                        tracing::info!(
+                            "Only {} of {} armers of ledger {} are lottery participants; waiting",
+                            set.participants.len(),
+                            armed_heights.len(),
+                            ledger_prefix
+                        );
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Lottery participants for {}: {}", ledger_prefix, e);
+                        continue;
+                    }
+                };
             tracing::info!("{} of {} armers are lottery participants for ledger {}..., initiating confiscation ({} quorum members)",
                 participants.len(), armed_heights.len(), ledger_prefix, quorum_members.len());
 
@@ -3676,7 +3685,15 @@ impl Node {
                     },
                 },
             };
-            let is_respectful = proof_type.map(|pt| pt.is_respectful()).unwrap_or(false);
+            let is_respectful = match grounds.respectful() {
+                // DEP-03 §Grounded arms: the shape from the grounded DisputeEnters alone.
+                Some(Ok(r)) => r,
+                Some(Err(e)) => {
+                    tracing::info!("Confiscation of {}: {}; waiting", ledger_prefix, e);
+                    continue;
+                }
+                None => proof_type.map(|pt| pt.is_respectful()).unwrap_or(false),
+            };
 
             let obligations_sats = {
                 let ledgers = self.handler.ledgers.lock().unwrap();
@@ -4605,6 +4622,7 @@ mod recovery_chaining_tests {
                 anchor_block_hash: None,
                 anchor_block_height: None,
                 fraud_proof_hash: None,
+                fraud_proof: None,
             },
             u0.chain_hash(),
         );

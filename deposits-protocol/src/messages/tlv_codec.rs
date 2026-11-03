@@ -196,6 +196,7 @@ mod ledger_op_tlv {
     pub const DISPUTE_ANCHOR_BLOCK_HASH: u64 = 292; // [u8; 32]
     pub const DISPUTE_ANCHOR_BLOCK_HEIGHT: u64 = 294; // u32
     pub const DISPUTE_FRAUD_PROOF_HASH: u64 = 344; // 32 bytes, DisputeEnter (DEP-19 §6)
+    pub const DISPUTE_FRAUD_PROOF: u64 = 345; // variable, DisputeEnter (odd; DEP-03 §Grounded arms)
 
     /// InvoiceCredit settlement-atomic authorization: BIP-340 signature by
     /// the depositor's authorization key over the canonical credit
@@ -904,6 +905,7 @@ impl TlvEncode for LedgerOperation {
                 anchor_block_hash,
                 anchor_block_height,
                 fraud_proof_hash,
+                fraud_proof,
             } => {
                 builder = builder
                     .u64_field(LAST_VALID_SEQUENCE, *last_valid_sequence)
@@ -916,6 +918,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(h) = fraud_proof_hash {
                     builder = builder.bytes_field(DISPUTE_FRAUD_PROOF_HASH, h);
+                }
+                if let Some(p) = fraud_proof {
+                    builder = builder.string_field(DISPUTE_FRAUD_PROOF, p);
                 }
             }
             Self::DisputeArmed {
@@ -1344,6 +1349,7 @@ impl TlvDecode for LedgerOperation {
                 anchor_block_hash: reader.read_bytes_opt(DISPUTE_ANCHOR_BLOCK_HASH)?,
                 anchor_block_height: reader.read_u32_opt(DISPUTE_ANCHOR_BLOCK_HEIGHT)?,
                 fraud_proof_hash: reader.read_bytes_opt(DISPUTE_FRAUD_PROOF_HASH)?,
+                fraud_proof: reader.read_string_opt(DISPUTE_FRAUD_PROOF)?,
             }),
             55 => Ok(Self::DisputeAcquire {
                 new_custodian: reader.read_pubkey(NEW_CUSTODIAN)?,

@@ -550,6 +550,18 @@ pub fn eligible_armers(
     eligible_armers_at(chain, updates, last_valid_sequence, None)
 }
 
+/// [`eligible_armers`] with each disputant's grounds judged (DEP-03 §Grounded arms):
+/// `grounds` from [`crate::node::Node::grounds_verdicts`]. Without them, a proven ground is
+/// not judged and stops a cut under grounded arms.
+pub fn eligible_armers_grounded(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: Option<u64>,
+    grounds: &GroundsVerdicts,
+) -> Result<ArmerSet, String> {
+    eligible_armers_grounded_at(chain, updates, last_valid_sequence, None, grounds)
+}
+
 /// [`eligible_armers`] once the confiscation has confirmed in block `confiscated_at`.
 pub fn eligible_armers_at(
     chain: &dyn ChainBackend,
@@ -557,13 +569,341 @@ pub fn eligible_armers_at(
     last_valid_sequence: Option<u64>,
     confiscated_at: Option<u32>,
 ) -> Result<ArmerSet, String> {
-    let required = required_sats(updates, last_valid_sequence)?;
-    split_at(
+    eligible_armers_grounded_at(
         chain,
-        collect_armers_until(updates, confiscated_at),
-        required,
+        updates,
+        last_valid_sequence,
         confiscated_at,
+        &GroundsVerdicts::pure(updates),
     )
+}
+
+/// [`eligible_armers_at`] with judged grounds: an arm without grounds is disregarded before the
+/// snapshot under grounded arms (it moves neither E nor joins) and listed as excluded.
+pub fn eligible_armers_grounded_at(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: Option<u64>,
+    confiscated_at: Option<u32>,
+    grounds: &GroundsVerdicts,
+) -> Result<ArmerSet, String> {
+    let required = required_sats(updates, last_valid_sequence)?;
+    let (armers, ungrounded) = grounds.filter(collect_armers_until(updates, confiscated_at))?;
+    let mut set = split_at(chain, armers, required, confiscated_at)?;
+    set.excluded.extend(ungrounded);
+    Ok(set)
+}
+
+// ============================================================================
+// DEP-03 §Grounded arms (DEP-18 grounded-arms-v7)
+// ============================================================================
+//
+// The winner's fork becomes the ledger's canonical history, so under grounded-arms-v7 an arm
+// counts in the cut, and a DisputeEnter in the confiscation's shape, only if its DisputeEnter
+// has grounds: an expiry ground, or the broadcast proof it acts on carried on the fork (TLV
+// 345), hashing to its fraud_proof_hash, accusing the operator at its fork point, and
+// verifying as a received proof does. Motive is never examined. Mirrors cl-deposits'
+// grounds-class / cut-by-grounds / shape-by-grounds; vector grounded_arms.txt.
+
+/// A DisputeEnter's grounds, once judged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Grounded,
+    Ungrounded,
+    /// Not judged yet (evidence this node does not hold): stops the cut and the shape.
+    Unknown,
+}
+
+/// A DisputeEnter's grounds from the DisputeEnter alone.
+#[derive(Clone, Debug)]
+pub enum GroundsClass {
+    Expiry,
+    Ungrounded(String),
+    /// A carried proof that must verify as a received proof does.
+    Verify(Box<deposits_core::fraud::FraudBroadcast>),
+}
+
+/// DEP-03 §Grounded arms from one DisputeEnter: its reason, expiry anchor, `fraud_proof_hash`,
+/// carried `fraud_proof`, signed height, the `quorum_expiry` in force at its
+/// `last_valid_sequence`, and the operator of the update there.
+pub fn grounds_class(
+    reason: &str,
+    anchor_block_height: Option<u32>,
+    fraud_proof_hash: Option<[u8; 32]>,
+    fraud_proof: Option<&str>,
+    enter_height: u32,
+    governing_expiry: Option<u32>,
+    fork_point_operator: Option<&PublicKey>,
+) -> GroundsClass {
+    if deposits_core::types::dispute_is_expiry(
+        reason,
+        anchor_block_height.is_some(),
+        fraud_proof_hash.is_some(),
+        enter_height,
+        governing_expiry,
+    ) {
+        return match governing_expiry {
+            Some(e) if enter_height > e => GroundsClass::Expiry,
+            Some(e) => GroundsClass::Ungrounded(format!(
+                "a quorum_expired dispute entered at {enter_height}, not past the quorum_expiry {e}"
+            )),
+            None => GroundsClass::Ungrounded(
+                "a quorum_expired dispute with no quorum_expiry in force at its fork point".into(),
+            ),
+        };
+    }
+    let Some(body) = fraud_proof else {
+        return GroundsClass::Ungrounded(
+            "a punitive DisputeEnter that carries no fraud_proof".into(),
+        );
+    };
+    let Ok(b) = serde_json::from_str::<deposits_core::fraud::FraudBroadcast>(body) else {
+        return GroundsClass::Ungrounded("its fraud_proof does not parse".into());
+    };
+    if fraud_proof_hash != Some(b.proof.proof_hash()) {
+        return GroundsClass::Ungrounded(
+            "its fraud_proof does not hash to its fraud_proof_hash".into(),
+        );
+    }
+    match fork_point_operator {
+        Some(op)
+            if b.proof
+                .accused
+                .eq_ignore_ascii_case(&hex::encode(op.serialize())) =>
+        {
+            GroundsClass::Verify(Box::new(b))
+        }
+        _ => GroundsClass::Ungrounded(
+            "its proof does not accuse the operator at its fork point".into(),
+        ),
+    }
+}
+
+/// The cut's grounds step: under a ruleset with grounded arms, the grounded entries (in order)
+/// and the ungrounded with why; an `Unknown` stops it. Under any other ruleset, every entry.
+pub fn cut_by_grounds<T: Clone>(
+    ruleset: &str,
+    entries: &[(T, Verdict, String)],
+) -> Result<(Vec<T>, Vec<(T, String)>), String> {
+    if !deposits_core::types::ruleset_grounds_arms(ruleset) {
+        return Ok((entries.iter().map(|e| e.0.clone()).collect(), Vec::new()));
+    }
+    let mut kept = Vec::new();
+    let mut out = Vec::new();
+    for (item, verdict, why) in entries {
+        match verdict {
+            Verdict::Grounded => kept.push(item.clone()),
+            Verdict::Ungrounded => out.push((item.clone(), format!("no grounds: {why}"))),
+            Verdict::Unknown => return Err(format!("grounds not judged yet: {why}")),
+        }
+    }
+    Ok((kept, out))
+}
+
+/// The confiscation's shape (DEP-06 §Respectful vs punitive): respectful iff every counted
+/// DisputeEnter is for a lapsed quorum and at least one counts; under grounded arms only the
+/// grounded ones count, and an `Unknown` stops it.
+pub fn shape_by_grounds(ruleset: &str, entries: &[(String, Verdict)]) -> Result<bool, String> {
+    let reasons: Vec<&String> = if deposits_core::types::ruleset_grounds_arms(ruleset) {
+        let mut r = Vec::new();
+        for (reason, v) in entries {
+            match v {
+                Verdict::Grounded => r.push(reason),
+                Verdict::Ungrounded => {}
+                Verdict::Unknown => return Err("grounds not judged yet".into()),
+            }
+        }
+        r
+    } else {
+        entries.iter().map(|(r, _)| r).collect()
+    };
+    Ok(!reasons.is_empty()
+        && reasons
+            .iter()
+            .all(|r| r.replace('-', "_") == "quorum_expired"))
+}
+
+/// The ruleset in force at `seq` on the operator's chain: its latest `QuorumBegin` or
+/// `QuorumUpgrade` at or below it, else its `LedgerOpen`'s; "" when none names one.
+pub fn ruleset_at(updates: &[SignedLedgerUpdate], seq: u64) -> String {
+    let Some(origin) = original_operator(updates) else {
+        return String::new();
+    };
+    let mut chain: Vec<&SignedLedgerUpdate> = updates
+        .iter()
+        .filter(|u| u.operator_id == origin && u.sequence_number <= seq)
+        .collect();
+    chain.sort_by_key(|u| u.sequence_number);
+    let mut ruleset = String::new();
+    for u in chain {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::LedgerOpen {
+                protocol_version, ..
+            })
+            | Ok(LedgerOperation::QuorumBegin {
+                protocol_version, ..
+            }) => {
+                if let Some(p) = protocol_version {
+                    ruleset = p;
+                }
+            }
+            Ok(LedgerOperation::QuorumUpgrade {
+                new_protocol_version,
+                ..
+            }) => ruleset = new_protocol_version,
+            _ => {}
+        }
+    }
+    ruleset
+}
+
+/// The `quorum_expiry` of the operator's latest `QuorumBegin` at or below `seq`.
+pub fn governing_expiry_at(updates: &[SignedLedgerUpdate], seq: u64) -> Option<u32> {
+    let origin = original_operator(updates)?;
+    updates
+        .iter()
+        .filter(|u| u.operator_id == origin && u.sequence_number <= seq)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin { quorum_expiry, .. }) => {
+                Some((u.sequence_number, quorum_expiry))
+            }
+            _ => None,
+        })
+        .max_by_key(|(s, _)| *s)
+        .map(|(_, e)| e)
+}
+
+/// Each disputant's latest `DisputeEnter` in the current dispute (DEP-03 §The dispute), with
+/// its grounds class and reason.
+pub fn dispute_enter_grounds(
+    updates: &[SignedLedgerUpdate],
+) -> Vec<(PublicKey, String, GroundsClass)> {
+    let scoped = deposits_core::rotation_order::dispute_scope(updates);
+    let origin = original_operator(&scoped);
+    let mut latest: HashMap<PublicKey, &SignedLedgerUpdate> = HashMap::new();
+    for u in scoped.iter().filter(|u| Some(u.operator_id) != origin) {
+        if matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::DisputeEnter { .. })
+        ) && latest
+            .get(&u.operator_id)
+            .is_none_or(|p| p.sequence_number < u.sequence_number)
+        {
+            latest.insert(u.operator_id, u);
+        }
+    }
+    let mut out: Vec<(PublicKey, String, GroundsClass)> = latest
+        .into_iter()
+        .filter_map(|(k, u)| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                reason,
+                anchor_block_height,
+                fraud_proof_hash,
+                fraud_proof,
+                ..
+            }) => {
+                let fork_op = origin.filter(|_| {
+                    scoped.iter().any(|x| {
+                        Some(x.operator_id) == origin && x.sequence_number == last_valid_sequence
+                    })
+                });
+                let class = grounds_class(
+                    &reason,
+                    anchor_block_height,
+                    fraud_proof_hash,
+                    fraud_proof.as_deref(),
+                    u.block_height,
+                    governing_expiry_at(&scoped, last_valid_sequence),
+                    fork_op.as_ref(),
+                );
+                Some((k, reason, class))
+            }
+            _ => None,
+        })
+        .collect();
+    out.sort_by_key(|(k, _, _)| k.serialize());
+    out
+}
+
+/// The grounds verdict of every disputant, and the ruleset in force at the dispute's fork point.
+#[derive(Clone, Debug, Default)]
+pub struct GroundsVerdicts {
+    pub ruleset: String,
+    pub by_key: HashMap<PublicKey, (Verdict, String)>,
+    pub reasons: HashMap<PublicKey, String>,
+}
+
+impl GroundsVerdicts {
+    /// From the updates alone: a proven ground that would need verifying is `Unknown`.
+    pub fn pure(updates: &[SignedLedgerUpdate]) -> Self {
+        Self::with_verifier(updates, |_| (Verdict::Unknown, "not verified here".into()))
+    }
+
+    /// `verify` judges each carried proof.
+    pub fn with_verifier(
+        updates: &[SignedLedgerUpdate],
+        mut verify: impl FnMut(&deposits_core::fraud::FraudBroadcast) -> (Verdict, String),
+    ) -> Self {
+        let judged = dispute_enter_grounds(updates)
+            .into_iter()
+            .map(|(k, reason, class)| {
+                let verdict = match class {
+                    GroundsClass::Expiry => (Verdict::Grounded, "an expiry ground".to_string()),
+                    GroundsClass::Ungrounded(why) => (Verdict::Ungrounded, why),
+                    GroundsClass::Verify(b) => verify(&b),
+                };
+                (k, reason, verdict)
+            })
+            .collect();
+        Self::from_judged(updates, judged)
+    }
+
+    /// From each disputant's judged verdict, with the ruleset at the dispute's fork point.
+    pub fn from_judged(
+        updates: &[SignedLedgerUpdate],
+        judged: Vec<(PublicKey, String, (Verdict, String))>,
+    ) -> Self {
+        let scoped = deposits_core::rotation_order::dispute_scope(updates);
+        let lvs = dispute_last_valid_sequence(&scoped);
+        let mut v = GroundsVerdicts {
+            ruleset: lvs.map(|s| ruleset_at(&scoped, s)).unwrap_or_default(),
+            ..Default::default()
+        };
+        for (k, reason, verdict) in judged {
+            v.by_key.insert(k, verdict);
+            v.reasons.insert(k, reason);
+        }
+        v
+    }
+
+    /// The armers with grounds (the cut's grounds step), and those without.
+    pub fn filter(&self, armers: Vec<Armer>) -> Result<(Vec<Armer>, Vec<(Armer, String)>), String> {
+        let entries: Vec<(Armer, Verdict, String)> = armers
+            .into_iter()
+            .map(|a| {
+                let (v, why) = self.by_key.get(&a.key).cloned().unwrap_or((
+                    Verdict::Ungrounded,
+                    "no DisputeEnter in the current dispute".into(),
+                ));
+                (a, v, why)
+            })
+            .collect();
+        cut_by_grounds(&self.ruleset, &entries)
+    }
+
+    /// The shape under grounded arms; `None` under any other ruleset.
+    pub fn respectful(&self) -> Option<Result<bool, String>> {
+        if !deposits_core::types::ruleset_grounds_arms(&self.ruleset) {
+            return None;
+        }
+        let entries: Vec<(String, Verdict)> = self
+            .by_key
+            .iter()
+            .map(|(k, (v, _))| (self.reasons.get(k).cloned().unwrap_or_default(), *v))
+            .collect();
+        Some(shape_by_grounds(&self.ruleset, &entries))
+    }
 }
 
 /// Whether `vault` is spent on the confirmed chain: `Some(true)` spent, `Some(false)` unspent,

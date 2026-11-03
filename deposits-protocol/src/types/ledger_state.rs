@@ -38,10 +38,21 @@ pub fn ruleset_enforces_fee_cap(_ruleset_name: &str) -> bool {
 pub const ANCHOR_LADDER_V5: &str = "anchor-ladder-v5";
 /// DEP-18: `anchor-ladder-v5`'s rules plus `balance-commit-v4`'s `MissingBalanceCommitment`.
 pub const BALANCE_ANCHOR_V6: &str = "balance-anchor-v6";
+/// DEP-18: `balance-anchor-v6`'s rules plus grounded arms (DEP-03 §Grounded arms).
+pub const GROUNDED_ARMS_V7: &str = "grounded-arms-v7";
 
-/// Whether a ruleset carries `anchor-ladder-v5`'s gated rules (v5 itself, and v6).
+/// Whether a ruleset carries `anchor-ladder-v5`'s gated rules (v5 itself, v6 and v7).
 fn carries_v5_rules(ruleset_name: &str) -> bool {
-    ruleset_name == ANCHOR_LADDER_V5 || ruleset_name == BALANCE_ANCHOR_V6
+    ruleset_name == ANCHOR_LADDER_V5
+        || ruleset_name == BALANCE_ANCHOR_V6
+        || ruleset_name == GROUNDED_ARMS_V7
+}
+
+/// Grounded arms (DEP-03 §Grounded arms), judged under the ruleset in force at the dispute's
+/// fork point: an arm counts in the eligibility cut, and a `DisputeEnter` in the confiscation's
+/// shape, only if its `DisputeEnter` has grounds.
+pub fn ruleset_grounds_arms(ruleset_name: &str) -> bool {
+    ruleset_name == GROUNDED_ARMS_V7
 }
 
 /// DEP-18 gated rules of `anchor-ladder-v5`. Each is dormant under any other
@@ -71,7 +82,10 @@ pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
 /// match the replayed state) is intrinsic to every ruleset and is NOT gated by
 /// this — see `check_conformance`.
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
-    matches!(ruleset_name, "balance-commit-v4" | "balance-anchor-v6")
+    matches!(
+        ruleset_name,
+        "balance-commit-v4" | "balance-anchor-v6" | "grounded-arms-v7"
+    )
 }
 
 /// Whether this binary knows the named ruleset at all. Mirrors the
@@ -91,7 +105,7 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
         "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5"
-        | "balance-anchor-v6" => "cltv-offset-v2",
+        | "balance-anchor-v6" | "grounded-arms-v7" => "cltv-offset-v2",
         _ => "",
     }
 }
@@ -140,7 +154,7 @@ pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> Ru
 }
 
 /// The ruleset a new ledger names, and the reference policy's default target.
-pub const POLICY_TARGET_RULESET: &str = BALANCE_ANCHOR_V6;
+pub const POLICY_TARGET_RULESET: &str = GROUNDED_ARMS_V7;
 
 /// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
 /// next `QuorumBegin`. `balance-anchor-v6` when every member declares it;
@@ -150,6 +164,8 @@ pub const POLICY_TARGET_RULESET: &str = BALANCE_ANCHOR_V6;
 pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
     if every_declares(POLICY_TARGET_RULESET, declarations) {
         POLICY_TARGET_RULESET.to_string()
+    } else if every_declares(BALANCE_ANCHOR_V6, declarations) {
+        BALANCE_ANCHOR_V6.to_string()
     } else if current == "balance-commit-v4" {
         current.to_string()
     } else if every_declares(ANCHOR_LADDER_V5, declarations) {

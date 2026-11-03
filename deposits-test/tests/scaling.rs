@@ -174,6 +174,7 @@ fn scaling_dispute_state_gate() {
                 anchor_block_hash: None,
                 anchor_block_height: None,
                 fraud_proof_hash: None,
+                fraud_proof: None,
             })
             .unwrap();
 

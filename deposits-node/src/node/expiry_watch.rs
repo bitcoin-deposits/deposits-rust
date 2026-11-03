@@ -436,6 +436,7 @@ mod tests {
             anchor_block_hash: Some([7; 32]),
             anchor_block_height: Some(8160),
             fraud_proof_hash: None,
+            fraud_proof: None,
         }
         .tlv_encode();
         let history = vec![

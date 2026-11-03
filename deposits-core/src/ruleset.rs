@@ -61,19 +61,20 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "balance-commit-v4" => Some(&BALANCE_COMMIT_V4),
         "anchor-ladder-v5" => Some(&ANCHOR_LADDER_V5),
         "balance-anchor-v6" => Some(&BALANCE_ANCHOR_V6),
+        "grounded-arms-v7" => Some(&GROUNDED_ARMS_V7),
         _ => None,
     }
 }
 
 /// The ruleset new ledgers and rotations commit to when every member supports it.
-pub const CURRENT: &str = "balance-anchor-v6";
+pub const CURRENT: &str = "grounded-arms-v7";
 
 /// Resolve a name to a ruleset, falling back to [`CURRENT`] for a missing or
 /// unknown name. Acceptance paths reject unknown names before calling this
 /// (a `QuorumBegin` without `protocol_version` is refused at apply), so the
 /// fallback only covers display and pre-`QuorumBegin` state.
 pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
-    name.and_then(lookup).unwrap_or(&BALANCE_ANCHOR_V6)
+    name.and_then(lookup).unwrap_or(&GROUNDED_ARMS_V7)
 }
 
 /// All ruleset names this binary knows how to enforce. Order is the
@@ -87,6 +88,7 @@ pub fn all_supported_names() -> Vec<&'static str> {
         BALANCE_COMMIT_V4.name,
         ANCHOR_LADDER_V5.name,
         BALANCE_ANCHOR_V6.name,
+        GROUNDED_ARMS_V7.name,
     ]
 }
 
@@ -180,6 +182,13 @@ pub static ANCHOR_LADDER_V5: Ruleset = Ruleset {
 /// (gated in deposits-protocol), so a ledger moving from either loses nothing.
 pub static BALANCE_ANCHOR_V6: Ruleset = Ruleset {
     name: "balance-anchor-v6",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// DEP-18 §grounded-arms-v7: the `cltv-offset-v2` reserves cascade, with `balance-anchor-v6`'s
+/// rules plus grounded arms (DEP-03 §Grounded arms, gated in deposits-protocol).
+pub static GROUNDED_ARMS_V7: Ruleset = Ruleset {
+    name: "grounded-arms-v7",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

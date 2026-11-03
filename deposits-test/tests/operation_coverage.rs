@@ -383,6 +383,7 @@ fn double_dispute_enter_rejected() {
             anchor_block_hash: None,
             anchor_block_height: None,
             fraud_proof_hash: None,
+            fraud_proof: None,
         })
         .unwrap();
 
@@ -396,6 +397,7 @@ fn double_dispute_enter_rejected() {
             anchor_block_hash: None,
             anchor_block_height: None,
             fraud_proof_hash: None,
+            fraud_proof: None,
         });
     assert!(result.is_err(), "Double DisputeEnter must be rejected");
 }

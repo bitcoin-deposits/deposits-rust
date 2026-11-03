@@ -1483,7 +1483,21 @@ impl Node {
     /// `WinnerCollateralDeviation` on-chain step. `Ok(())` means the fault is
     /// real. Shared by the inbound receive path (`handle_fraud_proof`) and the
     /// confiscation proof-type resolver so both ground on identical checks.
+    /// [`Self::verify_fraud_broadcast_inner`], remembering every broadcast that verifies by its
+    /// proof hash, so a `DisputeEnter` acting on it can carry it as its grounds (DEP-02 TLV 345,
+    /// DEP-03 §Grounded arms).
     pub(crate) async fn verify_fraud_broadcast_locally(
+        &self,
+        broadcast: &deposits_core::fraud::FraudBroadcast,
+    ) -> Result<(), String> {
+        let r = self.verify_fraud_broadcast_inner(broadcast).await;
+        if r.is_ok() {
+            remember_broadcast(broadcast);
+        }
+        r
+    }
+
+    async fn verify_fraud_broadcast_inner(
         &self,
         broadcast: &deposits_core::fraud::FraudBroadcast,
     ) -> Result<(), String> {
@@ -2962,5 +2976,58 @@ mod fork_point_collateral_tests {
     fn cosigner_basis_refuses_without_a_quorum_begin() {
         let (operator, chain) = ledger_c();
         assert!(collateral_basis_at(&chain, operator, 0).is_err());
+    }
+}
+
+/// Broadcasts that verified here, by proof hash, as their DEP-06 JSON form: the grounds a
+/// `DisputeEnter` acting on one carries (DEP-02 TLV 345). One node per process.
+fn known_broadcasts() -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], String>> {
+    static KNOWN: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<[u8; 32], String>>,
+    > = std::sync::OnceLock::new();
+    KNOWN.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn remember_broadcast(b: &deposits_core::fraud::FraudBroadcast) {
+    if let Ok(j) = serde_json::to_string(b) {
+        let mut known = known_broadcasts().lock().unwrap();
+        if known.len() > 10_000 {
+            known.clear();
+        }
+        known.insert(b.proof.proof_hash(), j);
+    }
+}
+
+/// The broadcast whose proof hash is `h`, if one verified here.
+pub(crate) fn known_broadcast_json(h: &[u8; 32]) -> Option<String> {
+    known_broadcasts().lock().unwrap().get(h).cloned()
+}
+
+impl crate::node::Node {
+    /// Every disputant's grounds in the current dispute (DEP-03 §Grounded arms): an expiry
+    /// ground, none, or its carried proof verified as a received proof is. A proof whose
+    /// evidence this node does not hold is `Unknown`, never a verdict.
+    pub(crate) async fn grounds_verdicts(
+        &self,
+        updates: &[deposits_core::SignedLedgerUpdate],
+    ) -> crate::node::armers::GroundsVerdicts {
+        use crate::node::armers::{dispute_enter_grounds, GroundsClass, GroundsVerdicts, Verdict};
+        let mut judged = Vec::new();
+        for (k, reason, class) in dispute_enter_grounds(updates) {
+            let v = match class {
+                GroundsClass::Expiry => (Verdict::Grounded, "an expiry ground".to_string()),
+                GroundsClass::Ungrounded(w) => (Verdict::Ungrounded, w),
+                GroundsClass::Verify(b) => match self.verify_fraud_broadcast_locally(&b).await {
+                    Ok(()) => (Verdict::Grounded, "its proof verifies".to_string()),
+                    Err(e) if e.contains("not available") => (Verdict::Unknown, e),
+                    Err(e) => (
+                        Verdict::Ungrounded,
+                        format!("its proof does not verify: {e}"),
+                    ),
+                },
+            };
+            judged.push((k, reason, v));
+        }
+        GroundsVerdicts::from_judged(updates, judged)
     }
 }
