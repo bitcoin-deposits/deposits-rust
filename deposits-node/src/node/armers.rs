@@ -1041,7 +1041,9 @@ impl crate::node::Node {
         // DEP-03 "When the set is final": once the confiscation confirmed, arms above its
         // block do not count (a restarted member's late re-arm moved E past it).
         let confiscated_at = super::lottery_recovery::confiscation_height(&*chain, &updates);
-        let set = eligible_armers_at(&*chain, &updates, None, confiscated_at)?;
+        // DEP-03 §Grounded arms: each disputant's grounds, judged here.
+        let grounds = Box::pin(self.grounds_verdicts(&updates)).await;
+        let set = eligible_armers_grounded_at(&*chain, &updates, None, confiscated_at, &grounds)?;
         if t.elapsed().as_millis() >= 1000 {
             tracing::warn!(
                 "lottery {}: eligibility took {} ms",

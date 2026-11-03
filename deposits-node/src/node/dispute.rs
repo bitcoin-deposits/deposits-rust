@@ -1065,6 +1065,16 @@ impl Node {
             Some(h) => (Some(h), super::inbound::known_broadcast_json(&h), reason),
             None if anchor.is_none() => match self.cited_grounds(ledger_id).await {
                 Some((h, body, r)) => (Some(h), Some(body), Some(r)),
+                // DEP-03 §Grounded arms: under grounded-arms-v7 a member does not join a dispute on
+                // no grounds; it waits for a proof it can verify (the proof that started the
+                // dispute reaches it moments later, and it enters then).
+                None if self.ledger_grounds_arms(ledger_id) && reason.is_none() => {
+                    tracing::info!(
+                        "Dispute on {}: no grounds we can cite yet; not joining until we have a proof",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    );
+                    return Ok(());
+                }
                 None => (None, None, reason),
             },
             None => (None, None, reason),
@@ -5078,5 +5088,20 @@ impl crate::node::Node {
             }
         }
         None
+    }
+}
+
+impl crate::node::Node {
+    /// Whether `ledger_id`'s active ruleset grounds arms (DEP-18 grounded-arms-v7).
+    pub(crate) fn ledger_grounds_arms(&self, ledger_id: &str) -> bool {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers
+            .get(ledger_id)
+            .map(|arc| {
+                deposits_core::types::ruleset_grounds_arms(
+                    &arc.read().unwrap().state.active_ruleset_name,
+                )
+            })
+            .unwrap_or(false)
     }
 }
