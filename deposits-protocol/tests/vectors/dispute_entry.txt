@@ -1,0 +1,77 @@
+# dispute_entry.txt — DEP-06 §Embedding / §Entering a dispute (2026-11-04).
+# May a member enter (and arm) a dispute on a proof whose own evidence verifies, given how its
+# broadcast carries an embedding?  The rule holds under every ruleset (DEP-18), so each case is
+# stated under balance-anchor-v6 and grounded-arms-v7 with the same answer.
+#   embedding: none (no embedding key) | placeholder (ledger_id = accused, sequence 0, field "inline",
+#              empty update_hash: present but never in any history) | valid (the proof hash is at
+#              the named sequence of the accused's history, empty causal chain)
+#   requires: 1 if the type needs an embedding (DEP-06 §Embedding), else 0
+#   entry: permitted | refused  (whether the rule lets a member enter; a member MAY still decline,
+#          e.g. cl-deposits, which has no lightning verifier, declines every type-2 proof)
+# Format: case <proof_type> <embedding> <ruleset> <requires> <entry>
+case UncreditedOnchainPayment none balance-anchor-v6 0 permitted
+case UncreditedOnchainPayment placeholder balance-anchor-v6 0 permitted
+case UncreditedOnchainPayment valid balance-anchor-v6 0 permitted
+case UncreditedLightningPayment none balance-anchor-v6 1 refused
+case UncreditedLightningPayment placeholder balance-anchor-v6 1 refused
+case UncreditedLightningPayment valid balance-anchor-v6 1 permitted
+case StaleCosignature none balance-anchor-v6 0 permitted
+case StaleCosignature placeholder balance-anchor-v6 0 permitted
+case StaleCosignature valid balance-anchor-v6 0 permitted
+case DisputeDereliction none balance-anchor-v6 0 permitted
+case DisputeDereliction placeholder balance-anchor-v6 0 permitted
+case DisputeDereliction valid balance-anchor-v6 0 permitted
+case NonConformingUpdate none balance-anchor-v6 0 permitted
+case NonConformingUpdate placeholder balance-anchor-v6 0 permitted
+case NonConformingUpdate valid balance-anchor-v6 0 permitted
+case QuorumExpired none balance-anchor-v6 0 permitted
+case QuorumExpired placeholder balance-anchor-v6 0 permitted
+case QuorumExpired valid balance-anchor-v6 0 permitted
+case WinnerCollateralDeviation none balance-anchor-v6 0 permitted
+case WinnerCollateralDeviation placeholder balance-anchor-v6 0 permitted
+case WinnerCollateralDeviation valid balance-anchor-v6 0 permitted
+case Equivocation none balance-anchor-v6 0 permitted
+case Equivocation placeholder balance-anchor-v6 0 permitted
+case Equivocation valid balance-anchor-v6 0 permitted
+case NonConformingCosignature none balance-anchor-v6 0 permitted
+case NonConformingCosignature placeholder balance-anchor-v6 0 permitted
+case NonConformingCosignature valid balance-anchor-v6 0 permitted
+case UnauthorizedVaultSpend none balance-anchor-v6 0 permitted
+case UnauthorizedVaultSpend placeholder balance-anchor-v6 0 permitted
+case UnauthorizedVaultSpend valid balance-anchor-v6 0 permitted
+case UnhonouredObligation none balance-anchor-v6 0 permitted
+case UnhonouredObligation placeholder balance-anchor-v6 0 permitted
+case UnhonouredObligation valid balance-anchor-v6 0 permitted
+case UncreditedOnchainPayment none grounded-arms-v7 0 permitted
+case UncreditedOnchainPayment placeholder grounded-arms-v7 0 permitted
+case UncreditedOnchainPayment valid grounded-arms-v7 0 permitted
+case UncreditedLightningPayment none grounded-arms-v7 1 refused
+case UncreditedLightningPayment placeholder grounded-arms-v7 1 refused
+case UncreditedLightningPayment valid grounded-arms-v7 1 permitted
+case StaleCosignature none grounded-arms-v7 0 permitted
+case StaleCosignature placeholder grounded-arms-v7 0 permitted
+case StaleCosignature valid grounded-arms-v7 0 permitted
+case DisputeDereliction none grounded-arms-v7 0 permitted
+case DisputeDereliction placeholder grounded-arms-v7 0 permitted
+case DisputeDereliction valid grounded-arms-v7 0 permitted
+case NonConformingUpdate none grounded-arms-v7 0 permitted
+case NonConformingUpdate placeholder grounded-arms-v7 0 permitted
+case NonConformingUpdate valid grounded-arms-v7 0 permitted
+case QuorumExpired none grounded-arms-v7 0 permitted
+case QuorumExpired placeholder grounded-arms-v7 0 permitted
+case QuorumExpired valid grounded-arms-v7 0 permitted
+case WinnerCollateralDeviation none grounded-arms-v7 0 permitted
+case WinnerCollateralDeviation placeholder grounded-arms-v7 0 permitted
+case WinnerCollateralDeviation valid grounded-arms-v7 0 permitted
+case Equivocation none grounded-arms-v7 0 permitted
+case Equivocation placeholder grounded-arms-v7 0 permitted
+case Equivocation valid grounded-arms-v7 0 permitted
+case NonConformingCosignature none grounded-arms-v7 0 permitted
+case NonConformingCosignature placeholder grounded-arms-v7 0 permitted
+case NonConformingCosignature valid grounded-arms-v7 0 permitted
+case UnauthorizedVaultSpend none grounded-arms-v7 0 permitted
+case UnauthorizedVaultSpend placeholder grounded-arms-v7 0 permitted
+case UnauthorizedVaultSpend valid grounded-arms-v7 0 permitted
+case UnhonouredObligation none grounded-arms-v7 0 permitted
+case UnhonouredObligation placeholder grounded-arms-v7 0 permitted
+case UnhonouredObligation valid grounded-arms-v7 0 permitted

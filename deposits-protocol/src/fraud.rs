@@ -188,17 +188,25 @@ impl FraudProofType {
     ///   hash (cl-deposits' `verify-dispute-dereliction` classifies it the
     ///   same way; see `make_dispute_dereliction_proof`).
     ///
-    /// Embedding required (off-ledger or timing-dependent):
-    /// - `UncreditedOnchainPayment`, `UncreditedLightningPayment`: the
-    ///   payment is off-ledger; the proof must be shown to precede the
+    /// Embedding required (off-ledger and timing-dependent):
+    /// - `UncreditedLightningPayment`: the preimage says nothing about when
+    ///   the payment settled, so the proof must be shown to precede the
     ///   operator's (non-)response.
+    ///
+    /// `UncreditedOnchainPayment` dates itself (DEP-06 §Embedding,
+    /// 2026-11-04): the payment's confirming block is on the chain, and the
+    /// proof update is signed by the accused and dated by its own
+    /// `block_height` at least `service_response_blocks` later, with no
+    /// credit at or before it. Requiring an embedding for it made us refuse
+    /// disputes cl-deposits entered on offer proofs.
     ///
     /// The match is exhaustive on purpose: a new proof type must be
     /// classified here.
     pub fn requires_embedding(&self) -> bool {
         match self {
-            Self::UncreditedOnchainPayment | Self::UncreditedLightningPayment => true,
-            Self::DisputeDereliction
+            Self::UncreditedLightningPayment => true,
+            Self::UncreditedOnchainPayment
+            | Self::DisputeDereliction
             | Self::NonConformingUpdate
             | Self::Equivocation
             | Self::NonConformingCosignature
@@ -208,6 +216,14 @@ impl FraudProofType {
             | Self::QuorumExpired
             | Self::WinnerCollateralDeviation => false,
         }
+    }
+
+    /// DEP-06 §Entering a dispute: whether the rule lets a member enter a
+    /// dispute on a proof of this type whose own evidence verified, given
+    /// whether its broadcast's embedding verified in the accused's history.
+    /// It holds under every ruleset. Vector: `dispute_entry.txt`.
+    pub fn entry_permitted(&self, embedding_verified: bool) -> bool {
+        !self.requires_embedding() || embedding_verified
     }
 
     /// The complement of [`Self::requires_embedding`]: the proof is its own
@@ -4348,7 +4364,9 @@ mod tests {
 
     #[test]
     fn indirect_embedding_missing_chain_rejected() {
-        let proof = make_proof();
+        // An embedding-required type (DEP-06: a lightning payment; an offer proof dates itself).
+        let mut proof = make_proof();
+        proof.proof_type = FraudProofType::UncreditedLightningPayment;
         let broadcast = FraudBroadcast {
             embedding: Some(ProofEmbedding {
                 ledger_id: "11".repeat(32), // different from accused
@@ -4364,7 +4382,9 @@ mod tests {
 
     #[test]
     fn chain_not_reaching_accused_rejected() {
-        let proof = make_proof();
+        // An embedding-required type (DEP-06: a lightning payment; an offer proof dates itself).
+        let mut proof = make_proof();
+        proof.proof_type = FraudProofType::UncreditedLightningPayment;
         let broadcast = FraudBroadcast {
             embedding: Some(ProofEmbedding {
                 ledger_id: "11".repeat(32),

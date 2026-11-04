@@ -250,13 +250,14 @@ fn discriminants_are_unique() {
 
 #[test]
 fn embedding_classification() {
+    // DEP-06 §Embedding (2026-11-04): only a lightning payment's timing needs
+    // an embedding; an on-chain offer proof dates itself.
+    assert!(
+        FraudProofType::UncreditedLightningPayment.requires_embedding(),
+        "UncreditedLightningPayment must require an embedding"
+    );
     for t in [
         FraudProofType::UncreditedOnchainPayment,
-        FraudProofType::UncreditedLightningPayment,
-    ] {
-        assert!(t.requires_embedding(), "{:?} must require an embedding", t);
-    }
-    for t in [
         FraudProofType::NonConformingUpdate,
         FraudProofType::Equivocation,
         FraudProofType::NonConformingCosignature,
@@ -278,25 +279,39 @@ fn uncredited_payment_without_embedding_rejected() {
     let empty =
         |_: &str| -> Option<Vec<deposits_protocol::types::SignedLedgerUpdate>> { Some(vec![]) };
     let oracle = |_: &[u8; 32]| -> Option<u32> { None };
-    for proof in [make_onchain_proof(), make_lightning_proof()] {
-        let b = FraudBroadcast {
-            proof,
-            embedding: None,
-            causal_chain: vec![],
-        };
-        let err = b.verify_chain_structure().unwrap_err();
-        assert!(
-            err.contains("requires an embedding"),
-            "wrong error: {}",
-            err
-        );
-        let err = verify_fraud_broadcast(&b, &empty, &oracle, &AllowAll).unwrap_err();
-        assert!(
-            err.contains("requires an embedding"),
-            "wrong error: {}",
-            err
-        );
-    }
+    // Only a lightning payment needs an embedding (DEP-06 §Embedding).
+    let b = FraudBroadcast {
+        proof: make_lightning_proof(),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    let err = b.verify_chain_structure().unwrap_err();
+    assert!(
+        err.contains("requires an embedding"),
+        "wrong error: {}",
+        err
+    );
+    let err = verify_fraud_broadcast(&b, &empty, &oracle, &AllowAll).unwrap_err();
+    assert!(
+        err.contains("requires an embedding"),
+        "wrong error: {}",
+        err
+    );
+
+    // An uncredited on-chain payment is self-evident (DEP-06 §Entering a
+    // dispute): its structure passes bare, and it is judged on its evidence.
+    let b = FraudBroadcast {
+        proof: make_onchain_proof(),
+        embedding: None,
+        causal_chain: vec![],
+    };
+    assert!(b.verify_chain_structure().is_ok());
+    let err = verify_fraud_broadcast(&b, &empty, &oracle, &AllowAll).unwrap_err();
+    assert!(
+        !err.contains("requires an embedding"),
+        "an offer proof must not be rejected for a missing embedding: {}",
+        err
+    );
 
     // DisputeDereliction is self-evident: a missing embedding is never the
     // reason it fails. It is rejected (if at all) on its own evidence.
@@ -319,9 +334,9 @@ fn uncredited_payment_without_embedding_rejected() {
 
 #[test]
 fn uncredited_payment_embedding_required_on_the_wire() {
-    // An embedding-required broadcast without the key still parses (the
+    // An embedding-required broadcast (a lightning payment, DEP-06) without the key still parses (the
     // field is optional on the wire) but fails verification.
-    let json = serde_json::json!({ "proof": make_onchain_proof() }).to_string();
+    let json = serde_json::json!({ "proof": make_lightning_proof() }).to_string();
     let b: FraudBroadcast = serde_json::from_str(&json).unwrap();
     assert!(b.embedding.is_none());
     assert!(b.verify_chain_structure().is_err());
@@ -329,7 +344,7 @@ fn uncredited_payment_embedding_required_on_the_wire() {
 
 #[test]
 fn direct_embedding_valid() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
@@ -345,7 +360,7 @@ fn direct_embedding_valid() {
 
 #[test]
 fn direct_embedding_with_chain_rejected() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
             ledger_id: proof.ledger_id.clone(),
@@ -367,7 +382,7 @@ fn direct_embedding_with_chain_rejected() {
 
 #[test]
 fn indirect_missing_chain_rejected() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32), // different from accused
@@ -383,7 +398,7 @@ fn indirect_missing_chain_rejected() {
 
 #[test]
 fn one_hop_valid() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let member = "11".repeat(32);
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
@@ -406,7 +421,7 @@ fn one_hop_valid() {
 
 #[test]
 fn one_hop_wrong_source_rejected() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32),
@@ -428,7 +443,7 @@ fn one_hop_wrong_source_rejected() {
 
 #[test]
 fn two_hop_valid() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let a = "11".repeat(32);
     let b_ledger = "22".repeat(32);
     let b = FraudBroadcast {
@@ -461,7 +476,7 @@ fn two_hop_valid() {
 
 #[test]
 fn two_hop_broken_middle_rejected() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let a = "11".repeat(32);
     let b_ledger = "22".repeat(32);
     let b = FraudBroadcast {
@@ -494,7 +509,7 @@ fn two_hop_broken_middle_rejected() {
 
 #[test]
 fn chain_not_reaching_accused_rejected() {
-    let proof = make_onchain_proof();
+    let proof = make_lightning_proof();
     let b = FraudBroadcast {
         embedding: Some(ProofEmbedding {
             ledger_id: "11".repeat(32),
