@@ -545,6 +545,68 @@ pub enum FraudEvidence {
 }
 
 impl FraudProof {
+    /// DEP-03 §Lottery: the x-only keys this proof convicts, from its own evidence: its accused,
+    /// plus the signers of the faulty update (non-conforming update or cosignature), the keys that
+    /// signed both updates (equivocation), or the spend's witness signers (unauthorised vault
+    /// spend). An omission or an expiry convicts only its accused. Such keys never win the
+    /// dispute's lottery. Mirrors cl-deposits' `proof-accused-keys`.
+    pub fn accused_keys(&self) -> Vec<bitcoin::secp256k1::XOnlyPublicKey> {
+        use crate::TlvDecode;
+        fn signers(
+            u: &crate::types::SignedLedgerUpdate,
+        ) -> Vec<bitcoin::secp256k1::XOnlyPublicKey> {
+            let mut v = vec![u.operator_id.x_only_public_key().0];
+            v.extend(
+                u.cosignatures
+                    .iter()
+                    .map(|c| c.cosigner_pubkey.x_only_public_key().0),
+            );
+            v
+        }
+        fn update(hex_s: &str) -> Option<crate::types::SignedLedgerUpdate> {
+            crate::types::SignedLedgerUpdate::tlv_decode(&hex::decode(hex_s).ok()?).ok()
+        }
+        let mut out: Vec<bitcoin::secp256k1::XOnlyPublicKey> = hex::decode(&self.accused)
+            .ok()
+            .and_then(|b| bitcoin::secp256k1::PublicKey::from_slice(&b).ok())
+            .map(|k| vec![k.x_only_public_key().0])
+            .unwrap_or_default();
+        match &self.evidence {
+            FraudEvidence::NonConformingUpdate {
+                fault_update_hex, ..
+            }
+            | FraudEvidence::NonConformingCosignature {
+                fault_update_hex, ..
+            } => {
+                if let Some(u) = update(fault_update_hex) {
+                    out.extend(signers(&u));
+                }
+            }
+            FraudEvidence::Equivocation {
+                update_a_hex,
+                update_b_hex,
+                ..
+            } => {
+                if let (Some(a), Some(b)) = (update(update_a_hex), update(update_b_hex)) {
+                    let b = signers(&b);
+                    out.extend(signers(&a).into_iter().filter(|k| b.contains(k)));
+                }
+            }
+            FraudEvidence::UnauthorizedVaultSpend { spend_tx_hex, .. } => {
+                if let Some(tx) = hex::decode(spend_tx_hex)
+                    .ok()
+                    .and_then(|b| bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b).ok())
+                {
+                    out.extend(witness_signer_keys(&tx));
+                }
+            }
+            _ => {}
+        }
+        out.sort_by_key(|k| k.serialize());
+        out.dedup();
+        out
+    }
+
     /// Compute the 32-byte hash for embedding into a ledger chain.
     ///
     /// Uses BIP-340 tagged hashing for domain separation.
@@ -4438,4 +4500,36 @@ mod tests {
         };
         assert!(broadcast.verify_chain_structure().is_ok());
     }
+}
+
+/// The x-only keys of `tx`'s tapscript witnesses that carry a 64-byte signature, in each input's
+/// leaf (keys in script order, signatures in reverse stack order, as a CHECKSIG/CHECKSIGADD leaf
+/// takes them). Used only on a spend whose proof has already verified, so the signatures are not
+/// checked again here.
+pub fn witness_signer_keys(tx: &bitcoin::Transaction) -> Vec<bitcoin::secp256k1::XOnlyPublicKey> {
+    let mut out = Vec::new();
+    for input in &tx.input {
+        let stack: Vec<&[u8]> = input.witness.iter().collect();
+        let n = stack.len();
+        if n < 3 {
+            continue;
+        }
+        let leaf = bitcoin::Script::from_bytes(stack[n - 2]);
+        let keys: Vec<bitcoin::secp256k1::XOnlyPublicKey> = leaf
+            .instructions()
+            .filter_map(|i| match i {
+                Ok(bitcoin::script::Instruction::PushBytes(b)) if b.len() == 32 => {
+                    bitcoin::secp256k1::XOnlyPublicKey::from_slice(b.as_bytes()).ok()
+                }
+                _ => None,
+            })
+            .collect();
+        let sigs: Vec<&[u8]> = stack[..n - 2].iter().rev().copied().collect();
+        for (k, sig) in keys.iter().zip(sigs.iter()) {
+            if sig.len() == 64 {
+                out.push(*k);
+            }
+        }
+    }
+    out
 }

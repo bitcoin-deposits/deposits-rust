@@ -1053,7 +1053,18 @@ impl crate::Node {
                             })
                             .unwrap_or(false)
                 });
-                let Some(answer) = answer else { continue };
+                let Some(answer) = answer else {
+                    // DEP-06 §Spend challenge, answer 2: an authorised confiscation. Whoever
+                    // holds the dispute answers with its disputants' updates, so a judge that
+                    // missed them rebuilds the same rung (any holder, not only a signer).
+                    if self
+                        .answer_confiscation_challenge(&id, &txid, &anchor)
+                        .await
+                    {
+                        self.handler.answered_challenges.lock().unwrap().insert(key);
+                    }
+                    continue;
+                };
                 tracing::info!(
                     "answering the challenge of {}'s spend {}: its rotation's QuorumBegin (seq {})",
                     &id[..8],
@@ -1077,6 +1088,73 @@ impl crate::Node {
                 }
             }
         }
+    }
+
+    /// DEP-06 §Spend challenge: if the challenged spend of `id`'s vault is the confiscation the
+    /// rules build from public state, publish the dispute's disputant updates (every
+    /// `DisputeEnter`, `DisputeArmed` and later update by an operator other than the ledger's
+    /// origin, within the current dispute) as the Challenge Answer. Returns whether an answer
+    /// was published.
+    async fn answer_confiscation_challenge(&self, id: &str, txid: &[u8], anchor: &[u8]) -> bool {
+        use base64::Engine;
+        use bitcoin::hashes::Hash;
+        use deposits_core::TlvEncode;
+        let Ok(t) = bitcoin::Txid::from_slice(txid) else {
+            return false;
+        };
+        let chain = self.wallet.chain_backend();
+        let (tx, height) = {
+            let c = chain.clone();
+            match tokio::task::spawn_blocking(move || {
+                (
+                    c.get_tx(&t).ok().flatten(),
+                    c.get_tx_block_height(&t).ok().flatten(),
+                )
+            })
+            .await
+            {
+                Ok((Some(tx), h)) => (tx, h),
+                _ => return false,
+            }
+        };
+        if !self.authorised_confiscation_spend(id, &tx, height).await {
+            return false;
+        }
+        let updates = self.fetch_all_ledger_updates_paginated(id).await;
+        let Some(origin) = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id)
+        else {
+            return false;
+        };
+        let scoped = deposits_core::rotation_order::dispute_scope(&updates);
+        let mut answer: Vec<String> = scoped
+            .iter()
+            .filter(|u| u.operator_id != origin)
+            .map(|u| base64::engine::general_purpose::STANDARD.encode(u.tlv_encode()))
+            .collect();
+        answer.sort();
+        answer.dedup();
+        if answer.is_empty() {
+            return false;
+        }
+        tracing::info!(
+            "answering the challenge of {}'s spend {}: its confiscation's dispute ({} updates)",
+            &id[..8.min(id.len())],
+            &hex::encode(txid)[..16],
+            answer.len()
+        );
+        self.nostr
+            .publish_spend_challenge_event(
+                deposits_nostr::KIND_CHALLENGE_ANSWER,
+                id,
+                &hex::encode(txid),
+                &hex::encode(anchor),
+                &answer,
+            )
+            .await
+            .is_ok()
     }
 
     async fn report_vault_spend(

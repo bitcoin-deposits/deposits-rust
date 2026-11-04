@@ -3322,7 +3322,7 @@ impl Node {
             );
             return;
         }
-        let height = self.wallet.get_block_height().ok().unwrap_or(0);
+        let height = self.fresh_height();
         // The schedule counts from our first broadcast of this ladder.
         let h_c = match self
             .confiscation_ladders
@@ -3389,7 +3389,7 @@ impl Node {
             .iter()
             .map(|(k, (r, h))| (k.clone(), r.clone(), *h))
             .collect();
-        let height = self.wallet.get_block_height().ok().unwrap_or(0);
+        let height = self.fresh_height();
         for (prefix, rungs, h_c) in ladders {
             let confirmed = rungs.iter().any(|r| {
                 matches!(

@@ -426,7 +426,14 @@ impl crate::node::Node {
         else {
             return false;
         };
-        let updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        let mut updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        // DEP-06 §Spend challenge: the dispute updates published as Challenge Answers (Kind
+        // 9112) count too, for a judge whose relay view lacks them.
+        for u in self.handler.spend_answers_for(ledger_id) {
+            if !updates.iter().any(|h| h.chain_hash() == u.chain_hash()) {
+                updates.push(u);
+            }
+        }
         if updates.is_empty() {
             return false;
         }

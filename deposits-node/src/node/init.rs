@@ -420,6 +420,24 @@ impl Node {
         self.wallet.get_block_height().unwrap_or(cached)
     }
 
+    /// The chain's tip, refreshed now rather than the wallet's last sync: a schedule that counts
+    /// blocks (the confiscation ladder's bumps, DEP-03) must read both its start and its now from
+    /// the same fresh source, or a lagging sync makes rungs look overdue (signet soak, 2026-11-04:
+    /// rung 1 of a confiscation went out 24 s after rung 0).
+    pub fn fresh_height(&self) -> u32 {
+        let cached = self.wallet.get_block_height().unwrap_or(0);
+        let multi = matches!(
+            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        );
+        let _ = if multi {
+            tokio::task::block_in_place(|| self.sync_block_height())
+        } else {
+            self.sync_block_height()
+        };
+        self.wallet.get_block_height().unwrap_or(cached)
+    }
+
     pub fn sync_block_height(&self) -> Result<(), Error> {
         self.wallet.sync_block_height()
     }

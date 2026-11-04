@@ -589,9 +589,44 @@ pub fn eligible_armers_grounded_at(
 ) -> Result<ArmerSet, String> {
     let required = required_sats(updates, last_valid_sequence)?;
     let (armers, ungrounded) = grounds.filter(collect_armers_until(updates, confiscated_at))?;
+    // DEP-03 §Lottery: a key the dispute's own grounds convict never wins. Dropped before the
+    // cut, so the lottery is the cut of a subset of the arms, which every judge already accepts.
+    let accused = dispute_accused_keys(updates, grounds);
+    let (armers, convicted): (Vec<Armer>, Vec<Armer>) = armers
+        .into_iter()
+        .partition(|a| !accused.contains(&a.xonly()));
     let mut set = split_at(chain, armers, required, confiscated_at)?;
     set.excluded.extend(ungrounded);
+    set.excluded.extend(
+        convicted
+            .into_iter()
+            .map(|a| (a, "accused by the dispute's own grounds".to_string())),
+    );
     Ok(set)
+}
+
+/// DEP-03 §Lottery: the x-only keys the dispute's own grounds convict, from the proof each
+/// counted DisputeEnter carries (TLV 345, [`deposits_core::fraud::FraudProof::accused_keys`]).
+/// Under grounded arms only grounded DisputeEnters count. Only this dispute's grounds: a key
+/// convicted on another ledger is not excluded here. Mirrors cl's `dispute-accused-keys`.
+pub fn dispute_accused_keys(
+    updates: &[SignedLedgerUpdate],
+    grounds: &GroundsVerdicts,
+) -> Vec<XOnlyPublicKey> {
+    let grounded_rule = deposits_core::types::ruleset_grounds_arms(&grounds.ruleset);
+    let mut out: Vec<XOnlyPublicKey> = Vec::new();
+    for (k, _, class) in dispute_enter_grounds(updates) {
+        if let GroundsClass::Verify(b) = class {
+            let counts =
+                !grounded_rule || matches!(grounds.by_key.get(&k), Some((Verdict::Grounded, _)));
+            if counts {
+                out.extend(b.proof.accused_keys());
+            }
+        }
+    }
+    out.sort_by_key(|k| k.serialize());
+    out.dedup();
+    out
 }
 
 // ============================================================================
