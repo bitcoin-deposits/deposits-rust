@@ -75,3 +75,15 @@ case UnauthorizedVaultSpend valid grounded-arms-v7 0 permitted
 case UnhonouredObligation none grounded-arms-v7 0 permitted
 case UnhonouredObligation placeholder grounded-arms-v7 0 permitted
 case UnhonouredObligation valid grounded-arms-v7 0 permitted
+#
+# Where the dispute forks (DEP-06 §Entering a dispute): `last_valid_sequence` for a proof whose fault
+# (or cited evidence) is at sequence 40, when the disputant's replica tip is 52.
+#   before-fault = 39 (a faulty update); tip = 52 (an omission or lapse: the evidence stays in the fork)
+# Format: forkpoint <proof_type> <before-fault|tip>
+forkpoint NonConformingUpdate before-fault
+forkpoint Equivocation before-fault
+forkpoint UncreditedOnchainPayment tip
+forkpoint UncreditedLightningPayment tip
+forkpoint UnhonouredObligation tip
+forkpoint QuorumExpired tip
+forkpoint DisputeDereliction tip

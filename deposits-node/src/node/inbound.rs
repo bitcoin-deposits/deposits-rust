@@ -2452,8 +2452,11 @@ pub(crate) fn fraud_proof_last_valid_seq(
     let fault = match evidence {
         E::NonConformingUpdate { fault_sequence, .. } => Some(*fault_sequence),
         E::Equivocation { sequence, .. } => Some(*sequence),
-        E::UncreditedOnchain { proof_sequence, .. } => Some(*proof_sequence),
-        E::UncreditedLightning { proof_sequence, .. } => Some(*proof_sequence),
+        // An uncredited payment is an omission: the update at `proof_sequence` is valid and is
+        // the evidence (the operator signed past the deadline without crediting), so the dispute
+        // forks from our tip, keeping it (DEP-06 §Entering a dispute). Forking before it dropped a
+        // valid update and left the proof unverifiable from our own fork, so the payment was
+        // never recorded as owed (regtest 2026-11-04).
         E::NonConforming { sequence, .. } => Some(*sequence),
         E::NonConformingCosignature {
             fault_ledger_id,
@@ -2577,6 +2580,56 @@ mod fraud_proof_base_tests {
     /// disputed and confiscated, and cld3 acquired custody. The old proof
     /// against cld1 still verifies when re-broadcast, but it must not
     /// dispute A again under cld3. A proof against cld3 still does.
+    /// DEP-06 §Entering a dispute, where it forks (shared with cl-deposits,
+    /// `dispute_entry.txt` forkpoint rows): the fault or cited evidence at 40, our tip at 52.
+    #[test]
+    fn dispute_fork_point_vector() {
+        let text = include_str!("../../../deposits-protocol/tests/vectors/dispute_entry.txt");
+        let evidence = |t: &str| -> Option<FraudEvidence> {
+            match t {
+                "NonConformingUpdate" => Some(FraudEvidence::NonConformingUpdate {
+                    fault_sequence: 40,
+                    fault_update_hex: String::new(),
+                }),
+                "Equivocation" => Some(FraudEvidence::Equivocation {
+                    sequence: 40,
+                    update_a_hex: String::new(),
+                    update_b_hex: String::new(),
+                }),
+                "UncreditedOnchainPayment" => Some(FraudEvidence::UncreditedOnchain {
+                    offer_id: String::new(),
+                    deposit_id: String::new(),
+                    descriptor: String::new(),
+                    funding_address: String::new(),
+                    accused_operator_pubkey: String::new(),
+                    deadline_block: 0,
+                    cosigner_pubkey: String::new(),
+                    cosigner_ledger_hash: String::new(),
+                    cosign_signature: String::new(),
+                    txid: String::new(),
+                    vout: 0,
+                    amount_sats: 0,
+                    confirmed_at_block_hash: [0; 32],
+                    required_confirmations: 0,
+                    proof_sequence: 40,
+                }),
+                // the other types carry no fault sequence; they fork from the tip
+                _ => None,
+            }
+        };
+        let mut n = 0;
+        for line in text.lines().filter(|l| l.starts_with("forkpoint ")) {
+            let w: Vec<&str> = line.split_whitespace().collect();
+            let want = if w[2] == "tip" { 52 } else { 39 };
+            match evidence(w[1]) {
+                Some(e) => assert_eq!(fraud_proof_last_valid_seq(&e, C, 52), want, "{line}"),
+                None => assert_eq!(want, 52, "{line}"),
+            }
+            n += 1;
+        }
+        assert_eq!(n, 7);
+    }
+
     #[test]
     fn a_proof_against_a_former_operator_does_not_dispute_the_successor() {
         let (cld1, cld3) = (key(1), key(3));

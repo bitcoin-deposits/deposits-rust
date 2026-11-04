@@ -1328,10 +1328,92 @@ impl Node {
                         .collect::<Vec<_>>(),
                 )
             };
-            for json in self
+            // The proof this fork's own DisputeEnter acts on (TLV 345) first: a member that
+            // enters on an offer proof can arm before the relay serves that proof back, and a
+            // payment no participant records is not owed at confiscation (regtest 2026-11-04:
+            // two reference members armed 0.05 s after the proof and confiscated without it).
+            let own = {
+                let fork_ledger = fork_arc.read().unwrap();
+                fork_ledger.history.iter().rev().find_map(|u| {
+                    match LedgerOperation::tlv_decode(&u.message) {
+                        Ok(LedgerOperation::DisputeEnter {
+                            fraud_proof: Some(body),
+                            ..
+                        }) => Some(body),
+                        _ => None,
+                    }
+                })
+            };
+            let mut proofs: Vec<Vec<u8>> = Vec::new();
+            let mut seen: Vec<(String, u32)> = Vec::new();
+            if own.is_none() {
+                tracing::debug!(
+                    "no carried proof on our DisputeEnter for {}",
+                    &ledger_id_hex[..16]
+                );
+            }
+            if let Some(body) = own {
+                // TLV 345 holds the broadcast as received ({proof, embedding, causal_chain}).
+                let parsed = serde_json::from_str::<deposits_core::fraud::FraudBroadcast>(&body)
+                    .map(|b| b.proof)
+                    .or_else(|_| serde_json::from_str::<deposits_core::fraud::FraudProof>(&body));
+                if let Ok(p) = parsed {
+                    if let deposits_core::fraud::FraudEvidence::UncreditedOnchain {
+                        txid,
+                        vout,
+                        ..
+                    } = &p.evidence
+                    {
+                        let wallet = &self.wallet;
+                        let oracle = |b: &[u8; 32]| wallet.confirms_block(b);
+                        let verdict = if p.ledger_id != ledger_id_hex {
+                            Err("names another ledger".to_string())
+                        } else {
+                            deposits_core::fraud::verify_uncredited_onchain(
+                                &p,
+                                &operator_history,
+                                &oracle,
+                            )
+                        };
+                        match verdict {
+                            Ok(()) => {
+                                seen.push((txid.clone(), *vout));
+                                if let Ok(j) = serde_json::to_vec(&p) {
+                                    proofs.push(j);
+                                }
+                            }
+                            Err(e) => tracing::info!(
+                                "our DisputeEnter's offer proof on {} not recorded: {}",
+                                &ledger_id_hex[..16],
+                                e
+                            ),
+                        }
+                    }
+                }
+            }
+            for j in self
                 .fetch_uncredited_payment_proofs(&ledger_id_hex, &operator_history)
                 .await
             {
+                let key = serde_json::from_slice::<deposits_core::fraud::FraudProof>(&j)
+                    .ok()
+                    .and_then(|p| match p.evidence {
+                        deposits_core::fraud::FraudEvidence::UncreditedOnchain {
+                            txid,
+                            vout,
+                            ..
+                        } => Some((txid, vout)),
+                        _ => None,
+                    });
+                if let Some(k) = key {
+                    if seen.contains(&k) {
+                        continue;
+                    }
+                    seen.push(k);
+                }
+                proofs.push(j);
+            }
+            for json in proofs {
                 let op = LedgerOperation::ObligationRecord {
                     source_notice_update: None,
                     source_qb_update: None,

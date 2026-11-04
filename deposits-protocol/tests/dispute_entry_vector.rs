@@ -10,7 +10,7 @@ fn dispute_entry_vector() {
     let text = include_str!("vectors/dispute_entry.txt");
     let mut n = 0;
     for line in text.lines() {
-        if line.is_empty() || line.starts_with('#') {
+        if line.is_empty() || line.starts_with('#') || line.starts_with("forkpoint ") {
             continue;
         }
         let w: Vec<&str> = line.split_whitespace().collect();
