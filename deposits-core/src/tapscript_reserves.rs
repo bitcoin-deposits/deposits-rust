@@ -1445,7 +1445,9 @@ impl LotteryScriptBuilder {
     /// participants, in tree order; empty for `k < 2`.
     pub fn build_subset_leaves(&self) -> DepositsResult<Vec<(Vec<usize>, ScriptBuf)>> {
         let k = self.participants.len();
-        if k < 2 {
+        // No recovery voters (strict-lottery-v8, a wholly accused quorum): only the full-set
+        // leaf can be claimed.
+        if k < 2 || self.recovery_voters.is_empty() {
             return Ok(vec![]);
         }
         let prefix = self.build_attest_prefix()?;
@@ -1532,7 +1534,11 @@ impl LotteryScriptBuilder {
             Vec::with_capacity(1 + subset_scripts.len() + recovery_specs.len());
         leaves.push(lottery_script.clone());
         leaves.extend(subset_scripts.iter().map(|(_, s)| s.clone()));
-        for (csv, threshold) in recovery_specs {
+        // No recovery voters (strict-lottery-v8, every voter accused): no recovery leaves.
+        for (csv, threshold) in recovery_specs
+            .into_iter()
+            .filter(|_| !self.recovery_voters.is_empty())
+        {
             let builder = LotteryScriptBuilder::new(
                 self.participants.clone(),
                 self.recovery_voters.clone(),
@@ -1672,6 +1678,9 @@ impl LotteryOutput {
     /// Honest voters spend these only into a re-arm round's lottery output
     /// (DEP-06 Phase 4), never to the accused operator.
     pub fn recovery_leaves(&self) -> Vec<(u32, usize, ScriptBuf)> {
+        if self.recovery_voters.is_empty() {
+            return vec![];
+        }
         let specs: [(u32, usize); 4] = [
             (144, self.recovery_threshold),
             (1008, self.recovery_threshold.saturating_sub(1).max(1)),

@@ -3154,4 +3154,14 @@ impl crate::node::Node {
         }
         GroundsVerdicts::from_judged(updates, judged)
     }
+
+    /// The lottery's recovery voters and threshold, judged with this node's grounds verdicts
+    /// ([`crate::node::armers::lottery_voters_with`]).
+    pub(crate) async fn lottery_voters(
+        &self,
+        updates: &[deposits_core::SignedLedgerUpdate],
+    ) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
+        let grounds = Box::pin(self.grounds_verdicts(updates)).await;
+        crate::node::armers::lottery_voters_with(updates, &grounds)
+    }
 }

@@ -3693,7 +3693,7 @@ impl Node {
             // Build recovery voters (quorum minus original operator)
             // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
             let Some((recovery_voters, recovery_threshold)) =
-                deposits_core::rotation_order::lottery_recovery_voters(&paginated_updates)
+                super::armers::lottery_voters_with(&paginated_updates, &grounds)
             else {
                 tracing::debug!(
                     "No QuorumBegin by the original operator at or before the fork point of {}",
@@ -4273,11 +4273,13 @@ impl Node {
         // rebuilt lottery address won't find the confiscation UTXO and we
         // never trigger the reveal.
         let (recovery_voters, recovery_threshold) =
-            recovery_voters_from_updates(&paginated_updates).ok_or_else(|| {
-                Error::Protocol(
-                    "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
-                )
-            })?;
+            Box::pin(self.lottery_voters(&paginated_updates))
+                .await
+                .ok_or_else(|| {
+                    Error::Protocol(
+                        "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
+                    )
+                })?;
 
         let lottery_builder = LotteryScriptBuilder::new(
             participants,

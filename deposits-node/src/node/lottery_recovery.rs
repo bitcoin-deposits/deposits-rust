@@ -287,7 +287,7 @@ impl Node {
             .iter()
             .map(|a| (a.key, a.participant.clone()))
             .collect();
-        if let Some((voters, threshold)) = recovery_voters_from_updates(&updates) {
+        if let Some((voters, threshold)) = Box::pin(self.lottery_voters(&updates)).await {
             let candidates: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = set
                 .participants
                 .iter()
@@ -325,12 +325,11 @@ impl Node {
 
         // Recovery voters MUST come from the latest QuorumBegin (minus
         // operator): the set the confiscation's lottery output commits to.
-        let (recovery_voters, recovery_threshold) = recovery_voters_from_updates(&updates)
+        let (recovery_voters, recovery_threshold) = Box::pin(self.lottery_voters(&updates))
+            .await
             .ok_or_else(|| {
-                Error::Protocol(
-                    "No QuorumBegin/LedgerOpen found to derive recovery voters".to_string(),
-                )
-            })?;
+            Error::Protocol("No QuorumBegin/LedgerOpen found to derive recovery voters".to_string())
+        })?;
         if !has_ledger_open {
             return Err(Error::Protocol("No LedgerOpen found".to_string()));
         }

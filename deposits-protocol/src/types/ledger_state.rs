@@ -82,6 +82,21 @@ pub fn lottery_admissible<K: PartialEq>(
     !ruleset_strict_lottery(ruleset_name) || participants.iter().all(|p| !accused.contains(p))
 }
 
+/// The lottery's recovery voters under `strict-lottery-v8` (provisional, cl-deposits
+/// `docs/REVIEW.md`): the governing quorum's voters without `accused` (the keys the dispute's own
+/// grounds convict), and the threshold over what remains, the strict majority (`0` when none
+/// remain: the lottery then has only its full-set leaf). Pass an empty `accused` under an earlier
+/// ruleset. Shared with cl-deposits' `strict-voters`; vector `lottery_voters_accused.txt`.
+pub fn strict_voters<K: PartialEq + Clone>(voters: &[K], accused: &[K]) -> (Vec<K>, usize) {
+    let v: Vec<K> = voters
+        .iter()
+        .filter(|k| !accused.contains(k))
+        .cloned()
+        .collect();
+    let t = if v.is_empty() { 0 } else { v.len() / 2 + 1 };
+    (v, t)
+}
+
 /// DEP-18 gated rules of `anchor-ladder-v5`. Each is dormant under any other
 /// ruleset, and under none (`""`, a ledger before its first ruleset).
 pub fn ruleset_requires_signed_header(ruleset_name: &str) -> bool {

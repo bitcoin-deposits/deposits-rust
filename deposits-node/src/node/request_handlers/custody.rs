@@ -647,7 +647,7 @@ impl Node {
 
         // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
         let Some((recovery_voters, recovery_threshold)) =
-            deposits_core::rotation_order::lottery_recovery_voters(&updates)
+            Box::pin(self.lottery_voters(&updates)).await
         else {
             return (
                 false,
@@ -1544,10 +1544,11 @@ impl Node {
         }
 
         // DEP-06: the recovery voters of the vault's governing QuorumBegin (≤ the fork point).
-        let (recovery_voters, recovery_threshold) =
-            deposits_core::rotation_order::lottery_recovery_voters(&updates).ok_or_else(|| {
-                "no QuorumBegin by the original operator at or before the fork point".to_string()
-            })?;
+        let (recovery_voters, recovery_threshold) = Box::pin(self.lottery_voters(&updates))
+            .await
+            .ok_or_else(|| {
+            "no QuorumBegin by the original operator at or before the fork point".to_string()
+        })?;
 
         tracing::info!(
             "lottery inputs (verifier) for {}: {}",

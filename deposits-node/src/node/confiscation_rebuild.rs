@@ -273,8 +273,7 @@ fn rebuild_matching_in(
         state.total_deposit_balance() / 1000
     };
     let (recovery_voters, recovery_threshold) =
-        deposits_core::rotation_order::lottery_recovery_voters(&view)
-            .ok_or("no recovery voters")?;
+        super::armers::lottery_voters_with(&view, grounds).ok_or("no recovery voters")?;
     // DEP-03 §Grounded arms: under grounded-arms-v7 the shape counts grounded DisputeEnters only.
     let respectful = match grounds.respectful() {
         Some(r) => r?,

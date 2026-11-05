@@ -613,6 +613,25 @@ pub fn eligible_armers_grounded_at(
     Ok(set)
 }
 
+/// DEP-06 §Lottery, the lottery's recovery voters and threshold: the governing QuorumBegin's
+/// members other than the operator; under `strict-lottery-v8` (provisional, cl-deposits
+/// `docs/REVIEW.md`) also without the keys the dispute's own grounds convict, the threshold the
+/// strict majority of what remains (`0` when none remain: only the full-set leaf). Mirrors cl's
+/// `lottery-voters`; vector `lottery_voters_accused.txt`.
+pub fn lottery_voters_with(
+    updates: &[SignedLedgerUpdate],
+    grounds: &GroundsVerdicts,
+) -> Option<(Vec<XOnlyPublicKey>, usize)> {
+    let (voters, threshold) = deposits_core::rotation_order::lottery_recovery_voters(updates)?;
+    if !deposits_core::types::ruleset_strict_lottery(&grounds.ruleset) {
+        return Some((voters, threshold));
+    }
+    Some(deposits_core::types::strict_voters(
+        &voters,
+        &dispute_accused_keys(updates, grounds),
+    ))
+}
+
 /// DEP-03 §Lottery: the x-only keys the dispute's own grounds convict, from the proof each
 /// counted DisputeEnter carries (TLV 345, [`deposits_core::fraud::FraudProof::accused_keys`]).
 /// Under grounded arms only grounded DisputeEnters count. Only this dispute's grounds: a key
