@@ -2050,7 +2050,18 @@ impl Node {
                 t_locate.elapsed().as_millis()
             );
         }
-        let confirmations = located.map(|(_, _, c)| c).unwrap_or(0);
+        // The participant set we derived must be the one the confiscation's output commits to:
+        // if no unspent output pays this lottery, our set is not the landed one (or it has not
+        // landed yet), and neither a claim nor a yield may be decided from it. A yield is final
+        // (DisputeYield, completed marker), so deciding from a set that is not on chain can leave
+        // a sole participant yielding its own custody (soak, 30ea46ac, Nov 5).
+        let Some((_, _, confirmations)) = located else {
+            tracing::info!(
+                "Lottery for {}: no unspent output pays our participant set yet; not claiming or yielding",
+                &ledger_id[..16.min(ledger_id.len())]
+            );
+            return Ok(false);
+        };
 
         let (subset, ordered_preimages, winner_index) =
             match lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS) {
