@@ -1706,6 +1706,82 @@ impl LotteryOutput {
             .control_block(&(leaf_script.clone(), LeafVersion::TapScript))
     }
 
+    /// DEP-06 Phase 4 (draft): the vsize of this lottery's recovery spend
+    /// through `tier` (0..=3, CSV 144/1008/4032/8064) into one P2TR output, as
+    /// signed by the tier's threshold: `ceil((4 * 94 + W) / 4)`, `W` the witness
+    /// bytes (marker and flag, item count, signature items, leaf and control
+    /// block with their length prefixes). Vector: `rearm_spend.txt`.
+    pub fn rearm_spend_vsize(&self, tier: usize) -> DepositsResult<u64> {
+        fn cs(n: usize) -> usize {
+            if n < 253 {
+                1
+            } else if n <= 0xffff {
+                3
+            } else {
+                5
+            }
+        }
+        let leaves = self.recovery_leaves();
+        let (_, th, leaf) = leaves
+            .get(tier)
+            .ok_or_else(|| DepositsError::InvalidState(format!("no recovery tier {}", tier)))?;
+        let cb = self
+            .recovery_control_block(leaf)
+            .ok_or_else(|| DepositsError::InvalidState("recovery leaf not in tree".into()))?
+            .serialize();
+        let r = self.recovery_voters.len();
+        let (sig_items, items) = if *th == 1 {
+            (65, 1 + 2)
+        } else {
+            (th * 65 + (r - th), r + 2)
+        };
+        let w = 2 + cs(items) + sig_items + cs(leaf.len()) + leaf.len() + cs(cb.len()) + cb.len();
+        Ok(((4 * 94 + w) as u64).div_ceil(4))
+    }
+
+    /// DEP-06 Phase 4 (draft): the unsigned recovery spend of this lottery
+    /// (`outpoint` worth `lottery_sats`) through recovery `tier` into the re-arm
+    /// round's lottery output `next_spk`: version 2, nLockTime 0, nSequence the
+    /// tier's CSV, one output of `lottery_sats - feerate * rearm_spend_vsize`.
+    /// Returns `(tx, fee, vsize)`.
+    pub fn rearm_spend(
+        &self,
+        outpoint: bitcoin::OutPoint,
+        lottery_sats: u64,
+        tier: usize,
+        next_spk: ScriptBuf,
+        feerate: u64,
+    ) -> DepositsResult<(bitcoin::Transaction, u64, u64)> {
+        use bitcoin::{absolute::LockTime, transaction::Version, Sequence, TxIn, Witness};
+        let leaves = self.recovery_leaves();
+        let (csv, _, _) = leaves
+            .get(tier)
+            .ok_or_else(|| DepositsError::InvalidState(format!("no recovery tier {}", tier)))?;
+        let vsize = self.rearm_spend_vsize(tier)?;
+        let fee = feerate * vsize;
+        if lottery_sats < fee + 330 {
+            return Err(DepositsError::InvalidState(format!(
+                "a re-arm spend of {} sats cannot pay its {}-sat fee",
+                lottery_sats, fee
+            )));
+        }
+        let tx = bitcoin::Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence(*csv),
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(lottery_sats - fee),
+                script_pubkey: next_spk,
+            }],
+        };
+        Ok((tx, fee, vsize))
+    }
+
     /// The x-only recovery voter keys in the sorted order the recovery and
     /// attestation scripts consume them. Index `i` of a `voter_signatures`
     /// argument corresponds to `recovery_voter_order()[i]`.
