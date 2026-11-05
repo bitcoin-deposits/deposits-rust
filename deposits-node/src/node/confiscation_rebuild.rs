@@ -561,8 +561,27 @@ mod tests {
     /// stranger in it, a short output, an extra output) or the proposer's key is not.
     #[test]
     fn authorised_confiscation_vector() {
+        authorised_confiscation_cases(
+            include_str!("../../tests/vectors/authorised_confiscation.txt"),
+            6,
+        );
+    }
+
+    /// DEP-06 "Authorised confiscation": the base ends at the dispute's last fork point, against
+    /// the vector cl-deposits generated from the signet soak's ledger 6056fb38
+    /// (tests/vectors/confiscation_past_fault.txt). The operator's chain carries on past the fork
+    /// point with the fault itself; the honest rung 1 that confirmed is excused, an amount off by
+    /// one is not.
+    #[test]
+    fn confiscation_past_fault_vector() {
+        authorised_confiscation_cases(
+            include_str!("../../tests/vectors/confiscation_past_fault.txt"),
+            2,
+        );
+    }
+
+    fn authorised_confiscation_cases(text: &str, expected_cases: usize) {
         use bitcoin::hashes::Hash;
-        let text = include_str!("../../tests/vectors/authorised_confiscation.txt");
         let mut kv: HashMap<&str, &str> = HashMap::new();
         let mut updates = Vec::new();
         let mut pledges = HashMap::new();
@@ -596,7 +615,32 @@ mod tests {
         let chain = Pledges(pledges);
         let lid: [u8; 32] = hex::decode(kv["ledger"]).unwrap().try_into().unwrap();
         let h: u32 = kv["spend_height"].parse().unwrap();
-        assert_eq!(cases.len(), 6);
+        assert_eq!(cases.len(), expected_cases);
+        // Grounds are judged as a node holding the ledger judges them: a carried
+        // NonConformingUpdate against the original operator's chain.
+        let origin = crate::node::armers::original_operator(&updates).unwrap();
+        let mut history: Vec<SignedLedgerUpdate> = updates
+            .iter()
+            .filter(|u| u.operator_id == origin)
+            .cloned()
+            .collect();
+        history.sort_by_key(|u| u.sequence_number);
+        let grounds = crate::node::armers::GroundsVerdicts::with_verifier(&updates, |b| {
+            use crate::node::armers::Verdict;
+            match &b.proof.evidence {
+                deposits_core::fraud::FraudEvidence::NonConformingUpdate { .. } => {
+                    match deposits_core::fraud::verify_non_conforming_update(
+                        &b.proof,
+                        &history,
+                        &deposits_core::dep16::Dep16Authorizer::new(),
+                    ) {
+                        Ok(()) => (Verdict::Grounded, "its proof verifies".into()),
+                        Err(e) => (Verdict::Ungrounded, e),
+                    }
+                }
+                _ => (Verdict::Unknown, "not verified here".into()),
+            }
+        });
         for (name, excused, hex_tx) in cases {
             let tx: Transaction =
                 bitcoin::consensus::deserialize(&hex::decode(hex_tx).unwrap()).unwrap();
@@ -607,7 +651,7 @@ mod tests {
                 bitcoin::Network::Signet,
                 &tx,
                 Some(h),
-                &crate::node::armers::GroundsVerdicts::pure(&updates),
+                &grounds,
             );
             assert_eq!(v.is_ok(), excused, "{name}: {v:?}");
         }
