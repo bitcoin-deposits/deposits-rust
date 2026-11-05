@@ -1656,11 +1656,13 @@ impl Node {
         // our replica, the relay's copies and the answers published to challenges. Finding
         // nothing proves nothing here: the proof itself must be unanchored or lapsed.
         let mut confiscation_answer = false;
+        let mut answers_readable = true;
         let mut answer_pool: Vec<deposits_core::types::SignedLedgerUpdate> = Vec::new();
         if let deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend {
             spent_ledger_id,
             spend_tx_hex,
             spend_block_hash,
+            challenge_update,
             ..
         } = &broadcast.proof.evidence
         {
@@ -1669,6 +1671,21 @@ impl Node {
                 .and_then(|b| bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b).ok())
             {
                 if deposits_core::tapscript_reserves::anchor_of(&tx).is_some() {
+                    // DEP-06: a lapse is judged over every answer published (re-read now, not only
+                    // what our subscription delivered), and only where answers can be read.
+                    if challenge_update.is_some() {
+                        match self
+                            .nostr
+                            .fetch_spend_challenge_events(
+                                deposits_nostr::KIND_CHALLENGE_ANSWER,
+                                spent_ledger_id,
+                            )
+                            .await
+                        {
+                            Ok(answers) => self.keep_challenge_answers(spent_ledger_id, &answers),
+                            Err(_) => answers_readable = false,
+                        }
+                    }
                     let height = self.wallet.confirms_block(spend_block_hash);
                     confiscation_answer = self
                         .authorised_confiscation_spend(spent_ledger_id, &tx, height)
@@ -1683,6 +1700,9 @@ impl Node {
                     let relay = self
                         .fetch_ledger_updates_paginated_filtered(spent_ledger_id, &[])
                         .await;
+                    if relay.is_empty() {
+                        answers_readable = false;
+                    }
                     if relay.is_empty() && answer_pool.is_empty() {
                         return Err("UnauthorizedVaultSpend: no relay history for the spent \
                                     ledger; not judged"
@@ -1847,11 +1867,12 @@ impl Node {
                     )
                     .is_some()
             };
-            deposits_core::vault_spend::verify_unauthorized_vault_spend(
+            deposits_core::vault_spend::verify_unauthorized_vault_spend_read(
                 &broadcast.proof,
                 &history,
                 &hob,
                 &answered,
+                answers_readable,
             )
             .map_err(|e| format!("UnauthorizedVaultSpend: {}", e))?;
         }

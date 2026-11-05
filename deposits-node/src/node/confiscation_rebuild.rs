@@ -427,6 +427,21 @@ impl crate::node::Node {
             return false;
         };
         let mut updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
+        // Our own replica of the base chain too: an answer carries only the dispute's updates, so
+        // a judge whose relay lacks the ledger rebuilt from them alone, with no LedgerOpen, and
+        // could never accept it (regtest confiscation-answer, 2026-11-04).
+        let replica: Vec<SignedLedgerUpdate> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|l| l.read().unwrap().history.clone())
+                .unwrap_or_default()
+        };
+        for u in replica {
+            if !updates.iter().any(|h| h.chain_hash() == u.chain_hash()) {
+                updates.push(u);
+            }
+        }
         // DEP-06 §Spend challenge: the dispute updates published as Challenge Answers (Kind
         // 9112) count too, for a judge whose relay view lacks them.
         for u in self.handler.spend_answers_for(ledger_id) {

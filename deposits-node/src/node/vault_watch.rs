@@ -557,7 +557,8 @@ impl crate::Node {
                 let relay = self
                     .fetch_ledger_updates_paginated_filtered(&theft.ledger_id, &[])
                     .await;
-                if self.spend_answered(&theft, &anchor, relay).await {
+                let (answered, readable) = self.spend_answered_read(&theft, &anchor, relay).await;
+                if answered {
                     tracing::info!(
                         "the challenge of {}'s spend is answered; nothing to prove",
                         key
@@ -585,6 +586,16 @@ impl crate::Node {
                             lapsed = Some((entry.challenge_update.clone().unwrap(), b));
                         }
                     }
+                }
+                // DEP-06: a lapse asserts that no answer exists, which only a judge that reads
+                // where answers go can say. One that cannot reaches no verdict and judges again
+                // later (regtest confiscation-answer, 2026-11-04).
+                if lapsed.is_some() && !readable {
+                    tracing::warn!(
+                        "the challenge of {}'s spend has lapsed, but we cannot read where its answers go: no verdict",
+                        key
+                    );
+                    lapsed = None;
                 }
                 if lapsed.is_none() {
                     self.owed_vault_spends.lock().unwrap().insert(key, entry);
@@ -863,6 +874,19 @@ impl crate::Node {
         anchor: &[u8; 32],
         relay: Vec<SignedLedgerUpdate>,
     ) -> bool {
+        self.spend_answered_read(theft, anchor, relay).await.0
+    }
+
+    /// [`Self::spend_answered`], and whether we could read the places answers go: the relay holds
+    /// the spent ledger and its published answers (Kind 9112) could be fetched. DEP-06: a lapse is
+    /// judged only where answers are read.
+    async fn spend_answered_read(
+        &self,
+        theft: &VaultTheft,
+        anchor: &[u8; 32],
+        relay: Vec<SignedLedgerUpdate>,
+    ) -> (bool, bool) {
+        let mut readable = !relay.is_empty();
         let history = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -872,16 +896,17 @@ impl crate::Node {
         };
         let mut pool = history.clone();
         pool.extend(relay);
-        if let Ok(answers) = self
+        match self
             .nostr
             .fetch_spend_challenge_events(deposits_nostr::KIND_CHALLENGE_ANSWER, &theft.ledger_id)
             .await
         {
-            self.keep_challenge_answers(&theft.ledger_id, &answers);
+            Ok(answers) => self.keep_challenge_answers(&theft.ledger_id, &answers),
+            Err(_) => readable = false,
         }
         pool.extend(self.handler.spend_answers_for(&theft.ledger_id));
         let txid = theft.spend.tx.compute_txid().to_byte_array();
-        deposits_core::vault_spend::rotation_answer(
+        let answered = deposits_core::vault_spend::rotation_answer(
             &pool,
             &history,
             theft.governing_seq,
@@ -896,11 +921,12 @@ impl crate::Node {
                     &theft.spend.tx,
                     Some(theft.spend.height),
                 )
-                .await
+                .await;
+        (answered, readable)
     }
 
     /// Kind 9112 contents: keep the answering updates of `ledger_id`.
-    fn keep_challenge_answers(&self, ledger_id: &str, answers: &[serde_json::Value]) {
+    pub(crate) fn keep_challenge_answers(&self, ledger_id: &str, answers: &[serde_json::Value]) {
         use base64::Engine;
         let mut map = self.handler.spend_answers.lock().unwrap();
         let have = map.entry(ledger_id.to_string()).or_default();

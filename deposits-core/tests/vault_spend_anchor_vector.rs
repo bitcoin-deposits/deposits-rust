@@ -6,7 +6,10 @@
 //! nothing. Proved: unanchored on the witness alone; anchored only by a challenge that lapsed.
 
 use deposits_core::tapscript_reserves::anchor_of;
-use deposits_core::vault_spend::{rotation_answer, verify_unauthorized_vault_spend};
+use deposits_core::vault_spend::{
+    rotation_answer, verify_unauthorized_vault_spend, verify_unauthorized_vault_spend_read,
+    NO_VERDICT,
+};
 use deposits_protocol::fraud::FraudProof;
 use deposits_protocol::tlv::TlvDecode;
 use deposits_protocol::types::SignedLedgerUpdate;
@@ -18,6 +21,7 @@ struct Vector {
     spends: HashMap<String, bitcoin::Transaction>,
     answers: Vec<(String, String, String)>,
     proofs: Vec<(String, bool, String, String)>,
+    judges: Vec<(String, bool, String)>,
     governing: u64,
 }
 
@@ -28,6 +32,7 @@ fn vector() -> Vector {
         spends: HashMap::new(),
         answers: vec![],
         proofs: vec![],
+        judges: vec![],
         governing: 0,
     };
     for line in include_str!("vectors/vault_spend_anchor.txt")
@@ -54,6 +59,9 @@ fn vector() -> Vector {
                 );
             }
             "answer" => v.answers.push((w[1].into(), w[2].into(), w[3].into())),
+            "judge" => v
+                .judges
+                .push((w[1].into(), w[2] == "readable", w[3].into())),
             "proof" => {
                 let json = line.splitn(5, ' ').nth(4).unwrap().to_string();
                 v.proofs.push((w[1].into(), w[2] == "1", w[3].into(), json));
@@ -118,5 +126,29 @@ fn proofs_match_the_shared_vector() {
         assert_eq!(hex::encode(p.proof_hash()), *hash, "{name}: proof hash");
         let got = verify_unauthorized_vault_spend(&p, &v.updates, &hob, &answered);
         assert_eq!(got.is_ok(), *verdict, "{name}: {:?}", got);
+    }
+}
+
+/// DEP-06: a lapse is judged where answers are read. An answer found still rebuts; none found,
+/// where the places answers go could not be read, is no verdict; a form needing no answer is
+/// unaffected.
+#[test]
+fn proofs_judged_by_readability_match_the_shared_vector() {
+    let v = vector();
+    assert_eq!(v.judges.len(), 5);
+    let hob = |b: &[u8; 32]| v.blocks.get(b).copied();
+    let answered = |txid: &[u8; 32], anchor: &[u8; 32], tier: usize| {
+        rotation_answer(&v.updates, &v.updates, v.governing, anchor, txid, tier).is_some()
+    };
+    for (name, readable, want) in &v.judges {
+        let (_, _, _, json) = v.proofs.iter().find(|p| &p.0 == name).unwrap();
+        let p: FraudProof = serde_json::from_str(json).unwrap();
+        let got = verify_unauthorized_vault_spend_read(&p, &v.updates, &hob, &answered, *readable);
+        let verdict = match &got {
+            Ok(()) => "1",
+            Err(e) if e.starts_with(NO_VERDICT) => "u",
+            Err(_) => "0",
+        };
+        assert_eq!(verdict, want, "{name} (readable {readable}): {:?}", got);
     }
 }

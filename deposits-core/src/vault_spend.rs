@@ -395,11 +395,31 @@ pub fn spend_window(spent_history: &[SignedLedgerUpdate], governing_seq: u64) ->
 /// and the spend's. `answered(txid, anchor, tier_index)` is true when the verifier knows an answer
 /// (a rotation or an authorised confiscation); a known answer rebuts the lapsed form. Mirrors
 /// cl-deposits' `verify-unauthorized-vault-spend`; vector `tests/vectors/vault_spend_anchor.txt`.
+/// Judges as a verifier that could read every place answers go; see
+/// [`verify_unauthorized_vault_spend_read`].
 pub fn verify_unauthorized_vault_spend(
     proof: &FraudProof,
     spent_history: &[SignedLedgerUpdate],
     height_of_block: &dyn Fn(&[u8; 32]) -> Option<u32>,
     answered: &dyn Fn(&[u8; 32], &[u8; 32], usize) -> bool,
+) -> Result<(), String> {
+    verify_unauthorized_vault_spend_read(proof, spent_history, height_of_block, answered, true)
+}
+
+/// The prefix of the error a lapsed form with no answer found gets from a verifier that could not
+/// read the places answers go: no verdict, never a conviction (DEP-06 §Spend challenge).
+pub const NO_VERDICT: &str = "no verdict:";
+
+/// [`verify_unauthorized_vault_spend`], told whether the verifier could read every place DEP-06
+/// says answers go (the relays and its own store). Where it could not, a lapsed form with no
+/// answer found is no verdict (an error starting [`NO_VERDICT`]): a lapse asserts that no answer
+/// exists, which only a judge that reads where answers go can say.
+pub fn verify_unauthorized_vault_spend_read(
+    proof: &FraudProof,
+    spent_history: &[SignedLedgerUpdate],
+    height_of_block: &dyn Fn(&[u8; 32]) -> Option<u32>,
+    answered: &dyn Fn(&[u8; 32], &[u8; 32], usize) -> bool,
+    answers_readable: bool,
 ) -> Result<(), String> {
     let FraudEvidence::UnauthorizedVaultSpend {
         spent_ledger_id,
@@ -480,6 +500,12 @@ pub fn verify_unauthorized_vault_spend(
     }
     if answered(&txid, &anchor, tier_index) {
         return Err("the spend is answered".into());
+    }
+    if !answers_readable {
+        return Err(format!(
+            "{} the places answers go could not be read",
+            NO_VERDICT
+        ));
     }
     Ok(())
 }
