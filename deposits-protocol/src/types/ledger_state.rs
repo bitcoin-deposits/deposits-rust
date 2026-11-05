@@ -40,19 +40,46 @@ pub const ANCHOR_LADDER_V5: &str = "anchor-ladder-v5";
 pub const BALANCE_ANCHOR_V6: &str = "balance-anchor-v6";
 /// DEP-18: `balance-anchor-v6`'s rules plus grounded arms (DEP-03 §Grounded arms).
 pub const GROUNDED_ARMS_V7: &str = "grounded-arms-v7";
+/// DEP-18: `grounded-arms-v7`'s rules plus the strict lottery (DEP-03 §The accused never win):
+/// a confiscation whose lottery includes a key the dispute's own grounds convict is not
+/// authorised.
+pub const STRICT_LOTTERY_V8: &str = "strict-lottery-v8";
 
 /// Whether a ruleset carries `anchor-ladder-v5`'s gated rules (v5 itself, v6 and v7).
 fn carries_v5_rules(ruleset_name: &str) -> bool {
     ruleset_name == ANCHOR_LADDER_V5
         || ruleset_name == BALANCE_ANCHOR_V6
         || ruleset_name == GROUNDED_ARMS_V7
+        || ruleset_name == STRICT_LOTTERY_V8
 }
 
 /// Grounded arms (DEP-03 §Grounded arms), judged under the ruleset in force at the dispute's
 /// fork point: an arm counts in the eligibility cut, and a `DisputeEnter` in the confiscation's
 /// shape, only if its `DisputeEnter` has grounds.
 pub fn ruleset_grounds_arms(ruleset_name: &str) -> bool {
-    ruleset_name == GROUNDED_ARMS_V7
+    ruleset_name == GROUNDED_ARMS_V7 || ruleset_name == STRICT_LOTTERY_V8
+}
+
+/// The strict lottery (DEP-03 §The accused never win, DEP-18 `strict-lottery-v8`), judged under
+/// the ruleset in force at the dispute's fork point, as grounded arms is: a confiscation whose
+/// lottery includes a key the dispute's own grounds convict (or the operator at the fork point)
+/// is not authorised. Under an earlier ruleset such a lottery is still the cut of a subset of
+/// the arms, and authorised.
+pub fn ruleset_strict_lottery(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8
+}
+
+/// DEP-06 §Authorised confiscation, the lottery's participant set: under a ruleset with the
+/// strict lottery, no participant may be in `accused` (the keys the dispute's own grounds
+/// convict, with the operator at the fork point); under any other, every set is admissible
+/// here (the subset-of-the-arms rule is checked by the rebuild). Shared with cl-deposits'
+/// `lottery-admissible-p`; vector: the `judge` cases of `lottery_accused.txt`.
+pub fn lottery_admissible<K: PartialEq>(
+    ruleset_name: &str,
+    participants: &[K],
+    accused: &[K],
+) -> bool {
+    !ruleset_strict_lottery(ruleset_name) || participants.iter().all(|p| !accused.contains(p))
 }
 
 /// DEP-18 gated rules of `anchor-ladder-v5`. Each is dormant under any other
@@ -84,7 +111,7 @@ pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
     matches!(
         ruleset_name,
-        "balance-commit-v4" | "balance-anchor-v6" | "grounded-arms-v7"
+        "balance-commit-v4" | "balance-anchor-v6" | "grounded-arms-v7" | "strict-lottery-v8"
     )
 }
 
@@ -105,7 +132,7 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
         "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5"
-        | "balance-anchor-v6" | "grounded-arms-v7" => "cltv-offset-v2",
+        | "balance-anchor-v6" | "grounded-arms-v7" | "strict-lottery-v8" => "cltv-offset-v2",
         _ => "",
     }
 }
@@ -154,16 +181,19 @@ pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> Ru
 }
 
 /// The ruleset a new ledger names, and the reference policy's default target.
-pub const POLICY_TARGET_RULESET: &str = GROUNDED_ARMS_V7;
+pub const POLICY_TARGET_RULESET: &str = STRICT_LOTTERY_V8;
 
 /// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
-/// next `QuorumBegin`. `balance-anchor-v6` when every member declares it;
+/// next `QuorumBegin`. `strict-lottery-v8` when every member declares it, else
+/// `grounded-arms-v7`, else `balance-anchor-v6` when every member declares it;
 /// otherwise a `balance-commit-v4` ledger keeps it (`anchor-ladder-v5` lacks
 /// `MissingBalanceCommitment`), any other moves to `anchor-ladder-v5` when every
 /// member declares it; else the current ruleset, else `cltv-offset-v2`.
 pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
     if every_declares(POLICY_TARGET_RULESET, declarations) {
         POLICY_TARGET_RULESET.to_string()
+    } else if every_declares(GROUNDED_ARMS_V7, declarations) {
+        GROUNDED_ARMS_V7.to_string()
     } else if every_declares(BALANCE_ANCHOR_V6, declarations) {
         BALANCE_ANCHOR_V6.to_string()
     } else if current == "balance-commit-v4" {

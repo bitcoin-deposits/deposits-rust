@@ -62,19 +62,20 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "anchor-ladder-v5" => Some(&ANCHOR_LADDER_V5),
         "balance-anchor-v6" => Some(&BALANCE_ANCHOR_V6),
         "grounded-arms-v7" => Some(&GROUNDED_ARMS_V7),
+        "strict-lottery-v8" => Some(&STRICT_LOTTERY_V8),
         _ => None,
     }
 }
 
 /// The ruleset new ledgers and rotations commit to when every member supports it.
-pub const CURRENT: &str = "grounded-arms-v7";
+pub const CURRENT: &str = "strict-lottery-v8";
 
 /// Resolve a name to a ruleset, falling back to [`CURRENT`] for a missing or
 /// unknown name. Acceptance paths reject unknown names before calling this
 /// (a `QuorumBegin` without `protocol_version` is refused at apply), so the
 /// fallback only covers display and pre-`QuorumBegin` state.
 pub fn resolve_or_current(name: Option<&str>) -> &'static Ruleset {
-    name.and_then(lookup).unwrap_or(&GROUNDED_ARMS_V7)
+    name.and_then(lookup).unwrap_or(&STRICT_LOTTERY_V8)
 }
 
 /// All ruleset names this binary knows how to enforce. Order is the
@@ -89,6 +90,7 @@ pub fn all_supported_names() -> Vec<&'static str> {
         ANCHOR_LADDER_V5.name,
         BALANCE_ANCHOR_V6.name,
         GROUNDED_ARMS_V7.name,
+        STRICT_LOTTERY_V8.name,
     ]
 }
 
@@ -189,6 +191,14 @@ pub static BALANCE_ANCHOR_V6: Ruleset = Ruleset {
 /// rules plus grounded arms (DEP-03 §Grounded arms, gated in deposits-protocol).
 pub static GROUNDED_ARMS_V7: Ruleset = Ruleset {
     name: "grounded-arms-v7",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// DEP-18 §strict-lottery-v8: the `cltv-offset-v2` reserves cascade, with `grounded-arms-v7`'s
+/// rules plus the strict lottery (DEP-03 §The accused never win, gated in deposits-protocol): a
+/// confiscation whose lottery includes a key the dispute's own grounds convict is not authorised.
+pub static STRICT_LOTTERY_V8: Ruleset = Ruleset {
+    name: "strict-lottery-v8",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

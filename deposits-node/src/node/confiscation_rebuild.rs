@@ -287,6 +287,23 @@ fn rebuild_matching_in(
     // DEP-03 §Grounded arms: an arm without grounds is disregarded (a judge that cannot judge
     // one yet reaches no verdict, the error).
     let (armers, _) = grounds.filter(collect_armers_until(&view, spend_height))?;
+    // DEP-03 §The accused never win, under strict-lottery-v8 (the ruleset at the fork point, as
+    // grounded arms): a lottery with a key the dispute's own grounds convict, or the operator
+    // at the fork point, is not authorised. Under an earlier ruleset it is still the cut of a
+    // subset of the arms, and authorised. A colluding majority that confiscated itself into a
+    // lottery of its own colluders, which none of them claimed, left a ledger's lottery output
+    // stranded (signet soak 30ea46ac, 2026-11-05).
+    let accused: Vec<bitcoin::secp256k1::XOnlyPublicKey> = {
+        let mut a = super::armers::dispute_accused_keys(&view, grounds);
+        if let Some(op) = view
+            .iter()
+            .find(|u| u.sequence_number == fork_point && u.operator_id == origin)
+            .or_else(|| view.iter().find(|u| u.sequence_number == fork_point))
+        {
+            a.push(op.operator_id.x_only_public_key().0);
+        }
+        a
+    };
     if armers.is_empty() || armers.len() > 8 {
         return Err(format!("{} armers", armers.len()));
     }
@@ -308,6 +325,13 @@ fn rebuild_matching_in(
             .map(|a| a.xonly().serialize())
             .collect();
         if !tried.insert(key) {
+            continue;
+        }
+        let participants: Vec<_> = set.participants.iter().map(|a| a.xonly()).collect();
+        if !deposits_core::types::lottery_admissible(&grounds.ruleset, &participants, &accused) {
+            if closest.is_none() {
+                closest = Some("a lottery over a key the dispute's own grounds convict".into());
+            }
             continue;
         }
         let lottery = LotteryScriptBuilder::new(

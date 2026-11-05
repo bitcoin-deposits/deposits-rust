@@ -591,7 +591,15 @@ pub fn eligible_armers_grounded_at(
     let (armers, ungrounded) = grounds.filter(collect_armers_until(updates, confiscated_at))?;
     // DEP-03 §Lottery: a key the dispute's own grounds convict never wins. Dropped before the
     // cut, so the lottery is the cut of a subset of the arms, which every judge already accepts.
-    let accused = dispute_accused_keys(updates, grounds);
+    let mut accused = dispute_accused_keys(updates, grounds);
+    // The operator at the fork point is accused too ("it cannot dispute its own ledger"), as in
+    // cl's dispute-accused-keys.
+    if let Some(op) = last_valid_sequence
+        .and_then(|lvs| updates.iter().find(|u| u.sequence_number == lvs))
+        .map(|u| u.operator_id.x_only_public_key().0)
+    {
+        accused.push(op);
+    }
     let (armers, convicted): (Vec<Armer>, Vec<Armer>) = armers
         .into_iter()
         .partition(|a| !accused.contains(&a.xonly()));

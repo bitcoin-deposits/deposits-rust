@@ -27,10 +27,10 @@ fn lottery_accused_vector() {
         }
         let (head, rest) = line.split_once(' ').unwrap_or((line, ""));
         match head {
-            "accused" if kind == "cut" => {
+            "accused" if kind == "cut" || kind == "judge" => {
                 fields.insert("accused".into(), rest.into());
             }
-            "accused" | "cut" => {
+            "accused" | "cut" | "judge" => {
                 kind = head.into();
                 name = rest.into();
                 fields.clear();
@@ -38,6 +38,20 @@ fn lottery_accused_vector() {
             "end" => {
                 n += 1;
                 let expect = fields.get("expect").cloned().unwrap_or_default();
+                if kind == "judge" {
+                    // DEP-06 §Authorised confiscation under strict-lottery-v8.
+                    let rs = fields["ruleset"].clone();
+                    let rs = if rs == "-" { String::new() } else { rs };
+                    let ok = deposits_protocol::types::lottery_admissible(
+                        &rs,
+                        &keys(&fields["participants"]),
+                        &keys(&fields["accused"]),
+                    );
+                    let got = if ok { "admissible" } else { "inadmissible" };
+                    assert_eq!(got, expect, "judge {name}");
+                    kind.clear();
+                    continue;
+                }
                 let got = if kind == "accused" {
                     let b: FraudBroadcast = serde_json::from_str(&fields["proof"])
                         .unwrap_or_else(|e| panic!("{name}: {e}"));
@@ -69,5 +83,5 @@ fn lottery_accused_vector() {
             }
         }
     }
-    assert_eq!(n, 14, "every lottery_accused case ran");
+    assert_eq!(n, 22, "every lottery_accused case ran");
 }

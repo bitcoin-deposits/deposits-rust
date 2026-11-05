@@ -50,3 +50,10 @@ propose balance-commit-v4 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-lad
 propose cltv-offset-v2 cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
 propose cltv-offset-v2 cltv-offset-v2 cltv-offset-v2
 propose balance-anchor-v6 cltv-offset-v2,anchor-ladder-v5 anchor-ladder-v5
+seat strict-lottery-v8 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8 ok
+seat strict-lottery-v8 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7 unsupported
+upgrade grounded-arms-v7 strict-lottery-v8 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8 ok
+plan grounded-arms-v7 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8 strict-lottery-v8
+plan grounded-arms-v7 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8;cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7 grounded-arms-v7
+propose grounded-arms-v7 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7,strict-lottery-v8 strict-lottery-v8
+propose grounded-arms-v7 cltv-offset-v2,fee-cap-v3,balance-commit-v4,anchor-ladder-v5,balance-anchor-v6,grounded-arms-v7 grounded-arms-v7
