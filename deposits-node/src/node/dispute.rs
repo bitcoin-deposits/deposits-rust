@@ -4747,6 +4747,7 @@ mod recovery_chaining_tests {
             5,
             winner,
             &LedgerOperation::DisputeArmed {
+                rearm_round: None,
                 armed_block: 105,
                 commitment_hash: [9u8; 20],
                 target_reserves: "bcrt1qwinner".to_string(),
@@ -4968,6 +4969,7 @@ pub(crate) fn dispute_armed_op(
         Ok(_) => None,
     };
     ArmDecision::Arm(deposits_core::messages::LedgerOperation::DisputeArmed {
+        rearm_round: None,
         armed_block,
         commitment_hash,
         target_reserves,

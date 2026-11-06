@@ -1011,6 +1011,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
         (
             "DisputeArmed",
             LedgerOperation::DisputeArmed {
+                rearm_round: None,
                 armed_block: 300,
                 commitment_hash: h20(),
                 target_reserves: "bcrt1qtarget".into(),

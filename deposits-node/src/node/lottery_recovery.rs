@@ -1176,6 +1176,7 @@ mod tests {
             protocol_version: Some("cltv-offset-v2".to_string()),
         });
         let armed = update_with(&LedgerOperation::DisputeArmed {
+            rearm_round: None,
             armed_block: 1,
             commitment_hash: [1; 20],
             target_reserves: "tb1pw".into(),

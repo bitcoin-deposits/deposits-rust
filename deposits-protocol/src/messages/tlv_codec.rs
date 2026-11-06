@@ -70,6 +70,9 @@ mod ledger_op_tlv {
     pub const REPLACEMENT_COLLATERAL_TXID: u64 = 280; // [u8; 32]
     pub const REPLACEMENT_COLLATERAL_VOUT: u64 = 282; // u32
     pub const REPLACEMENT_COLLATERAL_AMOUNT: u64 = 284; // u64 sats
+    /// DisputeArmed re-arm round (DEP-06 Phase 4, strict-lottery-v8, provisional): u32;
+    /// absent = round 1.
+    pub const REARM_ROUND: u64 = 366;
     /// QuorumBegin protocol-ruleset name. Optional; absent →
     /// `legacy` (matches every pre-versioned QuorumBegin on chain).
     pub const PROTOCOL_VERSION: u64 = 286;
@@ -928,6 +931,7 @@ impl TlvEncode for LedgerOperation {
                 commitment_hash,
                 target_reserves,
                 replacement_collateral,
+                rearm_round,
             } => {
                 builder = builder
                     .u32_field(ARMED_BLOCK, *armed_block)
@@ -938,6 +942,9 @@ impl TlvEncode for LedgerOperation {
                         .bytes_field(REPLACEMENT_COLLATERAL_TXID, &rc.txid)
                         .u32_field(REPLACEMENT_COLLATERAL_VOUT, rc.vout)
                         .u64_field(REPLACEMENT_COLLATERAL_AMOUNT, rc.amount);
+                }
+                if let Some(r) = rearm_round {
+                    builder = builder.u32_field(REARM_ROUND, *r);
                 }
             }
             Self::DisputeAcquire {
@@ -1379,11 +1386,13 @@ impl TlvDecode for LedgerOperation {
                         reason: "DisputeArmed replacement_collateral fields must be all present or all absent".into(),
                     }),
                 };
+                let rearm_round = reader.read_u32_opt(REARM_ROUND)?;
                 Ok(Self::DisputeArmed {
                     armed_block,
                     commitment_hash,
                     target_reserves,
                     replacement_collateral,
+                    rearm_round,
                 })
             }
             80 => Ok(Self::DeliveryEmbed {

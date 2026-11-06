@@ -2558,6 +2558,7 @@ mod winner_collateral_deviation_tests {
     ) -> (String, ScriptBuf) {
         let (_kp, pk) = winner_keypair();
         let op = LedgerOperation::DisputeArmed {
+            rearm_round: None,
             armed_block: 800_100,
             commitment_hash: [0xAB; 20],
             target_reserves: target_address.into(),

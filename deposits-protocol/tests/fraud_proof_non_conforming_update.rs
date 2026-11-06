@@ -984,6 +984,7 @@ fn taken_over() -> Vec<SignedLedgerUpdate> {
             fraud_proof: None,
         },
         LedgerOperation::DisputeArmed {
+            rearm_round: None,
             armed_block: 100,
             commitment_hash: [0; 20],
             target_reserves: "bcrt1qnew".into(),

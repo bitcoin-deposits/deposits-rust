@@ -2480,6 +2480,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
     }
 
     let custody_armed = LedgerOperation::DisputeArmed {
+        rearm_round: None,
         armed_block: current_block_height,
         commitment_hash,
         target_reserves: target_reserves_addr.clone(),

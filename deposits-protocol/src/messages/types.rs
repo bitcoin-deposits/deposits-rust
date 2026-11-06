@@ -870,6 +870,9 @@ pub enum LedgerOperation {
         /// vault if they win. `None` on legacy events; new producers MUST
         /// populate it. See DEP-03 §"Replacement collateral declaration".
         replacement_collateral: Option<ReplacementCollateral>,
+        /// DEP-06 Phase 4 (strict-lottery-v8, provisional): the re-arm round this arm is
+        /// for (TLV 366); `None` is round 1.
+        rearm_round: Option<u32>,
     },
 
     /// Acquire custody after winning the on-chain lottery.
@@ -1800,6 +1803,7 @@ impl BinaryCodec for LedgerOperation {
                 write_string(w, reason)?;
             }
             Self::DisputeArmed {
+                rearm_round: _,
                 armed_block,
                 commitment_hash,
                 target_reserves,
@@ -2288,6 +2292,7 @@ impl BinaryCodec for LedgerOperation {
                     Err(_) => None,
                 };
                 Ok(Self::DisputeArmed {
+                    rearm_round: None,
                     armed_block,
                     commitment_hash,
                     target_reserves,

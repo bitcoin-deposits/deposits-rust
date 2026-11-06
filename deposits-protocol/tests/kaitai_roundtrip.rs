@@ -418,6 +418,7 @@ fn custody_dispute() {
 #[test]
 fn custody_armed() {
     test_roundtrip(&LedgerOperation::DisputeArmed {
+        rearm_round: None,
         armed_block: 300,
         commitment_hash: [0xab; 20],
         target_reserves: "bcrt1qtarget".into(),
@@ -428,6 +429,7 @@ fn custody_armed() {
 #[test]
 fn custody_armed_with_replacement_collateral() {
     test_roundtrip(&LedgerOperation::DisputeArmed {
+        rearm_round: None,
         armed_block: 300,
         commitment_hash: [0xab; 20],
         target_reserves: "bcrt1qtarget".into(),
