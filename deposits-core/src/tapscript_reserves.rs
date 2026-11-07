@@ -1178,6 +1178,82 @@ pub const LOTTERY_MAX_PREIMAGE_LEN: usize = 16 + LOTTERY_CONTRIBUTION_RANGE;
 /// after the confiscation confirms (DEP-06 Phase 3).
 pub const LOTTERY_REVEAL_CSV_BLOCKS: u32 = 72;
 
+/// DEP-06 Phase 4: a re-arm round opens at the reveal deadline when nobody
+/// revealed, else when the CSV-144 recovery leaf opens (an unclaimed lottery
+/// with revealers). `h_l` is the lottery output's block.
+pub fn rearm_round_opens(h_l: u32, revealed: bool) -> u32 {
+    h_l + if revealed {
+        144
+    } else {
+        LOTTERY_REVEAL_CSV_BLOCKS
+    }
+}
+
+/// DEP-06 Phase 4 step 3 (strict-lottery-v8, ruled 2026-11-07): the period
+/// of a re-arm round's recurring arm windows, `k = 144 * ceil((2w + 1) / 144)`,
+/// the least multiple of 144 above `2w`. Vector: `rearm_windows.json`.
+pub fn rearm_period(w: u32) -> u32 {
+    144 * (2 * w + 1).div_ceil(144)
+}
+
+/// Window `j` of a re-arm round opening at `o` with arm window `w`, as
+/// `(opens, closes)` for the window `(opens, closes]`: `j = 0` is the
+/// scheduled window `(o, o+w]`, `j = 1` its one reopening `(o+w, o+2w]`, and
+/// windows `j >= 2` recur at `o + (j-1)k` while the lottery output is unspent.
+pub fn rearm_window_nth(o: u32, w: u32, j: u32) -> (u32, u32) {
+    let opens = match j {
+        0 => o,
+        1 => o + w,
+        _ => o + (j - 1) * rearm_period(w),
+    };
+    (opens, opens + w)
+}
+
+/// The round's window as of `tip`: the first window, in order, that has
+/// closed (`tip > closes`) and whose cut `nonempty(opens, closes)` is
+/// non-empty, as `(j, opens, closes)`. `None` while none has; the first
+/// window not yet closed ends the search.
+pub fn rearm_round_window(
+    o: u32,
+    w: u32,
+    tip: u32,
+    mut nonempty: impl FnMut(u32, u32) -> bool,
+) -> Option<(u32, u32, u32)> {
+    (0..).find_map(|j| {
+        let (opens, closes) = rearm_window_nth(o, w, j);
+        if tip <= closes {
+            Some(None)
+        } else if nonempty(opens, closes) {
+            Some(Some((j, opens, closes)))
+        } else {
+            None
+        }
+    })?
+}
+
+/// The window `tip` lies in (`opens < tip <= closes`), as `(j, opens,
+/// closes)`, or `None` when `tip` falls between windows.
+pub fn rearm_open_window(o: u32, w: u32, tip: u32) -> Option<(u32, u32, u32)> {
+    (0..).find_map(|j| {
+        let (opens, closes) = rearm_window_nth(o, w, j);
+        if tip <= opens {
+            Some(None)
+        } else if tip <= closes {
+            Some(Some((j, opens, closes)))
+        } else {
+            None
+        }
+    })?
+}
+
+/// The opening height of the first window that opens at or after `tip`.
+pub fn rearm_next_window(o: u32, w: u32, tip: u32) -> u32 {
+    (0..)
+        .map(|j| rearm_window_nth(o, w, j).0)
+        .find(|&opens| opens >= tip)
+        .expect("windows recur without bound")
+}
+
 /// Most participants a lottery output supports: the subset tree has
 /// `2^k - 1` claim leaves.
 pub const MAX_LOTTERY_PARTICIPANTS: usize = 7;
