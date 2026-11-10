@@ -69,6 +69,19 @@ pub fn ruleset_strict_lottery(ruleset_name: &str) -> bool {
     ruleset_name == STRICT_LOTTERY_V8
 }
 
+/// DEP-05 §Deposed operator under `strict-lottery-v8` (ruled 2026-11-10), judged under the ruleset
+/// of the ledger's latest `QuorumBegin`: a rotation does not end a fraud dispute, so a dispute on any
+/// ground other than `quorum_expired` freezes co-signing whatever its `last_valid_sequence`.
+pub fn ruleset_fraud_survives_rotation(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8
+}
+
+/// DEP-06 §Phase 4 under `strict-lottery-v8` (ruled 2026-11-10): a `DisputeAcquire` moves custody
+/// only once its `claim_txid` is confirmed on chain.
+pub fn ruleset_acquire_on_confirm(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8
+}
+
 /// DEP-06 §Authorised confiscation, the lottery's participant set: under a ruleset with the
 /// strict lottery, no participant may be in `accused` (the keys the dispute's own grounds
 /// convict, with the operator at the fork point); under any other, every set is admissible

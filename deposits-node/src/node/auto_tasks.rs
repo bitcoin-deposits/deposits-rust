@@ -1273,7 +1273,35 @@ impl Node {
             };
             let _ = all_fresh;
 
-            if !still_all_fresh {
+            // DEP-11 §Rotating without a silent member (ruled 2026-11-10: "permissionless means
+            // letting people gfy"): from `drop_margin` blocks before expiry the operator stops
+            // waiting on members whose consent has not arrived. It seats the staged (consenting)
+            // set, trimmed to the largest valid size, and never lets one silent member expire the
+            // whole quorum (signet soak, 2026-11-07: every rotation of A waited on cld2 for five
+            // hours, and A's quorum expired).
+            let drop_margin = (threshold_blocks / 2).max(72);
+            let dropping = !post_expiry
+                && current_block.saturating_add(drop_margin) >= snap.quorum_expiry;
+            if !still_all_fresh && dropping {
+                match self.trim_staged_to_valid_size(&snap).await {
+                    Ok(q) => tracing::warn!(
+                        "auto_quorum_refresh: ledger {}... within {} blocks of expiry: \
+                         rotating with the {} members that consented, dropping the silent ones",
+                        &snap.ledger_id[..16],
+                        drop_margin,
+                        q
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            "auto_quorum_refresh: ledger {}... cannot rotate without the silent \
+                             members: {}",
+                            &snap.ledger_id[..16],
+                            e
+                        );
+                        return;
+                    }
+                }
+            } else if !still_all_fresh {
                 if post_expiry && cascade_active {
                     // Post-expiry self-rescue: skip the all-fresh gate.
                     // Some members may be unreachable (the very reason
@@ -1332,6 +1360,53 @@ impl Node {
                 );
             }
         }
+    }
+
+    /// DEP-11 §Rotating without a silent member: trim the staged (consenting) set to the largest
+    /// valid quorum size (3, 5 or 7), keeping the members seated now first, then candidates in
+    /// the order they consented; the rest are unstaged with `QuorumRemoveMember`. Returns the size
+    /// to be seated, or an error with fewer than three consents (no quorum; the ledger runs into
+    /// the expiry cascade).
+    pub(crate) async fn trim_staged_to_valid_size(
+        &self,
+        snap: &LedgerRefreshSnapshot,
+    ) -> Result<usize, String> {
+        let staged: Vec<bitcoin::secp256k1::PublicKey> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let arc = ledgers
+                .get(&snap.ledger_id)
+                .ok_or_else(|| "ledger gone".to_string())?;
+            let l = arc.read().unwrap();
+            l.state.next_quorum_members.iter().map(|m| m.pubkey).collect()
+        };
+        let keep = deposits_core::rotation_seat::seat_consenting(
+            &snap.active_members.iter().map(|m| m.pubkey).collect::<Vec<_>>(),
+            &staged,
+        )
+        .ok_or_else(|| format!("only {} members consented (a quorum needs 3)", staged.len()))?;
+        for pk in staged.iter().filter(|p| !keep.contains(p)) {
+            let req = crate::nostr::LedgerRequest {
+                action: "quorum_remove".into(),
+                ledger_id: snap.ledger_id.clone(),
+                params: serde_json::json!({ "quorum_member": pk.to_string() }),
+                event_id: String::new(),
+                sender: String::new(),
+                timestamp: 0,
+                gift_wrap_sender: None,
+                subkey_account: None,
+                subkey_attestation: None,
+                addressee: None,
+            };
+            let (ok, _, err) = self.process_quorum_remove_request(&req).await;
+            if !ok {
+                return Err(format!(
+                    "unstaging {} failed: {}",
+                    &pk.to_string()[..16],
+                    err.unwrap_or_default()
+                ));
+            }
+        }
+        Ok(keep.len())
     }
 
     /// Operator-side liquidity-drip ticker.

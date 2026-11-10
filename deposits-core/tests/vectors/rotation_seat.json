@@ -1,0 +1,216 @@
+{
+ "_doc": "DEP-11 'Rotating without a silent member' (ruled 2026-11-10): the members an operator seats from the consenting (staged) set, given in consent order. Current members first, then newcomers, each in consent order, cut to the largest valid quorum size (3, 5, 7); null with fewer than 3. Shared cl-deposits / deposits-rust vector (deposits-core/tests/vectors, cl inspect/vectors).",
+ "cases": [
+  {
+   "name": "all seven consent: everyone stays",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "staged": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "seat": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ]
+  },
+  {
+   "name": "one of seven silent: six consent, five are seated, the current members first in consent order",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "staged": [
+    "g",
+    "f",
+    "e",
+    "d",
+    "c",
+    "b"
+   ],
+   "seat": [
+    "g",
+    "f",
+    "e",
+    "d",
+    "c"
+   ]
+  },
+  {
+   "name": "one silent, one candidate consents: seven again, the candidate last",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "staged": [
+    "x",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "seat": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ]
+  },
+  {
+   "name": "two silent of seven, two candidates: seven, candidates after the current members",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "staged": [
+    "a",
+    "x",
+    "b",
+    "c",
+    "y",
+    "d",
+    "e"
+   ],
+   "seat": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "x",
+    "y"
+   ]
+  },
+  {
+   "name": "four of five consent: three are seated",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "staged": [
+    "d",
+    "c",
+    "b",
+    "a"
+   ],
+   "seat": [
+    "d",
+    "c",
+    "b"
+   ]
+  },
+  {
+   "name": "three of five consent: three",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "staged": [
+    "a",
+    "c",
+    "e"
+   ],
+   "seat": [
+    "a",
+    "c",
+    "e"
+   ]
+  },
+  {
+   "name": "two consent: no quorum",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "staged": [
+    "a",
+    "b"
+   ],
+   "seat": null
+  },
+  {
+   "name": "none consent: no quorum",
+   "current": [
+    "a",
+    "b",
+    "c"
+   ],
+   "staged": [],
+   "seat": null
+  },
+  {
+   "name": "more than seven consent: the first seven by the rule",
+   "current": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "staged": [
+    "h",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ],
+   "seat": [
+    "a",
+    "b",
+    "c",
+    "d",
+    "e",
+    "f",
+    "g"
+   ]
+  }
+ ]
+}

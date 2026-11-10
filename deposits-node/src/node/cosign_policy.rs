@@ -10,25 +10,37 @@ pub(crate) struct DisputeView {
     pub forker: String,
     pub last_valid_sequence: u64,
     pub reason: String,
-    /// The fork carries a `DisputeAcquire`: custody moved.
+    /// The fork carries a `DisputeAcquire`: custody moved (under `strict-lottery-v8`, only
+    /// with `acquire_confirmed`).
     pub acquired: bool,
+    /// The acquire's `claim_txid` is confirmed on chain (DEP-06 §Phase 4, strict-lottery-v8).
+    pub acquire_confirmed: bool,
 }
 
 /// `Some(reason)` when a member `own` (hex) of `members` must refuse: custody moved, or
 /// a non-expiry dispute at or after the latest `QuorumBegin` by `own` or by a majority.
+/// Under `ruleset` `strict-lottery-v8` (the ledger's latest `QuorumBegin`'s; ruled 2026-11-10) a
+/// rotation does not end a fraud dispute (a non-expiry dispute counts whatever its
+/// `last_valid_sequence`), and an acquire moves custody only once its claim is confirmed.
 pub(crate) fn cosign_refusal(
     own: &str,
     members: &[String],
     latest_quorum_begin_seq: u64,
     disputes: &[DisputeView],
+    ruleset: &str,
 ) -> Option<String> {
-    if disputes.iter().any(|d| d.acquired) {
+    let fraud_survives = deposits_core::types::ruleset_fraud_survives_rotation(ruleset);
+    let on_confirm = deposits_core::types::ruleset_acquire_on_confirm(ruleset);
+    if disputes
+        .iter()
+        .any(|d| d.acquired && (!on_confirm || d.acquire_confirmed))
+    {
         return Some("custody moved by DisputeAcquire".to_string());
     }
     let mut freezing: Vec<&str> = disputes
         .iter()
         .filter(|d| {
-            d.last_valid_sequence >= latest_quorum_begin_seq
+            (fraud_survives || d.last_valid_sequence >= latest_quorum_begin_seq)
                 && !is_expiry_reason(&d.reason)
                 && members.iter().any(|m| m == &d.forker)
         })
@@ -79,17 +91,20 @@ pub(crate) fn refusal_for(
             } else {
                 label
             };
-            let acquired = fork.history.iter().any(|u| {
-                matches!(
-                    LedgerOperation::tlv_decode(&u.message),
-                    Ok(LedgerOperation::DisputeAcquire { .. })
-                )
-            });
+            let claims: Vec<[u8; 32]> = fork
+                .history
+                .iter()
+                .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => Some(claim_txid),
+                    _ => None,
+                })
+                .collect();
             Some(DisputeView {
                 forker: hex::encode(fork.state.parent_pubkey.serialize()),
                 last_valid_sequence: fork.state.dispute_fork_sequence,
                 reason,
-                acquired,
+                acquired: !claims.is_empty(),
+                acquire_confirmed: claims.iter().any(claim_confirmed),
             })
         })
         .collect();
@@ -104,7 +119,66 @@ pub(crate) fn refusal_for(
         &members,
         base.state.quorum_begin_sequence.unwrap_or(0),
         &disputes,
+        &base.state.active_ruleset_name,
     )
+}
+
+/// Claim txids (internal byte order) seen confirmed. Filled off the co-sign path by
+/// [`note_confirmed_claims`], so a co-sign decision never waits on the chain backend; a
+/// confirmation is never re-read.
+fn confirmed_claims() -> &'static std::sync::Mutex<std::collections::HashSet<[u8; 32]>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Whether the claim `txid` of a `DisputeAcquire` is known confirmed.
+pub(crate) fn claim_confirmed(txid: &[u8; 32]) -> bool {
+    confirmed_claims().lock().map(|s| s.contains(txid)).unwrap_or(false)
+}
+
+/// The `claim_txid` of every `DisputeAcquire` on any fork in `ledgers` not yet known confirmed.
+pub(crate) fn unconfirmed_claims(
+    ledgers: &std::collections::HashMap<
+        String,
+        std::sync::Arc<std::sync::RwLock<deposits_core::Ledger>>,
+    >,
+) -> Vec<[u8; 32]> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let mut out = Vec::new();
+    for arc in ledgers.values() {
+        let Ok(l) = arc.read() else { continue };
+        // An acquire sits near the tail of the winner's fork (or of a replica carrying its chain).
+        for u in l.history.iter().rev().take(64) {
+            if let Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) =
+                LedgerOperation::tlv_decode(&u.message)
+            {
+                if !claim_confirmed(&claim_txid) {
+                    out.push(claim_txid);
+                }
+            }
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Ask the chain about `claims` (from [`unconfirmed_claims`]) and remember the confirmed ones.
+pub(crate) fn note_confirmed_claims(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    claims: &[[u8; 32]],
+) {
+    use bitcoin::hashes::Hash;
+    for c in claims {
+        let txid = bitcoin::Txid::from_byte_array(*c);
+        if let Ok(Some(_height)) = backend.get_tx_block_height(&txid) {
+            if let Ok(mut s) = confirmed_claims().lock() {
+                s.insert(*c);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -129,6 +203,7 @@ mod tests {
                     last_valid_sequence: d["last_valid_sequence"].as_u64().unwrap(),
                     reason: d["reason"].as_str().unwrap().to_string(),
                     acquired: d["acquired"].as_bool().unwrap(),
+                    acquire_confirmed: d["acquire_confirmed"].as_bool().unwrap_or(false),
                 })
                 .collect();
             let got = cosign_refusal(
@@ -136,6 +211,7 @@ mod tests {
                 &members,
                 c["latest_quorum_begin_seq"].as_u64().unwrap(),
                 &disputes,
+                c["ruleset"].as_str().unwrap_or(""),
             );
             assert_eq!(
                 got.is_some(),

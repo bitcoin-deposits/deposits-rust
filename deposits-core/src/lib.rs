@@ -78,6 +78,7 @@ pub mod message_validation;
 pub mod operation_validation;
 pub mod quorum_policy;
 pub mod rotation_order;
+pub mod rotation_seat;
 pub mod ruleset;
 pub mod tapscript_reserves;
 pub mod time_utils;

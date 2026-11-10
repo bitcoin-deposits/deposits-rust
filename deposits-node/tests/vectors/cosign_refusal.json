@@ -1,41 +1,432 @@
 {
-  "_doc": "DEP-05 'Deposed operator': whether a member (m0) refuses to cosign the operator's chain. Shared cl-deposits / deposits-rust vector. members m0..m(n-1); x* are not members. A dispute counts when last_valid_sequence >= latest_quorum_begin_seq and reason is not quorum_expired; any acquired fork means custody moved.",
-  "cases": [
-    {"name": "no disputes", "members": 5, "latest_quorum_begin_seq": 10, "disputes": [], "refuse": false},
-    {"name": "own expiry dispute", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 14, "reason": "quorum_expired", "acquired": false}], "refuse": false},
-    {"name": "own expiry dispute, hyphenated spelling", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 14, "reason": "quorum-expired", "acquired": false}], "refuse": false},
-    {"name": "own fraud dispute since the quorum began", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 12, "reason": "non_conforming_update", "acquired": false}], "refuse": true},
-    {"name": "own fraud dispute at the QuorumBegin itself", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 10, "reason": "equivocation", "acquired": false}], "refuse": true},
-    {"name": "own fraud dispute before the latest QuorumBegin", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 9, "reason": "non_conforming_update", "acquired": false}], "refuse": false},
-    {"name": "one other member's fraud dispute", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false}], "refuse": false},
-    {"name": "two of five members", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false},
-                  {"by": "m2", "last_valid_sequence": 12, "reason": "fraud", "acquired": false}], "refuse": false},
-    {"name": "three of five members", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false},
-                  {"by": "m2", "last_valid_sequence": 13, "reason": "non_conforming_update", "acquired": false},
-                  {"by": "m3", "last_valid_sequence": 12, "reason": "equivocation", "acquired": false}], "refuse": true},
-    {"name": "three of five members, all for expiry", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "quorum_expired", "acquired": false},
-                  {"by": "m2", "last_valid_sequence": 12, "reason": "quorum_expired", "acquired": false},
-                  {"by": "m3", "last_valid_sequence": 12, "reason": "quorum_expired", "acquired": false}], "refuse": false},
-    {"name": "two members and a non-member", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false},
-                  {"by": "m2", "last_valid_sequence": 12, "reason": "fraud", "acquired": false},
-                  {"by": "x1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false}], "refuse": false},
-    {"name": "one member disputing twice counts once", "members": 4, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m1", "last_valid_sequence": 12, "reason": "fraud", "acquired": false},
-                  {"by": "m1", "last_valid_sequence": 15, "reason": "fraud", "acquired": false},
-                  {"by": "m2", "last_valid_sequence": 12, "reason": "fraud", "acquired": false}], "refuse": false},
-    {"name": "custody moved, even from an expiry dispute", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m3", "last_valid_sequence": 12, "reason": "quorum_expired", "acquired": true}], "refuse": true},
-    {"name": "custody moved to us", "members": 5, "latest_quorum_begin_seq": 10,
-     "disputes": [{"by": "m0", "last_valid_sequence": 12, "reason": "quorum_expired", "acquired": true}], "refuse": true}
-  ]
+ "_doc": "DEP-05 'Deposed operator': whether a member (m0) refuses to cosign the operator's chain. Shared cl-deposits / deposits-rust vector. members m0..m(n-1); x* are not members. A dispute counts when last_valid_sequence >= latest_quorum_begin_seq and reason is not quorum_expired; any acquired fork means custody moved. Under strict-lottery-v8 (a case's \"ruleset\"; absent means an earlier ruleset): a non-expiry dispute counts whatever its last_valid_sequence (a rotation does not end a fraud dispute), and an acquired fork moves custody only when acquire_confirmed (its claim_txid is confirmed on chain; absent means false). DEP-05 Deposed operator, ruled 2026-11-10.",
+ "cases": [
+  {
+   "name": "no disputes",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [],
+   "refuse": false
+  },
+  {
+   "name": "own expiry dispute",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 14,
+     "reason": "quorum_expired",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "own expiry dispute, hyphenated spelling",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 14,
+     "reason": "quorum-expired",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "own fraud dispute since the quorum began",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 12,
+     "reason": "non_conforming_update",
+     "acquired": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "own fraud dispute at the QuorumBegin itself",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 10,
+     "reason": "equivocation",
+     "acquired": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "own fraud dispute before the latest QuorumBegin",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 9,
+     "reason": "non_conforming_update",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "one other member's fraud dispute",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "two of five members",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "three of five members",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 13,
+     "reason": "non_conforming_update",
+     "acquired": false
+    },
+    {
+     "by": "m3",
+     "last_valid_sequence": 12,
+     "reason": "equivocation",
+     "acquired": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "three of five members, all for expiry",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": false
+    },
+    {
+     "by": "m3",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "two members and a non-member",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "x1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "one member disputing twice counts once",
+   "members": 4,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "m1",
+     "last_valid_sequence": 15,
+     "reason": "fraud",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 12,
+     "reason": "fraud",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "custody moved, even from an expiry dispute",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m3",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": true
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "custody moved to us",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": true
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v8: own fraud dispute before the latest QuorumBegin still freezes",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 9,
+     "reason": "non_conforming_update",
+     "acquired": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v8: a majority's fraud disputes before the latest QuorumBegin still freeze",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 7,
+     "reason": "equivocation",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 8,
+     "reason": "non_conforming_update",
+     "acquired": false
+    },
+    {
+     "by": "m3",
+     "last_valid_sequence": 9,
+     "reason": "unauthorized_vault_spend",
+     "acquired": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v8: a minority's fraud disputes before the latest QuorumBegin do not freeze another member",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 7,
+     "reason": "equivocation",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 8,
+     "reason": "non_conforming_update",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "v8: own expiry dispute before the latest QuorumBegin ended with the rotation",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 9,
+     "reason": "quorum_expired",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "v8: a majority's expiry disputes before the latest QuorumBegin ended with the rotation",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 9,
+     "reason": "quorum_expired",
+     "acquired": false
+    },
+    {
+     "by": "m2",
+     "last_valid_sequence": 9,
+     "reason": "quorum_expired",
+     "acquired": false
+    },
+    {
+     "by": "m3",
+     "last_valid_sequence": 9,
+     "reason": "quorum_expired",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "v8: an acquire whose claim is unconfirmed moves no custody",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": true,
+     "acquire_confirmed": false
+    }
+   ],
+   "refuse": false
+  },
+  {
+   "name": "v8: an acquire whose claim confirmed moves custody",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": true,
+     "acquire_confirmed": true
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v8: an unconfirmed acquire on our own fraud fork still freezes, by the fraud ground",
+   "ruleset": "strict-lottery-v8",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 9,
+     "reason": "equivocation",
+     "acquired": true,
+     "acquire_confirmed": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v7: an acquire counts as published, confirmed or not",
+   "ruleset": "grounded-arms-v7",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m1",
+     "last_valid_sequence": 12,
+     "reason": "quorum_expired",
+     "acquired": true,
+     "acquire_confirmed": false
+    }
+   ],
+   "refuse": true
+  },
+  {
+   "name": "v7: own fraud dispute before the latest QuorumBegin is scoped away",
+   "ruleset": "grounded-arms-v7",
+   "members": 5,
+   "latest_quorum_begin_seq": 10,
+   "disputes": [
+    {
+     "by": "m0",
+     "last_valid_sequence": 9,
+     "reason": "non_conforming_update",
+     "acquired": false
+    }
+   ],
+   "refuse": false
+  }
+ ]
 }
