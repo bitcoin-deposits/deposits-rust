@@ -603,6 +603,19 @@ mod tests {
         );
     }
 
+    /// DEP-03 §Fee ladder: a confiscation of a vault whose rotation confirmed at a higher rung,
+    /// judged after the vault was spent, against the vector cl-deposits generated on regtest
+    /// (tests/vectors/confiscation_vault_rung.txt; signet soak 2026-11-08, ledger G). The rung is
+    /// read from the spend's input and its value from that output; the real spend is excused, one
+    /// a sat short is not.
+    #[test]
+    fn confiscation_vault_rung_vector() {
+        authorised_confiscation_cases(
+            include_str!("../../tests/vectors/confiscation_vault_rung.txt"),
+            2,
+        );
+    }
+
     fn authorised_confiscation_cases(text: &str, expected_cases: usize) {
         use bitcoin::hashes::Hash;
         let mut kv: HashMap<&str, &str> = HashMap::new();

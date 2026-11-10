@@ -2035,14 +2035,49 @@ impl Node {
         // the recovery voters from the latest QuorumBegin: the set
         // `initiate_confiscations` committed to when it paid the lottery
         // output.
-        let ctx = self.lottery_context(ledger_id).await?;
+        let mut ctx = self.lottery_context(ledger_id).await?;
         let our_armed = ctx
             .our_armed
             .clone()
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
         let lottery = ctx.build_lottery(self.wallet.network())?;
         let t_locate = std::time::Instant::now();
-        let located = self.locate_lottery_output(&lottery)?;
+        let mut located = self.locate_lottery_output(&lottery)?;
+        // DEP-06 "Authorised confiscation": the confiscation that landed may be a lottery over a
+        // subset of the arms counted at its block (a proposer that saw fewer arms). The sole
+        // participant of 751e6951's round 1 (ref6) never claimed because it looked only for the
+        // lottery over every arm it holds now (signet soak, Nov 6..10). Look for the subsets that
+        // include us, as the rebuild does (at most 8 armers), and take the one that pays.
+        if located.is_none() && ctx.participants.len() > 1 && ctx.participants.len() <= 8 {
+            let n = ctx.participants.len();
+            let ours = ctx.participants.iter().position(|(pk, _)| *pk == our_pubkey);
+            if let Some(ours) = ours {
+                for mask in (1u32..(1u32 << n) - 1).rev() {
+                    if mask & (1 << ours) == 0 {
+                        continue;
+                    }
+                    let sub = super::lottery_recovery::LotteryContext {
+                        participants: (0..n).filter(|i| mask & (1 << i) != 0).map(|i| ctx.participants[i].clone()).collect(),
+                        preimages: (0..n).filter(|i| mask & (1 << i) != 0).map(|i| ctx.preimages[i].clone()).collect(),
+                        recovery_voters: ctx.recovery_voters.clone(),
+                        recovery_threshold: ctx.recovery_threshold,
+                        our_armed: ctx.our_armed.clone(),
+                    };
+                    let Ok(l) = sub.build_lottery(self.wallet.network()) else { continue };
+                    if let Some(found) = self.locate_lottery_output(&l)? {
+                        tracing::info!(
+                            "Lottery for {}: the landed output pays a subset of the arms ({} of {})",
+                            &ledger_id[..16.min(ledger_id.len())],
+                            sub.participants.len(),
+                            n
+                        );
+                        located = Some(found);
+                        ctx = sub;
+                        break;
+                    }
+                }
+            }
+        }
         if t_locate.elapsed().as_millis() >= 1000 {
             tracing::warn!(
                 "lottery {}: locate_lottery_output took {} ms",
