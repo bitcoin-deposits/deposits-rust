@@ -134,7 +134,10 @@ fn confirmed_claims() -> &'static std::sync::Mutex<std::collections::HashSet<[u8
 
 /// Whether the claim `txid` of a `DisputeAcquire` is known confirmed.
 pub(crate) fn claim_confirmed(txid: &[u8; 32]) -> bool {
-    confirmed_claims().lock().map(|s| s.contains(txid)).unwrap_or(false)
+    confirmed_claims()
+        .lock()
+        .map(|s| s.contains(txid))
+        .unwrap_or(false)
 }
 
 /// The `claim_txid` of every `DisputeAcquire` on any fork in `ledgers` not yet known confirmed.
@@ -165,18 +168,49 @@ pub(crate) fn unconfirmed_claims(
     out
 }
 
+/// Claim txid -> when it was last found unconfirmed: asked again after a minute, not on every
+/// pass (a phantom acquire's claim never confirms; asking every claim on every pass flooded the
+/// regtest bitcoind's RPC, 2026-11-10).
+fn unconfirmed_seen(
+) -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], std::time::Instant>> {
+    static MAP: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<[u8; 32], std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    MAP.get_or_init(Default::default)
+}
+
+/// At most this many chain lookups per pass; the rest wait for the next.
+const CLAIM_LOOKUPS_PER_PASS: usize = 16;
+
 /// Ask the chain about `claims` (from [`unconfirmed_claims`]) and remember the confirmed ones.
 pub(crate) fn note_confirmed_claims(
     backend: &dyn crate::chain_backend::ChainBackend,
     claims: &[[u8; 32]],
 ) {
     use bitcoin::hashes::Hash;
-    for c in claims {
-        let txid = bitcoin::Txid::from_byte_array(*c);
+    let now = std::time::Instant::now();
+    let due: Vec<[u8; 32]> = {
+        let seen = unconfirmed_seen().lock().unwrap();
+        claims
+            .iter()
+            .filter(|c| {
+                seen.get(*c)
+                    .map(|t| now.duration_since(*t).as_secs() >= 60)
+                    .unwrap_or(true)
+            })
+            .take(CLAIM_LOOKUPS_PER_PASS)
+            .copied()
+            .collect()
+    };
+    for c in due {
+        let txid = bitcoin::Txid::from_byte_array(c);
         if let Ok(Some(_height)) = backend.get_tx_block_height(&txid) {
             if let Ok(mut s) = confirmed_claims().lock() {
-                s.insert(*c);
+                s.insert(c);
             }
+            unconfirmed_seen().lock().unwrap().remove(&c);
+        } else {
+            unconfirmed_seen().lock().unwrap().insert(c, now);
         }
     }
 }

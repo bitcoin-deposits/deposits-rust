@@ -1280,10 +1280,10 @@ impl Node {
             // whole quorum (signet soak, 2026-11-07: every rotation of A waited on cld2 for five
             // hours, and A's quorum expired).
             let drop_margin = (threshold_blocks / 2).max(72);
-            let dropping = !post_expiry
-                && current_block.saturating_add(drop_margin) >= snap.quorum_expiry;
+            let dropping =
+                !post_expiry && current_block.saturating_add(drop_margin) >= snap.quorum_expiry;
             if !still_all_fresh && dropping {
-                match self.trim_staged_to_valid_size(&snap).await {
+                match self.trim_staged_to_valid_size(&snap, current_block).await {
                     Ok(q) => tracing::warn!(
                         "auto_quorum_refresh: ledger {}... within {} blocks of expiry: \
                          rotating with the {} members that consented, dropping the silent ones",
@@ -1370,20 +1370,53 @@ impl Node {
     pub(crate) async fn trim_staged_to_valid_size(
         &self,
         snap: &LedgerRefreshSnapshot,
+        current_block: u32,
     ) -> Result<usize, String> {
-        let staged: Vec<bitcoin::secp256k1::PublicKey> = {
+        // Only a live consent counts: one staged in an earlier, failed pass keeps its old
+        // `membership_until`, which would bound the new quorum's expiry and make the
+        // QuorumBegin born expired. A consent counts when it runs 72 blocks past the tip.
+        let (staged, fresh): (
+            Vec<bitcoin::secp256k1::PublicKey>,
+            Vec<bitcoin::secp256k1::PublicKey>,
+        ) = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             let arc = ledgers
                 .get(&snap.ledger_id)
                 .ok_or_else(|| "ledger gone".to_string())?;
             let l = arc.read().unwrap();
-            l.state.next_quorum_members.iter().map(|m| m.pubkey).collect()
+            let staged = l
+                .state
+                .next_quorum_members
+                .iter()
+                .map(|m| m.pubkey)
+                .collect();
+            let fresh = l
+                .state
+                .next_quorum_members
+                .iter()
+                .filter(|m| {
+                    m.membership_until
+                        .map(|u| u > current_block.saturating_add(72))
+                        .unwrap_or(true)
+                })
+                .map(|m| m.pubkey)
+                .collect();
+            (staged, fresh)
         };
         let keep = deposits_core::rotation_seat::seat_consenting(
-            &snap.active_members.iter().map(|m| m.pubkey).collect::<Vec<_>>(),
-            &staged,
+            &snap
+                .active_members
+                .iter()
+                .map(|m| m.pubkey)
+                .collect::<Vec<_>>(),
+            &fresh,
         )
-        .ok_or_else(|| format!("only {} members consented (a quorum needs 3)", staged.len()))?;
+        .ok_or_else(|| {
+            format!(
+                "only {} members hold a live consent (a quorum needs 3)",
+                fresh.len()
+            )
+        })?;
         for pk in staged.iter().filter(|p| !keep.contains(p)) {
             let req = crate::nostr::LedgerRequest {
                 action: "quorum_remove".into(),

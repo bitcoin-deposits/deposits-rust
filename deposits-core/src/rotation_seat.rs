@@ -7,7 +7,11 @@
 /// those seated now (`current`) first, then the newcomers, each group in consent order, cut to
 /// the largest valid quorum size (3, 5 or 7). `None` with fewer than three consents.
 pub fn seat_consenting<T: PartialEq + Clone>(current: &[T], staged: &[T]) -> Option<Vec<T>> {
-    let mut order: Vec<T> = staged.iter().filter(|m| current.contains(m)).cloned().collect();
+    let mut order: Vec<T> = staged
+        .iter()
+        .filter(|m| current.contains(m))
+        .cloned()
+        .collect();
     order.extend(staged.iter().filter(|m| !current.contains(m)).cloned());
     let size = crate::VALID_QUORUM_SIZES
         .iter()
