@@ -1149,11 +1149,25 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
         let ledgers = node.handler.ledgers.lock().unwrap();
         ledgers
             .iter()
-            .filter(|(_, arc)| {
+            .filter(|(lid, arc)| {
                 let l = arc.read().unwrap();
+                // A dispute fork (key `<ledger_id>_<seq>_<pk16>`) is ours to operate but is no
+                // ledger to advertise until its DisputeAcquire stands (state Normal again). Its
+                // key also never matched an ad (ads and the ad cache are keyed by the ledger id):
+                // ref6 published "a first ad with default terms" for its 751e6951 fork every
+                // pass, 566 times, and advertised the disputed ledger as its own (signet soak,
+                // Nov 7..10).
+                let is_fork = crate::node::fork_publish::fork_key_last_valid_seq(lid).is_some();
                 matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
+                    && (!is_fork || l.state.dispute_state == deposits_core::types::DisputeState::Normal)
             })
-            .map(|(lid, _)| lid.clone())
+            .map(|(lid, arc)| {
+                // Ads are keyed by the ledger id, a fork's included.
+                let _ = lid;
+                arc.read().unwrap().ledger_id_hex()
+            })
+            .collect::<std::collections::BTreeSet<String>>()
+            .into_iter()
             .collect()
     };
 

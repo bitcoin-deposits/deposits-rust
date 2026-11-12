@@ -2091,9 +2091,21 @@ impl Node {
         // (DisputeYield, completed marker), so deciding from a set that is not on chain can leave
         // a sole participant yielding its own custody (soak, 30ea46ac, Nov 5).
         let Some((_, _, confirmations)) = located else {
+            // What we derived, so a mismatch with the landed output can be read off the log:
+            // 751e6951's round-1 output (Nov 7..10) never matched ref6's set and nothing said why.
+            let short = |b: &[u8]| hex::encode(&b[..4.min(b.len())]);
             tracing::info!(
-                "Lottery for {}: no unspent output pays our participant set yet; not claiming or yielding",
-                &ledger_id[..16.min(ledger_id.len())]
+                "Lottery for {}: no unspent output pays our participant set yet; not claiming or yielding \
+                 (derived: participants [{}] voters [{}] threshold {} spk {})",
+                &ledger_id[..16.min(ledger_id.len())],
+                ctx.participants
+                    .iter()
+                    .map(|(pk, p)| format!("{}:{}", short(&pk.x_only_public_key().0.serialize()), short(&p.commitment_hash)))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                ctx.recovery_voters.iter().map(|v| short(&v.serialize())).collect::<Vec<_>>().join(" "),
+                ctx.recovery_threshold,
+                short(lottery.script_pubkey().as_bytes())
             );
             return Ok(false);
         };
