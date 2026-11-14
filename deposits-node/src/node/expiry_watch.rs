@@ -256,32 +256,28 @@ impl Node {
         for (fork_key, ledger_id, _, expiry, state, _) in candidates {
             let prefix = &ledger_id[..16];
 
-            if state != DisputeState::Armed {
-                tracing::debug!(
-                    "Expiry dispute on {}: quorum re-established (expiry {:?}, height {}); \
-                     not armed, not pursuing it",
-                    prefix,
-                    expiry,
-                    height
-                );
-                continue;
-            }
-
-            // Nothing confiscated: no confiscation of ours in flight, no
-            // lottery reveal (which follows a confirmed confiscation), and no
-            // lottery output on chain for this dispute's armers.
+            // DEP-06 §Race (ruled 2026-11-14): a re-establishment ends our expiry
+            // dispute whether or not we armed it, so an un-armed disputant yields
+            // too. It used to leave its DisputeEnter standing for good (signet
+            // soak, 2026-11-14: ref2, ref3 and ref7 on ledger J after its
+            // post-expiry rotation). Nothing confiscated: no confiscation of ours
+            // in flight, no lottery reveal (which follows a confirmed
+            // confiscation), and no lottery output on chain for this dispute.
+            let armed = state == DisputeState::Armed;
             let ours_pending = self
                 .pending_confiscations
                 .lock()
                 .unwrap()
                 .contains_key(prefix);
-            if ours_pending
+            let confiscated = ours_pending
                 || self.have_revealed_lottery(&ledger_id).await
                 || matches!(
                     self.check_confiscation_confirmed(&ledger_id, 0).await,
                     Ok(true)
-                )
-            {
+                );
+            let (stand_down, _release_pledge) =
+                deposits_core::types::expiry_dispute_outcome(armed, true, confiscated);
+            if !stand_down {
                 tracing::info!(
                     "Expiry dispute on {}: quorum re-established (expiry {:?}) but a \
                      confiscation is under way; not standing down",

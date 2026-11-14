@@ -638,15 +638,43 @@ impl Node {
                     };
                     if let Some(arc) = validate_against {
                         let ledger = arc.read().unwrap();
-                        // Cosigner-edge policy + expiry check. Refuses to
-                        // sign anything past `quorum_expiry`, including a
-                        // fresh `QuorumBegin`. Operators must rotate before
-                        // the deadline; missing it forces them onto the
-                        // Tier-1 (operator-alone after expiry) recovery
-                        // path. We use the wallet's view of the chain tip
-                        // — fresh enough since the wallet syncs every
-                        // periodic_interval.
+                        // Cosigner-edge expiry check (DEP-05 §Lifecycle):
+                        // past `quorum_expiry` a value-moving op is refused,
+                        // and an establishment op is cosignable at the
+                        // tier's threshold. We use the wallet's view of the
+                        // chain tip — fresh enough since the wallet syncs
+                        // every periodic_interval.
                         let current_block_height = self.wallet.get_block_height().unwrap_or(0);
+                        // Member policy (ruled 2026-11-14: "we can allow it,
+                        // but we can't require members to sign"): a rotation
+                        // past expiry is cosigned by default, and refused with
+                        // DEPOSITS_REFUSE_POST_EXPIRY_ROTATION=1. Never a fault.
+                        let establishment = matches!(
+                            deposits_core::cosign_threshold::OperationClass::of(&operation),
+                            deposits_core::cosign_threshold::OperationClass::Establishment
+                        );
+                        if !deposits_core::types::member_cosigns_post_expiry(
+                            fields.block_height,
+                            ledger.state.quorum_expiry,
+                            establishment,
+                            deposits_core::types::cosign_post_expiry_policy(),
+                        ) && establishment
+                        {
+                            tracing::info!(
+                                "Cosign declined (member policy): seq={} op={} past quorum_expiry {:?}",
+                                sequence_number,
+                                Self::format_op_short(&operation),
+                                ledger.state.quorum_expiry
+                            );
+                            return (
+                                false,
+                                None,
+                                Some(
+                                    "Cosign refused: member policy: we do not cosign a rotation past quorum_expiry"
+                                        .to_string(),
+                                ),
+                            );
+                        }
                         if let Err(e) = ledger
                             .validate_for_cosign(&operation, current_block_height)
                             .and_then(|()| {
@@ -917,6 +945,40 @@ impl Node {
                                 }
                             })
                         };
+                        // DEP-06 §Race: a confiscation that confirmed first decided it; no
+                        // rotation of that vault can be spent, so we never record one. Only
+                        // asked of the relay when no rung of the governing ladder is unspent.
+                        let any_rung_unspent = {
+                            let gov =
+                                deposits_core::rotation_order::rotating_quorum_begin_seq(&history);
+                            history
+                                .iter()
+                                .filter(|u| Some(u.sequence_number) == gov)
+                                .find_map(|u| LedgerOperation::tlv_decode(&u.message).ok())
+                                .map(|op| deposits_core::vault_spend::quorum_begin_rungs(&op))
+                                .unwrap_or_default()
+                                .iter()
+                                .any(|t| {
+                                    matches!(
+                                        self.wallet.get_outpoint_value_and_confs(
+                                            bitcoin::Txid::from_byte_array(*t),
+                                            0
+                                        ),
+                                        Ok(Some(_))
+                                    )
+                                })
+                        };
+                        if !any_rung_unspent
+                            && matches!(
+                                self.check_confiscation_confirmed(&request.ledger_id, 0).await,
+                                Ok(true)
+                            )
+                        {
+                            let msg = "the vault's confiscation confirmed: no rotation of it can be spent"
+                                .to_string();
+                            tracing::warn!("Refusing cosign: {}", msg);
+                            return (false, None, Some(msg));
+                        }
                         if let Err(e) = deposits_core::rotation_order::verify_rotation_rungs(
                             &history,
                             &pre_state,

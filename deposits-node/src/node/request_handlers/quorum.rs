@@ -588,6 +588,34 @@ impl Node {
             self.ensure_actor_for(&operator_ledger_id);
         }
 
+        // Member policy (ruled 2026-11-14): a seat on a quorum past its expiry is
+        // offered, never owed. Declined with DEPOSITS_REFUSE_POST_EXPIRY_ROTATION=1.
+        {
+            let expiry = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .get(&operator_ledger_id)
+                .and_then(|l| l.read().unwrap().state.quorum_expiry);
+            let tip = self.wallet.get_block_height().unwrap_or(0);
+            if !deposits_core::types::member_cosigns_post_expiry(
+                tip,
+                expiry,
+                true,
+                deposits_core::types::cosign_post_expiry_policy(),
+            ) {
+                return (
+                    false,
+                    None,
+                    Some(format!(
+                        "member policy: we do not join a rotation past quorum_expiry {:?}",
+                        expiry
+                    )),
+                );
+            }
+        }
+
         // Sign consent: COLLATERAL_CONSENT || operator_pubkey(33 bytes) || ledger_id(string bytes)
         let mut sign_content = Vec::new();
         sign_content.extend_from_slice(b"COLLATERAL_CONSENT");

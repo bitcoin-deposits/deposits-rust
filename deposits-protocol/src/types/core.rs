@@ -825,6 +825,48 @@ pub fn arm_on_expiry_dispute(
         && !expiry_dispute_ended(last_valid_sequence, latest_quorum_begin_sequence, false)
 }
 
+/// DEP-05 §Cosignature Threshold, a rotation past expiry (ruled 2026-11-14:
+/// "we can allow it, but we can't require members to sign"). Whether a member
+/// signs an op of the given class at `block_height`: before `quorum_expiry`
+/// always (the protocol's own checks still apply), at or past it only an
+/// establishment op, and that only by the member's own policy. Refusing is
+/// never a fault. Vector `post_expiry_rotation.json`.
+pub fn member_cosigns_post_expiry(
+    block_height: u32,
+    quorum_expiry: Option<u32>,
+    establishment: bool,
+    cosign_post_expiry: bool,
+) -> bool {
+    match quorum_expiry {
+        None => true,
+        Some(e) if block_height < e => true,
+        Some(_) => establishment && cosign_post_expiry,
+    }
+}
+
+/// What a member does with its own `quorum_expired` dispute (DEP-06 §Race):
+/// `(yield, release_pledge)`. A re-establishment after the fork point ends it
+/// whether or not the member armed: it yields, and its pledge lapses with no
+/// lottery. A confiscation that confirmed first decided the race, and the
+/// dispute runs on. `armed` never changes the answer. Vector
+/// `post_expiry_rotation.json`.
+pub fn expiry_dispute_outcome(
+    _armed: bool,
+    reestablished: bool,
+    confiscation_confirmed: bool,
+) -> (bool, bool) {
+    let end = reestablished && !confiscation_confirmed;
+    (end, end)
+}
+
+/// The member policy for [`member_cosigns_post_expiry`]: true (the default)
+/// unless `DEPOSITS_REFUSE_POST_EXPIRY_ROTATION` is `1` or `true`.
+pub fn cosign_post_expiry_policy() -> bool {
+    !std::env::var("DEPOSITS_REFUSE_POST_EXPIRY_ROTATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Default compensation payout cadence: 2016 blocks (~2 weeks). Mirrors the
 /// default `frequency_blocks` on `FeeStructure`, so by default a member is
 /// paid once per operator fee-collection cycle.
