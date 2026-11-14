@@ -1690,21 +1690,32 @@ impl Node {
         // confirmed; the wallet records rung 0.
         let (vault_outpoint, vault_sats) = {
             let rungs: Vec<bitcoin::OutPoint> = {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                ledgers
-                    .get(ledger_id)
-                    .and_then(|l| {
-                        let l = l.read().unwrap();
-                        l.history.iter().rev().find_map(|u| {
-                            match deposits_core::LedgerOperation::tlv_decode(&u.message) {
-                                Ok(op @ deposits_core::LedgerOperation::QuorumBegin { .. }) => {
-                                    Some(deposits_core::vault_spend::quorum_begin_rungs(&op))
-                                }
-                                _ => None,
+                let latest_qb_rungs = |h: &[deposits_core::SignedLedgerUpdate]| {
+                    h.iter().rev().find_map(|u| {
+                        match deposits_core::LedgerOperation::tlv_decode(&u.message) {
+                            Ok(op @ deposits_core::LedgerOperation::QuorumBegin { .. }) => {
+                                Some(deposits_core::vault_spend::quorum_begin_rungs(&op))
                             }
-                        })
+                            _ => None,
+                        }
                     })
-                    .unwrap_or_default()
+                };
+                let history: Vec<deposits_core::SignedLedgerUpdate> = {
+                    let ledgers = self.handler.ledgers.lock().unwrap();
+                    ledgers
+                        .get(ledger_id)
+                        .map(|l| l.read().unwrap().history.clone())
+                        .unwrap_or_default()
+                };
+                // The governing QuorumBegin may be older than the in-memory history (capped at
+                // `history_retain`): then read it from the disk log, never fall back to the
+                // wallet's rung 0 (signet soak, 2026-11-14: a higher rung had confirmed, and every
+                // later rotation spent a rung 0 that never existed).
+                match latest_qb_rungs(&history) {
+                    Some(r) => Some(r),
+                    None => latest_qb_rungs(&self.handler.complete_history(ledger_id, history)),
+                }
+                .unwrap_or_default()
                     .into_iter()
                     .map(|t| {
                         bitcoin::OutPoint::new(

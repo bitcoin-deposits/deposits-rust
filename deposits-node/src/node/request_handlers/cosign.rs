@@ -835,11 +835,29 @@ impl Node {
                         Vec<deposits_core::SignedLedgerUpdate>,
                         deposits_core::LedgerState,
                     )> = if matches!(operation, LedgerOperation::QuorumBegin { .. }) {
-                        let ledgers = self.handler.ledgers.lock().unwrap();
-                        ledgers.get(&request.ledger_id).and_then(|arc| {
-                            let l = arc.read().unwrap();
-                            deposits_core::rotation_order::rotating_quorum_begin_seq(&l.history)
-                                .map(|_| (l.history.clone(), l.state.clone()))
+                        let snap = {
+                            let ledgers = self.handler.ledgers.lock().unwrap();
+                            ledgers.get(&request.ledger_id).map(|arc| {
+                                let l = arc.read().unwrap();
+                                (l.history.clone(), l.state.clone())
+                            })
+                        };
+                        // The governing QuorumBegin is often older than the in-memory history
+                        // (capped at `history_retain`): decide on the whole chain, or a rotating
+                        // QuorumBegin is judged as a fresh one whose new outpoint must already be
+                        // on chain (signet soak, 2026-11-14: every reference rotation refused).
+                        snap.and_then(|(history, state)| {
+                            let history = if deposits_core::rotation_order::rotating_quorum_begin_seq(
+                                &history,
+                            )
+                            .is_some()
+                            {
+                                history
+                            } else {
+                                self.handler.complete_history(&request.ledger_id, history)
+                            };
+                            deposits_core::rotation_order::rotating_quorum_begin_seq(&history)
+                                .map(|_| (history, state))
                         })
                     } else {
                         None
