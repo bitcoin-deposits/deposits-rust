@@ -946,38 +946,42 @@ impl Node {
                             })
                         };
                         // DEP-06 §Race: a confiscation that confirmed first decided it; no
-                        // rotation of that vault can be spent, so we never record one. Only
-                        // asked of the relay when no rung of the governing ladder is unspent.
-                        let any_rung_unspent = {
-                            let gov =
-                                deposits_core::rotation_order::rotating_quorum_begin_seq(&history);
-                            history
-                                .iter()
-                                .filter(|u| Some(u.sequence_number) == gov)
-                                .find_map(|u| LedgerOperation::tlv_decode(&u.message).ok())
-                                .map(|op| deposits_core::vault_spend::quorum_begin_rungs(&op))
-                                .unwrap_or_default()
-                                .iter()
-                                .any(|t| {
-                                    matches!(
-                                        self.wallet.get_outpoint_value_and_confs(
-                                            bitcoin::Txid::from_byte_array(*t),
-                                            0
-                                        ),
-                                        Ok(Some(_))
-                                    )
-                                })
-                        };
-                        if !any_rung_unspent
-                            && matches!(
-                                self.check_confiscation_confirmed(&request.ledger_id, 0).await,
-                                Ok(true)
-                            )
-                        {
-                            let msg = "the vault's confiscation confirmed: no rotation of it can be spent"
-                                .to_string();
-                            tracing::warn!("Refusing cosign: {}", msg);
-                            return (false, None, Some(msg));
+                        // rotation of that vault can be spent, so we never record one. Read from
+                        // the chain, not from the relay's dispute events, which lag the block
+                        // (regtest 2026-11-15: a QuorumBegin was cosigned over a vault confiscated
+                        // a block earlier). The rotation's own rungs are signed only after it is
+                        // final, so any confirmed spend of the vault is another's; a mempool-only
+                        // spend is no confirmed spend (the race is still open).
+                        let governing_vault = vault.map(|(o, _)| o).or_else(|| {
+                            crate::node::vault_watch::current_vault(&history).map(|(o, _)| o)
+                        });
+                        let reserves_spk = pre_state
+                            .reserves_key
+                            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+                            .ok()
+                            .and_then(|a| a.require_network(self.wallet.network()).ok())
+                            .map(|a| a.script_pubkey());
+                        if let (Some(o), Some(spk)) = (governing_vault, reserves_spk) {
+                            let backend = self.wallet.chain_backend();
+                            let from = backend
+                                .get_tip_height()
+                                .unwrap_or(0)
+                                .saturating_sub(1008);
+                            if matches!(
+                                backend.confirmed_spend(&o, &spk, from),
+                                Ok(crate::chain_backend::ConfirmedSpend::SpentAt(_))
+                                    | Ok(crate::chain_backend::ConfirmedSpend::SpentBefore(_))
+                            ) {
+                                let msg = "the vault's confiscation confirmed: no rotation of it can be spent"
+                                    .to_string();
+                                tracing::warn!(
+                                    "Refusing cosign: {} ({} for ledger {})",
+                                    msg,
+                                    o,
+                                    &request.ledger_id[..16]
+                                );
+                                return (false, None, Some(msg));
+                            }
                         }
                         if let Err(e) = deposits_core::rotation_order::verify_rotation_rungs(
                             &history,
