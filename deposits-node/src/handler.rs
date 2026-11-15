@@ -814,13 +814,21 @@ impl DepositsHandler {
     }
 
     fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
-        let contents = match fs::read_to_string(path) {
-            Ok(c) => c,
+        use std::io::BufRead;
+        let t_read = std::time::Instant::now();
+        // Streamed, not read whole: a soaked ledger's log is ~10 GB.
+        let reader = match fs::File::open(path) {
+            Ok(f) => std::io::BufReader::with_capacity(1 << 20, f),
             Err(e) => {
                 tracing::warn!("Failed to read ledger {}: {}", ledger_id, e);
                 return None;
             }
         };
+        // `State` rows are snapshots (~5 MB each on a soaked ledger, ~90% of the log) that the
+        // replay below does not use while seq 0 is held: parsing every one took 122 of a 9.5 GB
+        // log's 124 s load, and a soak node's restart 26 min (signet, 2026-11-15). Only the last
+        // is kept, as text, and parsed only if the history has no seq 0.
+        let mut last_state_line: Option<String> = None;
 
         let mut role: Option<LedgerRole> = None;
         let mut state: Option<LedgerState> = None;
@@ -844,12 +852,23 @@ impl DepositsHandler {
         let is_fork_file = ledger_id.len() > 64;
         let mut main_operator: Option<bitcoin::secp256k1::PublicKey> = None;
 
-        for line in contents.lines() {
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("Failed to read a line of {}: {}", ledger_id, e);
+                    break;
+                }
+            };
             if line.trim().is_empty() {
                 continue;
             }
+            if line.starts_with(r#"{"type":"State""#) {
+                last_state_line = Some(line);
+                continue;
+            }
 
-            match serde_json::from_str::<LedgerLogRow>(line) {
+            match serde_json::from_str::<LedgerLogRow>(&line) {
                 Ok(LedgerLogRow::Role { role: r }) => {
                     role = Some(r);
                 }
@@ -894,6 +913,7 @@ impl DepositsHandler {
             }
         }
 
+        let parsed_in = t_read.elapsed();
         let ledger_role = role.unwrap_or_else(|| {
             tracing::warn!(
                 "Ledger {} missing role in JSONL, defaulting to Partner",
@@ -903,6 +923,29 @@ impl DepositsHandler {
         });
 
         updates.sort_by_key(|u| u.sequence_number);
+        // The replay below falls back to the State row when seq 0 is missing or is not a
+        // LedgerOpen.
+        let needs_state_row = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .is_none_or(|u| {
+                use deposits_core::tlv::TlvDecode;
+                !matches!(
+                    deposits_core::messages::LedgerOperation::tlv_decode(&u.message),
+                    Ok(deposits_core::messages::LedgerOperation::LedgerOpen { .. })
+                )
+            });
+        if state.is_none() && needs_state_row {
+            if let Some(line) = &last_state_line {
+                match serde_json::from_str::<LedgerLogRow>(line) {
+                    Ok(LedgerLogRow::State(s)) => state = Some(s),
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("Failed to parse the State row of {}: {}", ledger_id, e)
+                    }
+                }
+            }
+        }
 
         // Trusting the persisted `State` row was the source of a real
         // bug: persist runs on every in-memory append, and an early
@@ -992,6 +1035,7 @@ impl DepositsHandler {
             })
             .collect();
 
+        let t_replay = std::time::Instant::now();
         let mut replayed = 0u64;
         for (seq, height, content_hash, operation) in &ops_to_replay {
             // The state before a QuorumBegin, for a member asked to sign its rungs after a
@@ -1028,6 +1072,13 @@ impl DepositsHandler {
             }
         }
 
+        tracing::info!(
+            "[PROFILE] load {}…: read+parse {:?}, decode+replay {} ops {:?}",
+            &ledger_id[..16.min(ledger_id.len())],
+            parsed_in,
+            replayed,
+            t_replay.elapsed()
+        );
         // Restore fork-branch ownership after reload.
         //
         // `parent_pubkey` marks who OPERATES a dispute fork; the dispute
@@ -1222,18 +1273,33 @@ impl DepositsHandler {
             }
         };
 
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
-                continue;
-            }
-
-            let Some(ledger_id) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-
-            if let Some(ledger) = Self::load_single_ledger_from_jsonl(ledger_id, &path) {
-                ledgers.insert(ledger_id.to_string(), Arc::new(RwLock::new(ledger)));
+        let files: Vec<(String, PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("jsonl"))
+            .filter_map(|p| {
+                let id = p.file_stem().and_then(|s| s.to_str())?.to_string();
+                Some((id, p))
+            })
+            .collect();
+        // One thread per ledger, at most 8 at a time: each load is independent, and a soaked
+        // node's twelve ~10 GB logs loaded one after another took 26 min (signet, 2026-11-15).
+        for chunk in files.chunks(8) {
+            let loaded: Vec<(String, Option<Ledger>)> = std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|(id, path)| {
+                        scope.spawn(move || {
+                            (id.clone(), Self::load_single_ledger_from_jsonl(id, path))
+                        })
+                    })
+                    .collect();
+                handles.into_iter().filter_map(|h| h.join().ok()).collect()
+            });
+            for (id, ledger) in loaded {
+                if let Some(ledger) = ledger {
+                    ledgers.insert(id, Arc::new(RwLock::new(ledger)));
+                }
             }
         }
 
@@ -3089,6 +3155,171 @@ impl HandlerContext for DepositsHandler {
 // ============================================================================
 // Tests
 // ============================================================================
+
+#[cfg(test)]
+mod load_tests {
+    use super::{DepositsHandler, LedgerLogRow, LedgerRole};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::types::LedgerState;
+    use deposits_core::{SignedLedgerUpdate, TlvEncode};
+    use std::io::Write;
+
+    fn key() -> bitcoin::secp256k1::PublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        bitcoin::secp256k1::PublicKey::from_secret_key(
+            &secp,
+            &bitcoin::secp256k1::SecretKey::from_slice(&[7; 32]).unwrap(),
+        )
+    }
+
+    fn update(seq: u64, op: &LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0,
+            operator_id: key(),
+            ledger_id: [7u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [seq as u8; 32],
+            block_height: 100 + seq as u32,
+            block_hash: [1u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        }
+    }
+
+    fn open() -> LedgerOperation {
+        LedgerOperation::LedgerOpen {
+            operator_id: key(),
+            reserves_id: "from-ledger-open".into(),
+            genesis_block: 100,
+            reserves_amount: 1,
+            collateral_amount: 1,
+            protocol_version: None,
+        }
+    }
+
+    fn state_row(marker: &str) -> String {
+        serde_json::to_string(&LedgerLogRow::State(LedgerState::new(
+            key(),
+            marker.into(),
+            100,
+        )))
+        .unwrap()
+    }
+
+    fn write(dir: &std::path::Path, name: &str, lines: &[String]) -> std::path::PathBuf {
+        let path = dir.join(format!("{}.jsonl", name));
+        let mut f = std::fs::File::create(&path).unwrap();
+        for l in lines {
+            writeln!(f, "{}", l).unwrap();
+        }
+        path
+    }
+
+    fn row(r: &LedgerLogRow) -> String {
+        serde_json::to_string(r).unwrap()
+    }
+
+    #[test]
+    fn state_rows_are_skipped_while_seq_0_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        // The State rows are snapshots the replay does not use; a garbled one is never parsed.
+        let lines = vec![
+            row(&LedgerLogRow::Role {
+                role: LedgerRole::Partner,
+            }),
+            row(&LedgerLogRow::Update(update(0, &open()))),
+            state_row("from-state-row"),
+            r#"{"type":"State","garbled": [1,2,"#.to_string(),
+            row(&LedgerLogRow::Update(update(
+                1,
+                &LedgerOperation::DisputeYield,
+            ))),
+        ];
+        let path = write(dir.path(), "a", &lines);
+        let l = DepositsHandler::load_single_ledger_from_jsonl("a", &path).unwrap();
+        assert_eq!(l.history.len(), 2);
+        assert_eq!(l.state.sequence, 1);
+        assert_eq!(l.state.reserves_key, "from-ledger-open");
+    }
+
+    #[test]
+    fn a_truncated_history_starts_from_the_last_state_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            row(&LedgerLogRow::Role {
+                role: LedgerRole::Partner,
+            }),
+            state_row("first"),
+            row(&LedgerLogRow::Update(update(
+                5,
+                &LedgerOperation::DisputeYield,
+            ))),
+            state_row("last"),
+        ];
+        let path = write(dir.path(), "b", &lines);
+        let l = DepositsHandler::load_single_ledger_from_jsonl("b", &path).unwrap();
+        assert_eq!(l.state.reserves_key, "last");
+        assert_eq!(l.history.len(), 1);
+    }
+
+    #[test]
+    fn a_directory_of_ledgers_loads_every_one() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..11 {
+            write(
+                dir.path(),
+                &format!("l{:02}", i),
+                &[
+                    row(&LedgerLogRow::Role {
+                        role: LedgerRole::Partner,
+                    }),
+                    row(&LedgerLogRow::Update(update(0, &open()))),
+                ],
+            );
+        }
+        let ledgers = DepositsHandler::load_ledgers_from_jsonl(&dir.path().to_path_buf());
+        assert_eq!(ledgers.len(), 11);
+        assert!(ledgers.contains_key("l10"));
+    }
+}
+
+#[cfg(test)]
+mod load_profile {
+    /// Times a real ledger log's load: `LOAD_PROFILE_JSONL=<path> cargo test --release -p
+    /// deposits-node load_profile -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn load_profile() {
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .try_init();
+        if let Ok(d) = std::env::var("LOAD_PROFILE_DIR") {
+            let t = std::time::Instant::now();
+            let n =
+                super::DepositsHandler::load_ledgers_from_jsonl(&std::path::PathBuf::from(d)).len();
+            eprintln!("loaded {} ledgers in {:?}", n, t.elapsed());
+            return;
+        }
+        let Ok(p) = std::env::var("LOAD_PROFILE_JSONL") else {
+            return;
+        };
+        let _ = tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
+            .try_init();
+        let path = std::path::PathBuf::from(&p);
+        let id = path.file_stem().unwrap().to_str().unwrap().to_string();
+        let t = std::time::Instant::now();
+        let l = super::DepositsHandler::load_single_ledger_from_jsonl(&id, &path).unwrap();
+        eprintln!(
+            "loaded {} updates to seq {} in {:?}",
+            l.history.len(),
+            l.state.sequence,
+            t.elapsed()
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
