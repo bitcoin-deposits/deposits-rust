@@ -194,7 +194,18 @@ impl Node {
     pub(crate) async fn stand_down_reestablished_expiry_disputes(&self) {
         // (fork key, base id, reason, base expiry, fork state, re-established since the fork
         // point) for every fork of ours still live that was opened for a lapsed quorum.
-        type Live = (String, String, String, Option<u32>, DisputeState, bool);
+        // (fork key, ledger id, reason, base expiry, state, re-established, on_spend, the rung
+        // txids of each QuorumBegin after the fork point).
+        type Live = (
+            String,
+            String,
+            String,
+            Option<u32>,
+            DisputeState,
+            bool,
+            bool,
+            Vec<Vec<[u8; 32]>>,
+        );
         let live: Vec<Live> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
@@ -220,12 +231,44 @@ impl Node {
                     let reason = "quorum_expired".to_string();
                     // DEP-05 §"When a quorum_expired dispute ends": a QuorumBegin after the
                     // fork point answers the dispute's ground, whatever the tip says now.
-                    let reestablished = match (dispute_enter_last_valid(&fork.history), base) {
+                    let lvs = dispute_enter_last_valid(&fork.history);
+                    let reestablished = match (lvs, base) {
                         (Some(lvs), Some(b)) => latest_quorum_begin_seq(&b.read().unwrap().history)
                             .is_some_and(|qb| {
                                 deposits_core::types::expiry_dispute_ended(lvs, qb, false)
                             }),
                         _ => false,
+                    };
+                    // strict-lottery-v8, judged at the fork point (never by the QuorumBegin under
+                    // judgement): only a re-establishment whose spend of the vault confirmed
+                    // ends it. Collected here, asked of the chain below, outside the lock.
+                    let on_spend = deposits_core::types::ruleset_expiry_ends_on_spend(
+                        &fork.state.active_ruleset_name,
+                    );
+                    let rungs_after: Vec<Vec<[u8; 32]>> = match (on_spend, lvs, base) {
+                        (true, Some(lvs), Some(b)) => {
+                            use deposits_core::TlvDecode;
+                            b.read()
+                                .unwrap()
+                                .history
+                                .iter()
+                                .rev()
+                                .take_while(|u| u.sequence_number > lvs)
+                                .filter_map(|u| {
+                                    match deposits_core::messages::LedgerOperation::tlv_decode(
+                                        &u.message,
+                                    ) {
+                                        Ok(
+                                            op @ deposits_core::messages::LedgerOperation::QuorumBegin {
+                                                ..
+                                            },
+                                        ) => Some(deposits_core::vault_spend::quorum_begin_rungs(&op)),
+                                        _ => None,
+                                    }
+                                })
+                                .collect()
+                        }
+                        _ => Vec::new(),
                     };
                     Some((
                         key.clone(),
@@ -234,6 +277,8 @@ impl Node {
                         base_expiry,
                         fork.state.dispute_state,
                         reestablished,
+                        on_spend,
+                        rungs_after,
                     ))
                 })
                 .collect()
@@ -247,13 +292,30 @@ impl Node {
             Ok((h, _)) => h,
             Err(_) => return,
         };
-        let candidates = live
+        // Under v8 a stand-down also needs the re-establishment's spend confirmed: some rung of
+        // some QuorumBegin after the fork point in a block (regtest, 2026-11-15: we yielded our
+        // armed stake while our own confiscation sat in the mempool, and it then confirmed).
+        use bitcoin::hashes::Hash as _;
+        let rotation_spend_confirmed = |rungs_after: &Vec<Vec<[u8; 32]>>| {
+            rungs_after.iter().any(|rungs| {
+                rungs.iter().any(|t| {
+                    matches!(
+                        self.wallet
+                            .tx_block_height(bitcoin::Txid::from_byte_array(*t)),
+                        Ok(Some(_))
+                    )
+                })
+            })
+        };
+        let candidates: Vec<Live> = live
             .into_iter()
-            .filter(|(_, _, reason, expiry, _, reestablished)| {
-                *reestablished || expiry_dispute_stands_down(reason, *expiry, height)
-            });
+            .filter(|(_, _, reason, expiry, _, reestablished, on_spend, rungs_after)| {
+                (*reestablished || expiry_dispute_stands_down(reason, *expiry, height))
+                    && (!*on_spend || rotation_spend_confirmed(rungs_after))
+            })
+            .collect();
 
-        for (fork_key, ledger_id, _, expiry, state, _) in candidates {
+        for (fork_key, ledger_id, _, expiry, state, _, _, _) in candidates {
             let prefix = &ledger_id[..16];
 
             // DEP-06 §Race (ruled 2026-11-14): a re-establishment ends our expiry

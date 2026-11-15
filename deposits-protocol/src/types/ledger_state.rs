@@ -82,6 +82,14 @@ pub fn ruleset_acquire_on_confirm(ruleset_name: &str) -> bool {
     ruleset_name == STRICT_LOTTERY_V8
 }
 
+/// DEP-05 §When a `quorum_expired` dispute ends, under `strict-lottery-v8` (ruled 2026-11-15, an
+/// amendment to REVIEW 11), judged under the ruleset at the dispute's fork point: a
+/// re-establishment ends an expiry dispute only once its spend of the vault confirms. A recorded
+/// `QuorumBegin` that is still unspent leaves the dispute standing, and the race goes on.
+pub fn ruleset_expiry_ends_on_spend(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8
+}
+
 /// DEP-06 §Authorised confiscation, the lottery's participant set: under a ruleset with the
 /// strict lottery, no participant may be in `accused` (the keys the dispute's own grounds
 /// convict, with the operator at the fork point); under any other, every set is admissible

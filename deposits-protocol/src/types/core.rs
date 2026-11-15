@@ -825,6 +825,41 @@ pub fn arm_on_expiry_dispute(
         && !expiry_dispute_ended(last_valid_sequence, latest_quorum_begin_sequence, false)
 }
 
+/// [`expiry_dispute_ended`] under the ruleset at the dispute's fork point. Under
+/// `strict-lottery-v8` ([`ruleset_expiry_ends_on_spend`]) the re-establishment must also have its
+/// spend of the vault confirmed (`rotation_spend_confirmed`); before v8 a recorded `QuorumBegin`
+/// is enough. Vector `expiry_dispute_ends.json` (its `ruleset` cases).
+pub fn expiry_dispute_ended_under(
+    ruleset_at_fork: &str,
+    last_valid_sequence: u64,
+    latest_quorum_begin_sequence: u64,
+    confiscation_confirmed: bool,
+    rotation_spend_confirmed: bool,
+) -> bool {
+    expiry_dispute_ended(last_valid_sequence, latest_quorum_begin_sequence, confiscation_confirmed)
+        && (!crate::types::ruleset_expiry_ends_on_spend(ruleset_at_fork) || rotation_spend_confirmed)
+}
+
+/// [`arm_on_expiry_dispute`] under the ruleset at the dispute's fork point (see
+/// [`expiry_dispute_ended_under`]).
+pub fn arm_on_expiry_dispute_under(
+    ruleset_at_fork: &str,
+    anchor_block_height: u32,
+    governing_quorum_expiry: u32,
+    last_valid_sequence: u64,
+    latest_quorum_begin_sequence: u64,
+    rotation_spend_confirmed: bool,
+) -> bool {
+    anchor_block_height > governing_quorum_expiry
+        && !expiry_dispute_ended_under(
+            ruleset_at_fork,
+            last_valid_sequence,
+            latest_quorum_begin_sequence,
+            false,
+            rotation_spend_confirmed,
+        )
+}
+
 /// DEP-05 §Cosignature Threshold, a rotation past expiry (ruled 2026-11-14:
 /// "we can allow it, but we can't require members to sign"). Whether a member
 /// signs an op of the given class at `block_height`: before `quorum_expiry`
