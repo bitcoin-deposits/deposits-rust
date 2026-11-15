@@ -1057,6 +1057,52 @@ mod tests {
         );
     }
 
+    /// The backdated-arm question for round 1 (docs/ADVERSARIAL.md §Rule inverters, unruled). A
+    /// fork's DisputeArmed is not cosigned, so an armer can sign one with a `block_height` at or
+    /// below the confiscation block and publish it after the confiscation confirmed. The landed
+    /// set is recovered by searching subsets of the current arms (`match_landed_set`; cl
+    /// `lottery-paid-by`). The output script binds only each participant's key and commitment,
+    /// and the fold makes a same-round re-arm repeat its commitment, so a backdated re-arm that
+    /// changes a target or collateral still matches, and a backdated newcomer leaves the landed set
+    /// a subset. What loses it: more than 8 candidates, where the subset search does not run.
+    /// This asserts today's behaviour.
+    #[test]
+    fn a_backdated_round_1_arm_loses_the_landed_set_only_past_8_armers() {
+        let p = |i: u8, target: &str| {
+            (
+                pubkey(i),
+                LotteryParticipant::new(pubkey(i).x_only_public_key().0, [i; 20], target.into()),
+            )
+        };
+        let voters: Vec<XOnlyPublicKey> = (20..23u8)
+            .map(|i| pubkey(i).x_only_public_key().0)
+            .collect();
+        let net = bitcoin::Network::Regtest;
+        let mut landed = vec![p(1, "t"), p(2, "t")];
+        landed.sort_by_key(|(_, x)| x.pubkey.serialize());
+        let spk = LotteryScriptBuilder::new(
+            landed.iter().map(|(_, x)| x.clone()).collect(),
+            voters.clone(),
+            2,
+            net,
+        )
+        .build()
+        .unwrap()
+        .script_pubkey();
+        // A newcomer's backdated arm (3): the landed set is still a subset.
+        let grown = vec![p(1, "t"), p(2, "t"), p(3, "t")];
+        assert!(match_landed_set(&spk, &grown, &grown, &voters, 2, net).is_some());
+        // Participant 2 re-arms, backdated, same commitment (the fold requires it), another
+        // target: the script does not bind targets, so the output still matches (paying the new
+        // target on a claim).
+        let changed = vec![p(1, "t"), p(2, "elsewhere")];
+        let got = match_landed_set(&spk, &changed, &changed, &voters, 2, net).unwrap();
+        assert!(got.iter().any(|(_, x)| x.target_reserves == "elsewhere"));
+        // Nine candidates (seven backdated newcomers): the subset search does not run.
+        let crowd: Vec<_> = (1..=9u8).map(|i| p(i, "t")).collect();
+        assert!(match_landed_set(&spk, &crowd, &crowd, &voters, 2, net).is_none());
+    }
+
     #[test]
     fn claim_path_full_subset_or_wait() {
         let p = |n: usize| Some(vec![0u8; n]);
