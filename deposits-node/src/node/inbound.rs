@@ -53,6 +53,7 @@ impl Node {
             || request.action == "confiscation_sign"
             || request.action == "forfeit_sweep_sign"
             || request.action == "lottery_subset_attest"
+            || request.action == "lottery_rearm_sign"
             || request.action == "rotation_sign";
         // cosign requests can come from ledgers where we're a quorum member
         // (we may not have the full ledger locally, just a QuorumJoin record)
@@ -252,6 +253,7 @@ impl Node {
             "confiscation_sign" => self.process_confiscation_sign_request(&request).await,
             "forfeit_sweep_sign" => self.process_forfeit_sweep_sign_request(&request).await,
             "lottery_subset_attest" => self.process_lottery_subset_attest_request(&request).await,
+            "lottery_rearm_sign" => self.process_lottery_rearm_sign_request(&request).await,
             "rotation_sign" => self.process_rotation_sign_request(&request).await,
             "cooperative_refund_sign" => {
                 self.process_cooperative_refund_sign_request(&request).await

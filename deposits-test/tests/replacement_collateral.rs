@@ -76,6 +76,7 @@ fn dispute_armed_with_replacement_collateral_applies_cleanly() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: Some(rc),
+        rearm_round: None,
     };
     // append_operation pushes a SignedLedgerUpdate onto history (unlike
     // apply_operation, which only mutates state). We need the appended
@@ -140,6 +141,7 @@ fn dispute_armed_legacy_none_still_applies() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: None,
+        rearm_round: None,
     };
     net.op_mut("alice")
         .ledger
@@ -186,6 +188,7 @@ fn dispute_armed_replacement_collateral_survives_fork_rebuild() {
         commitment_hash: [0x11; 20],
         target_reserves: "bcrt1qfork".to_string(),
         replacement_collateral: Some(rc_orig),
+        rearm_round: None,
     };
     net.op_mut("alice")
         .ledger
@@ -210,6 +213,7 @@ fn dispute_armed_replacement_collateral_survives_fork_rebuild() {
             commitment_hash,
             target_reserves,
             replacement_collateral: Some(rc),
+            ..
         } => {
             assert_eq!(armed_block, 800_100);
             assert_eq!(commitment_hash, [0x11; 20]);
@@ -264,6 +268,7 @@ fn dispute_armed_partial_amount_is_distinct() {
             vout: 0,
             amount,
         }),
+        rearm_round: None,
     };
     let bytes_30k = mk_arm(30_000).tlv_encode();
     let bytes_25k = mk_arm(25_000).tlv_encode();

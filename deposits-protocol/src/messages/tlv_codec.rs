@@ -183,6 +183,8 @@ mod ledger_op_tlv {
     pub const CHALLENGED_LEDGER_ID: u64 = 360; // QuorumChallenge (DEP-06 §Spend challenge)
     pub const CHALLENGED_TXID: u64 = 362; // QuorumChallenge
     pub const CHALLENGED_ANCHOR: u64 = 364; // QuorumChallenge
+    /// DisputeArmed re-arm round (DEP-06 Phase 4, strict-lottery-v8): u32, absent = round 1.
+    pub const REARM_ROUND: u64 = 366;
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -928,6 +930,7 @@ impl TlvEncode for LedgerOperation {
                 commitment_hash,
                 target_reserves,
                 replacement_collateral,
+                rearm_round,
             } => {
                 builder = builder
                     .u32_field(ARMED_BLOCK, *armed_block)
@@ -938,6 +941,9 @@ impl TlvEncode for LedgerOperation {
                         .bytes_field(REPLACEMENT_COLLATERAL_TXID, &rc.txid)
                         .u32_field(REPLACEMENT_COLLATERAL_VOUT, rc.vout)
                         .u64_field(REPLACEMENT_COLLATERAL_AMOUNT, rc.amount);
+                }
+                if let Some(r) = rearm_round {
+                    builder = builder.u32_field(REARM_ROUND, *r);
                 }
             }
             Self::DisputeAcquire {
@@ -1379,11 +1385,13 @@ impl TlvDecode for LedgerOperation {
                         reason: "DisputeArmed replacement_collateral fields must be all present or all absent".into(),
                     }),
                 };
+                let rearm_round = reader.read_u32_opt(REARM_ROUND)?;
                 Ok(Self::DisputeArmed {
                     armed_block,
                     commitment_hash,
                     target_reserves,
                     replacement_collateral,
+                    rearm_round,
                 })
             }
             80 => Ok(Self::DeliveryEmbed {

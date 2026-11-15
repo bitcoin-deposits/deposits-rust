@@ -267,6 +267,32 @@ pub fn signed_nonce(op: &LedgerOperation) -> Option<(crate::types::DepositId, u6
 }
 
 impl Ledger {
+    /// Whether this fork's dispute state takes `op`. DEP-06 Phase 4 (strict-lottery-v8): a
+    /// DisputeArmed for a later re-arm round than the fork's last arm (`rearm_round`, TLV
+    /// 366) is taken from Disputed, Armed or Tombstoned (a yield ends a round, not the
+    /// dispute), and from Normal on a fork that armed before when the ruleset binds an
+    /// acquire only on a confirmed claim (a later round means the claim never landed:
+    /// 751e6951, signet soak 2026-11-11). Otherwise [`DisputeState::allows_operation`].
+    /// Mirrors cl's fold; vector dispute_rearm.json.
+    pub fn dispute_state_allows(&self, op: &LedgerOperation) -> bool {
+        use deposits_protocol::DisputeState;
+        if let LedgerOperation::DisputeArmed { rearm_round, .. } = op {
+            let round = rearm_round.unwrap_or(1);
+            if round > self.state.arm_round.unwrap_or(1) {
+                return match self.state.dispute_state {
+                    DisputeState::Disputed | DisputeState::Armed | DisputeState::Tombstoned => true,
+                    DisputeState::Normal => {
+                        self.state.arm_round.is_some()
+                            && deposits_protocol::types::ruleset_acquire_on_confirm(
+                                &self.state.active_ruleset_name,
+                            )
+                    }
+                };
+            }
+        }
+        self.state.dispute_state.allows_operation(op.discriminant())
+    }
+
     /// DEP-17 §duplicate delivery: classify a depositor-signed `op` arriving at `height`.
     /// On `Duplicate`, also the accepted original and the sequence of the update that carries
     /// it. The deposit's seen nonces say whether a live operation shares `op`'s nonce; only
@@ -599,7 +625,7 @@ impl Ledger {
         })?;
 
         let discriminant = operation.discriminant();
-        if !self.state.dispute_state.allows_operation(discriminant) {
+        if !self.dispute_state_allows(&operation) {
             return Err(DepositsError::ProtocolViolation {
                 violation_type: "dispute_state_violation".to_string(),
                 details: format!(
@@ -1557,7 +1583,7 @@ impl Ledger {
 
         // Check dispute state allows this operation type
         let discriminant = operation.discriminant();
-        if !self.state.dispute_state.allows_operation(discriminant) {
+        if !self.dispute_state_allows(&operation) {
             return Err(DepositsError::ProtocolViolation {
                 violation_type: "dispute_state_violation".to_string(),
                 details: format!(
@@ -1737,6 +1763,7 @@ impl Ledger {
             LedgerOperation::DisputeArmed {
                 commitment_hash,
                 replacement_collateral,
+                rearm_round,
                 ..
             } => {
                 // Must be in active quorum to arm
@@ -1755,7 +1782,22 @@ impl Ledger {
                 // pledge after a failed one (collateral after collateral) is a valid
                 // re-arm: DEP-03's eligibility cut counts an armer's first four
                 // arms; the fold does not bound them.
-                if self.state.dispute_state == deposits_protocol::DisputeState::Armed {
+                // DEP-06 Phase 4 (strict-lottery-v8): an arm for a later re-arm round
+                // (`rearm_round` above the fork's last arm round) starts that round with a
+                // fresh commitment; the state gate (`dispute_state_allows`) admitted it. A
+                // lower round is refused; within a round the rules below hold. Mirrors cl's
+                // fold; vector dispute_rearm.json.
+                let round = rearm_round.unwrap_or(1);
+                let last = self.state.arm_round.unwrap_or(1);
+                if round < last {
+                    return Err(DepositsError::ProtocolViolation {
+                        violation_type: "dispute_armed_rearm".to_string(),
+                        details: format!("a round-{} arm after a round-{} arm", round, last),
+                    });
+                }
+                if round == last
+                    && self.state.dispute_state == deposits_protocol::DisputeState::Armed
+                {
                     use crate::tlv::TlvDecode;
                     let prior: Option<[u8; 20]> = self.history.iter().rev().find_map(|u| {
                         match crate::messages::LedgerOperation::tlv_decode(&u.message) {
@@ -2639,7 +2681,9 @@ mod tests {
         PublicKey::from_secret_key(&secp, &sk)
     }
 
-    /// DEP-03 re-arm shape, against the vector shared with cl-deposits.
+    /// DEP-03 re-arm shape and DEP-06 Phase 4 re-arm rounds (TLV 366), against the vector
+    /// shared with cl-deposits: `prior` is the fork's latest arm, then an optional yield or
+    /// acquire, then `next` must be taken (the state gate and the arm rules) or refused.
     #[test]
     fn rearm_vector() {
         use crate::tlv::TlvEncode;
@@ -2659,11 +2703,27 @@ mod tests {
                     amount: 50_000,
                 },
             ),
+            rearm_round: c["round"].as_u64().map(|r| r as u32),
         };
-        for case in v["cases"].as_array().unwrap() {
+        let cases = v["cases"].as_array().unwrap();
+        assert!(
+            cases.len() >= 13,
+            "the vector carries the re-arm round cases"
+        );
+        for case in cases {
             let mut ledger = Ledger::new_as_operator(test_pubkey(), test_pubkey_2().to_string(), 0);
             ledger.state.quorum_state = QuorumState::Active;
+            if let Some(r) = case["ruleset"].as_str() {
+                ledger.state.active_ruleset_name = r.to_string();
+            }
             ledger.state.dispute_state = deposits_protocol::DisputeState::Armed;
+            ledger.state.arm_round = Some(case["prior"]["round"].as_u64().unwrap_or(1) as u32);
+            if case["yield_between"].as_bool() == Some(true) {
+                ledger.state.dispute_state = deposits_protocol::DisputeState::Tombstoned;
+            }
+            if case["acquire_between"].as_bool() == Some(true) {
+                ledger.state.dispute_state = deposits_protocol::DisputeState::Normal;
+            }
             ledger.history = vec![SignedLedgerUpdate {
                 message: arm(&case["prior"]).tlv_encode(),
                 message_type: 1,
@@ -2677,7 +2737,15 @@ mod tests {
                 operator_signature: [7u8; 64],
                 cosignatures: Vec::new(),
             }];
-            let got = ledger.validate_operation(&arm(&case["next"]));
+            let next = arm(&case["next"]);
+            let got = if ledger.dispute_state_allows(&next) {
+                ledger.validate_operation(&next)
+            } else {
+                Err(DepositsError::ProtocolViolation {
+                    violation_type: "dispute_state_violation".into(),
+                    details: format!("{:?}", ledger.state.dispute_state),
+                })
+            };
             assert_eq!(
                 got.is_ok(),
                 case["ok"].as_bool().unwrap(),

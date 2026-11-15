@@ -988,6 +988,7 @@ fn taken_over() -> Vec<SignedLedgerUpdate> {
             commitment_hash: [0; 20],
             target_reserves: "bcrt1qnew".into(),
             replacement_collateral: None,
+            rearm_round: None,
         },
         LedgerOperation::DisputeAcquire {
             new_custodian: pubkey(SUCCESSOR),

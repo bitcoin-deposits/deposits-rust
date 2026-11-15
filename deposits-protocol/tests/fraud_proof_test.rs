@@ -2562,6 +2562,7 @@ mod winner_collateral_deviation_tests {
             commitment_hash: [0xAB; 20],
             target_reserves: target_address.into(),
             replacement_collateral: rc,
+            rearm_round: None,
         };
         let message = op.tlv_encode();
         let update = SignedLedgerUpdate {

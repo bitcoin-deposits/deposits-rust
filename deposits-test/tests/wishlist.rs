@@ -547,6 +547,7 @@ fn tier3_3_lottery_griefing() {
             commitment_hash: [0xBB; 20], // bob's commitment
             target_reserves: "bcrt1qbob".into(),
             replacement_collateral: None,
+            rearm_round: None,
         })
         .unwrap();
 

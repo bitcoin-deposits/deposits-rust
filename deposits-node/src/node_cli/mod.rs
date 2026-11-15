@@ -1159,7 +1159,8 @@ pub async fn republish_ledger_advertisements(node: &Node) -> usize {
                 // Nov 7..10).
                 let is_fork = crate::node::fork_publish::fork_key_last_valid_seq(lid).is_some();
                 matches!(l.role, deposits_core::ledger::LedgerRole::Operator)
-                    && (!is_fork || l.state.dispute_state == deposits_core::types::DisputeState::Normal)
+                    && (!is_fork
+                        || l.state.dispute_state == deposits_core::types::DisputeState::Normal)
             })
             .map(|(lid, arc)| {
                 // Ads are keyed by the ledger id, a fork's included.

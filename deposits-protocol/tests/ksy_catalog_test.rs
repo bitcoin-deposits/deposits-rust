@@ -1015,6 +1015,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 commitment_hash: h20(),
                 target_reserves: "bcrt1qtarget".into(),
                 replacement_collateral: None,
+                rearm_round: None,
             },
         ),
         (

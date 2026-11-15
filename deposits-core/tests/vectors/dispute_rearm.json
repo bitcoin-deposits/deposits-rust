@@ -1,5 +1,5 @@
 {
-  "description": "DEP-03 re-arm on one armer's fork: a later DisputeArmed must repeat the commitment_hash and must declare replacement collateral; a fresh pledge (collateral after collateral) is allowed. Shared by cl-deposits (inspect/rotation-test.lisp) and deposits-rust (deposits-core ledger tests).",
+  "description": "DEP-03 re-arm on one armer's fork: a later DisputeArmed must repeat the commitment_hash and must declare replacement collateral; a fresh pledge (collateral after collateral) is allowed. Shared by cl-deposits (inspect/rotation-test.lisp) and deposits-rust (deposits-core ledger tests). DEP-06 Phase 4 (strict-lottery-v8, provisional): an arm carrying rearm_round (TLV 366) above the fork's last arm round starts that round with a fresh commitment, from an armed or a yielded fork; a lower round is refused; within a round the rules above hold. Under strict-lottery-v8 (acquire-on-confirm, ruled 2026-11-10) a fork that armed and then published a DisputeAcquire takes a later round's arm: a claim that confirmed would have spent the lottery output, so a later round means it never landed (cases with acquire_between and ruleset).",
   "cases": [
     {
       "name": "a fresh pledge under the same commitment",
@@ -58,6 +58,117 @@
       "next": {
         "commitment": "1111111111111111111111111111111111111111",
         "collateral": false
+      },
+      "ok": false
+    },
+    {
+      "name": "a round-2 arm with a fresh commitment after round 1",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "ok": true
+    },
+    {
+      "name": "a round-2 arm after a yield",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "yield_between": true,
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "ok": true
+    },
+    {
+      "name": "a round-1 arm after a round-2 arm",
+      "prior": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "ok": false
+    },
+    {
+      "name": "within round 2, a changed commitment",
+      "prior": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true,
+        "round": 2
+      },
+      "ok": false
+    },
+    {
+      "name": "a round-1 arm after a yield",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "yield_between": true,
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true
+      },
+      "ok": false
+    },
+    {
+      "name": "strict-lottery-v8: a round-2 arm after an acquire whose claim never landed",
+      "ruleset": "strict-lottery-v8",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "acquire_between": true,
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "ok": true
+    },
+    {
+      "name": "grounded-arms-v7: an acquire closes the fork to a later round",
+      "ruleset": "grounded-arms-v7",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "acquire_between": true,
+      "next": {
+        "commitment": "2222222222222222222222222222222222222222",
+        "collateral": true,
+        "round": 2
+      },
+      "ok": false
+    },
+    {
+      "name": "strict-lottery-v8: after an acquire, no further arm of the same round",
+      "ruleset": "strict-lottery-v8",
+      "prior": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
+      },
+      "acquire_between": true,
+      "next": {
+        "commitment": "1111111111111111111111111111111111111111",
+        "collateral": true
       },
       "ok": false
     }

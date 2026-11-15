@@ -702,6 +702,7 @@ pub mod ledger_repair;
 pub mod lottery_recovery;
 pub mod main_loop;
 pub mod operations;
+pub mod rearm;
 pub mod replacement_collateral;
 pub mod request_handlers;
 pub mod vault_watch;

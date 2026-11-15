@@ -1682,6 +1682,13 @@ impl Node {
                     };
                 let _ = preimage_was_persisted;
 
+                if redteam_no_arm() {
+                    tracing::info!(
+                        "DEPOSITS_REDTEAM_NO_ARM: not arming {}",
+                        &ledger_id[..16.min(ledger_id.len())]
+                    );
+                    return Ok(());
+                }
                 match dispute_armed_op(
                     current_block,
                     commitment_hash,
@@ -2050,20 +2057,31 @@ impl Node {
         // include us, as the rebuild does (at most 8 armers), and take the one that pays.
         if located.is_none() && ctx.participants.len() > 1 && ctx.participants.len() <= 8 {
             let n = ctx.participants.len();
-            let ours = ctx.participants.iter().position(|(pk, _)| *pk == our_pubkey);
+            let ours = ctx
+                .participants
+                .iter()
+                .position(|(pk, _)| *pk == our_pubkey);
             if let Some(ours) = ours {
                 for mask in (1u32..(1u32 << n) - 1).rev() {
                     if mask & (1 << ours) == 0 {
                         continue;
                     }
                     let sub = super::lottery_recovery::LotteryContext {
-                        participants: (0..n).filter(|i| mask & (1 << i) != 0).map(|i| ctx.participants[i].clone()).collect(),
-                        preimages: (0..n).filter(|i| mask & (1 << i) != 0).map(|i| ctx.preimages[i].clone()).collect(),
+                        participants: (0..n)
+                            .filter(|i| mask & (1 << i) != 0)
+                            .map(|i| ctx.participants[i].clone())
+                            .collect(),
+                        preimages: (0..n)
+                            .filter(|i| mask & (1 << i) != 0)
+                            .map(|i| ctx.preimages[i].clone())
+                            .collect(),
                         recovery_voters: ctx.recovery_voters.clone(),
                         recovery_threshold: ctx.recovery_threshold,
                         our_armed: ctx.our_armed.clone(),
                     };
-                    let Ok(l) = sub.build_lottery(self.wallet.network()) else { continue };
+                    let Ok(l) = sub.build_lottery(self.wallet.network()) else {
+                        continue;
+                    };
                     if let Some(found) = self.locate_lottery_output(&l)? {
                         tracing::info!(
                             "Lottery for {}: the landed output pays a subset of the arms ({} of {})",
@@ -4798,6 +4816,7 @@ mod recovery_chaining_tests {
                 commitment_hash: [9u8; 20],
                 target_reserves: "bcrt1qwinner".to_string(),
                 replacement_collateral: None,
+                rearm_round: None,
             },
             u4.chain_hash(),
         );
@@ -4977,6 +4996,15 @@ pub(crate) fn allow_uncollateralized_arm() -> bool {
     )
 }
 
+/// Testing only (`DEPOSITS_REDTEAM_NO_ARM=1`): never arm, so the node is a recovery voter
+/// and not a lottery participant (redteam/check-rearm-mixed.sh).
+pub(crate) fn redteam_no_arm() -> bool {
+    matches!(
+        std::env::var("DEPOSITS_REDTEAM_NO_ARM").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// What to do with a (re-)arm, given the collateral lookup.
 #[derive(Debug)]
 pub(crate) enum ArmDecision {
@@ -5019,6 +5047,7 @@ pub(crate) fn dispute_armed_op(
         commitment_hash,
         target_reserves,
         replacement_collateral,
+        rearm_round: None,
     })
 }
 

@@ -69,6 +69,7 @@ fn dispute_arm_requires_disputed_state() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: None,
+        rearm_round: None,
     };
     let result = net.op_mut("alice").ledger.apply_operation(&arm_op);
     assert!(
@@ -116,6 +117,7 @@ fn dispute_arm_after_enter_succeeds() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: None,
+        rearm_round: None,
     };
     net.op_mut("alice").ledger.apply_operation(&arm_op).unwrap();
 
@@ -155,6 +157,7 @@ fn dispute_acquire_returns_to_normal() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: None,
+        rearm_round: None,
     };
     net.op_mut("alice").ledger.apply_operation(&arm_op).unwrap();
 
@@ -209,6 +212,7 @@ fn dispute_yield_tombstones_ledger() {
         commitment_hash: [0xAA; 20],
         target_reserves: "bcrt1qtarget".to_string(),
         replacement_collateral: None,
+        rearm_round: None,
     };
     net.op_mut("alice").ledger.apply_operation(&arm_op).unwrap();
 

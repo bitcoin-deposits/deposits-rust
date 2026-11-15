@@ -155,24 +155,49 @@ pub(crate) fn parse_unsigned_tx(bytes: &[u8]) -> Result<Transaction, String> {
 
 /// Operation discriminants (`t` tag) a lottery is rebuilt from: LedgerOpen,
 /// QuorumBegin, DisputeArmed.
-pub(crate) const LOTTERY_OP_TYPES: [u8; 3] = [1, 12, 57];
+/// LedgerOpen, QuorumBegin, QuorumUpgrade, DisputeEnter, DisputeArmed. The DisputeEnters and the
+/// ruleset ops are what the recovery voters and the cut are judged from: without them the ruleset at
+/// the fork point read as none, so under strict-lottery-v8 the voters kept the accused and the
+/// derived lottery was not the one cl paid (751e6951's ref6, signet soak Nov 7..10).
+pub(crate) const LOTTERY_OP_TYPES: [u8; 5] = [1, 12, 45, 54, 57];
+
+/// The `last_valid_sequence` of each DisputeEnter in `updates` whose update is not among them.
+pub(crate) fn missing_fork_points(updates: &[deposits_core::SignedLedgerUpdate]) -> Vec<u64> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+    let mut out: Vec<u64> = updates
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some(last_valid_sequence),
+            _ => None,
+        })
+        .filter(|s| !updates.iter().any(|u| u.sequence_number == *s))
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
 
 /// Whether `updates` hold what a lottery is rebuilt from: the LedgerOpen,
-/// a QuorumBegin and at least one DisputeArmed. A `t`-filtered fetch that
+/// a QuorumBegin, a DisputeEnter and at least one DisputeArmed. A `t`-filtered fetch that
 /// misses any of them (an update published without the tag) falls back to
 /// the whole chain.
 pub(crate) fn lottery_updates_complete(updates: &[deposits_core::SignedLedgerUpdate]) -> bool {
     use deposits_core::messages::LedgerOperation;
-    let (mut open, mut qb, mut armed) = (false, false, false);
+    let (mut open, mut qb, mut entered, mut armed) = (false, false, false, false);
     for u in updates {
         match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::LedgerOpen { .. }) => open = true,
             Ok(LedgerOperation::QuorumBegin { .. }) => qb = true,
+            Ok(LedgerOperation::DisputeEnter { .. }) => entered = true,
             Ok(LedgerOperation::DisputeArmed { .. }) => armed = true,
             _ => {}
         }
     }
-    open && qb && armed
+    open && qb && entered && armed
 }
 
 /// For each participant, the revealed preimage whose HASH160 is its
@@ -354,7 +379,21 @@ impl Node {
             .fetch_ledger_updates_paginated_filtered(ledger_id, &LOTTERY_OP_TYPES)
             .await;
         if lottery_updates_complete(&updates) {
-            return updates;
+            // The grounds of a DisputeEnter are judged against the operator of the update at
+            // its `last_valid_sequence` (`dispute_enter_grounds`), which no op-type tag
+            // selects: without it every punitive DisputeEnter read as "its proof does not
+            // accuse the operator at its fork point", nothing was accused, and under
+            // strict-lottery-v8 the voters kept the accused (rearm-mixed, 2026-11-14).
+            let missing = missing_fork_points(&updates);
+            if missing.is_empty() {
+                return updates;
+            }
+            if let Some(found) = self.local_updates_at(ledger_id, &missing) {
+                let mut updates = updates;
+                updates.extend(found);
+                updates.sort_by_key(|u| u.sequence_number);
+                return updates;
+            }
         }
         tracing::debug!(
             "Lottery ops for {} incomplete by op-type tag ({} found); fetching the whole chain",
@@ -362,6 +401,26 @@ impl Node {
             updates.len()
         );
         self.fetch_all_ledger_updates_paginated(ledger_id).await
+    }
+
+    /// The base ledger's updates at `seqs`, from the ledger we hold (its in-memory history,
+    /// then the disk log); `None` unless every one is found.
+    fn local_updates_at(
+        &self,
+        ledger_id: &str,
+        seqs: &[u64],
+    ) -> Option<Vec<deposits_core::SignedLedgerUpdate>> {
+        let history = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let l = ledgers.get(ledger_id)?.read().unwrap();
+            l.history.clone()
+        };
+        let pick = |h: &[deposits_core::SignedLedgerUpdate]| -> Option<Vec<_>> {
+            seqs.iter()
+                .map(|s| h.iter().find(|u| u.sequence_number == *s).cloned())
+                .collect()
+        };
+        pick(&history).or_else(|| pick(&self.handler.complete_history(ledger_id, history)))
     }
 
     /// Every preimage revealed for `ledger_id` that we can get at. The
@@ -1142,6 +1201,35 @@ mod tests {
     }
 
     #[test]
+    fn a_dispute_enter_s_fork_point_is_fetched_when_no_tag_selected_it() {
+        use deposits_core::messages::LedgerOperation;
+        let enter_at = |lvs: u64, seq: u64| {
+            let mut u = update_with(&LedgerOperation::DisputeEnter {
+                last_valid_sequence: lvs,
+                reason: "r".into(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
+                fraud_proof_hash: None,
+                fraud_proof: None,
+            });
+            u.sequence_number = seq;
+            u
+        };
+        let mut point = update_with(&LedgerOperation::DisputeArmed {
+            armed_block: 1,
+            commitment_hash: [1; 20],
+            target_reserves: "tb1pw".into(),
+            replacement_collateral: None,
+            rearm_round: None,
+        });
+        point.sequence_number = 8;
+        // Two DisputeEnters at fork point 8, one at 5: 8 is held, 5 is not.
+        let ups = [enter_at(8, 9), enter_at(8, 9), enter_at(5, 6), point];
+        assert_eq!(missing_fork_points(&ups), vec![5]);
+        assert_eq!(missing_fork_points(&ups[3..]), Vec::<u64>::new());
+    }
+
+    #[test]
     fn a_tag_filtered_fetch_is_used_only_when_complete() {
         use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
         let open = update_with(&LedgerOperation::LedgerOpen {
@@ -1180,8 +1268,24 @@ mod tests {
             commitment_hash: [1; 20],
             target_reserves: "tb1pw".into(),
             replacement_collateral: None,
+            rearm_round: None,
+        });
+        let enter = update_with(&LedgerOperation::DisputeEnter {
+            last_valid_sequence: 0,
+            reason: "r".into(),
+            anchor_block_hash: None,
+            anchor_block_height: None,
+            fraud_proof_hash: None,
+            fraud_proof: None,
         });
         assert!(lottery_updates_complete(&[
+            open.clone(),
+            qb.clone(),
+            enter.clone(),
+            armed.clone()
+        ]));
+        // Without the DisputeEnter the ruleset at the fork point (and the accused) cannot be read.
+        assert!(!lottery_updates_complete(&[
             open.clone(),
             qb.clone(),
             armed.clone()
@@ -1203,6 +1307,8 @@ mod tests {
                 }
                 .discriminant(),
                 12,
+                45,
+                54,
                 57
             ]
         );

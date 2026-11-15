@@ -98,6 +98,18 @@ pub fn collect_armers(updates: &[SignedLedgerUpdate]) -> Vec<Armer> {
 /// is final"): an arm whose signed header is above `until` does not count, so each armer's
 /// latest arm at or below it is its arm.
 pub fn collect_armers_until(updates: &[SignedLedgerUpdate], until: Option<u32>) -> Vec<Armer> {
+    collect_armers_round(updates, until, 1)
+}
+
+/// DEP-06 Phase 4 (strict-lottery-v8): [`collect_armers_until`] for re-arm round `round`
+/// (`rearm_round`, TLV 366; absent is round 1). The `MAX_ARMS` bound spans every round: an
+/// armer's first `MAX_ARMS` arms by sequence count, and of those, its latest arm of `round`
+/// is its arm in that round. Mirrors cl's `armers-of :round`.
+pub fn collect_armers_round(
+    updates: &[SignedLedgerUpdate],
+    until: Option<u32>,
+    round: u32,
+) -> Vec<Armer> {
     let operator = original_operator(updates);
     // Each armer's first `MAX_ARMS` arms, by sequence; the latest of them counts.
     let mut by_seq: Vec<&SignedLedgerUpdate> = updates.iter().collect();
@@ -112,6 +124,7 @@ pub fn collect_armers_until(updates: &[SignedLedgerUpdate], until: Option<u32>) 
             commitment_hash,
             target_reserves,
             replacement_collateral,
+            rearm_round,
             ..
         }) = LedgerOperation::tlv_decode(&u.message)
         else {
@@ -119,7 +132,7 @@ pub fn collect_armers_until(updates: &[SignedLedgerUpdate], until: Option<u32>) 
         };
         let count = seen_arms.entry(u.operator_id).or_insert(0);
         *count += 1;
-        if *count > MAX_ARMS {
+        if *count > MAX_ARMS || rearm_round.unwrap_or(1) != round {
             continue;
         }
         let armer = Armer {
@@ -587,8 +600,46 @@ pub fn eligible_armers_grounded_at(
     confiscated_at: Option<u32>,
     grounds: &GroundsVerdicts,
 ) -> Result<ArmerSet, String> {
+    cut_armers(
+        chain,
+        updates,
+        last_valid_sequence,
+        collect_armers_until(updates, confiscated_at),
+        confiscated_at,
+        grounds,
+    )
+}
+
+/// DEP-06 Phase 4 step 3 (strict-lottery-v8): re-arm round `round`'s participants, the arms
+/// for that round signed inside the window `(opens, closes]`, through the same grounds,
+/// accused exclusion and eligibility cut as round 1, the window's close standing in for the
+/// confiscation's block. Mirrors cl's `rearm-armers`.
+pub fn eligible_armers_round(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    round: u32,
+    opens: u32,
+    closes: u32,
+    grounds: &GroundsVerdicts,
+) -> Result<ArmerSet, String> {
+    let arms: Vec<Armer> = collect_armers_round(updates, None, round)
+        .into_iter()
+        .filter(|a| opens < a.arm_height && a.arm_height <= closes)
+        .collect();
+    cut_armers(chain, updates, None, arms, Some(closes), grounds)
+}
+
+/// The grounds filter, the accused exclusion and the eligibility split over `arms`.
+fn cut_armers(
+    chain: &dyn ChainBackend,
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: Option<u64>,
+    arms: Vec<Armer>,
+    confiscated_at: Option<u32>,
+    grounds: &GroundsVerdicts,
+) -> Result<ArmerSet, String> {
     let required = required_sats(updates, last_valid_sequence)?;
-    let (armers, ungrounded) = grounds.filter(collect_armers_until(updates, confiscated_at))?;
+    let (armers, ungrounded) = grounds.filter(arms)?;
     // DEP-03 §Lottery: a key the dispute's own grounds convict never wins. Dropped before the
     // cut, so the lottery is the cut of a subset of the arms, which every judge already accepts.
     let mut accused = dispute_accused_keys(updates, grounds);

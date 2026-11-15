@@ -480,6 +480,12 @@ pub struct LedgerState {
     /// Determines which operations are allowed and signature requirements.
     #[serde(default)]
     pub dispute_state: DisputeState,
+    /// DEP-06 Phase 4 (strict-lottery-v8): the re-arm round of this fork's latest
+    /// DisputeArmed (`rearm_round`, TLV 366; round 1 when absent), `None` before any arm.
+    /// A DisputeAcquire leaves it set, so a later round can still reopen an acquire whose
+    /// claim never confirmed (vector `dispute_rearm.json`).
+    #[serde(default)]
+    pub arm_round: Option<u32>,
     /// The pubkey that signed the last update.
     /// All subsequent updates must be signed by this same pubkey (except DisputeEnter).
     /// For Normal state this is typically the operator; for Disputed/Ready it's the dispute opener.
@@ -809,6 +815,7 @@ impl LedgerState {
             chain_tip_hash: [0u8; 32],
             joined_quorums: Vec::new(),
             dispute_state: DisputeState::Normal,
+            arm_round: None,
             parent_pubkey: operator_key,
             quorum_at_fork: Vec::new(),
             dispute_fork_sequence: 0,
@@ -2295,8 +2302,9 @@ impl LedgerState {
                 next.dispute_fork_sequence = *last_valid_sequence;
                 next.dispute_state = DisputeState::Disputed;
             }
-            LedgerOperation::DisputeArmed { .. } => {
+            LedgerOperation::DisputeArmed { rearm_round, .. } => {
                 next.dispute_state = DisputeState::Armed;
+                next.arm_round = Some(rearm_round.unwrap_or(1));
             }
             LedgerOperation::DisputeAcquire {
                 new_custodian,

@@ -2484,6 +2484,7 @@ pub async fn recovery_arm(args: &[String]) -> Result<(), Box<dyn std::error::Err
         commitment_hash,
         target_reserves: target_reserves_addr.clone(),
         replacement_collateral,
+        rearm_round: None,
     };
 
     let message_bytes = custody_armed.tlv_encode();

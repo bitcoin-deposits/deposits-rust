@@ -422,6 +422,7 @@ fn custody_armed() {
         commitment_hash: [0xab; 20],
         target_reserves: "bcrt1qtarget".into(),
         replacement_collateral: None,
+        rearm_round: None,
     });
 }
 
@@ -436,6 +437,7 @@ fn custody_armed_with_replacement_collateral() {
             vout: 7,
             amount: 25_000_000,
         }),
+        rearm_round: None,
     });
 }
 
