@@ -844,6 +844,20 @@ pub fn member_cosigns_post_expiry(
     }
 }
 
+/// Whether a member signs the rungs of a rotation whose `QuorumBegin` is at
+/// `qb_block_height`, judged against the spent vault's quorum expiry (the
+/// state before the `QuorumBegin`), never the new quorum's. Rungs are
+/// establishment: the same opt-out as the cosign, so a member that declined
+/// can't carry the rotation over its threshold with its rung signature.
+/// Vector `post_expiry_rotation.json` (its `rung_sign` cases).
+pub fn rung_sign_policy_allows(
+    qb_block_height: u32,
+    old_quorum_expiry: Option<u32>,
+    cosign_post_expiry: bool,
+) -> bool {
+    member_cosigns_post_expiry(qb_block_height, old_quorum_expiry, true, cosign_post_expiry)
+}
+
 /// What a member does with its own `quorum_expired` dispute (DEP-06 §Race):
 /// `(yield, release_pledge)`. A re-establishment after the fork point ends it
 /// whether or not the member armed: it yields, and its pledge lapses with no

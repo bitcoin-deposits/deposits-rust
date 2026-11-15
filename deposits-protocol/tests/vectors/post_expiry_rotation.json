@@ -1,5 +1,5 @@
 {
-  "description": "DEP-05 §Cosignature Threshold and DEP-06 §Race, a rotation past quorum_expiry (ruled 2026-11-14: \"we can allow it, but we can't require members to sign\"). 'cosign': whether a member signs an op of the given class at block_height; before quorum_expiry always, at or past it only an establishment op (QuorumAddMember, QuorumRemoveMember, QuorumBegin), and that only by the member's own policy (cosign_post_expiry). Refusing is never a fault. 'outcome': what a member does with its own quorum_expired dispute: a QuorumBegin after the dispute's fork point (reestablished) ends it, armed or not: the member yields (DisputeYield) and its pledge lapses with no lottery; a confiscation that confirmed first decides the race, and the dispute runs on.",
+  "description": "DEP-05 §Cosignature Threshold and DEP-06 §Race, a rotation past quorum_expiry. 'rung_sign': the same opt-out for the rotation's rungs, judged at the QuorumBegin's block height against the SPENT vault's quorum expiry; new_quorum_expiry never matters (REVIEW 11) (ruled 2026-11-14: \"we can allow it, but we can't require members to sign\"). 'cosign': whether a member signs an op of the given class at block_height; before quorum_expiry always, at or past it only an establishment op (QuorumAddMember, QuorumRemoveMember, QuorumBegin), and that only by the member's own policy (cosign_post_expiry). Refusing is never a fault. 'outcome': what a member does with its own quorum_expired dispute: a QuorumBegin after the dispute's fork point (reestablished) ends it, armed or not: the member yields (DisputeYield) and its pledge lapses with no lottery; a confiscation that confirmed first decides the race, and the dispute runs on.",
   "cosign": [
     {"name": "before expiry, a transfer", "block_height": 5000, "quorum_expiry": 5874, "establishment": false, "cosign_post_expiry": true, "cosign": true},
     {"name": "before expiry, a QuorumBegin, policy refuses: the policy only speaks past expiry", "block_height": 5000, "quorum_expiry": 5874, "establishment": true, "cosign_post_expiry": false, "cosign": true},
@@ -15,5 +15,10 @@
     {"name": "re-established, never armed: yield too (signet soak 2026-11-14: three reference disputes on J left open)", "armed": false, "reestablished": true, "confiscation_confirmed": false, "yield": true, "release_pledge": true},
     {"name": "re-established after the confiscation confirmed: the chain decided, the dispute runs on", "armed": true, "reestablished": true, "confiscation_confirmed": true, "yield": false, "release_pledge": false},
     {"name": "confiscation confirmed, never re-established", "armed": false, "reestablished": false, "confiscation_confirmed": true, "yield": false, "release_pledge": false}
+  ],
+  "rung_sign": [
+    {"name": "QuorumBegin before the spent vault's expiry, member opted out: the policy only speaks past expiry", "qb_block_height": 5800, "old_quorum_expiry": 5881, "new_quorum_expiry": 10201, "cosign_post_expiry": false, "sign": true},
+    {"name": "QuorumBegin past the spent vault's expiry, default policy", "qb_block_height": 5885, "old_quorum_expiry": 5881, "new_quorum_expiry": 10205, "cosign_post_expiry": true, "sign": true},
+    {"name": "QuorumBegin past the spent vault's expiry, member opted out: refused, though the new quorum's expiry is far ahead (REVIEW 11)", "qb_block_height": 5885, "old_quorum_expiry": 5881, "new_quorum_expiry": 10205, "cosign_post_expiry": false, "sign": false}
   ]
 }

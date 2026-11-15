@@ -1148,6 +1148,19 @@ impl Node {
         if !current.contains(&self.node_id) {
             return refuse("not a member of the spent vault".into());
         }
+        // Member policy (REVIEW 11): the opt-out covers the rungs too, judged against the spent
+        // vault's quorum (the state before the QuorumBegin), never the new one, or our signature
+        // could still carry a rotation we declined over its threshold.
+        if !deposits_core::types::rung_sign_policy_allows(
+            qb.block_height,
+            state.quorum_expiry,
+            deposits_core::types::cosign_post_expiry_policy(),
+        ) {
+            return refuse(format!(
+                "member policy: we do not sign the rungs of a rotation past quorum_expiry {:?}",
+                state.quorum_expiry
+            ));
+        }
         // Final: cosigned by the quorum that governs it (its establishment threshold).
         let required =
             deposits_core::cosign_threshold::cosign_requirement(&state, &op, qb.block_height)
