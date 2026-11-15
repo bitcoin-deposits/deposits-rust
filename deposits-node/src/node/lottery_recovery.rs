@@ -319,14 +319,40 @@ impl Node {
                 .chain(set.excluded.iter().map(|(a, _)| a))
                 .map(|a| (a.key, a.participant.clone()))
                 .collect();
-            if let Some(landed) = self.landed_lottery_set(
-                &updates,
-                &participants,
-                &candidates,
-                &voters,
-                threshold,
-                super::armers::first_arm_height(&updates).unwrap_or(set.snapshot),
-            ) {
+            // DEP-03 §Arm manifests: the published arm sets first (a backdated arm or a ninth
+            // armer cannot hide the landed set), then our cut, then the subsets of every arm.
+            let manifests: Vec<Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>> = self
+                .arm_manifests(ledger_id, 1)
+                .await
+                .iter()
+                .filter_map(|m| {
+                    super::armers::collect_manifest_armers(&updates, m, 1, -1, u32::MAX).ok()
+                })
+                .map(|v| v.into_iter().map(|a| (a.key, a.participant)).collect())
+                .collect();
+            if let Some(landed) = manifests
+                .iter()
+                .find_map(|named| {
+                    self.landed_lottery_set(
+                        &updates,
+                        named,
+                        &[],
+                        &voters,
+                        threshold,
+                        super::armers::first_arm_height(&updates).unwrap_or(set.snapshot),
+                    )
+                })
+                .or_else(|| {
+                    self.landed_lottery_set(
+                        &updates,
+                        &participants,
+                        &candidates,
+                        &voters,
+                        threshold,
+                        super::armers::first_arm_height(&updates).unwrap_or(set.snapshot),
+                    )
+                })
+            {
                 participants = landed;
             }
         }
@@ -684,7 +710,7 @@ impl Node {
 
     /// `(signer, signature)` pairs from successful responses to
     /// `request_id` (the relay scan `collect_confiscation_signatures` does).
-    async fn fetch_sign_responses(
+    pub(crate) async fn fetch_sign_responses(
         &self,
         request_id: &str,
     ) -> Vec<(bitcoin::secp256k1::PublicKey, Vec<u8>)> {

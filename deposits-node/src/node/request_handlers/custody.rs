@@ -408,6 +408,35 @@ impl Node {
             "Signed confiscation sighash for ledger {}...",
             ledger_prefix
         );
+        // DEP-03 §Arm manifests: the arm set of what we signed, published by the periodic loop.
+        {
+            let txs: Vec<String> = request
+                .params
+                .get("unsigned_rungs")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .filter(|v: &Vec<String>| !v.is_empty())
+                .or_else(|| {
+                    request
+                        .params
+                        .get("unsigned_tx")
+                        .and_then(|v| v.as_str())
+                        .map(|x| vec![x.to_string()])
+                })
+                .unwrap_or_default();
+            for h in txs {
+                if let Some(tx) = hex::decode(&h)
+                    .ok()
+                    .and_then(|b| bitcoin::consensus::deserialize::<bitcoin::Transaction>(&b).ok())
+                {
+                    crate::node::Node::queue_confiscation_manifest(&request.ledger_id, tx);
+                }
+            }
+        }
         (true, Some(result.to_string()), None)
     }
 

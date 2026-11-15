@@ -1682,22 +1682,38 @@ impl Node {
                     };
                 let _ = preimage_was_persisted;
 
-                if redteam_no_arm() {
+                // Round 1 only: the fork (DisputeEnter) is still signed, persisted and
+                // published below, so the node can arm a later re-arm round (rearm.rs).
+                let decision = if redteam_no_arm() {
                     tracing::info!(
                         "DEPOSITS_REDTEAM_NO_ARM: not arming {}",
                         &ledger_id[..16.min(ledger_id.len())]
                     );
-                    return Ok(());
-                }
-                match dispute_armed_op(
-                    current_block,
-                    commitment_hash,
-                    op_address.to_string(),
-                    lookup,
-                    prior_collateral_was_none || prior_pledge_failed,
-                    allow_uncollateralized_arm(),
-                ) {
-                    ArmDecision::Arm(armed_op) => {
+                    ArmDecision::Refuse("DEPOSITS_REDTEAM_NO_ARM".into())
+                } else {
+                    dispute_armed_op(
+                        current_block,
+                        commitment_hash,
+                        op_address.to_string(),
+                        lookup,
+                        prior_collateral_was_none || prior_pledge_failed,
+                        allow_uncollateralized_arm(),
+                    )
+                };
+                match decision {
+                    ArmDecision::Arm(mut armed_op) => {
+                        // A re-arm (collateral upgrade, failed pledge) of a later round's arm
+                        // stays in that round: the fold refuses a lower round.
+                        if let (
+                            LedgerOperation::DisputeArmed { rearm_round, .. },
+                            Some(LedgerOperation::DisputeArmed {
+                                rearm_round: prior_round,
+                                ..
+                            }),
+                        ) = (&mut armed_op, &prior_arm)
+                        {
+                            *rearm_round = *prior_round;
+                        }
                         fork_ledger
                             .append_operation_with_block(armed_op, current_block, block_hash)
                             .map_err(|e| {
@@ -1877,12 +1893,18 @@ impl Node {
                 return;
             }
         };
-        let preimage_hex = hex::encode(&preimage);
 
         if self.have_revealed_lottery(ledger_id).await {
             tracing::debug!("Already revealed preimage for ledger {}", &ledger_id[..16]);
             return;
         }
+        self.publish_lottery_reveal(ledger_id, &preimage).await;
+    }
+
+    /// Publish `preimage` for `ledger_id`'s lottery: the `lottery_reveal` request (ephemeral) and
+    /// the durable Kind 9106 reveal. Round 1's (`auto_reveal_preimage`) and a re-arm round's.
+    pub(crate) async fn publish_lottery_reveal(&self, ledger_id: &str, preimage: &[u8]) {
+        let preimage_hex = hex::encode(preimage);
 
         tracing::info!(
             "Auto-revealing lottery preimage for ledger {}...",
@@ -1925,7 +1947,7 @@ impl Node {
         // relay does not keep it for anyone who was not listening, or
         // restarts. Kind 9106, signed by our operator key over the reveal
         // digest, is the form cl-deposits verifies and keeps.
-        let digest = crate::nostr::custody_lottery_reveal_digest(ledger_id, &preimage);
+        let digest = crate::nostr::custody_lottery_reveal_digest(ledger_id, preimage);
         match self.handler.signer.bip340_sign(
             &deposits_signer_api::SignContext::no_ledger(
                 deposits_signer_api::SigPurpose::Bip340Untagged,
@@ -1937,7 +1959,7 @@ impl Node {
                     .nostr
                     .publish_signed_custody_lottery_reveal(
                         ledger_id,
-                        &preimage,
+                        preimage,
                         &hex::encode(self.node_id.serialize()),
                         &sig,
                     )
@@ -2171,6 +2193,7 @@ impl Node {
             &our_armed,
             ctx.recovery_voters.clone(),
             ctx.recovery_threshold,
+            None,
         )
         .await
     }
@@ -2189,6 +2212,7 @@ impl Node {
         our_armed: &deposits_core::SignedLedgerUpdate,
         recovery_voters: Vec<bitcoin::secp256k1::XOnlyPublicKey>,
         recovery_threshold: usize,
+        confiscation_txid: Option<[u8; 32]>,
     ) -> Result<bool, Error> {
         use bitcoin::hashes::{sha256, Hash};
         use bitcoin::sighash::{SighashCache, TapSighashType};
@@ -2393,10 +2417,11 @@ impl Node {
             claim_txid: claim_txid_bytes,
             new_reserves_address: winner_participant.target_reserves.clone(),
             // DEP-06: the claim spends the confiscation's lottery output (vout 0).
-            confiscation_txid: Some({
+            // A later re-arm round's claim names round 1's confiscation, as cl's does.
+            confiscation_txid: Some(confiscation_txid.unwrap_or_else(|| {
                 use bitcoin::hashes::Hash;
                 claim_tx.input[0].previous_output.txid.to_byte_array()
-            }),
+            })),
         };
 
         let message_bytes = operation.tlv_encode();
@@ -4225,6 +4250,11 @@ impl Node {
                 .lock()
                 .unwrap()
                 .insert(ledger_prefix.to_string(), pending);
+            // DEP-03 §Arm manifests: the arm set we proposed from.
+            for r in &rungs {
+                self.publish_confiscation_manifest(&ledger_id, r, None)
+                    .await;
+            }
         }
     }
 
@@ -5274,5 +5304,97 @@ impl crate::node::Node {
                 )
             })
             .unwrap_or(false)
+    }
+}
+
+/// DEP-06 Phase 4: arming a re-arm round on our own fork (rearm.rs drives it).
+impl Node {
+    /// Append our DisputeArmed for re-arm round `round` (TLV 366) to our fork, with a fresh
+    /// preimage and a replacement-collateral pledge, and publish it.
+    pub(crate) async fn arm_rearm_round(
+        &self,
+        ledger_id: &str,
+        fork_key: &str,
+        round: u32,
+    ) -> Result<(), String> {
+        use bitcoin::hashes::{hash160, Hash};
+        use deposits_core::messages::LedgerOperation;
+        let fork_arc = self
+            .handler
+            .ledgers
+            .lock()
+            .unwrap()
+            .get(fork_key)
+            .cloned()
+            .ok_or("our fork is gone")?;
+        let required_sats = {
+            use crate::node::replacement_collateral::{
+                compute_required_replacement_sats, CollateralPolicy,
+            };
+            let l = fork_arc.read().unwrap();
+            compute_required_replacement_sats(
+                l.state.total_deposit_balance(),
+                l.state.collateral_amount,
+                l.state.reserves_amount,
+                &CollateralPolicy::default(),
+            )
+            .unwrap_or(0)
+        };
+        let compressed = bitcoin::CompressedPublicKey::from_slice(&self.node_id.serialize())
+            .map_err(|e| e.to_string())?;
+        let op_address = bitcoin::Address::p2wpkh(&compressed, self.wallet.network());
+        let rc = match find_replacement_collateral(
+            &*self.wallet.chain_backend(),
+            op_address.script_pubkey().as_script(),
+            required_sats,
+            &crate::chain_backend::ScanRetry::quick(),
+        )
+        .await
+        .map_err(|e| e.to_string())?
+        {
+            CollateralLookup::Found(rc) => rc,
+            _ => {
+                return Err(format!(
+                    "no collateral of {} sats at {}",
+                    required_sats, op_address
+                ))
+            }
+        };
+        let preimage = self
+            .round_preimage(ledger_id, round)
+            .ok_or("no preimage for the round")?;
+        let commitment_hash: [u8; 20] = *hash160::Hash::hash(&preimage).as_byte_array();
+        let block = self.wallet.get_block_height().map_err(|e| e.to_string())?;
+        let block_hash = self.wallet.get_block_hash().map_err(|e| e.to_string())?;
+        {
+            let mut fork = fork_arc.write().unwrap();
+            fork.append_operation_with_block(
+                LedgerOperation::DisputeArmed {
+                    armed_block: block,
+                    commitment_hash,
+                    target_reserves: op_address.to_string(),
+                    replacement_collateral: Some(rc),
+                    rearm_round: Some(round),
+                },
+                block,
+                block_hash,
+            )
+            .map_err(|e| format!("{:?}", e))?;
+            if let Some(u) = fork.history.last_mut() {
+                u.operator_id = self.node_id;
+            }
+        }
+        self.sign_last_update(fork_key).map_err(|e| e.to_string())?;
+        if let Err(e) = self.handler.persist_ledger_to_disk(fork_key) {
+            tracing::error!("Failed to persist fork ledger: {}", e);
+        }
+        tracing::info!(
+            "re-arm {}: lottery round {} unclaimed; armed round {}",
+            &ledger_id[..16],
+            round - 1,
+            round
+        );
+        let _ = self.publish_fork(fork_key).await;
+        Ok(())
     }
 }

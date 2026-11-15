@@ -3837,6 +3837,42 @@ impl NostrTransport {
         Ok(event_id)
     }
 
+    /// DEP-03 §Arm manifests: a Challenge Answer (Kind 9112) carrying the arm set (`round`, `arms`
+    /// [{armer, seq}]) the spend `txid_hex` was built from, and no updates.
+    pub async fn publish_arm_manifest_event(
+        &self,
+        ledger_id: &str,
+        txid_hex: &str,
+        anchor_hex: &str,
+        round: u32,
+        arms: &[serde_json::Value],
+    ) -> Result<String, Error> {
+        let content = serde_json::json!({
+            "challenged_ledger_id": ledger_id,
+            "txid": txid_hex,
+            "anchor": anchor_hex,
+            "updates": [],
+            "round": round,
+            "arms": arms,
+        });
+        let event = EventBuilder::new(Kind::Custom(KIND_CHALLENGE_ANSWER), content.to_string())
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_REQ),
+                [ledger_id],
+            ))
+            .tag(Tag::custom(
+                TagKind::SingleLetter(TAG_LEDGER_ID),
+                [ledger_tag(ledger_id)],
+            ))
+            .sign_with_keys(&self.keys)
+            .map_err(|e| Error::Nostr(format!("Failed to sign arm manifest: {}", e)))?;
+        let event_id = event.id.to_hex();
+        self.send_event_with_timeout(event)
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to publish arm manifest: {}", e)))?;
+        Ok(event_id)
+    }
+
     /// DEP-06 §Spend challenge: the challenges (Kind 9111) or answers (Kind 9112) published
     /// for spends of `ledger_id`'s vault, as their JSON contents.
     pub async fn fetch_spend_challenge_events(

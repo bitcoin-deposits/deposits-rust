@@ -19,6 +19,7 @@ use bitcoin::OutPoint;
 use deposits_core::tapscript_reserves::{
     rearm_round_opens, rearm_round_window, LotteryOutput, LotteryParticipant, LotteryScriptBuilder,
 };
+use std::collections::HashMap;
 
 /// The arm window, in blocks, when no quorum member names one (cl's
 /// `*default-dispute-arm-blocks*`).
@@ -42,6 +43,8 @@ pub(crate) struct RoundLottery {
     pub height: u32,
     /// Whether any of the round's participants has revealed.
     pub revealed: bool,
+    /// Round 1's confiscation: a later round's DisputeAcquire names it, as cl's does.
+    pub confiscation_txid: bitcoin::Txid,
 }
 
 /// The public state a re-arm decision is made from.
@@ -151,13 +154,10 @@ impl Node {
     ) -> Result<Option<(LotteryOutput, Vec<LotteryParticipant>)>, String> {
         let chain = self.wallet.chain_backend();
         let o = rearm_round_opens(prev_height, prev_revealed);
-        let arms = super::armers::collect_armers_round(&view.updates, None, round);
+        let rows = super::armers::arm_rows(&view.updates);
         let cut_err: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
         let cut = |opens: u32, closes: u32| -> Option<Vec<LotteryParticipant>> {
-            if !arms
-                .iter()
-                .any(|a| opens < a.arm_height && a.arm_height <= closes)
-            {
+            if super::armers::pick_round_arms(&rows, round, opens, closes).is_empty() {
                 return None;
             }
             match super::armers::eligible_armers_round(
@@ -191,6 +191,90 @@ impl Node {
             self.wallet.network(),
         )?;
         Ok(Some((lottery, participants)))
+    }
+
+    /// The arm set (key, arm sequence per participant) of round `round`'s cut, as
+    /// [`Self::rearm_round_lottery`] picks it: the manifest its spend's signers publish.
+    pub(crate) fn rearm_round_arm_set(
+        &self,
+        view: &RearmView,
+        round: u32,
+        prev_height: u32,
+        prev_revealed: bool,
+        tip: u32,
+    ) -> Option<Vec<(bitcoin::secp256k1::PublicKey, u64)>> {
+        let chain = self.wallet.chain_backend();
+        let o = rearm_round_opens(prev_height, prev_revealed);
+        let rows = super::armers::arm_rows(&view.updates);
+        let set_at = |opens: u32, closes: u32| {
+            if super::armers::pick_round_arms(&rows, round, opens, closes).is_empty() {
+                return None;
+            }
+            super::armers::eligible_armers_round(
+                &*chain,
+                &view.updates,
+                round,
+                opens,
+                closes,
+                &view.grounds,
+            )
+            .ok()
+            .filter(|s| !s.participants.is_empty())
+        };
+        let (_, opens, closes) =
+            rearm_round_window(o, view.arm_window, tip, |a, b| set_at(a, b).is_some())?;
+        Some(
+            set_at(opens, closes)?
+                .participants
+                .iter()
+                .map(|a| (a.key, a.arm_seq))
+                .collect(),
+        )
+    }
+
+    /// Round `round`'s lottery from a published arm manifest: one valid in a window of the round
+    /// (opening at `o`) that closed at or before `spend_height`, whose lottery pays `spk`.
+    pub(crate) async fn manifest_round_lottery(
+        &self,
+        ledger_id: &str,
+        view: &RearmView,
+        round: u32,
+        o: u32,
+        spend_height: u32,
+        spk: &bitcoin::ScriptBuf,
+    ) -> Option<(LotteryOutput, Vec<LotteryParticipant>)> {
+        let manifests = self.arm_manifests(ledger_id, round).await;
+        for m in &manifests {
+            for j in 0.. {
+                let (opens, closes) =
+                    deposits_core::tapscript_reserves::rearm_window_nth(o, view.arm_window, j);
+                if closes > spend_height {
+                    break;
+                }
+                let Ok(named) = super::armers::collect_manifest_armers(
+                    &view.updates,
+                    m,
+                    round,
+                    opens as i64,
+                    closes,
+                ) else {
+                    continue;
+                };
+                let participants: Vec<LotteryParticipant> =
+                    named.into_iter().map(|a| a.participant).collect();
+                if let Ok(l) = lottery_over(
+                    participants.clone(),
+                    &view.voters,
+                    view.threshold,
+                    self.wallet.network(),
+                ) {
+                    if &l.script_pubkey() == spk {
+                        return Some((l, participants));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// The dispute's newest unspent lottery output: round 1's (the confiscation's first
@@ -291,6 +375,7 @@ impl Node {
                     value,
                     height,
                     revealed,
+                    confiscation_txid: confiscation.compute_txid(),
                 }));
             }
             if round >= MAX_ROUNDS {
@@ -314,14 +399,33 @@ impl Node {
             if spend.input.len() != 1 || spend.output.len() != 1 {
                 return Ok(None);
             }
-            let Some((next, participants)) =
-                self.rearm_round_lottery(view, round + 1, height, revealed, spend_height)?
-            else {
-                return Ok(None);
+            // DEP-03 §Arm manifests (DEP-06 Phase 4 step 5): the next round is the output the
+            // confirmed spend pays, its set named by a valid published manifest for the round;
+            // re-deriving the window's cut (each armer's latest in-window arm) is the fallback.
+            let from_manifest = self
+                .manifest_round_lottery(
+                    ledger_id,
+                    view,
+                    round + 1,
+                    rearm_round_opens(height, revealed),
+                    spend_height,
+                    &spend.output[0].script_pubkey,
+                )
+                .await;
+            let (next, participants) = match from_manifest {
+                Some(x) => x,
+                None => {
+                    let Some((next, participants)) =
+                        self.rearm_round_lottery(view, round + 1, height, revealed, spend_height)?
+                    else {
+                        return Ok(None);
+                    };
+                    if spend.output[0].script_pubkey != next.script_pubkey() {
+                        return Ok(None);
+                    }
+                    (next, participants)
+                }
             };
-            if spend.output[0].script_pubkey != next.script_pubkey() {
-                return Ok(None);
-            }
             revealed = super::lottery_recovery::match_revealed_preimages(
                 &participants
                     .iter()
@@ -357,7 +461,7 @@ impl Node {
     ) -> (bool, Option<String>, Option<String>) {
         let ledger_prefix = &request.ledger_id[..16.min(request.ledger_id.len())];
         match self.check_lottery_rearm_sign(request).await {
-            Ok((sighash, round, tier)) => {
+            Ok((sighash, round, tier, spend, arms)) => {
                 use deposits_signer_api::{SigPurpose, SignContext};
                 let signature = match self.handler.signer.bip340_sign(
                     &SignContext::no_ledger(SigPurpose::OnchainSighash),
@@ -376,6 +480,9 @@ impl Node {
                     "signer": self.node_id_hex.clone(),
                     "signature": hex::encode(signature),
                 });
+                // DEP-03 §Arm manifests: the arm set of the round the spend pays into.
+                self.publish_arm_manifest(&request.ledger_id, &spend, round + 1, &arms)
+                    .await;
                 (true, Some(result.to_string()), None)
             }
             Err(reason) => {
@@ -392,7 +499,16 @@ impl Node {
     async fn check_lottery_rearm_sign(
         &self,
         request: &crate::nostr::LedgerRequest,
-    ) -> Result<([u8; 32], u32, usize), String> {
+    ) -> Result<
+        (
+            [u8; 32],
+            u32,
+            usize,
+            bitcoin::Transaction,
+            Vec<(bitcoin::secp256k1::PublicKey, u64)>,
+        ),
+        String,
+    > {
         use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
         use bitcoin::taproot::{LeafVersion, TapLeafHash};
         let p = &request.params;
@@ -482,7 +598,528 @@ impl Node {
         if sighash != claimed {
             return Err("sighash mismatch".into());
         }
-        Ok((sighash, cur.round, tier))
+        let arms = self
+            .rearm_round_arm_set(&view, cur.round + 1, cur.height, cur.revealed, tip)
+            .unwrap_or_default();
+        Ok((sighash, cur.round, tier, ours, arms))
+    }
+}
+
+/// A re-arm spend this node proposed, collecting the other voters' signatures over later passes
+/// (non-blocking, as `subset_attestations`).
+struct PendingRearm {
+    request_id: String,
+    sighash: [u8; 32],
+    tier: usize,
+    signatures: HashMap<XOnlyPublicKey, [u8; 64]>,
+    created_at: std::time::Instant,
+}
+
+/// What a pass over one dispute found, for its back-off.
+pub(crate) enum RearmPass {
+    Progress,
+    Idle,
+    NoOutput,
+}
+
+/// How long a `lottery_rearm_sign` request is waited on before the next open tier is tried.
+const REARM_SIGN_WAIT_SECS: u64 = 90;
+/// Seconds between two passes over one dispute (each fetches the ledger's chain).
+const REARM_PASS_SECS: u64 = 30;
+
+fn pending_rearms() -> &'static std::sync::Mutex<HashMap<String, PendingRearm>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<HashMap<String, PendingRearm>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+fn next_rearm_pass() -> &'static std::sync::Mutex<HashMap<String, std::time::Instant>> {
+    static P: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+        std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+/// (ledger, round, what): reveals published and yields made, once each.
+fn rearm_done() -> &'static std::sync::Mutex<std::collections::HashSet<(String, u32, &'static str)>>
+{
+    static P: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashSet<(String, u32, &'static str)>>,
+    > = std::sync::OnceLock::new();
+    P.get_or_init(Default::default)
+}
+
+/// Our preimage for re-arm round `round` from round 1's seed: a fresh preimage per round (cl's
+/// `lottery-seed` takes the round too); round 1's is unchanged. Implementation-private: only
+/// its HASH160 is public, in the round's DisputeArmed.
+pub(crate) fn round_seed(round1_seed: &[u8; 32], round: u32) -> [u8; 32] {
+    use bitcoin::hashes::{sha256, Hash, HashEngine};
+    if round <= 1 {
+        return *round1_seed;
+    }
+    let mut e = sha256::Hash::engine();
+    e.input(b"deposits/rust/lottery-seed/rearm-round/v1");
+    e.input(round1_seed);
+    e.input(&round.to_le_bytes());
+    sha256::Hash::from_engine(e).to_byte_array()
+}
+
+impl Node {
+    /// Our lottery preimage for `ledger_id`'s re-arm round `round`.
+    pub(crate) fn round_preimage(&self, ledger_id: &str, round: u32) -> Option<Vec<u8>> {
+        if round <= 1 {
+            return self.own_lottery_preimage(ledger_id);
+        }
+        let fork_key = self.handler.find_our_fork(ledger_id)?;
+        let lvs = super::fork_publish::fork_key_last_valid_seq(&fork_key)?;
+        let seed = self
+            .handler
+            .signer
+            .derive_dispute_lottery_preimage(ledger_id, lvs)
+            .ok()?;
+        Some(LotteryOutput::derive_lottery_preimage(&round_seed(
+            &seed, round,
+        )))
+    }
+
+    /// DEP-06 Phase 4 for every dispute we hold a fork in (a yielded one included: a yield ends
+    /// a round, not the dispute). cl's `drive-rearms`.
+    pub(crate) async fn drive_rearms(&self) {
+        self.publish_queued_manifests().await;
+        // Arming, proposing and claiming re-arm rounds are not yet regtest-verified
+        // (cl-deposits redteam/check-rearm-rust.sh): off unless DEPOSITS_REARM_DRIVE=1.
+        if std::env::var("DEPOSITS_REARM_DRIVE").ok().as_deref() != Some("1") {
+            return;
+        }
+        // Only our forks under strict-lottery-v8 (read locally: the pass itself fetches the
+        // ledger's whole chain from the relay).
+        let ids: Vec<String> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(k, _)| k.len() > 64)
+                .filter(|(_, arc)| {
+                    let l = arc.read().unwrap();
+                    l.state.parent_pubkey == self.node_id
+                        && deposits_core::types::ruleset_strict_lottery(
+                            &l.state.active_ruleset_name,
+                        )
+                })
+                .map(|(k, _)| k[..64].to_string())
+                .collect()
+        };
+        for id in ids {
+            {
+                let mut next = next_rearm_pass().lock().unwrap();
+                if next
+                    .get(&id)
+                    .is_some_and(|t| *t > std::time::Instant::now())
+                {
+                    continue;
+                }
+            }
+            // Back off by outcome: 30 s while a round moves, 60 s while nothing is due, 1 h
+            // once the dispute has no unclaimed lottery output (claimed, or none yet).
+            let wait = match self.drive_rearm(&id).await {
+                Ok(RearmPass::Progress) => REARM_PASS_SECS,
+                Ok(RearmPass::Idle) => 60,
+                Ok(RearmPass::NoOutput) => 3600,
+                Err(e) => {
+                    tracing::info!("re-arm {}: {}", &id[..16], e);
+                    300
+                }
+            };
+            next_rearm_pass().lock().unwrap().insert(
+                id.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(wait),
+            );
+        }
+    }
+
+    /// One pass of the re-arm round for `ledger_id` (cl's `drive-rearm`): in a later round we
+    /// are a participant of, reveal and then claim or yield; otherwise arm the next round while
+    /// a window of it is open, and once a window has closed with a non-empty cut, as a recovery
+    /// voter, propose the spend into that round's lottery and gather the signatures.
+    pub(crate) async fn drive_rearm(&self, ledger_id: &str) -> Result<RearmPass, String> {
+        let fork_key = self
+            .handler
+            .find_our_fork(ledger_id)
+            .ok_or("no fork of ours")?;
+        let view = self.rearm_view(ledger_id).await?;
+        if !deposits_core::types::ruleset_strict_lottery(&view.grounds.ruleset) {
+            return Ok(RearmPass::NoOutput);
+        }
+        let Some(cur) = self.current_round_lottery(ledger_id, &view).await? else {
+            return Ok(RearmPass::NoOutput);
+        };
+        let tip = self
+            .wallet
+            .chain_backend()
+            .get_tip_height()
+            .map_err(|e| e.to_string())?;
+        let me = self.node_id.x_only_public_key().0;
+        if cur.round > 1 && cur.lottery.participants.iter().any(|p| p.pubkey == me) {
+            return self
+                .rearm_reveal_and_claim(ledger_id, &fork_key, &view, &cur, tip)
+                .await
+                .map(|_| RearmPass::Progress);
+        }
+        // Round 1 is claimed or yielded by its own path (auto_lottery_claim_or_yield); a round
+        // re-arms only once that round's reveal deadline has passed unclaimed.
+        let due = self.rearm_round_lottery(&view, cur.round + 1, cur.height, cur.revealed, tip)?;
+        match due {
+            None => {
+                let o = rearm_round_opens(cur.height, cur.revealed);
+                let Some((_, wo, wc)) =
+                    deposits_core::tapscript_reserves::rearm_open_window(o, view.arm_window, tip)
+                else {
+                    return Ok(RearmPass::Idle);
+                };
+                let rows = super::armers::arm_rows(&view.updates);
+                let ours: Vec<_> = rows.iter().filter(|r| r.armer == self.node_id).collect();
+                let armed_here = super::armers::pick_round_arms(&rows, cur.round + 1, wo, wc)
+                    .into_iter()
+                    .any(|i| rows[i].armer == self.node_id);
+                if armed_here || ours.len() >= super::armers::MAX_ARMS {
+                    return Ok(RearmPass::Progress);
+                }
+                self.arm_rearm_round(ledger_id, &fork_key, cur.round + 1)
+                    .await
+                    .map(|_| RearmPass::Progress)
+                    .map_err(|e| format!("arm round {}: {}", cur.round + 1, e))
+            }
+            Some((next, _)) => {
+                if !cur.lottery.recovery_voters.contains(&me) {
+                    return Ok(RearmPass::Idle);
+                }
+                self.propose_rearm(ledger_id, &view, &cur, &next, tip)
+                    .await
+                    .map(|_| RearmPass::Progress)
+            }
+        }
+    }
+
+    /// As a recovery voter: the re-arm spend of the current round's output into `next`, through
+    /// the first open tier its signers reach; our signature, the others' by `lottery_rearm_sign`
+    /// over later passes, then the witness and the broadcast.
+    async fn propose_rearm(
+        &self,
+        ledger_id: &str,
+        view: &RearmView,
+        cur: &RoundLottery,
+        next: &LotteryOutput,
+        tip: u32,
+    ) -> Result<(), String> {
+        use bitcoin::sighash::{Prevouts, SighashCache, TapSighashType};
+        use bitcoin::taproot::{LeafVersion, TapLeafHash};
+        use deposits_signer_api::{SigPurpose, SignContext};
+        let pfx = &ledger_id[..16];
+        let leaves = cur.lottery.recovery_leaves();
+        let open: Vec<usize> = leaves
+            .iter()
+            .enumerate()
+            .filter(|(_, (csv, _, _))| tip + 1 >= cur.height + csv)
+            .map(|(i, _)| i)
+            .collect();
+        if open.is_empty() {
+            return Ok(());
+        }
+        let order = cur.lottery.recovery_voter_order();
+        let me = self.node_id.x_only_public_key().0;
+        // The tier: the pending request's while it is waited on, else the next open tier after
+        // the one that timed out (tier 0 first).
+        let (tier, fresh) = {
+            let mut pending = pending_rearms().lock().unwrap();
+            match pending.get(ledger_id) {
+                Some(p)
+                    if p.created_at.elapsed().as_secs() < REARM_SIGN_WAIT_SECS
+                        && open.contains(&p.tier) =>
+                {
+                    (p.tier, false)
+                }
+                Some(p) => {
+                    let t = open
+                        .iter()
+                        .copied()
+                        .find(|t| *t > p.tier)
+                        .unwrap_or(open[0]);
+                    pending.remove(ledger_id);
+                    (t, true)
+                }
+                None => (open[0], true),
+            }
+        };
+        let (csv, threshold, leaf) = leaves[tier].clone();
+        let (mut spend, _, _) = cur
+            .lottery
+            .rearm_spend(
+                cur.outpoint,
+                cur.value,
+                tier,
+                next.script_pubkey(),
+                view.feerate,
+            )
+            .map_err(|e| e.to_string())?;
+        let prevouts = [bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(cur.value),
+            script_pubkey: cur.lottery.script_pubkey(),
+        }];
+        let sighash: [u8; 32] = *SighashCache::new(&spend)
+            .taproot_script_spend_signature_hash(
+                0,
+                &Prevouts::All(&prevouts),
+                TapLeafHash::from_script(&leaf, LeafVersion::TapScript),
+                TapSighashType::Default,
+            )
+            .map_err(|e| format!("sighash: {}", e))?
+            .as_ref();
+        if fresh {
+            let mut signatures = HashMap::new();
+            let ours = self
+                .handler
+                .signer
+                .bip340_sign(
+                    &SignContext::no_ledger(SigPurpose::OnchainSighash),
+                    &sighash,
+                )
+                .map_err(|e| format!("re-arm sign: {}", e))?;
+            signatures.insert(me, ours);
+            let request_id = if signatures.len() < threshold {
+                let params = serde_json::json!({
+                    "unsigned_tx": hex::encode(bitcoin::consensus::serialize(&spend)),
+                    "tier": tier,
+                    "sighash": hex::encode(sighash),
+                });
+                let id = self
+                    .nostr
+                    .send_ledger_request(ledger_id, "lottery_rearm_sign", params)
+                    .await
+                    .map_err(|e| format!("send lottery_rearm_sign: {:?}", e))?;
+                self.track_sent_event(&id);
+                tracing::info!(
+                    "re-arm {}: proposed round {}'s spend through tier {} (CSV {}); asking for {} more signature(s)",
+                    pfx,
+                    cur.round + 1,
+                    tier,
+                    csv,
+                    threshold - signatures.len()
+                );
+                id
+            } else {
+                String::new()
+            };
+            pending_rearms().lock().unwrap().insert(
+                ledger_id.to_string(),
+                PendingRearm {
+                    request_id,
+                    sighash,
+                    tier,
+                    signatures,
+                    created_at: std::time::Instant::now(),
+                },
+            );
+        } else {
+            let request_id = pending_rearms()
+                .lock()
+                .unwrap()
+                .get(ledger_id)
+                .map(|p| p.request_id.clone())
+                .unwrap_or_default();
+            let responses = self.fetch_sign_responses(&request_id).await;
+            let msg = bitcoin::secp256k1::Message::from_digest(sighash);
+            let secp = bitcoin::secp256k1::Secp256k1::verification_only();
+            let mut pending = pending_rearms().lock().unwrap();
+            if let Some(p) = pending.get_mut(ledger_id) {
+                if p.sighash != sighash {
+                    pending.remove(ledger_id);
+                    return Ok(());
+                }
+                for (signer, sig) in responses {
+                    let x = signer.x_only_public_key().0;
+                    let ok = order.contains(&x)
+                        && bitcoin::secp256k1::schnorr::Signature::from_slice(&sig)
+                            .map(|s| secp.verify_schnorr(&s, &msg, &x).is_ok())
+                            .unwrap_or(false);
+                    if ok && !p.signatures.contains_key(&x) {
+                        let mut a = [0u8; 64];
+                        a.copy_from_slice(&sig);
+                        p.signatures.insert(x, a);
+                        tracing::info!(
+                            "re-arm {}: signature from {} ({}/{})",
+                            pfx,
+                            &signer.to_string()[..16],
+                            p.signatures.len(),
+                            threshold
+                        );
+                    }
+                }
+            }
+        }
+        // Enough? Exactly `threshold` signatures, the lowest sorted voters' we hold (the fee was
+        // sized for that witness); a threshold-1 leaf names only the lowest sorted voter.
+        let held = pending_rearms()
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .map(|p| p.signatures.clone())
+            .unwrap_or_default();
+        let sigs: Vec<Option<[u8; 64]>> = if threshold == 1 {
+            order
+                .iter()
+                .enumerate()
+                .map(|(i, v)| if i == 0 { held.get(v).copied() } else { None })
+                .collect()
+        } else {
+            let mut n = 0;
+            order
+                .iter()
+                .map(|v| match held.get(v) {
+                    Some(s) if n < threshold => {
+                        n += 1;
+                        Some(*s)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        if sigs.iter().flatten().count() < threshold {
+            return Ok(());
+        }
+        spend.input[0].witness = cur
+            .lottery
+            .recovery_witness(tier, &sigs)
+            .map_err(|e| e.to_string())?;
+        let txid = self
+            .wallet
+            .broadcast(&spend)
+            .map_err(|e| format!("broadcast: {}", e))?;
+        pending_rearms().lock().unwrap().remove(ledger_id);
+        if let Some(arms) =
+            self.rearm_round_arm_set(view, cur.round + 1, cur.height, cur.revealed, tip)
+        {
+            self.publish_arm_manifest(ledger_id, &spend, cur.round + 1, &arms)
+                .await;
+        }
+        tracing::info!(
+            "re-arm {}: lottery round {} unclaimed; spent into round {}'s lottery (tier {}): {}",
+            pfx,
+            cur.round,
+            cur.round + 1,
+            tier,
+            txid
+        );
+        Ok(())
+    }
+
+    /// In a later round we are a participant of: reveal, then claim if we drew it, else yield.
+    async fn rearm_reveal_and_claim(
+        &self,
+        ledger_id: &str,
+        fork_key: &str,
+        view: &RearmView,
+        cur: &RoundLottery,
+        tip: u32,
+    ) -> Result<(), String> {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tapscript_reserves::LOTTERY_REVEAL_CSV_BLOCKS;
+        use deposits_core::tlv::TlvDecode;
+        let pfx = &ledger_id[..16];
+        let round = cur.round;
+        let our_armed = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let l = ledgers
+                .get(fork_key)
+                .ok_or("our fork is gone")?
+                .read()
+                .unwrap();
+            l.history
+                .iter()
+                .rev()
+                .find(|u| {
+                    matches!(
+                        LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::DisputeArmed { rearm_round: Some(r), .. }) if r == round
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| format!("no round-{} arm on our fork", round))?
+        };
+        let preimage = self
+            .round_preimage(ledger_id, round)
+            .ok_or("no preimage for the round")?;
+        let key = (ledger_id.to_string(), round, "reveal");
+        if !rearm_done().lock().unwrap().contains(&key) {
+            self.publish_lottery_reveal(ledger_id, &preimage).await;
+            rearm_done().lock().unwrap().insert(key);
+            tracing::info!(
+                "re-arm {}: round {}'s lottery on chain; revealed",
+                pfx,
+                round
+            );
+        }
+        let parts: Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)> = cur
+            .lottery
+            .participants
+            .iter()
+            .map(|p| {
+                (
+                    bitcoin::secp256k1::PublicKey::from_x_only_public_key(
+                        p.pubkey,
+                        bitcoin::secp256k1::Parity::Even,
+                    ),
+                    p.clone(),
+                )
+            })
+            .collect();
+        let mut revealed = view.revealed.clone();
+        revealed.push(preimage);
+        let preimages = super::lottery_recovery::match_revealed_preimages(&parts, &revealed);
+        let past = tip + 1 >= cur.height + LOTTERY_REVEAL_CSV_BLOCKS;
+        let (subset, ordered, winner) =
+            match super::lottery_recovery::lottery_claim_path(&preimages, past) {
+                super::lottery_recovery::LotteryClaimPath::Wait(why) => {
+                    tracing::debug!("re-arm {}: round {}: {}", pfx, round, why);
+                    return Ok(());
+                }
+                super::lottery_recovery::LotteryClaimPath::Full(pre) => {
+                    let w =
+                        LotteryOutput::calculate_winner(&pre).map_err(|e| format!("{:?}", e))?;
+                    (None, pre, w)
+                }
+                super::lottery_recovery::LotteryClaimPath::Subset(idx, pre) => {
+                    let w =
+                        LotteryOutput::subset_winner(&idx, &pre).map_err(|e| format!("{:?}", e))?;
+                    (Some(idx), pre, w)
+                }
+            };
+        let me = self.node_id.x_only_public_key().0;
+        if parts[winner].1.pubkey != me {
+            let key = (ledger_id.to_string(), round, "yield");
+            if !rearm_done().lock().unwrap().contains(&key) {
+                self.publish_custody_yield(ledger_id, &our_armed)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                rearm_done().lock().unwrap().insert(key);
+                tracing::info!("re-arm {}: re-arm round {}: yielded", pfx, round);
+            }
+            return Ok(());
+        }
+        use bitcoin::hashes::Hash;
+        let claimed = self
+            .claim_lottery(
+                ledger_id,
+                &parts,
+                &ordered,
+                winner,
+                subset.as_deref(),
+                &our_armed,
+                cur.lottery.recovery_voters.clone(),
+                cur.lottery.recovery_threshold,
+                Some(cur.confiscation_txid.to_byte_array()),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        if claimed {
+            tracing::info!("re-arm {}: re-arm round {}: won", pfx, round);
+        }
+        Ok(())
     }
 }
 

@@ -110,6 +110,199 @@ pub fn collect_armers_round(
     until: Option<u32>,
     round: u32,
 ) -> Vec<Armer> {
+    collect_armers_in(updates, until, round, None)
+}
+
+/// One arm, as [`pick_round_arms`] sees it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArmRow<K> {
+    pub armer: K,
+    pub seq: u64,
+    pub height: u32,
+    pub round: u32,
+}
+
+/// DEP-06 Phase 4 step 2: of `arms`, the index of each armer's arm for re-arm round `round` in the
+/// window `(opens, closes]`: the latest (by sequence) of its first [`MAX_ARMS`] arms that is of
+/// `round` and whose signed `block_height` lies inside the window. Arms outside the window, or of
+/// other rounds, count against the bound but never displace an in-window arm: taking the latest
+/// counted arm and filtering it by the window after let a later same-round arm signed past the
+/// close withdraw its armer from a closed window, or empty the cut (2026-11-15). Mirrors cl's
+/// `pick-round-arms`; vector `rearm_window_arms.json`.
+pub fn pick_round_arms<K: std::hash::Hash + Eq + Clone>(
+    arms: &[ArmRow<K>],
+    round: u32,
+    opens: u32,
+    closes: u32,
+) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..arms.len()).collect();
+    order.sort_by_key(|&i| arms[i].seq);
+    let mut counted: HashMap<K, usize> = HashMap::new();
+    let mut chosen: HashMap<K, usize> = HashMap::new();
+    for i in order {
+        let a = &arms[i];
+        let n = counted.entry(a.armer.clone()).or_insert(0);
+        *n += 1;
+        if *n > MAX_ARMS || a.round != round || a.height <= opens || a.height > closes {
+            continue;
+        }
+        chosen.insert(a.armer.clone(), i);
+    }
+    let mut out: Vec<usize> = chosen.into_values().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Every counted-or-not `DisputeArmed` of the dispute's armers (not the original operator), as
+/// [`ArmRow`]s for [`pick_round_arms`].
+pub fn arm_rows(updates: &[SignedLedgerUpdate]) -> Vec<ArmRow<PublicKey>> {
+    let operator = original_operator(updates);
+    updates
+        .iter()
+        .filter(|u| Some(u.operator_id) != operator)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeArmed { rearm_round, .. }) => Some(ArmRow {
+                armer: u.operator_id,
+                seq: u.sequence_number,
+                height: u.block_height,
+                round: rearm_round.unwrap_or(1),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// DEP-06 §Arm manifests (DEP-03, strict-lottery-v8; ruled 2026-11-15, option A): the indices into
+/// `arms` that `manifest` (a list of (armer, seq)) names, or why it is not a valid arm set for
+/// round `round`'s window `(opens, closes]` (round 1: `(-1, C]`). Valid: every entry names an arm,
+/// no armer twice, each arm among its armer's first [`MAX_ARMS`] by sequence (every round), of
+/// `round`, and signed inside the window. Omitting an armer is not a fault. Mirrors cl's
+/// `manifest-arms`; vector `arm_manifest.json`.
+pub fn manifest_arms<K: std::hash::Hash + Eq + Clone + std::fmt::Debug>(
+    arms: &[ArmRow<K>],
+    manifest: &[(K, u64)],
+    round: u32,
+    opens: i64,
+    closes: u32,
+) -> Result<Vec<usize>, String> {
+    if manifest.is_empty() {
+        return Err("empty manifest".into());
+    }
+    let mut by: HashMap<K, Vec<usize>> = HashMap::new();
+    for (i, a) in arms.iter().enumerate() {
+        by.entry(a.armer.clone()).or_default().push(i);
+    }
+    for v in by.values_mut() {
+        v.sort_by_key(|i| arms[*i].seq);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (armer, seq) in manifest {
+        if !seen.insert(armer.clone()) {
+            return Err(format!("armer {:?} named twice", armer));
+        }
+        let list = by.get(armer).map(|v| v.as_slice()).unwrap_or(&[]);
+        let Some(pos) = list.iter().position(|i| arms[*i].seq == *seq) else {
+            return Err(format!("no arm {:?}/{}", armer, seq));
+        };
+        if pos >= MAX_ARMS {
+            return Err(format!(
+                "arm {:?}/{} is past the {}-arm bound",
+                armer, seq, MAX_ARMS
+            ));
+        }
+        let a = &arms[list[pos]];
+        if a.round != round {
+            return Err(format!("arm {:?}/{} is of round {}", armer, seq, a.round));
+        }
+        if !((a.height as i64) > opens && a.height <= closes) {
+            return Err(format!(
+                "arm {:?}/{} signed at {}, outside ({}, {}]",
+                armer, seq, a.height, opens, closes
+            ));
+        }
+        out.push(list[pos]);
+    }
+    Ok(out)
+}
+
+/// The armers a valid manifest names, as [`collect_armers_until`] gives them (sorted by x-only
+/// key), or why the manifest is not valid ([`manifest_arms`]).
+pub fn collect_manifest_armers(
+    updates: &[SignedLedgerUpdate],
+    manifest: &[(PublicKey, u64)],
+    round: u32,
+    opens: i64,
+    closes: u32,
+) -> Result<Vec<Armer>, String> {
+    let operator = original_operator(updates);
+    let mut rows = Vec::new();
+    let mut armed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for u in updates.iter().filter(|u| Some(u.operator_id) != operator) {
+        if let Ok(LedgerOperation::DisputeArmed {
+            commitment_hash,
+            target_reserves,
+            replacement_collateral,
+            rearm_round,
+            ..
+        }) = LedgerOperation::tlv_decode(&u.message)
+        {
+            if !seen.insert((u.operator_id, u.sequence_number)) {
+                continue;
+            }
+            rows.push(ArmRow {
+                armer: u.operator_id,
+                seq: u.sequence_number,
+                height: u.block_height,
+                round: rearm_round.unwrap_or(1),
+            });
+            armed.push(Armer {
+                key: u.operator_id,
+                participant: LotteryParticipant::new(
+                    u.operator_id.x_only_public_key().0,
+                    commitment_hash,
+                    target_reserves,
+                ),
+                arm_height: u.block_height,
+                arm_seq: u.sequence_number,
+                collateral: replacement_collateral,
+            });
+        }
+    }
+    let idx = manifest_arms(&rows, manifest, round, opens, closes)?;
+    let mut out: Vec<Armer> = idx.into_iter().map(|i| armed[i].clone()).collect();
+    out.sort_by_key(|a| a.xonly().serialize());
+    Ok(out)
+}
+
+/// A manifest's JSON `arms` ([{armer, seq}]), as (key, seq); `None` when malformed.
+pub fn parse_manifest(v: &serde_json::Value) -> Option<Vec<(PublicKey, u64)>> {
+    v.as_array()?
+        .iter()
+        .map(|a| {
+            let k = PublicKey::from_slice(&hex::decode(a.get("armer")?.as_str()?).ok()?).ok()?;
+            Some((k, a.get("seq")?.as_u64()?))
+        })
+        .collect()
+}
+
+/// Round `round`'s armers in the window `(opens, closes]` ([`pick_round_arms`]).
+pub fn collect_armers_window(
+    updates: &[SignedLedgerUpdate],
+    round: u32,
+    opens: u32,
+    closes: u32,
+) -> Vec<Armer> {
+    collect_armers_in(updates, None, round, Some((opens, closes)))
+}
+
+fn collect_armers_in(
+    updates: &[SignedLedgerUpdate],
+    until: Option<u32>,
+    round: u32,
+    window: Option<(u32, u32)>,
+) -> Vec<Armer> {
     let operator = original_operator(updates);
     // Each armer's first `MAX_ARMS` arms, by sequence; the latest of them counts.
     let mut by_seq: Vec<&SignedLedgerUpdate> = updates.iter().collect();
@@ -133,6 +326,10 @@ pub fn collect_armers_round(
         let count = seen_arms.entry(u.operator_id).or_insert(0);
         *count += 1;
         if *count > MAX_ARMS || rearm_round.unwrap_or(1) != round {
+            continue;
+        }
+        // In a window, only an arm inside it is a candidate (pick_round_arms).
+        if window.is_some_and(|(o, c)| u.block_height <= o || u.block_height > c) {
             continue;
         }
         let armer = Armer {
@@ -622,10 +819,7 @@ pub fn eligible_armers_round(
     closes: u32,
     grounds: &GroundsVerdicts,
 ) -> Result<ArmerSet, String> {
-    let arms: Vec<Armer> = collect_armers_round(updates, None, round)
-        .into_iter()
-        .filter(|a| opens < a.arm_height && a.arm_height <= closes)
-        .collect();
+    let arms = collect_armers_window(updates, round, opens, closes);
     cut_armers(chain, updates, None, arms, Some(closes), grounds)
 }
 
@@ -1176,6 +1370,118 @@ impl crate::node::Node {
                 .insert(ledger_id.to_string(), set.clone());
         }
         Ok(set)
+    }
+}
+
+#[cfg(test)]
+mod window_arms_vector {
+    use super::{pick_round_arms, ArmRow};
+
+    #[test]
+    fn each_armer_s_in_window_arm_matches_the_shared_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/rearm_window_arms.json"))
+                .unwrap();
+        let mut cases = 0;
+        for c in v["cases"].as_array().unwrap() {
+            let arms: Vec<ArmRow<String>> = c["arms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| ArmRow {
+                    armer: a["armer"].as_str().unwrap().to_string(),
+                    seq: a["seq"].as_u64().unwrap(),
+                    height: a["height"].as_u64().unwrap() as u32,
+                    round: a["round"].as_u64().unwrap() as u32,
+                })
+                .collect();
+            let mut got: Vec<(String, u64)> = pick_round_arms(
+                &arms,
+                c["round"].as_u64().unwrap() as u32,
+                c["opens"].as_u64().unwrap() as u32,
+                c["closes"].as_u64().unwrap() as u32,
+            )
+            .into_iter()
+            .map(|i| (arms[i].armer.clone(), arms[i].seq))
+            .collect();
+            got.sort();
+            let want: Vec<(String, u64)> = c["expect"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["armer"].as_str().unwrap().to_string(),
+                        e["seq"].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(got, want, "{}", c["name"]);
+            cases += 1;
+        }
+        assert_eq!(cases, 8, "every rearm_window_arms case ran");
+    }
+}
+
+#[cfg(test)]
+mod arm_manifest_vector {
+    use super::{manifest_arms, ArmRow};
+
+    #[test]
+    fn manifests_match_the_shared_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/arm_manifest.json")).unwrap();
+        let mut cases = 0;
+        for c in v["cases"].as_array().unwrap() {
+            let arms: Vec<ArmRow<String>> = c["arms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| ArmRow {
+                    armer: a["armer"].as_str().unwrap().to_string(),
+                    seq: a["seq"].as_u64().unwrap(),
+                    height: a["height"].as_u64().unwrap() as u32,
+                    round: a["round"].as_u64().unwrap() as u32,
+                })
+                .collect();
+            let manifest: Vec<(String, u64)> = c["manifest"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| {
+                    (
+                        e["armer"].as_str().unwrap().to_string(),
+                        e["seq"].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            let got = manifest_arms(
+                &arms,
+                &manifest,
+                c["round"].as_u64().unwrap() as u32,
+                c["opens"].as_i64().unwrap(),
+                c["closes"].as_u64().unwrap() as u32,
+            );
+            assert_eq!(
+                got.is_ok(),
+                c["valid"].as_bool().unwrap(),
+                "{}: {:?}",
+                c["name"],
+                got
+            );
+            if let Ok(idx) = got {
+                let mut named: Vec<(String, u64)> = idx
+                    .iter()
+                    .map(|i| (arms[*i].armer.clone(), arms[*i].seq))
+                    .collect();
+                named.sort();
+                let mut want = manifest.clone();
+                want.sort();
+                assert_eq!(named, want, "{}", c["name"]);
+            }
+            cases += 1;
+        }
+        assert_eq!(cases, 11, "every arm_manifest case ran");
     }
 }
 

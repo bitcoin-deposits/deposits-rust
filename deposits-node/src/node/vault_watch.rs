@@ -1153,6 +1153,8 @@ impl crate::Node {
         if !self.authorised_confiscation_spend(id, &tx, height).await {
             return false;
         }
+        // DEP-03 §Arm manifests: the arm set it rebuilds from answers too.
+        self.publish_confiscation_manifest(id, &tx, height).await;
         let updates = self.fetch_all_ledger_updates_paginated(id).await;
         let Some(origin) = updates
             .iter()

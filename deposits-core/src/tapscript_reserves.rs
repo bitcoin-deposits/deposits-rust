@@ -1867,6 +1867,52 @@ impl LotteryOutput {
         Ok((tx, fee, vsize))
     }
 
+    /// DEP-06 Phase 4: the witness of a re-arm (recovery) spend through `tier`, from the voters'
+    /// signatures parallel to [`Self::recovery_voter_order`] (`None` where absent). Above
+    /// threshold 1, one item per voter in reverse sorted order (the leaf's CHECKSIGADD chain
+    /// takes the lowest key last), empty where absent; at threshold 1, the one signature
+    /// present. Then the tier's leaf script and control block. Mirrors cl's
+    /// `lot:recovery-witness`; vector `rearm_witness.txt`.
+    pub fn recovery_witness(
+        &self,
+        tier: usize,
+        signatures: &[Option<[u8; 64]>],
+    ) -> DepositsResult<bitcoin::Witness> {
+        let leaves = self.recovery_leaves();
+        let (_, threshold, leaf) = leaves
+            .get(tier)
+            .ok_or_else(|| DepositsError::InvalidState(format!("no recovery tier {}", tier)))?;
+        if signatures.len() != self.recovery_voters.len() {
+            return Err(DepositsError::InvalidState(format!(
+                "{} signatures for {} recovery voters",
+                signatures.len(),
+                self.recovery_voters.len()
+            )));
+        }
+        let control = self
+            .recovery_control_block(leaf)
+            .ok_or_else(|| DepositsError::InvalidState("recovery leaf not in the tree".into()))?;
+        let mut w = bitcoin::Witness::new();
+        if *threshold == 1 {
+            let sig = signatures
+                .iter()
+                .flatten()
+                .next()
+                .ok_or_else(|| DepositsError::InvalidState("need one signature".into()))?;
+            w.push(sig);
+        } else {
+            for s in signatures.iter().rev() {
+                match s {
+                    Some(sig) => w.push(sig),
+                    None => w.push([]),
+                }
+            }
+        }
+        w.push(leaf.as_bytes());
+        w.push(control.serialize());
+        Ok(w)
+    }
+
     /// The x-only recovery voter keys in the sorted order the recovery and
     /// attestation scripts consume them. Index `i` of a `voter_signatures`
     /// argument corresponds to `recovery_voter_order()[i]`.

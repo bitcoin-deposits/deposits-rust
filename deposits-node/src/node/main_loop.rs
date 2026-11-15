@@ -1838,6 +1838,27 @@ impl Node {
                             "auto_lottery_claim_or_yield",
                             node.auto_lottery_claim_or_yield()
                         );
+                        // DEP-06 Phase 4 re-arm rounds (rearm.rs): arm, propose, reveal, claim.
+                        // One pass at a time; each dispute at most every 30 s.
+                        {
+                            static DRIVE_REARMS_RUNNING: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !DRIVE_REARMS_RUNNING.swap(true, std::sync::atomic::Ordering::AcqRel)
+                            {
+                                let node = Arc::clone(&node);
+                                tokio::spawn(async move {
+                                    struct Done;
+                                    impl Drop for Done {
+                                        fn drop(&mut self) {
+                                            DRIVE_REARMS_RUNNING
+                                                .store(false, std::sync::atomic::Ordering::Release);
+                                        }
+                                    }
+                                    let _done = Done;
+                                    node.drive_rearms().await;
+                                });
+                            }
+                        }
                         timed_periodic!("retry_fork_publications", node.retry_fork_publications());
                         timed_periodic!(
                             "auto_report_derelict_members",
