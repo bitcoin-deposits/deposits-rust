@@ -661,6 +661,48 @@ pub(crate) fn round_seed(round1_seed: &[u8; 32], round: u32) -> [u8; 32] {
     sha256::Hash::from_engine(e).to_byte_array()
 }
 
+/// The tier a proposer asks for and whether it starts a fresh request: the pending request's tier
+/// while it is waited on and still open; once it timed out (or its tier closed), the next open
+/// tier above it, else the lowest open one. `prior` is (tier, timed out).
+pub(crate) fn rearm_tier_choice(open: &[usize], prior: Option<(usize, bool)>) -> (usize, bool) {
+    match prior {
+        Some((t, false)) if open.contains(&t) => (t, false),
+        Some((t, _)) => (
+            open.iter().copied().find(|x| *x > t).unwrap_or(open[0]),
+            true,
+        ),
+        None => (open[0], true),
+    }
+}
+
+/// The recovery witness's signatures, parallel to the sorted voters: a threshold-1 leaf names
+/// only the lowest sorted voter; otherwise exactly `threshold` of the held signatures, the
+/// lowest sorted voters' (the fee was sized for a `threshold`-signature witness).
+pub(crate) fn witness_signatures(
+    order: &[XOnlyPublicKey],
+    held: &HashMap<XOnlyPublicKey, [u8; 64]>,
+    threshold: usize,
+) -> Vec<Option<[u8; 64]>> {
+    if threshold == 1 {
+        return order
+            .iter()
+            .enumerate()
+            .map(|(i, v)| if i == 0 { held.get(v).copied() } else { None })
+            .collect();
+    }
+    let mut n = 0;
+    order
+        .iter()
+        .map(|v| match held.get(v) {
+            Some(s) if n < threshold => {
+                n += 1;
+                Some(*s)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 impl Node {
     /// Our lottery preimage for `ledger_id`'s re-arm round `round`.
     pub(crate) fn round_preimage(&self, ledger_id: &str, round: u32) -> Option<Vec<u8>> {
@@ -827,24 +869,17 @@ impl Node {
         // the one that timed out (tier 0 first).
         let (tier, fresh) = {
             let mut pending = pending_rearms().lock().unwrap();
-            match pending.get(ledger_id) {
-                Some(p)
-                    if p.created_at.elapsed().as_secs() < REARM_SIGN_WAIT_SECS
-                        && open.contains(&p.tier) =>
-                {
-                    (p.tier, false)
-                }
-                Some(p) => {
-                    let t = open
-                        .iter()
-                        .copied()
-                        .find(|t| *t > p.tier)
-                        .unwrap_or(open[0]);
-                    pending.remove(ledger_id);
-                    (t, true)
-                }
-                None => (open[0], true),
+            let prior = pending.get(ledger_id).map(|p| {
+                (
+                    p.tier,
+                    p.created_at.elapsed().as_secs() >= REARM_SIGN_WAIT_SECS,
+                )
+            });
+            let (t, fresh) = rearm_tier_choice(&open, prior);
+            if fresh {
+                pending.remove(ledger_id);
             }
+            (t, fresh)
         };
         let (csv, threshold, leaf) = leaves[tier].clone();
         let (mut spend, _, _) = cur
@@ -960,25 +995,7 @@ impl Node {
             .get(ledger_id)
             .map(|p| p.signatures.clone())
             .unwrap_or_default();
-        let sigs: Vec<Option<[u8; 64]>> = if threshold == 1 {
-            order
-                .iter()
-                .enumerate()
-                .map(|(i, v)| if i == 0 { held.get(v).copied() } else { None })
-                .collect()
-        } else {
-            let mut n = 0;
-            order
-                .iter()
-                .map(|v| match held.get(v) {
-                    Some(s) if n < threshold => {
-                        n += 1;
-                        Some(*s)
-                    }
-                    _ => None,
-                })
-                .collect()
-        };
+        let sigs = witness_signatures(&order, &held, threshold);
         if sigs.iter().flatten().count() < threshold {
             return Ok(());
         }
@@ -1120,6 +1137,65 @@ impl Node {
             tracing::info!("re-arm {}: re-arm round {}: won", pfx, round);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod drive_tests {
+    use super::*;
+
+    fn key(i: u8) -> XOnlyPublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[i; 32]).unwrap();
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk)
+            .x_only_public_key()
+            .0
+    }
+
+    #[test]
+    fn round_seeds_are_fresh_per_round_and_round_1_is_unchanged() {
+        let s = [7u8; 32];
+        assert_eq!(round_seed(&s, 1), s);
+        assert_ne!(round_seed(&s, 2), s);
+        assert_ne!(round_seed(&s, 2), round_seed(&s, 3));
+        assert_eq!(round_seed(&s, 2), round_seed(&s, 2));
+    }
+
+    #[test]
+    fn the_tier_waits_then_falls_through() {
+        assert_eq!(rearm_tier_choice(&[0], None), (0, true));
+        assert_eq!(rearm_tier_choice(&[0, 1], Some((0, false))), (0, false));
+        assert_eq!(rearm_tier_choice(&[0, 1], Some((0, true))), (1, true));
+        assert_eq!(rearm_tier_choice(&[0, 1], Some((1, true))), (0, true));
+        assert_eq!(rearm_tier_choice(&[1], Some((0, false))), (1, true));
+    }
+
+    #[test]
+    fn the_witness_holds_exactly_the_threshold_lowest_voters() {
+        let mut order = vec![key(1), key(2), key(3)];
+        order.sort_by_key(|k| k.serialize());
+        let held: HashMap<_, _> = [
+            (order[0], [1u8; 64]),
+            (order[1], [2u8; 64]),
+            (order[2], [3u8; 64]),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            witness_signatures(&order, &held, 2),
+            vec![Some([1u8; 64]), Some([2u8; 64]), None]
+        );
+        assert_eq!(
+            witness_signatures(&order, &held, 1),
+            vec![Some([1u8; 64]), None, None]
+        );
+        let mut gap = held.clone();
+        gap.remove(&order[0]);
+        assert_eq!(witness_signatures(&order, &gap, 1), vec![None, None, None]);
+        assert_eq!(
+            witness_signatures(&order, &gap, 2),
+            vec![None, Some([2u8; 64]), Some([3u8; 64])]
+        );
     }
 }
 
