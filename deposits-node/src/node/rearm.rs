@@ -103,6 +103,50 @@ fn lottery_over(
         .map_err(|e| format!("build lottery: {:?}", e))
 }
 
+/// Outputs whose spend lies past the chain backend's scan window from where we can start
+/// looking (bitcoind walks at most 4320 blocks): unknown to this node, and asked once.
+fn spend_unknown() -> &'static std::sync::Mutex<std::collections::HashSet<OutPoint>> {
+    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<OutPoint>>> =
+        std::sync::OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// Whether a `find_spending_tx` error says the spend is beyond the backend's scan window.
+pub(crate) fn is_beyond_scan_window(e: &str) -> bool {
+    e.contains("scans stop after")
+}
+
+/// `find_spending_tx`, except that a spend beyond the backend's scan window is recorded as
+/// unknown with ONE warning and is not looked for again: an old re-arm's every pass re-walked
+/// 4320 blocks and logged the same error (ref7 on regtest, 2026-11-19).
+fn find_spend_or_unknown(
+    chain: &dyn crate::chain_backend::ChainBackend,
+    ledger_id: &str,
+    outpoint: &OutPoint,
+    spk: &bitcoin::Script,
+    from: u32,
+) -> Result<Option<bitcoin::Transaction>, String> {
+    if spend_unknown().lock().unwrap().contains(outpoint) {
+        return Ok(None);
+    }
+    match chain.find_spending_tx(outpoint, spk, from) {
+        Ok(t) => Ok(t),
+        Err(e) if is_beyond_scan_window(&e.to_string()) => {
+            spend_unknown().lock().unwrap().insert(*outpoint);
+            tracing::warn!(
+                "re-arm {}: the spend of {} is beyond this backend's scan window from {}; \
+                 treated as unknown and not looked for again ({})",
+                &ledger_id[..16.min(ledger_id.len())],
+                outpoint,
+                from,
+                e
+            );
+            Ok(None)
+        }
+        Err(e) => Err(e.to_string()),
+    }
+}
+
 impl Node {
     /// The public state for re-arm decisions on `ledger_id`.
     pub(crate) async fn rearm_view(&self, ledger_id: &str) -> Result<RearmView, String> {
@@ -314,9 +358,8 @@ impl Node {
         let landed = super::lottery_recovery::confiscation_height(&*chain, &view.updates)
             .or_else(|| super::armers::first_arm_height(&view.updates))
             .unwrap_or(0);
-        let Some(confiscation) = chain
-            .find_spending_tx(&vault, bitcoin::Script::new(), landed)
-            .map_err(|e| e.to_string())?
+        let Some(confiscation) =
+            find_spend_or_unknown(&*chain, ledger_id, &vault, bitcoin::Script::new(), landed)?
         else {
             return Ok(None);
         };
@@ -395,9 +438,13 @@ impl Node {
             if round >= MAX_ROUNDS {
                 return Ok(None);
             }
-            let Some(spend) = chain
-                .find_spending_tx(&outpoint, &lottery.script_pubkey(), height)
-                .map_err(|e| e.to_string())?
+            let Some(spend) = find_spend_or_unknown(
+                &*chain,
+                ledger_id,
+                &outpoint,
+                &lottery.script_pubkey(),
+                height,
+            )?
             else {
                 return Ok(None);
             };
@@ -1261,5 +1308,78 @@ mod our_fork_tests {
         assert!(is_our_fork(&theirs, &me, &me));
         // The base ledger is never a fork.
         assert!(!is_our_fork(&id, &me, &me));
+    }
+}
+
+#[cfg(test)]
+mod scan_window_tests {
+    use super::{find_spend_or_unknown, is_beyond_scan_window};
+    use crate::chain_backend::{ChainBackend, UnspentOutput};
+    use crate::Error;
+    use bitcoin::{OutPoint, Script, Transaction, Txid};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Beyond(AtomicUsize);
+    impl ChainBackend for Beyond {
+        fn get_tip_height(&self) -> Result<u32, Error> {
+            Ok(19_166)
+        }
+        fn get_block_hash(&self, _: u32) -> Result<bitcoin::BlockHash, Error> {
+            Err(Error::Wallet("unused".into()))
+        }
+        fn get_block_height_if_in_best_chain(
+            &self,
+            _: &bitcoin::BlockHash,
+        ) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn get_tx(&self, _: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+        fn get_tx_block_height(&self, _: &Txid) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn is_output_unspent(&self, _: &Txid, _: u32) -> Result<Option<bool>, Error> {
+            Ok(None)
+        }
+        fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+            Ok(None)
+        }
+        fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+            Err(Error::Wallet("unused".into()))
+        }
+        fn find_spending_tx(
+            &self,
+            o: &OutPoint,
+            _: &Script,
+            from: u32,
+        ) -> Result<Option<Transaction>, Error> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(Error::Wallet(format!(
+                "bitcoind find_spending_tx: no spend of {} in {}..={} and the tip is 19166; \
+                 scans stop after 4320 blocks: pass a tighter scan_from_height",
+                o,
+                from,
+                from + 4320
+            )))
+        }
+    }
+
+    /// A spend past the scan window is asked once, then unknown: no second walk, no error.
+    #[test]
+    fn a_spend_beyond_the_window_is_asked_once() {
+        let b = Beyond(AtomicUsize::new(0));
+        let o = OutPoint::new(Txid::from_raw_hash(bitcoin::hashes::Hash::all_zeros()), 7);
+        for _ in 0..3 {
+            assert!(
+                find_spend_or_unknown(&b, &"ab".repeat(32), &o, Script::new(), 582)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert_eq!(b.0.load(Ordering::SeqCst), 1);
+        assert!(!is_beyond_scan_window(
+            "bitcoind RPC error: connection refused"
+        ));
     }
 }
