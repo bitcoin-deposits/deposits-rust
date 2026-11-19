@@ -76,6 +76,24 @@ pub(crate) fn reimport_reached_tip(
             .any(|u| u.sequence_number == local_next_seq && u.operator_id == *operator)
 }
 
+/// Whether a relay fetch holds a `LedgerOpen`, i.e. reaches genesis. The
+/// slow path rebuilds a ledger from genesis and fails without one, so a view
+/// it would replace must not be dropped first: on a ledger deeper than the
+/// fetch's page cap (240k of a 337k-update ledger, signet 2026-11-18) the
+/// custody-transfer branch dropped the local view, the rebuild failed with
+/// "No LedgerOpen in fetched events", and every later gap-fill pass refetched
+/// the whole window from `local_tip_seq=0`.
+pub(crate) fn fetched_holds_ledger_open(fetched: &[deposits_core::SignedLedgerUpdate]) -> bool {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    fetched.iter().any(|u| {
+        matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::LedgerOpen { .. })
+        )
+    })
+}
+
 impl Node {
     /// Start listening for messages
     pub async fn start(&self) -> Result<(), Error> {
@@ -886,6 +904,16 @@ impl Node {
                 )
             });
 
+            if relay_transfers_custody_away && !fetched_holds_ledger_open(&all_fetched) {
+                return Err(Error::Protocol(format!(
+                    "unbridgeable: a DisputeAcquire moves custody of {}... away, but the relay \
+                     window ({} updates) holds no LedgerOpen to rebuild from; keeping the local \
+                     view at seq {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    all_fetched.len(),
+                    local_next_seq,
+                )));
+            }
             if relay_transfers_custody_away {
                 tracing::warn!(
                     "Relay carries a DisputeAcquire transferring custody away from our \
@@ -933,6 +961,17 @@ impl Node {
             // our current operator — so fall through to the genesis rebuild).
             if need_full_reimport {
                 // Fall through to the slow path below.
+            } else if new_updates[0].sequence_number == local_next_seq
+                && new_updates[0].previous_hash != local_tip_hash
+                && !fetched_holds_ledger_open(&all_fetched)
+            {
+                return Err(Error::Protocol(format!(
+                    "Chain break on {}... at seq {}, and the relay window ({} updates) holds no \
+                     LedgerOpen to rebuild from; keeping the local view",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    local_next_seq,
+                    all_fetched.len(),
+                )));
             } else if new_updates[0].sequence_number == local_next_seq
                 && new_updates[0].previous_hash != local_tip_hash
             {
@@ -2307,6 +2346,7 @@ impl Node {
                                                 // Don't resync — it will just repeat the same failure.
                                                 if err_str.contains("wrong previous_hash")
                                                     || err_str.contains("Chain break")
+                                                    || err_str.contains("unbridgeable")
                                                 {
                                                     tracing::info!(
                                                     "Background gap-fill: chain break for {}... — dropping from stale queue (gap is unbridgeable)",
@@ -2992,6 +3032,32 @@ mod pagination_tests {
         assert!(reimport_reached_tip(&fetched, 67_860, &operator));
         // No local ledger: walk the whole chain.
         assert!(!reimport_reached_tip(&fetched, 0, &operator));
+    }
+
+    /// A view is dropped for a rebuild from genesis only when the fetch can
+    /// rebuild one: the newest 240k updates of a 337k-update ledger carry the
+    /// DisputeAcquire but not the LedgerOpen (signet ref2/ref4, 2026-11-18).
+    #[test]
+    fn a_rebuild_needs_the_ledger_open_in_the_fetch() {
+        use super::fetched_holds_ledger_open;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvEncode;
+        let operator = key(1);
+        let mut fetched: Vec<_> = (97_000..97_050).map(|s| upd(s, operator)).collect();
+        assert!(!fetched_holds_ledger_open(&fetched));
+        assert!(!fetched_holds_ledger_open(&[]));
+        let mut open = upd(0, operator);
+        open.message = LedgerOperation::LedgerOpen {
+            operator_id: operator,
+            reserves_id: "r".into(),
+            genesis_block: 100,
+            reserves_amount: 1,
+            collateral_amount: 1,
+            protocol_version: None,
+        }
+        .tlv_encode();
+        fetched.push(open);
+        assert!(fetched_holds_ledger_open(&fetched));
     }
 
     /// No oldest timestamp (empty page decoded to nothing) ends the walk.
