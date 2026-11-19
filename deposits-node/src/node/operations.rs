@@ -173,6 +173,18 @@ impl Node {
         ledger_id: &str,
         build: impl FnOnce([u8; 32]) -> Result<deposits_core::messages::LedgerOperation, Error>,
     ) -> Result<String, Error> {
+        self.commit_operation_floored(ledger_id, None, build).await
+    }
+
+    /// As [`Self::commit_operation_with`], with a DEP-06 answer floor `(keys, need)`: the update
+    /// must also carry `need` valid cosignatures by `keys`, or nothing is committed (a rotating
+    /// QuorumBegin, whose rungs it answers).
+    pub async fn commit_operation_floored(
+        &self,
+        ledger_id: &str,
+        tier_floor: Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)>,
+        build: impl FnOnce([u8; 32]) -> Result<deposits_core::messages::LedgerOperation, Error>,
+    ) -> Result<String, Error> {
         let _lock = self.acquire_staging_lock(ledger_id).await;
         let tip = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -208,6 +220,7 @@ impl Node {
                 operation,
                 block_height,
                 block_hash,
+                tier_floor,
                 reply: tx,
             })
             .await

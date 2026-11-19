@@ -1436,7 +1436,17 @@ impl Node {
             let lid = ledger_id.to_string();
             let collateral = collateral_msats;
             let txid_cell = &mut rung0_txid;
-            self.commit_operation_with(ledger_id, move |anchor| {
+            // DEP-06: the QuorumBegin answers a challenge of its rungs only at the spent tier's
+            // floor (signet C, 2026-11-16); below it nothing is recorded and the plan stays
+            // pending, to be re-planned at the tier then open.
+            let floor = self
+                .handler
+                .pending_rotation_plans
+                .lock()
+                .unwrap()
+                .get(ledger_id)
+                .and_then(|p| p.answer_floor.clone());
+            self.commit_operation_floored(ledger_id, floor, move |anchor| {
                 let mut plans = handler.pending_rotation_plans.lock().unwrap();
                 let plan = plans
                     .get_mut(&lid)
@@ -1846,6 +1856,11 @@ impl Node {
                 tier_index,
                 operator_alone,
                 cosigner_threshold,
+                answer_floor: deposits_core::vault_spend::answer_cosign_need(
+                    &cur_builder,
+                    &tier,
+                    &existing.operator,
+                ),
                 cur_voter_set: cur_voter_set.clone(),
                 prev_script_pubkey: prev_script_pubkey.clone(),
                 leaf_script: leaf_script.clone(),

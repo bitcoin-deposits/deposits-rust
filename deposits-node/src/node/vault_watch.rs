@@ -1209,6 +1209,19 @@ impl crate::Node {
                     continue;
                 };
                 if pk == self.node_id {
+                    // Never a proof against our own key: we know our own signatures were not a
+                    // theft, so a judgement that says so is our judge's error (signet soak,
+                    // 2026-11-19: C's operator proved itself and its co-signers over an honest
+                    // rescue it had broadcast). Mirrors cl-deposits' PUBLISH-OWED-VAULT-SPENDS.
+                    let spend_txid = theft.spend.tx.compute_txid().to_string();
+                    let own = format!("self:{spend_txid}");
+                    if published.insert(own) {
+                        tracing::warn!(
+                            "VAULT SPEND JUDGEMENT DISAGREES WITH OUR OWN CONDUCT: spend {} is one \
+                             we signed; no proof against ourselves",
+                            &spend_txid[..16]
+                        );
+                    }
                     continue;
                 }
                 let (targets, ok) = self.ledgers_operated_by_checked(&pk).await;

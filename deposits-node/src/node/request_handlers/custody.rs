@@ -1258,6 +1258,24 @@ impl Node {
         }
         let builder =
             TapscriptReservesBuilder::new(voter_set, config, self.wallet.network(), gov_hash);
+        // DEP-06: this QuorumBegin is the only answer to a challenge of these rungs. Final under
+        // DEP-05 is not enough when the spent tier's floor is higher (a rotation planned at tier 0
+        // and recorded after tier 1 opened carries the minority DEP-05 then asks): signet C,
+        // 2026-11-16, was signed by five over a QuorumBegin no judge accepts, and all five were
+        // proved. Mirrors cl-deposits' HANDLE-ROTATION-SIGN; vector rotation_answer_floor.json.
+        match deposits_core::vault_spend::answer_cosign_need(&builder, &tier, &state.operator_key) {
+            Some((keys, need)) => {
+                let have = deposits_core::vault_spend::tier_cosignatures(&qb, &keys);
+                if have < need {
+                    return refuse(format!(
+                        "the QuorumBegin carries {have} of the {need} cosignatures by the spent \
+                         vault's tier that answer its rungs (DEP-06): signing would be a spend no \
+                         judge can answer"
+                    ));
+                }
+            }
+            None => return refuse("the spent tier's answer floor cannot be computed".into()),
+        }
         let leaf = match builder.build_threshold_leaf(&tier) {
             Ok(l) => l,
             Err(e) => return refuse(format!("tier leaf: {e:?}")),

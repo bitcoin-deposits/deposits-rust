@@ -349,6 +349,9 @@ pub struct RotationPlan {
     pub tier_index: usize,
     pub operator_alone: bool,
     pub cosigner_threshold: usize,
+    /// DEP-06 answer floor of the spent tier: (its keys, the cosignatures by them a QuorumBegin
+    /// needs to answer these rungs). The QuorumBegin is recorded only at it.
+    pub answer_floor: Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)>,
     /// The spent vault's voters, prevout script and the splice prevout (if any).
     pub cur_voter_set: deposits_core::tapscript_reserves::VoterSet,
     pub prev_script_pubkey: bitcoin::ScriptBuf,

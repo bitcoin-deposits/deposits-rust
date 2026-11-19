@@ -93,8 +93,36 @@ pub fn rotation_answer<'a>(
 ) -> Option<&'a SignedLedgerUpdate> {
     let (builder, config, operator) = governing_reserves(spent_history, governing_seq).ok()?;
     let tier = config.tiers.get(tier_index)?;
+    let (keys, needed) = answer_cosign_need(&builder, tier, &operator)?;
+    updates.iter().find(|u| {
+        let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
+            return false;
+        };
+        matches!(op, LedgerOperation::QuorumBegin { .. })
+            && u.previous_hash == *anchor
+            && u.operator_id == operator
+            && quorum_begin_rungs(&op).contains(txid)
+            && u.verify_operator_signature().is_ok()
+            && tier_cosignatures(u, &keys) >= needed
+    })
+}
+
+/// DEP-06 §Spend challenge, the answer floor: the x-only keys of `tier` (of the reserves `builder`
+/// builds) and how many valid cosignatures by them a `QuorumBegin` must carry to answer a spend at
+/// that tier. The operator's own signature counts when its key is the tier's; the operator's solo
+/// tier needs none. The operator records a rotating `QuorumBegin` only at this floor and a member
+/// signs rungs only for one that reaches it: a rotation recorded below it is a spend no judge can
+/// answer (signet soak 2026-11-16, ledger C: planned at tier 0 just before tier 1 opened and
+/// recorded after, with the 3 cosignatures DEP-05 then asks where tier 0 needs 4; its rung was
+/// signed by five, the operator's own vault watch challenged it, and the lapsed challenge proved
+/// all five on 2026-11-19). Mirrors cl-deposits' `fr:answer-cosign-need`; vector
+/// `tests/vectors/rotation_answer_floor.json`.
+pub fn answer_cosign_need(
+    builder: &TapscriptReservesBuilder,
+    tier: &crate::tapscript_reserves::ThresholdTier,
+    operator: &bitcoin::secp256k1::PublicKey,
+) -> Option<(Vec<XOnlyPublicKey>, usize)> {
     let keys = leaf_keys(&builder.build_threshold_leaf(tier).ok()?);
-    // The operator's own signature on the QuorumBegin counts when its key is the tier's.
     let needed = if tier.threshold == 1 && tier.requires_tie_breaker {
         0
     } else if keys.contains(&operator.x_only_public_key().0) {
@@ -102,40 +130,43 @@ pub fn rotation_answer<'a>(
     } else {
         tier.threshold
     };
+    Some((keys, needed))
+}
+
+/// The DEP-06 answer floor of the vault the `QuorumBegin` at `governing_seq` of `spent_history`
+/// created, at `tier_index`: [`answer_cosign_need`] from the ledger's own history, as a judge
+/// derives it. Vector `tests/vectors/rotation_answer_floor.json`.
+pub fn answer_floor(
+    spent_history: &[SignedLedgerUpdate],
+    governing_seq: u64,
+    tier_index: usize,
+) -> Option<(Vec<XOnlyPublicKey>, usize)> {
+    let (builder, config, operator) = governing_reserves(spent_history, governing_seq).ok()?;
+    answer_cosign_need(&builder, config.tiers.get(tier_index)?, &operator)
+}
+
+/// How many distinct, valid cosignatures on `u` are by `keys` (x-only). Mirrors cl-deposits'
+/// `fr:tier-cosignatures`.
+pub fn tier_cosignatures(u: &SignedLedgerUpdate, keys: &[XOnlyPublicKey]) -> usize {
     let secp = Secp256k1::verification_only();
-    updates.iter().find(|u| {
-        let Ok(op) = LedgerOperation::tlv_decode(&u.message) else {
-            return false;
-        };
-        if !matches!(op, LedgerOperation::QuorumBegin { .. })
-            || u.previous_hash != *anchor
-            || u.operator_id != operator
-            || !quorum_begin_rungs(&op).contains(txid)
-            || u.verify_operator_signature().is_err()
-        {
-            return false;
-        }
-        let mut seen = std::collections::HashSet::new();
-        let good = u
-            .cosignatures
-            .iter()
-            .filter(|c| seen.insert(c.cosigner_pubkey.serialize()))
-            .filter(|c| keys.contains(&c.cosigner_pubkey.x_only_public_key().0))
-            .filter(|c| {
-                Signature::from_slice(&c.cosign_signature)
-                    .map(|s| {
-                        secp.verify_schnorr(
-                            &s,
-                            &Message::from_digest(u.cosign_digest(&c.member_ledger_hash)),
-                            &c.cosigner_pubkey.x_only_public_key().0,
-                        )
-                        .is_ok()
-                    })
-                    .unwrap_or(false)
-            })
-            .count();
-        good >= needed
-    })
+    let mut seen = std::collections::HashSet::new();
+    u.cosignatures
+        .iter()
+        .filter(|c| seen.insert(c.cosigner_pubkey.serialize()))
+        .filter(|c| keys.contains(&c.cosigner_pubkey.x_only_public_key().0))
+        .filter(|c| {
+            Signature::from_slice(&c.cosign_signature)
+                .map(|s| {
+                    secp.verify_schnorr(
+                        &s,
+                        &Message::from_digest(u.cosign_digest(&c.member_ledger_hash)),
+                        &c.cosigner_pubkey.x_only_public_key().0,
+                    )
+                    .is_ok()
+                })
+                .unwrap_or(false)
+        })
+        .count()
 }
 
 /// The reserves the `QuorumBegin` at `seq` built, from the ledger's operator: (builder, tier

@@ -46,6 +46,9 @@ pub enum LedgerEvent {
         operation: LedgerOperation,
         block_height: u32,
         block_hash: [u8; 32],
+        /// DEP-06 answer floor (keys, need): a rotating QuorumBegin also needs `need` valid
+        /// cosignatures by `keys` (the spent tier's), or nothing is committed.
+        tier_floor: Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)>,
         reply: oneshot::Sender<Result<CommitResult, String>>,
     },
 }
@@ -443,6 +446,7 @@ impl LedgerActor {
         operation: LedgerOperation,
         block_height: u32,
         block_hash: [u8; 32],
+        tier_floor: Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)>,
     ) -> Result<CommitResult, String> {
         use bitcoin::hashes::{sha256, Hash};
 
@@ -482,7 +486,8 @@ impl LedgerActor {
         let is_first_quorum_begin =
             !quorum_active && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
         if quorum_active || is_first_quorum_begin {
-            let threshold = members.len() / 2 + 1;
+            let threshold = (members.len() / 2 + 1)
+                .max(tier_floor.as_ref().map(|(_, n)| *n).unwrap_or(0));
             let (tx, rx) = oneshot::channel::<Result<Vec<CosignEntry>, String>>();
             let send_res = self.outbox.send((
                 self.ledger_id.clone(),
@@ -507,6 +512,18 @@ impl LedgerActor {
             });
             staged.update.cosignatures = sorted;
             staged.update.content_hash = staged.update.compute_hash();
+        }
+        // DEP-06: a rotating QuorumBegin answers a challenge of its rungs only at the spent tier's
+        // floor; below it nothing is recorded (signet C, 2026-11-16). Mirrors cl-deposits'
+        // APPEND-OPERATION :tier-floor.
+        if let Some((keys, need)) = &tier_floor {
+            let have = deposits_core::vault_spend::tier_cosignatures(&staged.update, keys);
+            if have < *need {
+                return Err(format!(
+                    "QuorumBegin: {have} of the {need} cosignatures by the spent vault's tier that \
+                     answer its rungs (DEP-06); not recording a rotation no judge could answer"
+                ));
+            }
         }
 
         // 3. Operator-sign. Uses the DEP-02 v2 operator digest
@@ -596,10 +613,11 @@ impl LedgerActor {
                     operation,
                     block_height,
                     block_hash,
+                    tier_floor,
                     reply,
                 } => {
                     let res = self
-                        .handle_commit(operation, block_height, block_hash)
+                        .handle_commit(operation, block_height, block_hash, tier_floor)
                         .await;
                     let _ = reply.send(res);
                 }
