@@ -266,6 +266,8 @@ pub struct DepositsHandler {
     /// Used to decide when to write a State line (every 100 appends)
     /// and when to do a full file rewrite (every 1000 appends).
     appends_since_compaction: Mutex<HashMap<String, usize>>,
+    /// Per ledger: update rows and their bytes appended since the log's last `State` row.
+    since_state_row: Mutex<HashMap<String, (u64, u64)>>,
 
     /// Content-addressed event store for ledger sync.
     /// Events are indexed by content_hash with memoized validation.
@@ -481,6 +483,7 @@ impl DepositsHandler {
             scanned_non_conforming: Mutex::new(HashMap::new()),
             last_file_modtimes: Mutex::new(HashMap::new()),
             appends_since_compaction: Mutex::new(HashMap::new()),
+            since_state_row: Mutex::new(HashMap::new()),
             event_store,
         };
 
@@ -745,10 +748,13 @@ impl DepositsHandler {
         // Record what we just wrote: each snapshot through its tip.
         let mut next = self.persisted_next_seq.lock().unwrap();
         let mut compaction = self.appends_since_compaction.lock().unwrap();
+        let mut since_state = self.since_state_row.lock().unwrap();
         for (id, ledger) in &ledgers_snapshot {
             next.insert(id.clone(), Self::next_seq_after(&ledger.history));
             compaction.insert(id.clone(), 0);
+            since_state.insert(id.clone(), (0, 0));
         }
+        drop(since_state);
 
         // Update modtimes so discover_new_ledgers() doesn't re-read our own writes
         let ledgers_dir = self.data_dir.join("ledgers");
@@ -937,7 +943,10 @@ impl DepositsHandler {
             && Self::tail_state_share(path) > 0.5
     }
 
-    fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
+    pub(crate) fn load_single_ledger_from_jsonl(
+        ledger_id: &str,
+        path: &std::path::Path,
+    ) -> Option<Ledger> {
         Self::load_ledger_log(ledger_id, path, Self::should_strip_state_rows(path))
     }
 
@@ -2222,6 +2231,10 @@ impl DepositsHandler {
                 .lock()
                 .unwrap()
                 .insert(ledger_id.to_string(), 0);
+            self.since_state_row
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), (0, 0));
 
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
@@ -2235,13 +2248,13 @@ impl DepositsHandler {
         } else if let Some(append) =
             self.persist_append_snapshot(ledger_id, &ledger_arc, next_seq.unwrap_or(0))
         {
-            Self::append_updates_to_disk(
+            let bytes = Self::append_updates_to_disk(
                 ledger_id,
                 append.state.as_ref(),
                 &append.updates,
                 &self.data_dir,
             );
-            self.persist_append_commit(ledger_id, &append);
+            self.persist_append_commit(ledger_id, &append, bytes);
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
                 tracing::info!(
@@ -2451,6 +2464,18 @@ impl DepositsHandler {
         self.persisted_next_seq.lock().unwrap().remove(ledger_id);
     }
 
+    /// A `State` row is a snapshot of the whole ledger state (6.4 MB on a soaked signet ledger)
+    /// that a load uses only without seq 0. One every 100 appends cost ~64 KB of log per
+    /// update: 90% of a 13.7 GB log (signet, 2026-11-18). Write one by volume instead, after
+    /// this many update rows or bytes of them since the last, whichever comes first; a load
+    /// replays forward from it (389k ops in ~90 ms), so a sparser snapshot costs it nothing.
+    const STATE_ROW_EVERY_UPDATES: u64 = 10_000;
+    const STATE_ROW_EVERY_BYTES: u64 = 64 * 1024 * 1024;
+
+    fn state_row_due(rows_since: u64, bytes_since: u64) -> bool {
+        rows_since >= Self::STATE_ROW_EVERY_UPDATES || bytes_since >= Self::STATE_ROW_EVERY_BYTES
+    }
+
     /// Step 1 of an append persist: the updates at or past `next_seq`, read
     /// under the ledger lock. Found from the tail, by sequence, so nothing
     /// that trims the front of `history` in the meantime can shift it.
@@ -2470,14 +2495,14 @@ impl DepositsHandler {
         if start == history_len {
             return None;
         }
-        let appends = self
-            .appends_since_compaction
+        let (rows, bytes) = self
+            .since_state_row
             .lock()
             .unwrap()
             .get(ledger_id)
             .copied()
-            .unwrap_or(0);
-        let state = (appends % 100 == 0).then(|| ledger.state.clone());
+            .unwrap_or((0, 0));
+        let state = Self::state_row_due(rows, bytes).then(|| ledger.state.clone());
         Some(PersistAppend {
             history_len,
             updates: ledger.history[start..].to_vec(),
@@ -2487,8 +2512,18 @@ impl DepositsHandler {
 
     /// Step 3 of an append persist, after the rows are on disk: raise the
     /// cursor past what this persist wrote, whatever ran meanwhile.
-    fn persist_append_commit(&self, ledger_id: &str, append: &PersistAppend) {
+    fn persist_append_commit(&self, ledger_id: &str, append: &PersistAppend, bytes: u64) {
         self.mark_persisted(ledger_id, Self::next_seq_after(&append.updates));
+        {
+            let mut since = self.since_state_row.lock().unwrap();
+            let e = since.entry(ledger_id.to_string()).or_insert((0, 0));
+            let rows = append.updates.len() as u64;
+            *e = if append.state.is_some() {
+                (rows, bytes)
+            } else {
+                (e.0 + rows, e.1 + bytes)
+            };
+        }
         *self
             .appends_since_compaction
             .lock()
@@ -2779,15 +2814,16 @@ impl DepositsHandler {
         current_state: Option<&LedgerState>,
         new_updates: &[SignedLedgerUpdate],
         data_dir: &PathBuf,
-    ) {
+    ) -> u64 {
         let ledgers_dir = data_dir.join("ledgers");
         let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
+        let mut written = 0u64;
 
         let file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
             Ok(f) => f,
             Err(e) => {
                 tracing::error!("Failed to open ledger file for append {}: {}", ledger_id, e);
-                return;
+                return written;
             }
         };
 
@@ -2800,7 +2836,7 @@ impl DepositsHandler {
             if let Ok(line) = serde_json::to_string(&state_row) {
                 if let Err(e) = write!(writer, "\n{}", line) {
                     tracing::error!("Failed to append state to ledger {}: {}", ledger_id, e);
-                    return;
+                    return written;
                 }
             }
         }
@@ -2810,14 +2846,16 @@ impl DepositsHandler {
             if let Ok(line) = serde_json::to_string(&update_row) {
                 if let Err(e) = write!(writer, "\n{}", line) {
                     tracing::error!("Failed to append to ledger {}: {}", ledger_id, e);
-                    return;
+                    return written;
                 }
+                written += 1 + line.len() as u64;
             }
         }
 
         if let Err(e) = writer.flush() {
             tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
         }
+        written
     }
 
     /// Append a single Nostr `created_at` row to an existing ledger JSONL.
@@ -4319,6 +4357,124 @@ mod tests {
             .collect()
     }
 
+    /// State rows are written by volume: none for the next appends after the
+    /// first save, one once 10k update rows (or 64 MB of them) have gone by,
+    /// and the count starts again from there.
+    #[test]
+    fn state_rows_are_written_by_volume_not_every_hundred_appends() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!DepositsHandler::state_row_due(9_999, 64 * 1024 * 1024 - 1));
+        assert!(DepositsHandler::state_row_due(10_000, 0));
+        assert!(DepositsHandler::state_row_due(1, 64 * 1024 * 1024));
+
+        let temp_dir = TempDir::new().unwrap();
+        let (handler, arc, ledger_id, op_pk) = compaction_race_fixture(&temp_dir);
+        let path = temp_dir
+            .path()
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let state_rows = || {
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .filter(|l| l.starts_with(r#"{"type":"State""#))
+                .count()
+        };
+        for seq in 10..250u64 {
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        }
+        // The first save's row only; every-100 would have added two or three.
+        assert_eq!(state_rows(), 1);
+        let (rows, bytes) = handler.since_state_row.lock().unwrap()[&ledger_id];
+        // seq 0..249, all appended after the first save of the empty ledger.
+        assert_eq!(rows, 250);
+        assert!(bytes > 0);
+
+        handler
+            .since_state_row
+            .lock()
+            .unwrap()
+            .insert(ledger_id.clone(), (9_999, 0));
+        for seq in 250..252u64 {
+            arc.write()
+                .unwrap()
+                .history
+                .push(mk_update(op_pk, seq, seq as u8));
+            handler.persist_ledger_to_disk(&ledger_id).unwrap();
+        }
+        assert_eq!(state_rows(), 2);
+        assert_eq!(handler.since_state_row.lock().unwrap()[&ledger_id].0, 1);
+        assert_eq!(
+            disk_seqs(&handler, &ledger_id),
+            (0..252).collect::<Vec<_>>()
+        );
+    }
+
+    /// `recovery reconstruct-taproot` takes the operator, tip and quorum from
+    /// the log replayed to its tip, not from the last State row: with rows
+    /// written by volume that row can be 10k updates behind.
+    #[test]
+    fn recovery_reads_the_tip_past_the_last_state_row() {
+        let (operator, updates) = replica_past_a_fault();
+        let dir = TempDir::new().unwrap();
+        let id = hex::encode([7u8; 32]);
+        let path = dir.path().join(format!("{}.jsonl", id));
+        // A truncated history (no seq 0), so the replay starts from the log's one State row:
+        // at seq 1, with the quorum, and five updates behind the tip.
+        let quorum: Vec<PublicKey> = (11..14u8)
+            .map(|b| {
+                PublicKey::from_secret_key(
+                    &bitcoin::secp256k1::Secp256k1::new(),
+                    &SecretKey::from_slice(&[b; 32]).unwrap(),
+                )
+            })
+            .collect();
+        let mut stale = LedgerState::new(operator, "stale".into(), 100);
+        stale.sequence = 1;
+        stale.chain_tip_hash = updates[1].chain_hash();
+        stale.quorum_members = quorum
+            .iter()
+            .map(|pk| {
+                serde_json::from_value(serde_json::json!({
+                    "pubkey": pk.serialize().to_vec(),
+                    "ledger_id": "",
+                }))
+                .unwrap()
+            })
+            .collect();
+        let mut lines = vec![
+            serde_json::to_string(&LedgerLogRow::Role {
+                role: LedgerRole::Operator,
+            })
+            .unwrap(),
+            serde_json::to_string(&LedgerLogRow::State(stale.clone())).unwrap(),
+        ];
+        for u in &updates[1..] {
+            lines.push(serde_json::to_string(&LedgerLogRow::Update(u.clone())).unwrap());
+        }
+        std::fs::write(&path, lines.join("\n")).unwrap();
+
+        let (op_hex, tip_hex, members) =
+            crate::node_cli::recovery::recovery_ledger_facts(&id, &path).unwrap();
+        assert_eq!(op_hex, hex::encode(operator.serialize()));
+        let tip = updates.last().unwrap();
+        assert!(tip.sequence_number >= 5);
+        assert_eq!(tip_hex, hex::encode(tip.chain_hash()));
+        // What the State row alone says, and what the old reader returned:
+        assert_ne!(tip_hex, hex::encode(stale.chain_tip_hash));
+        assert_eq!(
+            members,
+            quorum
+                .iter()
+                .map(|pk| hex::encode(pk.serialize()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// Compaction runs between an apply and its persist (the replica paths
     /// push under the ledger lock, drop it, then persist; a reimport batch
     /// pushes many). The updates applied but not yet written must still reach
@@ -4370,14 +4526,14 @@ mod tests {
         let append = handler
             .persist_append_snapshot(&ledger_id, &arc, cursor)
             .expect("seq 10 to write");
-        DepositsHandler::append_updates_to_disk(
+        let bytes = DepositsHandler::append_updates_to_disk(
             &ledger_id,
             append.state.as_ref(),
             &append.updates,
             &handler.data_dir,
         );
         handler.compact_ledger(&ledger_id).unwrap();
-        handler.persist_append_commit(&ledger_id, &append);
+        handler.persist_append_commit(&ledger_id, &append, bytes);
 
         for seq in 11..16u64 {
             arc.write()

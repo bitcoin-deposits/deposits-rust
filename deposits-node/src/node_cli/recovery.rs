@@ -340,48 +340,9 @@ pub async fn recovery_reconstruct_taproot(
         }
     };
 
-    // Read the ledger's latest State line.
     let ledger_jsonl = ledgers_dir.join(format!("{}.jsonl", ledger_id));
-    let raw = std::fs::read_to_string(&ledger_jsonl)?;
-    let mut latest_state: Option<serde_json::Value> = None;
-    for line in raw.lines() {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if v.get("type").and_then(|x| x.as_str()) == Some("State") {
-            latest_state = Some(v);
-        }
-    }
-    let state = latest_state.ok_or_else(|| {
-        format!(
-            "no State line found in {} — ledger file is malformed",
-            ledger_jsonl.display()
-        )
-    })?;
-
-    let operator_key_bytes: Vec<u8> = serde_json::from_value(state["operator_key"].clone())?;
-    let operator_hex = hex::encode(&operator_key_bytes);
-    let chain_tip_bytes: Vec<u8> = serde_json::from_value(state["chain_tip_hash"].clone())?;
-    let ledger_hash_hex = hex::encode(&chain_tip_bytes);
-    let next_quorum_members: Vec<serde_json::Value> =
-        serde_json::from_value(state["next_quorum_members"].clone()).unwrap_or_default();
-    let active_quorum_members: Vec<serde_json::Value> =
-        serde_json::from_value(state["quorum_members"].clone()).unwrap_or_default();
-    let members_source = if !next_quorum_members.is_empty() {
-        next_quorum_members
-    } else {
-        active_quorum_members
-    };
-    let member_pks: Vec<String> = members_source
-        .iter()
-        .filter_map(|m| {
-            let pk: Option<Vec<u8>> = m
-                .get("pubkey")
-                .and_then(|v| serde_json::from_value(v.clone()).ok());
-            pk.map(hex::encode)
-        })
-        .collect();
+    let (operator_hex, ledger_hash_hex, member_pks) =
+        recovery_ledger_facts(&ledger_id, &ledger_jsonl)?;
     if member_pks.is_empty() {
         return Err(format!(
             "ledger {} has no quorum members (next_quorum_members and quorum_members both empty)",
@@ -6998,4 +6959,31 @@ pub async fn recovery_refund(args: &[String]) -> Result<(), Box<dyn std::error::
         "  - Winner runs `recovery lottery-claim <ledger_id>` once all preimages are revealed"
     );
     Ok(())
+}
+
+/// The operator, chain tip and quorum of a ledger, from its log replayed to the tip.
+///
+/// This used to read the log's last `State` row, which is a snapshot: up to 100 appends old
+/// when one was written every 100, and up to 10k once they are written by volume. The tip and
+/// the quorum come from the replay the daemon's own load does, so they are the tip's.
+pub(crate) fn recovery_ledger_facts(
+    ledger_id: &str,
+    path: &std::path::Path,
+) -> Result<(String, String, Vec<String>), String> {
+    let ledger = crate::handler::DepositsHandler::load_single_ledger_from_jsonl(ledger_id, path)
+        .ok_or_else(|| format!("{} does not load as a ledger log", path.display()))?;
+    let state = &ledger.state;
+    let members = if !state.next_quorum_members.is_empty() {
+        &state.next_quorum_members
+    } else {
+        &state.quorum_members
+    };
+    Ok((
+        hex::encode(state.operator_key.serialize()),
+        hex::encode(state.chain_tip_hash),
+        members
+            .iter()
+            .map(|m| hex::encode(m.pubkey.serialize()))
+            .collect(),
+    ))
 }
