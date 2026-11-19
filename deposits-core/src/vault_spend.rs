@@ -103,8 +103,76 @@ pub fn rotation_answer<'a>(
             && u.operator_id == operator
             && quorum_begin_rungs(&op).contains(txid)
             && u.verify_operator_signature().is_ok()
-            && tier_cosignatures(u, &keys) >= needed
+            && (tier_cosignatures(u, &keys) >= needed
+                || recorded_threshold_met(u, &op, spent_history, governing_seq))
     })
+}
+
+/// DEP-06 §Spend challenge, `strict-lottery-v8` (ruled 2026-11-19): a rotating `QuorumBegin`
+/// `u` (decoded `op`) that names a ruleset with the recorded-threshold answer also answers when
+/// its valid cosignatures by the governing quorum's members reach what the ledger itself required
+/// of it at the height it was recorded (its signed header's block height): DEP-05's establishment
+/// requirement in the lifecycle tier of that height. The spent tier's floor
+/// ([`answer_cosign_need`]) is still what an operator must reach before recording; this answers
+/// rotations recorded below it before that floor was enforced (signet ledger C, 2653505d). It
+/// cannot answer with fewer cosignatures than the ledger demanded: such a `QuorumBegin` was never
+/// final, and naming `strict-lottery-v8` does not lower the count. Mirrors cl-deposits'
+/// `fr:recorded-threshold-met-p`; vector `tests/vectors/rotation_answer_floor.json`.
+pub fn recorded_threshold_met(
+    u: &SignedLedgerUpdate,
+    op: &LedgerOperation,
+    spent_history: &[SignedLedgerUpdate],
+    governing_seq: u64,
+) -> bool {
+    let LedgerOperation::QuorumBegin {
+        protocol_version, ..
+    } = op
+    else {
+        return false;
+    };
+    if !protocol_version
+        .as_deref()
+        .is_some_and(deposits_protocol::types::ruleset_recorded_threshold_answer)
+        || u.block_height == 0
+    {
+        return false;
+    }
+    let Some((members, expiry, ruleset)) = governing_quorum(spent_history, governing_seq) else {
+        return false;
+    };
+    let keys: Vec<XOnlyPublicKey> = members.iter().map(|m| m.x_only_public_key().0).collect();
+    !keys.is_empty()
+        && tier_cosignatures(u, &keys)
+            >= deposits_protocol::cosign_threshold::establishment_requirement(
+                keys.len(),
+                Some(expiry),
+                &ruleset,
+                u.block_height,
+            )
+}
+
+/// The members, quorum_expiry and ruleset name (the default when it names none) of the
+/// `QuorumBegin` at `seq` of `history`.
+fn governing_quorum(
+    history: &[SignedLedgerUpdate],
+    seq: u64,
+) -> Option<(Vec<bitcoin::secp256k1::PublicKey>, u32, String)> {
+    history
+        .iter()
+        .filter(|u| u.sequence_number == seq)
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::QuorumBegin {
+                quorum_members,
+                quorum_expiry,
+                protocol_version,
+                ..
+            }) => Some((
+                quorum_members.iter().map(|m| m.pubkey).collect(),
+                quorum_expiry,
+                protocol_version.unwrap_or_else(|| DEFAULT_RULESET.to_string()),
+            )),
+            _ => None,
+        })
 }
 
 /// DEP-06 §Spend challenge, the answer floor: the x-only keys of `tier` (of the reserves `builder`

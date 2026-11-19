@@ -209,6 +209,30 @@ pub fn cosign_requirement(
     }
 }
 
+/// DEP-05: the cosignatures, of a quorum of `quorum_size`, an establishment (a `QuorumBegin`
+/// among them) needs at `height` of a quorum whose expiry is `quorum_expiry`, under the ledger's
+/// `ruleset_name`: exactly what [`cosign_requirement`] asks of one, re-derived for a rotation
+/// recorded in the past (DEP-06, `strict-lottery-v8` recorded-threshold answer). Mirrors
+/// cl-deposits' `lg:establishment-requirement` over `lg:lifecycle-tier-at`.
+pub fn establishment_requirement(
+    quorum_size: usize,
+    quorum_expiry: Option<u32>,
+    ruleset_name: &str,
+    height: u32,
+) -> usize {
+    if !uses_lifecycle_cascade(ruleset_name) {
+        return majority(quorum_size);
+    }
+    match tier_for_chain_tip(quorum_expiry, height) {
+        None | Some(LifecycleTier::Tier0) | Some(LifecycleTier::Tier0PostExpiry) => {
+            majority(quorum_size)
+        }
+        Some(LifecycleTier::Tier1) => minority(quorum_size),
+        Some(LifecycleTier::Tier2) => 1,
+        Some(LifecycleTier::Tier3) => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

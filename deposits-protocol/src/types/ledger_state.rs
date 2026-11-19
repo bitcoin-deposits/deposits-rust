@@ -90,6 +90,15 @@ pub fn ruleset_expiry_ends_on_spend(ruleset_name: &str) -> bool {
     ruleset_name == STRICT_LOTTERY_V8
 }
 
+/// DEP-06 §Spend challenge, `strict-lottery-v8` (ruled 2026-11-19): a rotating `QuorumBegin`
+/// that names this ruleset also answers a spend of its rung when its cosignatures met the
+/// ledger's own DEP-05 requirement at the height it was recorded, below the spent tier's floor.
+/// Gated on the ANSWERING `QuorumBegin`'s ruleset. Shared with cl-deposits'
+/// `:recorded-threshold-answer`; vector `rotation_answer_floor.json`.
+pub fn ruleset_recorded_threshold_answer(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8
+}
+
 /// DEP-06 §Authorised confiscation, the lottery's participant set: under a ruleset with the
 /// strict lottery, no participant may be in `accused` (the keys the dispute's own grounds
 /// convict, with the operator at the fork point); under any other, every set is admissible
