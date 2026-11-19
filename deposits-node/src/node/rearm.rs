@@ -299,9 +299,23 @@ impl Node {
         let Some((vault, _)) = super::vault_watch::current_vault(&view.updates) else {
             return Ok(None);
         };
-        let floor = super::armers::first_arm_height(&view.updates).unwrap_or(0);
+        // Scan from the block the confiscation landed in when the chunked landed-spender search
+        // knows it, else from the dispute's first arm (a confiscation cannot precede the arms
+        // it pays). A bitcoind scan walks at most 4320 blocks from there; it used to refuse any
+        // range to the tip longer than that, so a dispute armed at 582 failed every pass and
+        // every lottery_rearm_sign at tip 19166 (regtest rearm-rust 1119-013201).
+        if chain
+            .is_output_unspent(&vault.txid, vault.vout)
+            .map_err(|e| e.to_string())?
+            == Some(true)
+        {
+            return Ok(None); // not confiscated: nothing to walk
+        }
+        let landed = super::lottery_recovery::confiscation_height(&*chain, &view.updates)
+            .or_else(|| super::armers::first_arm_height(&view.updates))
+            .unwrap_or(0);
         let Some(confiscation) = chain
-            .find_spending_tx(&vault, bitcoin::Script::new(), floor)
+            .find_spending_tx(&vault, bitcoin::Script::new(), landed)
             .map_err(|e| e.to_string())?
         else {
             return Ok(None);
@@ -703,6 +717,21 @@ pub(crate) fn witness_signatures(
         .collect()
 }
 
+/// Whether `key` is a dispute fork of ours: one we armed (arming sets its `parent_pubkey`)
+/// or one we entered without arming, whose tracking key names us
+/// (`DepositsHandler::fork_tracking_key`). A member that sat out round 1's arms is still a
+/// recovery voter and may arm a later round, and the driver passed over its fork because only
+/// arming sets `parent_pubkey` (regtest rearm-rust 1119-013201: ref7 never drove 4061136e).
+pub(crate) fn is_our_fork(
+    key: &str,
+    parent_pubkey: &bitcoin::secp256k1::PublicKey,
+    me: &bitcoin::secp256k1::PublicKey,
+) -> bool {
+    key.len() > 64
+        && (parent_pubkey == me
+            || key.ends_with(&format!("_{}", &hex::encode(me.serialize())[..16])))
+}
+
 impl Node {
     /// Our lottery preimage for `ledger_id`'s re-arm round `round`.
     pub(crate) fn round_preimage(&self, ledger_id: &str, round: u32) -> Option<Vec<u8>> {
@@ -736,10 +765,9 @@ impl Node {
             let ledgers = self.handler.ledgers.lock().unwrap();
             ledgers
                 .iter()
-                .filter(|(k, _)| k.len() > 64)
-                .filter(|(_, arc)| {
+                .filter(|(k, arc)| {
                     let l = arc.read().unwrap();
-                    l.state.parent_pubkey == self.node_id
+                    is_our_fork(k, &l.state.parent_pubkey, &self.node_id)
                         && deposits_core::types::ruleset_strict_lottery(
                             &l.state.active_ruleset_name,
                         )
@@ -1208,5 +1236,30 @@ mod tests {
         assert_eq!(arm_window_of([]), DEFAULT_DISPUTE_ARM_BLOCKS);
         assert_eq!(arm_window_of([None, Some(0)]), DEFAULT_DISPUTE_ARM_BLOCKS);
         assert_eq!(arm_window_of([Some(9), None, Some(4)]), 9);
+    }
+}
+
+#[cfg(test)]
+mod our_fork_tests {
+    use super::is_our_fork;
+
+    fn key(b: u8) -> bitcoin::secp256k1::PublicKey {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[b; 32]).unwrap())
+    }
+
+    #[test]
+    fn an_unarmed_fork_we_entered_is_ours() {
+        let (me, op, other) = (key(1), key(2), key(3));
+        let id = "ab".repeat(32);
+        let ours = crate::handler::DepositsHandler::fork_tracking_key(&id, 10, &me);
+        let theirs = crate::handler::DepositsHandler::fork_tracking_key(&id, 10, &other);
+        // Unarmed: parent_pubkey is still the ledger's operator.
+        assert!(is_our_fork(&ours, &op, &me));
+        assert!(!is_our_fork(&theirs, &op, &me));
+        // Armed: parent_pubkey names us whatever the key says.
+        assert!(is_our_fork(&theirs, &me, &me));
+        // The base ledger is never a fork.
+        assert!(!is_our_fork(&id, &me, &me));
     }
 }

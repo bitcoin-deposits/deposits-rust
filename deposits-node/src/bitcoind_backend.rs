@@ -466,17 +466,9 @@ impl ChainBackend for BitcoindRpcBackend {
         // — unbounded on mainnet). For the forfeit-sweep caller this is
         // fine: the claim TX it hunts for is necessarily older than the
         // CSV delay, hence confirmed.
-        const MAX_SCAN_BLOCKS: u32 = 4320; // ~30 days; unbounded walks are operator error
         let tip = self.get_tip_height()?;
-        let start = scan_from_height.min(tip);
-        if tip - start > MAX_SCAN_BLOCKS {
-            return Err(Error::Wallet(format!(
-                "bitcoind find_spending_tx: scan range {}..={} exceeds {} blocks; \
-                 pass a tighter scan_from_height or use an esplora/electrum backend",
-                start, tip, MAX_SCAN_BLOCKS
-            )));
-        }
-        for height in start..=tip {
+        let (start, end) = spend_scan_window(scan_from_height, tip);
+        for height in start..=end {
             let hash = self.get_block_hash(height)?;
             let block_hex: String =
                 self.call("getblock", serde_json::json!([hash.to_string(), 0]))?;
@@ -489,6 +481,14 @@ impl ChainBackend for BitcoindRpcBackend {
                     return Ok(Some(tx));
                 }
             }
+        }
+        if end < tip {
+            return Err(Error::Wallet(format!(
+                "bitcoind find_spending_tx: no spend of {} in {}..={} and the tip is {}; \
+                 scans stop after {} blocks: pass a tighter scan_from_height or use an \
+                 esplora/electrum backend",
+                outpoint, start, end, tip, SPEND_SCAN_MAX_BLOCKS
+            )));
         }
         Ok(None)
     }
@@ -629,6 +629,19 @@ impl ChainBackend for BitcoindRpcBackend {
             self.call("sendrawtransaction", serde_json::json!([hex_str]))?;
         Ok(tx.compute_txid())
     }
+}
+
+/// How far one `find_spending_tx` walks on bitcoind (no spent-output index): ~30 days.
+const SPEND_SCAN_MAX_BLOCKS: u32 = 4320;
+
+/// The blocks a `find_spending_tx` from `scan_from` walks: at most
+/// [`SPEND_SCAN_MAX_BLOCKS`] past it. The cap used to refuse any range to the tip longer than
+/// that before looking, so an old output spent soon after `scan_from` was unfindable once the
+/// chain had moved on (regtest 2026-11-19: "scan range 582..=19166 exceeds 4320 blocks" from
+/// every re-arm pass and every lottery_rearm_sign on a dispute armed at 582).
+fn spend_scan_window(scan_from: u32, tip: u32) -> (u32, u32) {
+    let start = scan_from.min(tip);
+    (start, tip.min(start.saturating_add(SPEND_SCAN_MAX_BLOCKS)))
 }
 
 #[cfg(test)]
@@ -824,5 +837,23 @@ mod tests {
         let (u, p) = cookie.trim_end().split_once(':').unwrap();
         assert_eq!(u, "__cookie__");
         assert_eq!(p, "abcdef1234567890");
+    }
+}
+
+#[cfg(test)]
+mod spend_scan_window_tests {
+    use super::{spend_scan_window, SPEND_SCAN_MAX_BLOCKS};
+
+    #[test]
+    fn a_scan_walks_at_most_the_cap_from_where_it_starts() {
+        // The dispute armed at 582 on a chain at 19166: walk 582..=4902, not refuse.
+        assert_eq!(
+            spend_scan_window(582, 19_166),
+            (582, 582 + SPEND_SCAN_MAX_BLOCKS)
+        );
+        // A tight start reaches the tip.
+        assert_eq!(spend_scan_window(18_935, 19_166), (18_935, 19_166));
+        // A start past the tip scans the tip only.
+        assert_eq!(spend_scan_window(20_000, 19_166), (19_166, 19_166));
     }
 }
