@@ -46,6 +46,89 @@ struct LedgerEntry {
     ledger: Ledger,
 }
 
+/// A ledger log rewritten without its superseded `State` rows, beside the
+/// original (`<log>.strip`) until [`StateRowStrip::finish`] renames it over.
+struct StateRowStrip {
+    path: PathBuf,
+    tmp: PathBuf,
+    out: Option<std::io::BufWriter<fs::File>>,
+    first: bool,
+    written: u64,
+    failed: bool,
+}
+
+impl StateRowStrip {
+    fn open(path: &std::path::Path) -> Option<Self> {
+        let tmp = path.with_extension("jsonl.strip");
+        let f = fs::File::create(&tmp).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            tmp,
+            out: Some(std::io::BufWriter::with_capacity(1 << 20, f)),
+            first: true,
+            written: 0,
+            failed: false,
+        })
+    }
+
+    /// One row, in the log's own `\n`-separated, no-trailing-newline shape.
+    fn row(&mut self, line: &str) {
+        use std::io::Write;
+        if self.failed {
+            return;
+        }
+        let Some(out) = self.out.as_mut() else { return };
+        let sep: &[u8] = if self.first { b"" } else { b"\n" };
+        if out
+            .write_all(sep)
+            .and_then(|_| out.write_all(line.as_bytes()))
+            .is_err()
+        {
+            self.failed = true;
+            return;
+        }
+        self.written += (sep.len() + line.len()) as u64;
+        self.first = false;
+    }
+
+    /// Append the one `State` row kept, make the copy durable, and rename it
+    /// over the log. Returns the log's size before and after.
+    fn finish(mut self, last_state: Option<&str>) -> Result<(u64, u64), String> {
+        if let Some(line) = last_state {
+            self.row(line);
+        }
+        if self.failed {
+            self.abandon();
+            return Err("write failed".into());
+        }
+        let before = fs::metadata(&self.path)
+            .map(|m| m.len())
+            .map_err(|e| e.to_string())?;
+        let out = self.out.take().ok_or("no writer")?;
+        let file = out.into_inner().map_err(|e| e.to_string())?;
+        if let Err(e) = file.sync_all() {
+            let _ = fs::remove_file(&self.tmp);
+            return Err(e.to_string());
+        }
+        drop(file);
+        if let Err(e) = fs::rename(&self.tmp, &self.path) {
+            let _ = fs::remove_file(&self.tmp);
+            return Err(e.to_string());
+        }
+        if let Some(dir) = self.path.parent() {
+            if let Ok(d) = fs::File::open(dir) {
+                let _ = d.sync_all();
+            }
+        }
+        Ok((before, self.written))
+    }
+
+    fn abandon(mut self) {
+        self.out.take();
+        let _ = fs::remove_file(&self.tmp);
+    }
+}
+
 /// JSONL row for append-only ledger log format
 /// - First line: Role variant (LedgerRole)
 /// - Second line: State variant (current LedgerState)
@@ -813,7 +896,56 @@ impl DepositsHandler {
             .max()
     }
 
+    /// The share of a ledger log's last `TAIL` bytes taken by `State` rows. A
+    /// soaked log is ~93% snapshots (a 6.4 MB row every ~100 appends against
+    /// ~3.8 KB per update: ref2's 13.7 GB log of 389k updates, signet
+    /// 2026-11-18), and after a strip it is one row in a mostly-update tail.
+    fn tail_state_share(path: &std::path::Path) -> f64 {
+        use std::io::{Read, Seek, SeekFrom};
+        const TAIL: u64 = 64 * 1024 * 1024;
+        let Ok(mut f) = fs::File::open(path) else {
+            return 0.0;
+        };
+        let Ok(len) = f.metadata().map(|m| m.len()) else {
+            return 0.0;
+        };
+        let from = len.saturating_sub(TAIL);
+        if f.seek(SeekFrom::Start(from)).is_err() {
+            return 0.0;
+        }
+        let mut buf = Vec::with_capacity((len - from) as usize);
+        if f.read_to_end(&mut buf).is_err() || buf.is_empty() {
+            return 0.0;
+        }
+        let state_bytes: usize = buf
+            .split(|&b| b == b'\n')
+            .filter(|l| l.starts_with(br#"{"type":"State""#))
+            .map(|l| l.len())
+            .sum();
+        state_bytes as f64 / buf.len() as f64
+    }
+
+    /// Strip a log's superseded `State` rows while it is read for load: only
+    /// when the log is past `STRIP_MIN_BYTES` and its tail is mostly snapshots.
+    /// `DEPOSITS_KEEP_STATE_ROWS=1` turns it off.
+    fn should_strip_state_rows(path: &std::path::Path) -> bool {
+        const STRIP_MIN_BYTES: u64 = 256 * 1024 * 1024;
+        if std::env::var("DEPOSITS_KEEP_STATE_ROWS").is_ok_and(|v| v == "1") {
+            return false;
+        }
+        fs::metadata(path).is_ok_and(|m| m.len() >= STRIP_MIN_BYTES)
+            && Self::tail_state_share(path) > 0.5
+    }
+
     fn load_single_ledger_from_jsonl(ledger_id: &str, path: &std::path::Path) -> Option<Ledger> {
+        Self::load_ledger_log(ledger_id, path, Self::should_strip_state_rows(path))
+    }
+
+    fn load_ledger_log(
+        ledger_id: &str,
+        path: &std::path::Path,
+        strip_state_rows: bool,
+    ) -> Option<Ledger> {
         use std::io::BufRead;
         let t_read = std::time::Instant::now();
         // Streamed, not read whole: a soaked ledger's log is ~10 GB.
@@ -852,11 +984,24 @@ impl DepositsHandler {
         let is_fork_file = ledger_id.len() > 64;
         let mut main_operator: Option<bitcoin::secp256k1::PublicKey> = None;
 
+        // Every reader of a log (this loader, `recovery`, `discover`) uses only its LAST
+        // `State` row, so a copy keeping every other row in order and that one row is the same
+        // log to all of them. Written beside the log in this same pass and renamed over it;
+        // any failure keeps the original.
+        let mut strip = if strip_state_rows {
+            StateRowStrip::open(path)
+        } else {
+            None
+        };
+        let mut read_failed = false;
+        let mut state_rows = 0usize;
+
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
                 Err(e) => {
                     tracing::warn!("Failed to read a line of {}: {}", ledger_id, e);
+                    read_failed = true;
                     break;
                 }
             };
@@ -864,8 +1009,12 @@ impl DepositsHandler {
                 continue;
             }
             if line.starts_with(r#"{"type":"State""#) {
+                state_rows += 1;
                 last_state_line = Some(line);
                 continue;
+            }
+            if let Some(w) = strip.as_mut() {
+                w.row(&line);
             }
 
             match serde_json::from_str::<LedgerLogRow>(&line) {
@@ -909,6 +1058,27 @@ impl DepositsHandler {
                 }
                 Err(e) => {
                     tracing::warn!("Failed to parse line in {}: {}", ledger_id, e);
+                }
+            }
+        }
+
+        if let Some(w) = strip.take() {
+            if read_failed || state_rows < 2 {
+                w.abandon();
+            } else {
+                match w.finish(last_state_line.as_deref()) {
+                    Ok((before, after)) => tracing::info!(
+                        "ledger log {}…: dropped {} superseded State rows, {} -> {} bytes",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        state_rows - 1,
+                        before,
+                        after
+                    ),
+                    Err(e) => tracing::warn!(
+                        "ledger log {}…: State-row strip abandoned: {}",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        e
+                    ),
                 }
             }
         }
@@ -1282,24 +1452,40 @@ impl DepositsHandler {
                 Some((id, p))
             })
             .collect();
-        // One thread per ledger, at most 8 at a time: each load is independent, and a soaked
-        // node's twelve ~10 GB logs loaded one after another took 26 min (signet, 2026-11-15).
-        for chunk in files.chunks(8) {
-            let loaded: Vec<(String, Option<Ledger>)> = std::thread::scope(|scope| {
-                let handles: Vec<_> = chunk
-                    .iter()
-                    .map(|(id, path)| {
-                        scope.spawn(move || {
-                            (id.clone(), Self::load_single_ledger_from_jsonl(id, path))
-                        })
+        // Eight workers drawing from one queue, largest log first: each load is independent,
+        // and a soaked node's twelve ~10 GB logs loaded one after another took 26 min (signet,
+        // 2026-11-15). Fixed chunks of eight waited on their slowest member: ref2's first
+        // chunk held four 200 MB fork logs done at 130 s and four main logs that ran to 3294 s,
+        // and the second chunk started only then (signet cold start, 2026-11-17).
+        let mut files = files;
+        files
+            .sort_by_key(|(_, p)| std::cmp::Reverse(fs::metadata(p).map(|m| m.len()).unwrap_or(0)));
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let loaded: Vec<(String, Option<Ledger>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8.min(files.len()))
+                .map(|_| {
+                    scope.spawn(|| {
+                        let mut out = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some((id, path)) = files.get(i) else {
+                                break;
+                            };
+                            out.push((id.clone(), Self::load_single_ledger_from_jsonl(id, path)));
+                        }
+                        out
                     })
-                    .collect();
-                handles.into_iter().filter_map(|h| h.join().ok()).collect()
-            });
-            for (id, ledger) in loaded {
-                if let Some(ledger) = ledger {
-                    ledgers.insert(id, Arc::new(RwLock::new(ledger)));
-                }
+                })
+                .collect();
+            handles
+                .into_iter()
+                .filter_map(|h| h.join().ok())
+                .flatten()
+                .collect()
+        });
+        for (id, ledger) in loaded {
+            if let Some(ledger) = ledger {
+                ledgers.insert(id, Arc::new(RwLock::new(ledger)));
             }
         }
 
@@ -3262,6 +3448,125 @@ mod load_tests {
         let l = DepositsHandler::load_single_ledger_from_jsonl("b", &path).unwrap();
         assert_eq!(l.state.reserves_key, "last");
         assert_eq!(l.history.len(), 1);
+    }
+
+    /// The strip keeps the log every reader sees: the same rows in order,
+    /// and only the last `State` row, which is the one each reader uses.
+    #[test]
+    fn stripping_state_rows_keeps_the_log_a_loader_sees() {
+        let dir = tempfile::tempdir().unwrap();
+        // Truncated history: the replay starts from the LAST State row.
+        let lines = vec![
+            row(&LedgerLogRow::Role {
+                role: LedgerRole::Partner,
+            }),
+            state_row("first"),
+            row(&LedgerLogRow::Update(update(
+                5,
+                &LedgerOperation::DisputeYield,
+            ))),
+            state_row("middle"),
+            row(&LedgerLogRow::Update(update(
+                6,
+                &LedgerOperation::DisputeYield,
+            ))),
+            state_row("last"),
+            row(&LedgerLogRow::Update(update(
+                7,
+                &LedgerOperation::DisputeYield,
+            ))),
+        ];
+        let path = write(dir.path(), "s", &lines);
+        let before = std::fs::metadata(&path).unwrap().len();
+        let kept = DepositsHandler::load_ledger_log("s", &path, false).unwrap();
+        let stripped = DepositsHandler::load_ledger_log("s", &path, true).unwrap();
+        let after = std::fs::metadata(&path).unwrap().len();
+        assert!(after < before, "{} -> {}", before, after);
+        assert!(!dir.path().join("s.jsonl.strip").exists());
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows: Vec<&str> = text.split('\n').collect();
+        assert_eq!(rows.len(), 5, "{:?}", rows);
+        assert!(rows[0].starts_with(r#"{"type":"Role""#));
+        assert_eq!(
+            rows.iter()
+                .filter(|r| r.starts_with(r#"{"type":"State""#))
+                .count(),
+            1
+        );
+        assert!(rows[4].contains("last"));
+
+        // Reloading the stripped log gives the same ledger as the original.
+        let again = DepositsHandler::load_ledger_log("s", &path, false).unwrap();
+        for l in [&stripped, &again] {
+            assert_eq!(l.state.reserves_key, kept.state.reserves_key);
+            assert_eq!(l.state.reserves_key, "last");
+            assert_eq!(l.state.sequence, kept.state.sequence);
+            assert_eq!(
+                l.history
+                    .iter()
+                    .map(|u| u.sequence_number)
+                    .collect::<Vec<_>>(),
+                vec![5, 6, 7]
+            );
+        }
+
+        // An append after the strip lands as a row of its own.
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        write!(
+            f,
+            "\n{}",
+            row(&LedgerLogRow::Update(update(
+                8,
+                &LedgerOperation::DisputeYield
+            )))
+        )
+        .unwrap();
+        drop(f);
+        let appended = DepositsHandler::load_ledger_log("s", &path, false).unwrap();
+        assert_eq!(appended.history.last().unwrap().sequence_number, 8);
+
+        // One State row: nothing to drop, the log is left as it is.
+        let one = write(dir.path(), "one", &lines[..3]);
+        let mtime = std::fs::metadata(&one).unwrap().len();
+        DepositsHandler::load_ledger_log("one", &one, true).unwrap();
+        assert_eq!(std::fs::metadata(&one).unwrap().len(), mtime);
+        assert!(!dir.path().join("one.jsonl.strip").exists());
+    }
+
+    /// Only a log that is mostly snapshots in its tail is stripped.
+    #[test]
+    fn the_tail_state_share_tells_a_snapshot_log_from_a_stripped_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let fat = "x".repeat(10_000);
+        let snap = format!(r#"{{"type":"State","pad":"{}"}}"#, fat);
+        let upd = row(&LedgerLogRow::Update(update(
+            1,
+            &LedgerOperation::DisputeYield,
+        )));
+        let mut soaked = vec![row(&LedgerLogRow::Role {
+            role: LedgerRole::Partner,
+        })];
+        for _ in 0..20 {
+            soaked.push(snap.clone());
+            soaked.push(upd.clone());
+        }
+        let p = write(dir.path(), "soaked", &soaked);
+        assert!(DepositsHandler::tail_state_share(&p) > 0.5);
+        let mut lean = vec![row(&LedgerLogRow::Role {
+            role: LedgerRole::Partner,
+        })];
+        lean.extend(std::iter::repeat_n(upd.clone(), 400));
+        lean.push(snap);
+        let p = write(dir.path(), "lean", &lean);
+        assert!(DepositsHandler::tail_state_share(&p) < 0.5);
+        // Small logs are never stripped, whatever their shape.
+        assert!(!DepositsHandler::should_strip_state_rows(
+            &dir.path().join("soaked.jsonl")
+        ));
     }
 
     #[test]
