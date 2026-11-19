@@ -1591,6 +1591,7 @@ impl Node {
                 op_address.script_pubkey().as_script(),
                 required_sats,
                 scan_retry,
+                &self.pledge_exclusion(ledger_id),
             )
             .await;
             match &lookup {
@@ -4991,26 +4992,72 @@ pub(crate) enum CollateralLookup {
 /// P2WPKH), retrying bitcoind's "Scan already in progress" per `retry`.
 /// `Err` only when the lookup itself failed (retries exhausted, or any
 /// other backend error).
+/// What a new pledge must avoid: this dispute's own earlier pledge (kept while unspent) and the
+/// coins our other arms pledged.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PledgeExclusion {
+    pub own: Option<bitcoin::OutPoint>,
+    pub taken: std::collections::HashSet<bitcoin::OutPoint>,
+}
+
+/// The coin to pledge in a `DisputeArmed` (DEP-03 §Replacement collateral declaration): `own`
+/// while it is unspent; else the smallest coin with at least `max(1, min_confs)`
+/// confirmations covering `need` that is not `taken`, ties to the smaller outpoint (as
+/// "txid:vout"); else none. A coin pledged to two disputes is spent by whichever claim lands
+/// first and strands the other: regtest rearm-rust 1119-100553, where ref7's round-2 arm
+/// pledged f9c1f754:0, another dispute's claim spent it three blocks before ref7's claim, and
+/// that claim failed bad-txns-inputs-missingorspent until the test gave up. cl's
+/// `pick-pledge`; vector `pledge_pick.json`.
+pub(crate) fn pick_pledge(
+    utxos: &[(crate::chain_backend::UnspentOutput, u32)],
+    need: u64,
+    min_confs: u32,
+    exclude: &PledgeExclusion,
+) -> Option<crate::chain_backend::UnspentOutput> {
+    if let Some(own) = exclude.own {
+        if let Some((u, _)) = utxos.iter().find(|(u, _)| u.outpoint == own) {
+            return Some(u.clone());
+        }
+    }
+    utxos
+        .iter()
+        .filter(|(u, c)| {
+            *c >= min_confs.max(1) && !exclude.taken.contains(&u.outpoint) && u.value_sats >= need
+        })
+        .min_by(|(a, _), (b, _)| {
+            a.value_sats
+                .cmp(&b.value_sats)
+                .then_with(|| a.outpoint.to_string().cmp(&b.outpoint.to_string()))
+        })
+        .map(|(u, _)| u.clone())
+}
+
 pub(crate) async fn find_replacement_collateral(
     backend: &dyn crate::chain_backend::ChainBackend,
     script: &bitcoin::Script,
     required_sats: u64,
     retry: &crate::chain_backend::ScanRetry,
+    exclude: &PledgeExclusion,
 ) -> Result<CollateralLookup, Error> {
-    let utxo = crate::chain_backend::find_unspent_output_retrying(backend, script, retry).await?;
-    Ok(match utxo {
-        Some(u) if u.value_sats >= required_sats => {
-            CollateralLookup::Found(deposits_core::messages::ReplacementCollateral {
+    let utxos = crate::chain_backend::find_unspent_outputs_retrying(backend, script, retry).await?;
+    if let Some(u) = pick_pledge(&utxos, required_sats, 1, exclude) {
+        return Ok(CollateralLookup::Found(
+            deposits_core::messages::ReplacementCollateral {
                 txid: *u.outpoint.txid.as_ref(),
                 vout: u.outpoint.vout,
                 amount: u.value_sats,
-            })
-        }
-        Some(u) => CollateralLookup::Undersized {
-            value_sats: u.value_sats,
-        },
-        None => CollateralLookup::NotFound,
-    })
+            },
+        ));
+    }
+    // Nothing free covers it: report the largest free coin, as the single-coin lookup did.
+    Ok(utxos
+        .iter()
+        .filter(|(u, _)| !exclude.taken.contains(&u.outpoint))
+        .map(|(u, _)| u.value_sats)
+        .max()
+        .map_or(CollateralLookup::NotFound, |value_sats| {
+            CollateralLookup::Undersized { value_sats }
+        }))
 }
 
 /// Whether to arm without replacement collateral when none is available
@@ -5111,9 +5158,14 @@ mod arm_collateral_tests {
             Err(ScriptedScans::scan_in_progress()),
             Ok(Some(utxo(50_000))),
         ]);
-        let lookup =
-            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(12))
-                .await;
+        let lookup = find_replacement_collateral(
+            &backend,
+            &script(),
+            30_000,
+            &ScanRetry::immediate(12),
+            &PledgeExclusion::default(),
+        )
+        .await;
         assert_eq!(backend.calls(), 3);
         match dispute_armed_op(100, [7u8; 20], "addr".into(), lookup, false, false) {
             ArmDecision::Arm(LedgerOperation::DisputeArmed {
@@ -5137,9 +5189,14 @@ mod arm_collateral_tests {
                 .map(|_| Err(ScriptedScans::scan_in_progress()))
                 .collect(),
         );
-        let lookup =
-            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(3))
-                .await;
+        let lookup = find_replacement_collateral(
+            &backend,
+            &script(),
+            30_000,
+            &ScanRetry::immediate(3),
+            &PledgeExclusion::default(),
+        )
+        .await;
         assert_eq!(backend.calls(), 3);
         // Even with the uncollateralized escape hatch, a failed lookup
         // never arms: it only means the scan lost a race.
@@ -5155,9 +5212,14 @@ mod arm_collateral_tests {
             Err(Error::Wallet("bitcoind scantxoutset error -1: boom".into())),
             Ok(Some(utxo(50_000))),
         ]);
-        let lookup =
-            find_replacement_collateral(&backend, &script(), 30_000, &ScanRetry::immediate(12))
-                .await;
+        let lookup = find_replacement_collateral(
+            &backend,
+            &script(),
+            30_000,
+            &ScanRetry::immediate(12),
+            &PledgeExclusion::default(),
+        )
+        .await;
         assert!(lookup.is_err());
         assert_eq!(backend.calls(), 1);
     }
@@ -5173,13 +5235,27 @@ mod arm_collateral_tests {
         ] {
             let backend = ScriptedScans::new(vec![Ok(scan.clone()), Ok(scan)]);
             let retry = ScanRetry::immediate(12);
-            let lookup = find_replacement_collateral(&backend, &script(), 30_000, &retry).await;
+            let lookup = find_replacement_collateral(
+                &backend,
+                &script(),
+                30_000,
+                &retry,
+                &PledgeExclusion::default(),
+            )
+            .await;
             assert_eq!(lookup.as_ref().unwrap(), &expect);
             assert!(matches!(
                 dispute_armed_op(1, [0; 20], "a".into(), lookup, false, false),
                 ArmDecision::Refuse(_)
             ));
-            let lookup = find_replacement_collateral(&backend, &script(), 30_000, &retry).await;
+            let lookup = find_replacement_collateral(
+                &backend,
+                &script(),
+                30_000,
+                &retry,
+                &PledgeExclusion::default(),
+            )
+            .await;
             assert!(matches!(
                 dispute_armed_op(1, [0; 20], "a".into(), lookup, false, true),
                 ArmDecision::Arm(LedgerOperation::DisputeArmed {
@@ -5311,6 +5387,37 @@ impl crate::node::Node {
 impl Node {
     /// Append our DisputeArmed for re-arm round `round` (TLV 366) to our fork, with a fresh
     /// preimage and a replacement-collateral pledge, and publish it.
+    /// What a pledge for `ledger_id` must avoid: the latest pledge on our own fork of it (kept
+    /// while unspent), and every coin any `DisputeArmed` of ours on any fork declares.
+    pub(crate) fn pledge_exclusion(&self, ledger_id: &str) -> PledgeExclusion {
+        use bitcoin::hashes::Hash;
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+        let mut ex = PledgeExclusion::default();
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        for (k, arc) in ledgers.iter() {
+            let l = arc.read().unwrap();
+            if !super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id) {
+                continue;
+            }
+            for u in l.history.iter().filter(|u| u.operator_id == self.node_id) {
+                if let Ok(LedgerOperation::DisputeArmed {
+                    replacement_collateral: Some(rc),
+                    ..
+                }) = LedgerOperation::tlv_decode(&u.message)
+                {
+                    let op =
+                        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout);
+                    ex.taken.insert(op);
+                    if k.starts_with(ledger_id) {
+                        ex.own = Some(op);
+                    }
+                }
+            }
+        }
+        ex
+    }
+
     pub(crate) async fn arm_rearm_round(
         &self,
         ledger_id: &str,
@@ -5348,6 +5455,7 @@ impl Node {
             op_address.script_pubkey().as_script(),
             required_sats,
             &crate::chain_backend::ScanRetry::quick(),
+            &self.pledge_exclusion(ledger_id),
         )
         .await
         .map_err(|e| e.to_string())?
@@ -5396,5 +5504,65 @@ impl Node {
         );
         let _ = self.publish_fork(fork_key).await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod pledge_pick_vector {
+    use super::{pick_pledge, PledgeExclusion};
+    use crate::chain_backend::UnspentOutput;
+
+    /// "aa:0" in the vector is a short stand-in for a txid: pad it to 64 hex digits.
+    fn outpoint(s: &str) -> bitcoin::OutPoint {
+        let (t, v) = s.split_once(':').unwrap();
+        let t = format!("{:0>64}", t);
+        bitcoin::OutPoint::new(t.parse().unwrap(), v.parse().unwrap())
+    }
+
+    #[test]
+    fn the_pledged_coin_matches_the_shared_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/pledge_pick.json")).unwrap();
+        let mut n = 0;
+        for c in v["cases"].as_array().unwrap() {
+            let utxos: Vec<(UnspentOutput, u32)> = c["utxos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|u| {
+                    (
+                        UnspentOutput {
+                            outpoint: outpoint(u["outpoint"].as_str().unwrap()),
+                            value_sats: u["sats"].as_u64().unwrap(),
+                        },
+                        u["confirmations"].as_u64().unwrap() as u32,
+                    )
+                })
+                .collect();
+            let exclude = PledgeExclusion {
+                own: c["own"].as_str().map(outpoint),
+                taken: c["taken"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| outpoint(t.as_str().unwrap()))
+                    .collect(),
+            };
+            let got = pick_pledge(
+                &utxos,
+                c["need"].as_u64().unwrap(),
+                c["min_confs"].as_u64().unwrap() as u32,
+                &exclude,
+            )
+            .map(|u| u.outpoint);
+            assert_eq!(
+                got,
+                c["expect"].as_str().map(outpoint),
+                "{}",
+                c["name"].as_str().unwrap()
+            );
+            n += 1;
+        }
+        assert_eq!(n, 9);
     }
 }

@@ -94,6 +94,16 @@ pub trait ChainBackend: Send + Sync {
     /// expensive but doesn't require `txindex`).
     fn find_unspent_output_at(&self, script: &Script) -> Result<Option<UnspentOutput>, Error>;
 
+    /// Every unspent output at `script`, each with its confirmation count. A backend that
+    /// can only name one answers with that one, counted as confirmed once.
+    fn find_unspent_outputs_at(&self, script: &Script) -> Result<Vec<(UnspentOutput, u32)>, Error> {
+        Ok(self
+            .find_unspent_output_at(script)?
+            .into_iter()
+            .map(|u| (u, 1))
+            .collect())
+    }
+
     /// Find the transaction that SPENDS `outpoint`, if the backend can
     /// see one. Used by the forfeit-sweep flow to locate the lottery
     /// claim TX (the spender of the confiscation TX's vout 0) so the
@@ -363,6 +373,31 @@ pub async fn find_unspent_output_retrying(
     let mut attempt = 1;
     loop {
         match backend.find_unspent_output_at(script) {
+            Err(e) if is_scan_in_progress(&e) && attempt < retry.attempts => {
+                let wait = retry.jittered_wait();
+                tracing::info!(
+                    "UTXO scan: another scan is in progress (attempt {}/{}); retrying in {:?}",
+                    attempt,
+                    retry.attempts,
+                    wait
+                );
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+            other => return other,
+        }
+    }
+}
+
+/// [`ChainBackend::find_unspent_outputs_at`], retried like [`find_unspent_output_retrying`].
+pub async fn find_unspent_outputs_retrying(
+    backend: &dyn ChainBackend,
+    script: &Script,
+    retry: &ScanRetry,
+) -> Result<Vec<(UnspentOutput, u32)>, Error> {
+    let mut attempt = 1;
+    loop {
+        match backend.find_unspent_outputs_at(script) {
             Err(e) if is_scan_in_progress(&e) && attempt < retry.attempts => {
                 let wait = retry.jittered_wait();
                 tracing::info!(

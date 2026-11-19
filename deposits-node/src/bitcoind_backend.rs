@@ -267,6 +267,9 @@ struct GetTxOut {
 #[derive(Deserialize)]
 struct ScanTxOutSetResult {
     success: bool,
+    /// The tip the scan ran at.
+    #[serde(default)]
+    height: Option<u32>,
     #[serde(default)]
     unspents: Vec<ScanTxOutUnspent>,
 }
@@ -277,6 +280,9 @@ struct ScanTxOutUnspent {
     vout: u32,
     /// BTC; convert to sats.
     amount: f64,
+    /// The block the output confirmed in.
+    #[serde(default)]
+    height: Option<u32>,
 }
 
 // -- ChainBackend impl -----------------------------------------------------
@@ -448,6 +454,41 @@ impl ChainBackend for BitcoindRpcBackend {
             outpoint: bitcoin::OutPoint::new(txid, first.vout),
             value_sats,
         }))
+    }
+
+    fn find_unspent_outputs_at(
+        &self,
+        script: &bitcoin::Script,
+    ) -> Result<Vec<(UnspentOutput, u32)>, Error> {
+        let desc = format!("raw({})", hex::encode(script.as_bytes()));
+        let result: ScanTxOutSetResult = self.call(
+            "scantxoutset",
+            serde_json::json!(["start", [{ "desc": desc }]]),
+        )?;
+        if !result.success {
+            return Err(Error::Wallet(
+                "bitcoind scantxoutset returned success=false".to_string(),
+            ));
+        }
+        let tip = result.height.unwrap_or(0);
+        result
+            .unspents
+            .into_iter()
+            .map(|u| {
+                let txid: bitcoin::Txid = u
+                    .txid
+                    .parse()
+                    .map_err(|e| Error::Wallet(format!("scantxoutset txid parse: {}", e)))?;
+                let confs = u.height.map_or(1, |h| tip.saturating_sub(h) + 1);
+                Ok((
+                    UnspentOutput {
+                        outpoint: bitcoin::OutPoint::new(txid, u.vout),
+                        value_sats: (u.amount * 100_000_000.0).round() as u64,
+                    },
+                    confs,
+                ))
+            })
+            .collect()
     }
 
     fn find_spending_tx(

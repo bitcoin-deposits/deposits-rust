@@ -151,6 +151,73 @@ impl ChainBackend for EsploraBackend {
         Ok(None)
     }
 
+    fn find_unspent_outputs_at(&self, script: &Script) -> Result<Vec<(UnspentOutput, u32)>, Error> {
+        // Hit /scripthash/<hash>/txs directly. The esplora-client library
+        // would auto-format the hash using bitcoin's {:x} (byte-reversed)
+        // which is the Blockstream-public-esplora convention; electrs
+        // expects the non-reversed SHA256 hash. Bypass the typed client
+        // to use the non-reversed form so we work against the electrs
+        // every operator runs.
+        use bitcoin::hashes::{sha256, Hash as _};
+
+        let script_hash = sha256::Hash::hash(script.as_bytes());
+        let script_hash_hex = hex::encode(script_hash.to_byte_array());
+        let url = format!("{}/scripthash/{}/txs", self.url, script_hash_hex);
+
+        // reqwest::blocking off tokio's coop budget: see chain_backend::off_budget.
+        let txs: Vec<bdk_esplora::esplora_client::Tx> =
+            crate::chain_backend::off_budget(|| -> Result<_, Error> {
+                let http = reqwest::blocking::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|e| Error::Wallet(format!("esplora HTTP client: {}", e)))?;
+                let response = http
+                    .get(&url)
+                    .send()
+                    .map_err(|e| Error::Wallet(format!("esplora GET {}: {}", url, e)))?;
+                if !response.status().is_success() {
+                    return Err(Error::Wallet(format!(
+                        "esplora returned status {} for scripthash scan",
+                        response.status()
+                    )));
+                }
+                response
+                    .json()
+                    .map_err(|e| Error::Wallet(format!("esplora parse scripthash response: {}", e)))
+            })?;
+        let client = self.client();
+        let tip = self.get_tip_height()?;
+        let mut out = Vec::new();
+        for tx in &txs {
+            for (vout, output) in tx.vout.iter().enumerate() {
+                if output.scriptpubkey.as_script() == script {
+                    let status = client
+                        .get_output_status(&tx.txid, vout as u64)
+                        .map_err(|e| {
+                            Error::Wallet(format!(
+                                "esplora get_output_status({}:{}): {:?}",
+                                tx.txid, vout, e
+                            ))
+                        })?;
+                    if status.map(|s| !s.spent).unwrap_or(true) {
+                        let confs = match (tx.status.confirmed, tx.status.block_height) {
+                            (true, Some(h)) => tip.saturating_sub(h) + 1,
+                            _ => 0,
+                        };
+                        out.push((
+                            UnspentOutput {
+                                outpoint: OutPoint::new(tx.txid, vout as u32),
+                                value_sats: output.value,
+                            },
+                            confs,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(out)
+    }
+
     fn find_spending_tx(
         &self,
         outpoint: &OutPoint,
