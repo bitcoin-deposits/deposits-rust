@@ -76,6 +76,44 @@ pub(crate) fn reimport_reached_tip(
             .any(|u| u.sequence_number == local_next_seq && u.operator_id == *operator)
 }
 
+/// The claim txids of the fetched `DisputeAcquire`s that name a custodian other than
+/// `operator`, filtered by `keep`.
+pub(crate) fn foreign_acquire_claims(
+    fetched: &[deposits_core::SignedLedgerUpdate],
+    operator: &bitcoin::secp256k1::PublicKey,
+    keep: impl Fn(&[u8; 32]) -> bool,
+) -> Vec<[u8; 32]> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let mut out: Vec<[u8; 32]> = fetched
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeAcquire {
+                new_custodian,
+                claim_txid,
+                ..
+            }) if new_custodian != *operator && keep(&claim_txid) => Some(claim_txid),
+            _ => None,
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Whether the fetch carries a `DisputeAcquire` that moves custody away from `operator`:
+/// any such acquire before strict-lottery-v8, and under it only one whose claim is confirmed
+/// (DEP-06 §Phase 4). Every acquire sits on a dispute fork, so "on a fork branch" alone says
+/// nothing; an unconfirmed one is a branch that has not won.
+pub(crate) fn acquire_moves_custody_away(
+    fetched: &[deposits_core::SignedLedgerUpdate],
+    operator: &bitcoin::secp256k1::PublicKey,
+    on_confirm: bool,
+    confirmed: impl Fn(&[u8; 32]) -> bool,
+) -> bool {
+    !foreign_acquire_claims(fetched, operator, |c| !on_confirm || confirmed(c)).is_empty()
+}
+
 /// Whether a relay fetch holds a `LedgerOpen`, i.e. reaches genesis. The
 /// slow path rebuilds a ledger from genesis and fails without one, so a view
 /// it would replace must not be dropped first: on a ledger deeper than the
@@ -863,7 +901,7 @@ impl Node {
 
         if let Some(ledger_arc) = existing {
             // --- Fast path: existing ledger, incremental update ---
-            let (local_tip_hash, local_next_seq, main_chain_operator) = {
+            let (local_tip_hash, local_next_seq, main_chain_operator, ruleset) = {
                 let ledger = ledger_arc.read().unwrap();
                 // The main chain's operator is whoever signed
                 // LedgerOpen — that's `state.operator_key`. Fork-branch
@@ -879,6 +917,7 @@ impl Node {
                     ledger.tail_hash(),
                     ledger.next_sequence(),
                     ledger.state.operator_key,
+                    ledger.state.active_ruleset_name.clone(),
                 )
             };
 
@@ -896,13 +935,29 @@ impl Node {
             // a `new_custodian` other than our current operator, force the
             // full genesis reimport so the branch-preferring `best_chain`
             // walk adopts the resolved (DisputeAcquire-bearing) chain.
-            let relay_transfers_custody_away = all_fetched.iter().any(|u| {
-                matches!(
-                    LedgerOperation::tlv_decode(&u.message),
-                    Ok(LedgerOperation::DisputeAcquire { new_custodian, .. })
-                        if new_custodian != main_chain_operator
-                )
-            });
+            //
+            // Under strict-lottery-v8 an acquire moves custody only once its claim confirms
+            // (DEP-06 §Phase 4), as the co-sign policy already reads it: a fork branch's
+            // acquire whose claim never confirmed (a phantom, or a loser's) must not drop the
+            // main ledger. Ask the chain about the ones not yet known confirmed.
+            let on_confirm = deposits_core::types::ruleset_acquire_on_confirm(&ruleset);
+            if on_confirm {
+                let claims = foreign_acquire_claims(&all_fetched, &main_chain_operator, |c| {
+                    !crate::node::cosign_policy::claim_confirmed(c)
+                });
+                if !claims.is_empty() {
+                    crate::node::cosign_policy::note_confirmed_claims(
+                        self.wallet.chain_backend().as_ref(),
+                        &claims,
+                    );
+                }
+            }
+            let relay_transfers_custody_away = acquire_moves_custody_away(
+                &all_fetched,
+                &main_chain_operator,
+                on_confirm,
+                crate::node::cosign_policy::claim_confirmed,
+            );
 
             if relay_transfers_custody_away && !fetched_holds_ledger_open(&all_fetched) {
                 return Err(Error::Protocol(format!(
@@ -3058,6 +3113,73 @@ mod pagination_tests {
         .tlv_encode();
         fetched.push(open);
         assert!(fetched_holds_ledger_open(&fetched));
+    }
+
+    /// A fork branch's acquire drops the main ledger only when it moves custody: under
+    /// strict-lottery-v8, once its claim is confirmed. Before, the reimport took ANY fetched
+    /// acquire naming another custodian, a phantom's or a loser's included.
+    #[test]
+    fn only_a_confirmed_acquire_moves_custody_under_v8() {
+        use super::{acquire_moves_custody_away, foreign_acquire_claims};
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvEncode;
+        let (operator, winner) = (key(1), key(2));
+        let acquire = |custodian, claim: u8| {
+            let mut u = upd(9, custodian);
+            u.message = LedgerOperation::DisputeAcquire {
+                new_custodian: custodian,
+                claim_txid: [claim; 32],
+                new_reserves_address: "tb1q".into(),
+                confiscation_txid: None,
+            }
+            .tlv_encode();
+            u
+        };
+        let mut fetched: Vec<_> = (1..9).map(|s| upd(s, operator)).collect();
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            true,
+            |_| true
+        ));
+        // The operator's own acquire never moves custody away from it.
+        fetched.push(acquire(operator, 1));
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            false,
+            |_| true
+        ));
+        // A fork's acquire, its claim unconfirmed: custody stays under v8, moves before it.
+        fetched.push(acquire(winner, 2));
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            true,
+            |_| false
+        ));
+        assert!(acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            false,
+            |_| false
+        ));
+        assert!(acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            true,
+            |c| *c == [2; 32]
+        ));
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            true,
+            |c| *c == [1; 32]
+        ));
+        assert_eq!(
+            foreign_acquire_claims(&fetched, &operator, |_| true),
+            vec![[2; 32]]
+        );
     }
 
     /// No oldest timestamp (empty page decoded to nothing) ends the walk.
