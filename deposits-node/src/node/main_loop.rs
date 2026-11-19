@@ -633,6 +633,19 @@ impl Node {
         ledger_id: &str,
         op_types: &[u8],
     ) -> Vec<deposits_core::types::SignedLedgerUpdate> {
+        self.fetch_ledger_updates_window(ledger_id, op_types, None)
+            .await
+            .0
+    }
+
+    /// The paginated fetch, from `since` (a `created_at`, inclusive) when given, else the
+    /// whole chain; also the newest `created_at` seen.
+    pub(crate) async fn fetch_ledger_updates_window(
+        &self,
+        ledger_id: &str,
+        op_types: &[u8],
+        since: Option<u64>,
+    ) -> (Vec<deposits_core::types::SignedLedgerUpdate>, Option<u64>) {
         use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
         use deposits_core::TlvDecode;
         use nostr_sdk::{Filter, Kind, Timestamp};
@@ -657,6 +670,7 @@ impl Node {
         let mut until_ts: Option<u64> = None;
         let mut pages = 0u32;
         let mut stalls = 0u32;
+        let mut newest_ts: Option<u64> = None;
 
         loop {
             let mut filter = Filter::new()
@@ -674,6 +688,9 @@ impl Node {
             }
             if let Some(ts) = until_ts {
                 filter = filter.until(Timestamp::from(ts));
+            }
+            if let Some(ts) = since {
+                filter = filter.since(Timestamp::from(ts));
             }
 
             let events = match client
@@ -694,6 +711,7 @@ impl Node {
                 if page_min_ts.is_none() || ts < page_min_ts.unwrap() {
                     page_min_ts = Some(ts);
                 }
+                newest_ts = newest_ts.max(Some(ts));
                 if let Ok(tlv) = BASE64.decode(&event.content) {
                     if let Ok(u) = deposits_core::types::SignedLedgerUpdate::tlv_decode(&tlv) {
                         if seen.insert((u.operator_id.serialize(), u.content_hash)) {
@@ -715,7 +733,7 @@ impl Node {
                 ReimportPage::Continue { until_ts: next } => until_ts = Some(next),
             }
         }
-        all
+        (all, newest_ts)
     }
 
     /// Re-import a joined ledger from Nostr, replacing any stale local copy.

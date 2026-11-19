@@ -1322,7 +1322,127 @@ fn ledger_cache() -> &'static Mutex<HashMap<String, ArmerSet>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// A non-final dispute's updates, kept between armer-set passes so a pass fetches only what
+/// is new. A deep dispute's set was rebuilt from a whole-ledger fetch every pass: 94k-250k
+/// updates, 37-56 s each, every 4-5 minutes per ledger (signet ref2/ref4, 2026-11-18).
+#[derive(Clone)]
+pub(crate) struct LotteryUpdates {
+    pub updates: std::sync::Arc<Vec<SignedLedgerUpdate>>,
+    keys: std::collections::HashSet<([u8; 33], [u8; 32])>,
+    /// The newest `created_at` fetched.
+    pub newest_ts: u64,
+    full_at: std::time::Instant,
+}
+
+/// A pass fetches from this long before the newest event it holds, for events published late
+/// with a slightly older `created_at`.
+const LOTTERY_FETCH_OVERLAP_SECS: u64 = 600;
+/// And refetches the whole ledger this often, for an event backdated past the overlap (an arm
+/// can be: docs/ADVERSARIAL.md §Backdated arms).
+const LOTTERY_FULL_REFETCH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+impl LotteryUpdates {
+    pub(crate) fn new(updates: Vec<SignedLedgerUpdate>, newest_ts: Option<u64>) -> Self {
+        let keys = updates
+            .iter()
+            .map(|u| (u.operator_id.serialize(), u.content_hash))
+            .collect();
+        Self {
+            updates: std::sync::Arc::new(updates),
+            keys,
+            newest_ts: newest_ts.unwrap_or(0),
+            full_at: std::time::Instant::now(),
+        }
+    }
+
+    /// Where the next incremental fetch starts, or `None` when a whole refetch is due.
+    pub(crate) fn since(&self, now: std::time::Instant) -> Option<u64> {
+        (now.duration_since(self.full_at) < LOTTERY_FULL_REFETCH)
+            .then(|| self.newest_ts.saturating_sub(LOTTERY_FETCH_OVERLAP_SECS))
+    }
+
+    /// Add what an incremental fetch brought that is not held yet (keyed as the fetch keys
+    /// them: by operator and content). Returns how many were new.
+    pub(crate) fn merge(
+        &mut self,
+        fetched: Vec<SignedLedgerUpdate>,
+        newest_ts: Option<u64>,
+    ) -> usize {
+        let fresh: Vec<SignedLedgerUpdate> = fetched
+            .into_iter()
+            .filter(|u| {
+                self.keys
+                    .insert((u.operator_id.serialize(), u.content_hash))
+            })
+            .collect();
+        if let Some(ts) = newest_ts {
+            self.newest_ts = self.newest_ts.max(ts);
+        }
+        let n = fresh.len();
+        if n > 0 {
+            let mut all = (*self.updates).clone();
+            all.extend(fresh);
+            self.updates = std::sync::Arc::new(all);
+        }
+        n
+    }
+}
+
+fn lottery_updates_cache() -> &'static Mutex<HashMap<String, LotteryUpdates>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, LotteryUpdates>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 impl crate::node::Node {
+    /// A dispute's updates for its armer set: the whole ledger on the first pass and every
+    /// [`LOTTERY_FULL_REFETCH`], and in between only what came since the last pass.
+    async fn lottery_updates(&self, ledger_id: &str) -> std::sync::Arc<Vec<SignedLedgerUpdate>> {
+        let cached = lottery_updates_cache()
+            .lock()
+            .unwrap()
+            .get(ledger_id)
+            .cloned();
+        let since = cached
+            .as_ref()
+            .and_then(|c| c.since(std::time::Instant::now()));
+        let t = std::time::Instant::now();
+        let entry = match (cached, since) {
+            (Some(mut c), Some(since)) => {
+                let (fetched, newest) = self
+                    .fetch_ledger_updates_window(ledger_id, &[], Some(since))
+                    .await;
+                c.merge(fetched, newest);
+                c
+            }
+            _ => {
+                let (fetched, newest) =
+                    self.fetch_ledger_updates_window(ledger_id, &[], None).await;
+                LotteryUpdates::new(fetched, newest)
+            }
+        };
+        if t.elapsed().as_millis() >= 1000 {
+            tracing::warn!(
+                "lottery {}: fetching {} updates took {} ms ({})",
+                &ledger_id[..16.min(ledger_id.len())],
+                entry.updates.len(),
+                t.elapsed().as_millis(),
+                if since.is_some() {
+                    "incremental"
+                } else {
+                    "whole ledger"
+                }
+            );
+        }
+        let updates = entry.updates.clone();
+        if !updates.is_empty() {
+            lottery_updates_cache()
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), entry);
+        }
+        updates
+    }
+
     /// The dispute's armer set for `ledger_id`. Once its confiscation has confirmed and is
     /// buried the set cannot change (DEP-03), so it is kept per ledger and the claim and
     /// recovery periodics never refetch whole ledgers; before that a later arm may move E.
@@ -1330,16 +1450,8 @@ impl crate::node::Node {
         if let Some(set) = ledger_cache().lock().unwrap().get(ledger_id) {
             return Ok(set.clone());
         }
-        let t = std::time::Instant::now();
-        let updates = self.fetch_all_ledger_updates_paginated(ledger_id).await;
-        if t.elapsed().as_millis() >= 1000 {
-            tracing::warn!(
-                "lottery {}: fetching {} updates took {} ms",
-                &ledger_id[..16.min(ledger_id.len())],
-                updates.len(),
-                t.elapsed().as_millis()
-            );
-        }
+        let updates = self.lottery_updates(ledger_id).await;
+        let updates: &[SignedLedgerUpdate] = &updates;
         if updates.is_empty() {
             return Err("failed to fetch ledger updates from relay".into());
         }
@@ -1368,6 +1480,7 @@ impl crate::node::Node {
                 .lock()
                 .unwrap()
                 .insert(ledger_id.to_string(), set.clone());
+            lottery_updates_cache().lock().unwrap().remove(ledger_id);
         }
         Ok(set)
     }
@@ -1865,5 +1978,54 @@ mod tests {
                 case["name"]
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod lottery_updates_cache_tests {
+    use super::{LotteryUpdates, LOTTERY_FETCH_OVERLAP_SECS, LOTTERY_FULL_REFETCH};
+    use deposits_core::SignedLedgerUpdate;
+
+    fn upd(seq: u64, op: u8) -> SignedLedgerUpdate {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        SignedLedgerUpdate {
+            message: Vec::new(),
+            message_type: 0x8001,
+            operator_id: PublicKey::from_secret_key(
+                &Secp256k1::new(),
+                &SecretKey::from_slice(&[op; 32]).unwrap(),
+            ),
+            ledger_id: [0u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [seq as u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// A pass after the first fetches from just before the newest event held, adds only what
+    /// it does not hold (a fork's update at an OLD sequence included: the key is the operator
+    /// and content, never the sequence), and refetches the whole ledger every 30 minutes.
+    #[test]
+    fn a_pass_fetches_only_what_is_new_and_refetches_whole_on_schedule() {
+        let mut c = LotteryUpdates::new((0..100).map(|s| upd(s, 1)).collect(), Some(5_000));
+        let now = std::time::Instant::now();
+        assert_eq!(c.since(now), Some(5_000 - LOTTERY_FETCH_OVERLAP_SECS));
+
+        // The overlap re-serves 98 and 99; a disputant's arm at seq 40 is new.
+        let fetched = vec![upd(98, 1), upd(99, 1), upd(100, 1), upd(40, 2)];
+        assert_eq!(c.merge(fetched, Some(5_200)), 2);
+        assert_eq!(c.updates.len(), 102);
+        assert_eq!(c.newest_ts, 5_200);
+        // Nothing new: no copy, no change.
+        let before = std::sync::Arc::as_ptr(&c.updates);
+        assert_eq!(c.merge(vec![upd(100, 1)], None), 0);
+        assert_eq!(std::sync::Arc::as_ptr(&c.updates), before);
+        assert_eq!(c.newest_ts, 5_200);
+
+        assert_eq!(c.since(now + LOTTERY_FULL_REFETCH), None);
     }
 }
