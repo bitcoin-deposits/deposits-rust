@@ -2681,6 +2681,89 @@ mod tests {
         PublicKey::from_secret_key(&secp, &sk)
     }
 
+    /// DEP-05 "When a quorum_expired dispute ends" / DEP-06 "Losers yield": where a
+    /// DisputeYield is valid, against the vector shared with cl-deposits. Each case's `ops`
+    /// are appended through the real path (`append_operation_with_block`: the state gate and
+    /// the op rules), then one DisputeYield.
+    #[test]
+    fn dispute_yield_states_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/vectors/dispute_yield_states.json"))
+                .unwrap();
+        let state_name = |s: deposits_protocol::DisputeState| match s {
+            deposits_protocol::DisputeState::Normal => "normal",
+            deposits_protocol::DisputeState::Disputed => "disputed",
+            deposits_protocol::DisputeState::Armed => "armed",
+            deposits_protocol::DisputeState::Tombstoned => "tombstoned",
+        };
+        let arm =
+            |commit: u8, collateral: bool, round: Option<u32>| LedgerOperation::DisputeArmed {
+                armed_block: 100,
+                commitment_hash: [commit; 20],
+                target_reserves: "t".into(),
+                replacement_collateral: collateral.then_some(
+                    crate::messages::ReplacementCollateral {
+                        txid: [3; 32],
+                        vout: 0,
+                        amount: 50_000,
+                    },
+                ),
+                rearm_round: round,
+            };
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 10, "every dispute state, armed and un-armed");
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut ledger = Ledger::new_as_operator(test_pubkey(), test_pubkey_2().to_string(), 0);
+            ledger.state.quorum_state = QuorumState::Active;
+            for o in case["ops"].as_array().unwrap() {
+                let op = match o["op"].as_str().unwrap() {
+                    "enter" => LedgerOperation::DisputeEnter {
+                        last_valid_sequence: 0,
+                        reason: o["reason"].as_str().unwrap().into(),
+                        anchor_block_hash: None,
+                        anchor_block_height: None,
+                        fraud_proof_hash: None,
+                        fraud_proof: None,
+                    },
+                    "arm" => arm(0x11, true, None),
+                    "arm_bare" => arm(0x11, false, None),
+                    "arm_round_2" => arm(0x22, true, Some(2)),
+                    "yield" => LedgerOperation::DisputeYield,
+                    "acquire" => LedgerOperation::DisputeAcquire {
+                        new_custodian: test_pubkey_2(),
+                        claim_txid: [4; 32],
+                        new_reserves_address: String::new(),
+                        confiscation_txid: None,
+                    },
+                    other => panic!("{name}: unknown op {other}"),
+                };
+                ledger
+                    .append_operation_with_block(op, 100, [0u8; 32])
+                    .unwrap_or_else(|e| panic!("{name}: setup op {o} refused: {e:?}"));
+            }
+            assert_eq!(
+                state_name(ledger.state.dispute_state),
+                case["state_before"].as_str().unwrap(),
+                "{name}: state before the yield"
+            );
+            let got =
+                ledger.append_operation_with_block(LedgerOperation::DisputeYield, 100, [0u8; 32]);
+            assert_eq!(
+                if got.is_ok() { "accept" } else { "reject" },
+                case["yield"].as_str().unwrap(),
+                "{name}: {got:?}"
+            );
+            if let Some(after) = case["state_after"].as_str() {
+                assert_eq!(
+                    state_name(ledger.state.dispute_state),
+                    after,
+                    "{name}: state after"
+                );
+            }
+        }
+    }
+
     /// DEP-03 re-arm shape and DEP-06 Phase 4 re-arm rounds (TLV 366), against the vector
     /// shared with cl-deposits: `prior` is the fork's latest arm, then an optional yield or
     /// acquire, then `next` must be taken (the state gate and the arm rules) or refused.
