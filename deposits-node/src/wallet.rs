@@ -576,6 +576,21 @@ impl Wallet {
         Ok(None)
     }
 
+    /// The output at `outpoint` if it pays `script` and is unspent: (value, confirmations).
+    /// See [`crate::chain_backend::unspent_output_paying`]; use it wherever the outpoint is
+    /// known, never [`Self::find_utxo_for_script`].
+    pub fn unspent_output_paying(
+        &self,
+        outpoint: OutPoint,
+        script: &bitcoin::ScriptBuf,
+    ) -> Result<Option<(u64, u32)>, Error> {
+        crate::chain_backend::unspent_output_paying(
+            &*self.chain_backend(),
+            &outpoint,
+            script.as_script(),
+        )
+    }
+
     /// Find an unspent UTXO for a given script pubkey
     ///
     /// Returns (OutPoint, amount) if found, None if no unspent output exists.

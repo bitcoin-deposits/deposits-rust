@@ -442,6 +442,39 @@ pub fn find_unspent_output_retrying_blocking(
     }
 }
 
+/// The output at `outpoint`, if it pays `script` and is unspent: its value and confirmation
+/// count (0 in the mempool). An output known by its OUTPOINT, never "an unspent output at this
+/// script": two outputs can pay one script (DEP-06: a lottery's script commits to its
+/// participants and voters only, so two disputes with the same sole armer and quorum pay the
+/// same one, regtest 2026-11-20), and a by-script lookup then picks either.
+pub fn unspent_output_paying(
+    backend: &dyn ChainBackend,
+    outpoint: &OutPoint,
+    script: &Script,
+) -> Result<Option<(u64, u32)>, Error> {
+    let Some(tx) = backend.get_tx(&outpoint.txid)? else {
+        return Ok(None);
+    };
+    let Some(out) = tx.output.get(outpoint.vout as usize) else {
+        return Ok(None);
+    };
+    if out.script_pubkey.as_script() != script {
+        return Ok(None);
+    }
+    // Unknown counts as unspent: the transaction exists, so the output does.
+    if backend.is_output_unspent(&outpoint.txid, outpoint.vout)? == Some(false) {
+        return Ok(None);
+    }
+    let confs = match backend.get_tx_block_height(&outpoint.txid)? {
+        Some(h) => backend
+            .get_tip_height()?
+            .saturating_sub(h)
+            .saturating_add(1),
+        None => 0,
+    };
+    Ok(Some((out.value.to_sat(), confs)))
+}
+
 fn sleep_blocking(d: std::time::Duration) {
     off_budget(|| std::thread::sleep(d))
 }
@@ -558,6 +591,108 @@ mod from_env_tests {
         assert!(
             !std::sync::Arc::ptr_eq(&a, &b),
             "different url, different backend"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outpoint_tests {
+    use super::*;
+    use bitcoin::{Amount, ScriptBuf, TxOut};
+    use std::collections::{HashMap, HashSet};
+
+    /// Two transactions whose output 0 pays one script; the by-script scan answers the decoy.
+    struct TwoAtOneScript {
+        txs: HashMap<Txid, (Transaction, u32)>,
+        spent: HashSet<OutPoint>,
+        decoy: UnspentOutput,
+    }
+
+    fn tx(lock: u32, spk: &ScriptBuf, sats: u64) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::from_consensus(lock),
+            input: vec![],
+            output: vec![TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: spk.clone(),
+            }],
+        }
+    }
+
+    impl ChainBackend for TwoAtOneScript {
+        fn get_tip_height(&self) -> Result<u32, Error> {
+            Ok(110)
+        }
+        fn get_block_hash(&self, _: u32) -> Result<BlockHash, Error> {
+            Err(Error::Wallet("fake".into()))
+        }
+        fn get_block_height_if_in_best_chain(&self, _: &BlockHash) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn get_tx(&self, t: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(self.txs.get(t).map(|(x, _)| x.clone()))
+        }
+        fn get_tx_block_height(&self, t: &Txid) -> Result<Option<u32>, Error> {
+            Ok(self.txs.get(t).map(|(_, h)| *h))
+        }
+        fn is_output_unspent(&self, t: &Txid, v: u32) -> Result<Option<bool>, Error> {
+            Ok(Some(!self.spent.contains(&OutPoint::new(*t, v))))
+        }
+        fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+            Ok(Some(self.decoy.clone()))
+        }
+        fn find_spending_tx(
+            &self,
+            _: &OutPoint,
+            _: &Script,
+            _: u32,
+        ) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+        fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+            Err(Error::Wallet("fake".into()))
+        }
+    }
+
+    #[test]
+    fn the_named_outpoint_is_the_answer_not_whatever_pays_its_script() {
+        let spk = ScriptBuf::from_bytes(vec![0x51, 0x20, 7, 7, 7]);
+        // regtest 2026-11-20: a606a4ca's round-2 output and 70b0abb3's, same script and value.
+        let ours = tx(1, &spk, 49_998_956);
+        let other = tx(2, &spk, 49_998_956);
+        let ours_op = OutPoint::new(ours.compute_txid(), 0);
+        let other_op = OutPoint::new(other.compute_txid(), 0);
+        let mut b = TwoAtOneScript {
+            txs: [(ours_op.txid, (ours, 100)), (other_op.txid, (other, 50))].into(),
+            spent: HashSet::new(),
+            decoy: UnspentOutput {
+                outpoint: other_op,
+                value_sats: 49_998_956,
+            },
+        };
+        assert_eq!(
+            b.find_unspent_output_at(&spk).unwrap().unwrap().outpoint,
+            other_op,
+            "the scan answers the other dispute's output"
+        );
+        assert_eq!(
+            unspent_output_paying(&b, &ours_op, &spk).unwrap(),
+            Some((49_998_956, 11))
+        );
+        // Spent: gone, and the other output at the script never stands in for it.
+        b.spent.insert(ours_op);
+        assert_eq!(unspent_output_paying(&b, &ours_op, &spk).unwrap(), None);
+        // An outpoint that pays another script is not the output asked for.
+        let elsewhere = ScriptBuf::from_bytes(vec![0x51, 0x20, 9]);
+        assert_eq!(
+            unspent_output_paying(&b, &other_op, &elsewhere).unwrap(),
+            None
+        );
+        // Unknown transaction, or a vout past its outputs.
+        assert_eq!(
+            unspent_output_paying(&b, &OutPoint::new(other_op.txid, 1), &spk).unwrap(),
+            None
         );
     }
 }

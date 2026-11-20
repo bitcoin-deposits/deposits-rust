@@ -409,6 +409,8 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let mut qb_members: Vec<bitcoin::secp256k1::PublicKey> = Vec::new();
         let mut qb_expiry: u32 = 0;
         let mut qb_ruleset: Option<String> = None;
+        // The vault that QuorumBegin records: the lookup below is by outpoint.
+        let mut qb_outpoint: Option<bitcoin::OutPoint> = None;
         for u in &ledger.history {
             if let Ok(LedgerOperation::QuorumBegin {
                 reserves_id,
@@ -416,9 +418,18 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 quorum_members,
                 quorum_expiry,
                 protocol_version,
+                new_outpoint_txid,
+                new_outpoint_vout,
                 ..
             }) = LedgerOperation::tlv_decode(&u.message)
             {
+                {
+                    use bitcoin::hashes::Hash;
+                    qb_outpoint = Some(bitcoin::OutPoint::new(
+                        bitcoin::Txid::from_byte_array(new_outpoint_txid),
+                        new_outpoint_vout,
+                    ));
+                }
                 qb_reserves_id = Some(reserves_id);
                 qb_ledger_hash = Some(ledger_hash);
                 qb_members = quorum_members.into_iter().map(|m| m.pubkey).collect();
@@ -492,7 +503,7 @@ async fn reserves_spend(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let reserves_script = reserves_addr.script_pubkey();
         let utxo = node
             .wallet
-            .find_utxo_for_script(&reserves_script)
+            .vault_utxo(qb_outpoint, &reserves_script)
             .map_err(|e| format!("esplora reserves lookup: {}", e))?
             .ok_or_else(|| {
                 format!(

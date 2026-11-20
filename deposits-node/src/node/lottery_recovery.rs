@@ -239,6 +239,10 @@ pub(crate) struct LotteryContext {
     pub recovery_threshold: usize,
     /// Our own DisputeArmed, if we armed.
     pub our_armed: Option<deposits_core::SignedLedgerUpdate>,
+    /// Round 1's lottery output, once the confiscation landed: output 0 of the transaction
+    /// that spent the vault. The lottery is found at THIS outpoint, never by its script: two
+    /// disputes with one sole armer and one quorum pay the same script (regtest 2026-11-20).
+    pub landed: Option<OutPoint>,
 }
 
 impl LotteryContext {
@@ -385,12 +389,14 @@ impl Node {
             return Err(Error::Protocol("No LedgerOpen found".to_string()));
         }
 
+        let landed = landed_lottery_outpoint(&*self.wallet.chain_backend(), &updates);
         Ok(LotteryContext {
             participants,
             preimages,
             recovery_voters,
             recovery_threshold,
             our_armed,
+            landed,
         })
     }
 
@@ -550,7 +556,7 @@ impl Node {
     ) -> Option<Vec<(bitcoin::secp256k1::PublicKey, LotteryParticipant)>> {
         let (vault, _) = super::vault_watch::current_vault(updates)?;
         let backend = self.wallet.chain_backend();
-        let (spk, _) = landed_spender(&*backend, &vault, floor)?;
+        let (spk, _, _) = landed_spender(&*backend, &vault, floor)?;
         match_landed_set(
             &spk,
             current,
@@ -565,17 +571,19 @@ impl Node {
     pub(crate) fn locate_lottery_output(
         &self,
         lottery: &LotteryOutput,
+        landed: Option<OutPoint>,
     ) -> Result<Option<(OutPoint, u64, u32)>, Error> {
-        let Some((outpoint, value)) = self.wallet.find_utxo_for_script(&lottery.script_pubkey())?
-        else {
+        // By outpoint: the landed confiscation's output 0, if it pays this lottery and is
+        // unspent. Not "an unspent output at the lottery's script", which ref7 read as another
+        // ledger's unclaimed round-2 output of the same script and value and claimed instead
+        // (regtest rearm-rust 1120-090836: a606a4ca's claim spent 70b0abb3's 46a66b12:0).
+        let Some(outpoint) = landed else {
             return Ok(None);
         };
-        let confirmations = self
+        Ok(self
             .wallet
-            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)?
-            .map(|(_, c)| c)
-            .unwrap_or(0);
-        Ok(Some((outpoint, value, confirmations)))
+            .unspent_output_paying(outpoint, &lottery.script_pubkey())?
+            .map(|(value, confirmations)| (outpoint, value, confirmations)))
     }
 
     /// The recovery voters' attestations of a subset claim, parallel to
@@ -874,7 +882,7 @@ impl Node {
             .build_lottery(self.wallet.network())
             .map_err(|e| e.to_string())?;
         let (outpoint, value, confirmations) = self
-            .locate_lottery_output(&lottery)
+            .locate_lottery_output(&lottery, ctx.landed)
             .map_err(|e| e.to_string())?
             .ok_or("no pending lottery on chain")?;
         let path = lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS);
@@ -963,26 +971,37 @@ pub(crate) fn confiscation_height(
 ) -> Option<u32> {
     let (vault, _) = super::vault_watch::current_vault(updates)?;
     let floor = super::armers::first_arm_height(updates)?;
-    landed_spender(backend, &vault, floor).map(|(_, h)| h)
+    landed_spender(backend, &vault, floor).map(|(_, h, _)| h)
 }
 
-/// The landed spender of `vault` (its first output's script) and the block it confirmed
-/// in, searched from `floor` a chunk per call, progress remembered.
+/// Round 1's lottery outpoint: output 0 of the confirmed spend of the vault the ledger's latest
+/// `QuorumBegin` names (the confiscation), once the search has found it.
+pub(crate) fn landed_lottery_outpoint(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    updates: &[deposits_core::SignedLedgerUpdate],
+) -> Option<OutPoint> {
+    let (vault, _) = super::vault_watch::current_vault(updates)?;
+    let floor = super::armers::first_arm_height(updates)?;
+    landed_spender(backend, &vault, floor).map(|(_, _, txid)| OutPoint { txid, vout: 0 })
+}
+
+/// The landed spender of `vault` (its first output's script), the block it confirmed
+/// in and its txid, searched from `floor` a chunk per call, progress remembered.
 fn landed_spender(
     backend: &dyn crate::chain_backend::ChainBackend,
     vault: &OutPoint,
     floor: u32,
-) -> Option<(bitcoin::ScriptBuf, u32)> {
+) -> Option<(bitcoin::ScriptBuf, u32, bitcoin::Txid)> {
     use std::sync::{Mutex, OnceLock};
     const LANDED_SCAN_CHUNK: u32 = 50;
     enum Progress {
         ScannedTo(u32),
-        Found(bitcoin::ScriptBuf, u32),
+        Found(bitcoin::ScriptBuf, u32, bitcoin::Txid),
     }
     static CACHE: OnceLock<Mutex<HashMap<OutPoint, Progress>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let start = match cache.lock().unwrap().get(vault) {
-        Some(Progress::Found(spk, h)) => return Some((spk.clone(), *h)),
+        Some(Progress::Found(spk, h, txid)) => return Some((spk.clone(), *h, *txid)),
         Some(Progress::ScannedTo(h)) => h + 1,
         None => {
             let created = backend.get_tx_block_height(&vault.txid).ok().flatten()?;
@@ -1028,11 +1047,12 @@ fn landed_spender(
         .ok()
         .flatten()?;
     let spk = spender.output.first()?.script_pubkey.clone();
+    let txid = spender.compute_txid();
     cache
         .lock()
         .unwrap()
-        .insert(*vault, Progress::Found(spk.clone(), height));
-    Some((spk, height))
+        .insert(*vault, Progress::Found(spk.clone(), height, txid));
+    Some((spk, height, txid))
 }
 
 #[cfg(test)]

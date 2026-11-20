@@ -2081,7 +2081,7 @@ impl Node {
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
         let lottery = ctx.build_lottery(self.wallet.network())?;
         let t_locate = std::time::Instant::now();
-        let mut located = self.locate_lottery_output(&lottery)?;
+        let mut located = self.locate_lottery_output(&lottery, ctx.landed)?;
         // DEP-06 "Authorised confiscation": the confiscation that landed may be a lottery over a
         // subset of the arms counted at its block (a proposer that saw fewer arms). The sole
         // participant of 751e6951's round 1 (ref6) never claimed because it looked only for the
@@ -2110,11 +2110,12 @@ impl Node {
                         recovery_voters: ctx.recovery_voters.clone(),
                         recovery_threshold: ctx.recovery_threshold,
                         our_armed: ctx.our_armed.clone(),
+                        landed: ctx.landed,
                     };
                     let Ok(l) = sub.build_lottery(self.wallet.network()) else {
                         continue;
                     };
-                    if let Some(found) = self.locate_lottery_output(&l)? {
+                    if let Some(found) = self.locate_lottery_output(&l, ctx.landed)? {
                         tracing::info!(
                             "Lottery for {}: the landed output pays a subset of the arms ({} of {})",
                             &ledger_id[..16.min(ledger_id.len())],
@@ -2140,7 +2141,7 @@ impl Node {
         // landed yet), and neither a claim nor a yield may be decided from it. A yield is final
         // (DisputeYield, completed marker), so deciding from a set that is not on chain can leave
         // a sole participant yielding its own custody (soak, 30ea46ac, Nov 5).
-        let Some((_, _, confirmations)) = located else {
+        let Some((lottery_outpoint, lottery_value, confirmations)) = located else {
             // What we derived, so a mismatch with the landed output can be read off the log:
             // 751e6951's round-1 output (Nov 7..10) never matched ref6's set and nothing said why.
             let short = |b: &[u8]| hex::encode(&b[..4.min(b.len())]);
@@ -2196,6 +2197,7 @@ impl Node {
         tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
         self.claim_lottery(
             ledger_id,
+            (lottery_outpoint, lottery_value),
             &ctx.participants,
             &ordered_preimages,
             winner_index,
@@ -2208,10 +2210,13 @@ impl Node {
         .await
     }
 
-    /// Claim the lottery output as the winner
+    /// Claim the lottery output as the winner. `lottery_utxo` is the output the caller located
+    /// BY OUTPOINT (round 1: the landed confiscation's output 0; a later round: the re-arm
+    /// spend's), with its value: the claim spends exactly that output.
     pub(crate) async fn claim_lottery(
         &self,
         ledger_id: &str,
+        lottery_utxo: (bitcoin::OutPoint, u64),
         participants: &[(
             bitcoin::secp256k1::PublicKey,
             deposits_core::tapscript_reserves::LotteryParticipant,
@@ -2244,9 +2249,8 @@ impl Node {
         // ledger's latest QuorumBegin (minus operator) — the SAME set the
         // confiscation TX committed to on-chain. Deriving them from the
         // DisputeArmed participants here (the old stub) produced a
-        // different Taproot address, so `find_utxo_for_script` below found
-        // no UTXO and the claim silently failed — leaving the ledger
-        // disputed forever.
+        // different Taproot address, so the claim's leaf and sighash would
+        // not match the output being spent.
 
         // Build the lottery output
         let lottery_builder = LotteryScriptBuilder::new(
@@ -2260,17 +2264,15 @@ impl Node {
             .build()
             .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
 
-        // Find the lottery UTXO on-chain
+        // The lottery UTXO is the one the caller located by outpoint. It was once "any unspent
+        // output at the lottery's script" (`find_utxo_for_script`), and a lottery's script
+        // commits to its participants and voters only: ref7, sole armer of round 2 of two
+        // ledgers with one quorum, claimed 70b0abb3's unclaimed round-2 output (46a66b12:0,
+        // same script, same value) as a606a4ca's, spending a606a4ca's declared collateral, and
+        // every later claim of a606a4ca's own output failed bad-txns-inputs-missingorspent
+        // (regtest rearm-rust 1120-090836).
         let lottery_script = lottery_output.address.script_pubkey();
-
-        // Use wallet's esplora to find UTXO
-        let lottery_utxo = self
-            .wallet
-            .find_utxo_for_script(&lottery_script)
-            .map_err(|e| Error::Protocol(format!("Failed to find lottery UTXO: {:?}", e)))?;
-
-        let (lottery_outpoint, lottery_amount) = lottery_utxo
-            .ok_or_else(|| Error::Protocol("No unspent UTXO at lottery address".to_string()))?;
+        let (lottery_outpoint, lottery_amount) = lottery_utxo;
 
         tracing::info!(
             "Found lottery UTXO: {} ({} sats)",
@@ -4402,17 +4404,19 @@ impl Node {
             lottery_output.address
         );
 
-        // Check if lottery address has a UTXO with enough confirmations.
-        // Ask Esplora directly for the tx's confirmation depth; no
-        // local cache file needed.
+        // The confiscation that spent this dispute's vault, and its output 0 if it pays this
+        // lottery: by outpoint, not "a UTXO at the lottery's script", which another dispute
+        // with the same participants and quorum also pays (regtest 2026-11-20).
         let lottery_script = lottery_output.address.script_pubkey();
-        let outpoint = match self.wallet.find_utxo_for_script(&lottery_script)? {
-            Some((op, _value)) => op,
-            None => return Ok(false), // No UTXO at lottery address yet
+        let Some(outpoint) = super::lottery_recovery::landed_lottery_outpoint(
+            &*self.wallet.chain_backend(),
+            &paginated_updates,
+        ) else {
+            return Ok(false); // not confiscated yet (or the search has not reached it)
         };
         let confs = match self
             .wallet
-            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)?
+            .unspent_output_paying(outpoint, &lottery_script)?
         {
             Some((_value, c)) => c,
             None => return Ok(false),
