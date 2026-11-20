@@ -713,3 +713,4 @@ pub mod rearm;
 pub mod replacement_collateral;
 pub mod request_handlers;
 pub mod vault_watch;
+pub mod yield_backfill;
