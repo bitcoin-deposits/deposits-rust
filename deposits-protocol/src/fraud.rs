@@ -1072,6 +1072,27 @@ pub fn verify_inactive_quorum_member(
     block_oracle: &dyn BlockOracle,
     authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
+    verify_inactive_quorum_member_rooted(
+        proof,
+        member_history,
+        defrauded_updates,
+        None,
+        block_oracle,
+        authorizer,
+    )
+}
+
+/// [`verify_inactive_quorum_member`] with the defrauded ledger's verified checkpoint as
+/// `defrauded_root`, through which the original proof is re-verified when the defrauded
+/// history is pruned below its genesis (see [`verify_equivocation_rooted`]).
+pub fn verify_inactive_quorum_member_rooted(
+    proof: &FraudProof,
+    member_history: &[crate::types::SignedLedgerUpdate],
+    defrauded_updates: &[crate::types::SignedLedgerUpdate],
+    defrauded_root: Option<&crate::types::LedgerState>,
+    block_oracle: &dyn BlockOracle,
+    authorizer: &impl crate::types::Authorizer,
+) -> Result<(), String> {
     use crate::messages::LedgerOperation;
     use crate::tlv::{TlvDecode, TlvEncode};
     use crate::types::SignedLedgerUpdate;
@@ -1139,10 +1160,27 @@ pub fn verify_inactive_quorum_member(
     if chain.is_empty() {
         return Err("we hold none of the defrauded ledger's updates".into());
     }
-    let d_hex = original_proof.ledger_id.clone();
-    let chain_for = chain.clone();
-    let provider = move |lid: &str| -> Option<Vec<SignedLedgerUpdate>> {
-        (lid == d_hex).then(|| chain_for.clone())
+    struct Defrauded<'r> {
+        id: String,
+        chain: Vec<SignedLedgerUpdate>,
+        root: Option<&'r crate::types::LedgerState>,
+    }
+    impl LedgerProvider for Defrauded<'_> {
+        fn ledger_history(&self, lid: &str) -> Option<Vec<SignedLedgerUpdate>> {
+            (lid == self.id).then(|| self.chain.clone())
+        }
+        fn ledger_checkpoint(&self, lid: &str) -> Option<crate::types::LedgerState> {
+            if lid == self.id {
+                self.root.cloned()
+            } else {
+                None
+            }
+        }
+    }
+    let provider = Defrauded {
+        id: original_proof.ledger_id.clone(),
+        chain: chain.clone(),
+        root: defrauded_root,
     };
     verify_fraud_evidence(original_proof, &provider, block_oracle, authorizer)
         .map_err(|e| format!("the original proof does not verify: {e}"))?;
@@ -1394,6 +1432,21 @@ pub fn verify_equivocation(
     proof: &FraudProof,
     history: &[crate::types::SignedLedgerUpdate],
 ) -> Result<(), String> {
+    verify_equivocation_rooted(proof, history, None)
+}
+
+/// [`verify_equivocation`] for a history that may be pruned below its genesis: `root` is the
+/// verifier's own verified checkpoint of the ledger (replayed from genesis, never a peer's),
+/// through which steps (8) and (9) bind and replay when the genesis is not in `history`.
+/// Signet 2026-11-20: ref7 refused its own Equivocation on 5effb9e8 at seq 432510 ("update_a
+/// does not follow an update of this ledger in its history") because its in-memory history
+/// starts 50 000 updates back (`HISTORY_RETAIN`), while the NonConformingUpdate path already
+/// judged from the checkpoint.
+pub fn verify_equivocation_rooted(
+    proof: &FraudProof,
+    history: &[crate::types::SignedLedgerUpdate],
+    root: Option<&crate::types::LedgerState>,
+) -> Result<(), String> {
     use crate::tlv::TlvDecode;
 
     let FraudEvidence::Equivocation {
@@ -1495,7 +1548,7 @@ pub fn verify_equivocation(
     //     must be a genesis opening this ledger or follow an update whose
     //     chain reaches that genesis in the ledger's history.
     let index = OperatorIndex::all(history, u64::MAX);
-    let bound = index.bound_hashes(&update_a.ledger_id);
+    let bound = index.bound_hashes_rooted(&update_a.ledger_id, root);
     for (name, u) in [("update_a", &update_a), ("update_b", &update_b)] {
         if !update_binds_to_ledger(u, &update_a.ledger_id, &bound) {
             return Err(format!(
@@ -1520,15 +1573,21 @@ pub fn verify_equivocation(
                 continue;
             }
             judged.push(u.previous_hash);
-            let anchor = index
-                .by_hash
-                .get(&u.previous_hash)
-                .copied()
-                .ok_or_else(|| {
-                    "an update's predecessor is not in the history — fail closed".to_string()
-                })?;
-            let prefix = index.chain_to_genesis(anchor, &update_a.ledger_id)?;
-            let state = replay_canonical(&prefix)?;
+            // The checkpoint's own update may be pruned too: following its tip is the state.
+            let state = match (index.by_hash.get(&u.previous_hash).copied(), root) {
+                (Some(anchor), _) => index.prefix_state(anchor, &update_a.ledger_id, root)?.0,
+                (None, Some(cp))
+                    if cp.chain_tip_hash == u.previous_hash
+                        && cp.sequence + 1 == u.sequence_number =>
+                {
+                    cp.clone()
+                }
+                (None, _) => {
+                    return Err(
+                        "an update's predecessor is not in the history — fail closed".to_string(),
+                    )
+                }
+            };
             check_accused_operates(&state, u, &update_a.operator_id)?;
         }
     }
@@ -1582,6 +1641,19 @@ pub fn verify_equivocation(
 pub fn verify_non_conforming_cosignature(
     proof: &FraudProof,
     fault_history: &[crate::types::SignedLedgerUpdate],
+    authorizer: &impl crate::types::Authorizer,
+) -> Result<(), String> {
+    verify_non_conforming_cosignature_rooted(proof, fault_history, None, authorizer)
+}
+
+/// [`verify_non_conforming_cosignature`] with the fault ledger's verified checkpoint as `root`
+/// (see [`verify_equivocation_rooted`]): the prefix is replayed from it when the genesis is not
+/// in `fault_history`, and a governing `QuorumBegin` at or before the checkpoint is the one the
+/// checkpoint's state was seated by (`quorum_begin_sequence`), or the proof fails closed.
+pub fn verify_non_conforming_cosignature_rooted(
+    proof: &FraudProof,
+    fault_history: &[crate::types::SignedLedgerUpdate],
+    root: Option<&crate::types::LedgerState>,
     authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
     use crate::messages::LedgerOperation;
@@ -1686,27 +1758,39 @@ pub fn verify_non_conforming_cosignature(
                 fault_sequence
             )
         })?;
-    let prefix = index.chain_to_genesis(linked, &fault_ledger_bytes)?;
+    let (state, prefix) = index.prefix_state(linked, &fault_ledger_bytes, root)?;
 
-    // (4) The governing QuorumBegin is on that prefix (or is the fault).
+    // (4) The governing QuorumBegin is on that prefix (or is the fault), or, on a prefix that
+    //     starts past a checkpoint, the one the checkpoint's state was seated by.
     let governing = if *governing_quorumbegin_seq == *fault_sequence {
-        &fault_update
+        Some(&fault_update)
     } else {
-        prefix[*governing_quorumbegin_seq as usize]
+        prefix
+            .iter()
+            .copied()
+            .find(|u| u.sequence_number == *governing_quorumbegin_seq)
     };
-    if !matches!(
-        LedgerOperation::tlv_decode(&governing.message),
-        Ok(LedgerOperation::QuorumBegin { .. })
-    ) {
+    let is_qb = match governing {
+        Some(g) => matches!(
+            LedgerOperation::tlv_decode(&g.message),
+            Ok(LedgerOperation::QuorumBegin { .. })
+        ),
+        None => root.is_some_and(|cp| {
+            prefix
+                .first()
+                .is_some_and(|u| u.sequence_number == cp.sequence + 1)
+                && cp.quorum_begin_sequence == Some(*governing_quorumbegin_seq)
+        }),
+    };
+    if !is_qb {
         return Err(format!(
             "update at governing_quorumbegin_seq {} is not a QuorumBegin",
             governing_quorumbegin_seq
         ));
     }
 
-    // (5) Replay and judge. The fault's signer must be the ledger's operator
+    // (5) Judge. The fault's signer must be the ledger's operator
     //     at that sequence: an update anyone else signed is not the ledger's.
-    let state = replay_canonical(&prefix)?;
     if state.parent_pubkey != fault_update.operator_id {
         return Err(format!(
             "the fault update's signer does not operate the ledger at seq {}: \
@@ -1715,7 +1799,7 @@ pub fn verify_non_conforming_cosignature(
             hex::encode(&state.parent_pubkey.serialize()[..8]),
         ));
     }
-    match fault_rejection(&state, prefix.last().copied(), &fault_update, authorizer)? {
+    match fault_rejection(&state, Some(linked), &fault_update, authorizer)? {
         Some(_reason) => Ok(()),
         None => Err(format!(
             "fault update at seq {} applies cleanly with no conformance violation \
@@ -1840,6 +1924,19 @@ pub fn verify_non_conforming_update(
     history: &[crate::types::SignedLedgerUpdate],
     authorizer: &impl crate::types::Authorizer,
 ) -> Result<(), String> {
+    verify_non_conforming_update_rooted(proof, history, None, authorizer)
+}
+
+/// [`verify_non_conforming_update`] with the ledger's verified checkpoint as `root` (see
+/// [`verify_equivocation_rooted`]). A node's inbound path already judged this type from the
+/// checkpoint (`verify_non_conforming_update_from`); this is the same fallback inside the
+/// verifier, so a proof re-verified elsewhere (a dereliction's original proof) binds too.
+pub fn verify_non_conforming_update_rooted(
+    proof: &FraudProof,
+    history: &[crate::types::SignedLedgerUpdate],
+    root: Option<&crate::types::LedgerState>,
+    authorizer: &impl crate::types::Authorizer,
+) -> Result<(), String> {
     use crate::tlv::TlvDecode;
 
     let FraudEvidence::NonConformingUpdate {
@@ -1957,8 +2054,7 @@ pub fn verify_non_conforming_update(
             fault.sequence_number
         ));
     };
-    let prefix = index.chain_to_genesis(anchor, &fault.ledger_id)?;
-    let state = replay_canonical(&prefix)?;
+    let (state, _) = index.prefix_state(anchor, &fault.ledger_id, root)?;
 
     // (7b) The accused operates the ledger at the fault's sequence, by the
     //      prefix it follows. Only the operator's updates can be its fault.
@@ -2191,6 +2287,105 @@ impl<'a> OperatorIndex<'a> {
     /// that opens `ledger_id`: one forward pass by sequence. An update
     /// belongs to the ledger when it is such a genesis or its
     /// `previous_hash` is in this set (see [`update_binds_to_ledger`]).
+    /// [`Self::bound_hashes`], plus, when `root` is the verifier's own verified checkpoint
+    /// (a state replayed from genesis, so its `chain_tip_hash` is bound), every update whose
+    /// chain walks back to that tip: a history pruned below its genesis still binds what
+    /// follows the checkpoint.
+    fn bound_hashes_rooted(
+        &self,
+        ledger_id: &[u8; 32],
+        root: Option<&crate::types::LedgerState>,
+    ) -> std::collections::HashSet<[u8; 32]> {
+        let mut bound = self.bound_hashes(ledger_id);
+        if let Some(cp) = root {
+            let mut from_cp = std::collections::HashSet::from([cp.chain_tip_hash]);
+            let max = self.by_seq.keys().copied().max().unwrap_or(0);
+            for seq in cp.sequence.saturating_add(1)..=max {
+                for u in self.at_seq(seq) {
+                    if from_cp.contains(&u.previous_hash) {
+                        from_cp.insert(u.chain_hash());
+                    }
+                }
+            }
+            bound.extend(from_cp);
+        }
+        bound
+    }
+
+    /// The state after `anchor` and the chain it closes, oldest first: from genesis
+    /// ([`Self::chain_to_genesis`], replayed), or, when that is not in the history and `root` is
+    /// the verifier's verified checkpoint, from the checkpoint state forward over the updates
+    /// after it (the chain then starts just past the checkpoint, and is empty when `anchor` IS
+    /// the checkpoint's update). The same fallback `verify_non_conforming_update_from` makes for
+    /// a node's pruned history (DEP-06 §Verification: judged from a replayed checkpoint).
+    fn prefix_state(
+        &self,
+        anchor: &'a crate::types::SignedLedgerUpdate,
+        ledger_id: &[u8; 32],
+        root: Option<&crate::types::LedgerState>,
+    ) -> Result<
+        (
+            crate::types::LedgerState,
+            Vec<&'a crate::types::SignedLedgerUpdate>,
+        ),
+        String,
+    > {
+        let genesis_err = match self.chain_to_genesis(anchor, ledger_id) {
+            Ok(prefix) => {
+                let state = replay_canonical(&prefix)?;
+                return Ok((state, prefix));
+            }
+            Err(e) => e,
+        };
+        let Some(cp) = root else {
+            return Err(genesis_err);
+        };
+        if anchor.sequence_number == cp.sequence && anchor.chain_hash() == cp.chain_tip_hash {
+            return Ok((cp.clone(), Vec::new()));
+        }
+        let mut chain = vec![anchor];
+        loop {
+            let last = *chain.last().expect("non-empty");
+            if last.sequence_number <= cp.sequence {
+                return Err(format!(
+                    "{genesis_err}; and it does not reach our verified checkpoint at seq {}",
+                    cp.sequence
+                ));
+            }
+            if last.sequence_number == cp.sequence + 1 {
+                if last.previous_hash == cp.chain_tip_hash {
+                    break;
+                }
+                return Err(format!(
+                    "{genesis_err}; and it does not follow our verified checkpoint at seq {}",
+                    cp.sequence
+                ));
+            }
+            match self.by_hash.get(&last.previous_hash) {
+                Some(&p) if p.sequence_number + 1 == last.sequence_number => chain.push(p),
+                _ => {
+                    return Err(format!(
+                        "{genesis_err}; and the update at seq {} links to one not in the \
+                         supplied history above our verified checkpoint at seq {}",
+                        last.sequence_number, cp.sequence
+                    ))
+                }
+            }
+        }
+        chain.reverse();
+        let mut state = cp.clone();
+        for u in &chain {
+            state.apply_update_in_place(u).map_err(|e| {
+                format!(
+                    "history does not replay from our verified checkpoint at seq {}: {} — \
+                     inconclusive, fail closed",
+                    u.sequence_number, e
+                )
+            })?;
+        }
+        Ok((state, chain))
+    }
+
     fn bound_hashes(&self, ledger_id: &[u8; 32]) -> std::collections::HashSet<[u8; 32]> {
         let mut bound = std::collections::HashSet::new();
         let max = self.by_seq.keys().copied().max().unwrap_or(0);
@@ -3893,6 +4088,14 @@ pub trait LedgerProvider {
     fn ledger_forks(&self, _ledger_id: &str) -> Vec<crate::types::SignedLedgerUpdate> {
         Vec::new()
     }
+    /// The verifier's own verified checkpoint of `ledger_id`: a state it replayed from genesis
+    /// (never one a peer supplied), whose `chain_tip_hash` binds. The chain-binding verifiers
+    /// (Equivocation, NonConformingUpdate, NonConformingCosignature, and a dereliction's
+    /// original proof) bind and replay through it when `ledger_history` is pruned below the
+    /// genesis. `None`: bind from genesis only.
+    fn ledger_checkpoint(&self, _ledger_id: &str) -> Option<crate::types::LedgerState> {
+        None
+    }
 }
 
 impl<F> LedgerProvider for F
@@ -4050,10 +4253,12 @@ pub fn verify_fraud_evidence(
                 .ledger_history(&original_proof.ledger_id)
                 .unwrap_or_default();
             defrauded.extend(ledgers.ledger_forks(&original_proof.ledger_id));
-            verify_inactive_quorum_member(
+            let root = ledgers.ledger_checkpoint(&original_proof.ledger_id);
+            verify_inactive_quorum_member_rooted(
                 proof,
                 &member_history,
                 &defrauded,
+                root.as_ref(),
                 block_oracle,
                 authorizer,
             )?;
@@ -4083,7 +4288,13 @@ pub fn verify_fraud_evidence(
                     &proof.ledger_id[..16.min(proof.ledger_id.len())]
                 )
             })?;
-            verify_non_conforming_update(proof, &accused_history, authorizer)?;
+            let root = ledgers.ledger_checkpoint(&proof.ledger_id);
+            verify_non_conforming_update_rooted(
+                proof,
+                &accused_history,
+                root.as_ref(),
+                authorizer,
+            )?;
         }
         FraudProofType::UnhonouredObligation => {
             let accused_history = ledgers.ledger_history(&proof.ledger_id).ok_or_else(|| {
@@ -4121,7 +4332,8 @@ pub fn verify_fraud_evidence(
                     &proof.ledger_id[..16.min(proof.ledger_id.len())]
                 )
             })?;
-            verify_equivocation(proof, &accused_history)?;
+            let root = ledgers.ledger_checkpoint(&proof.ledger_id);
+            verify_equivocation_rooted(proof, &accused_history, root.as_ref())?;
         }
         FraudProofType::UnauthorizedVaultSpend => {
             // The reserves tapscript tree is built in deposits-core, so the
@@ -4164,7 +4376,13 @@ pub fn verify_fraud_evidence(
             // and an honest one is not. Never `DenyAll`: it refuses every
             // withdrawal's witness, so any honest cosigned withdrawal
             // "proved" fraud.
-            verify_non_conforming_cosignature(proof, &fault_history, authorizer)?;
+            let root = ledgers.ledger_checkpoint(fault_ledger_id);
+            verify_non_conforming_cosignature_rooted(
+                proof,
+                &fault_history,
+                root.as_ref(),
+                authorizer,
+            )?;
         }
     }
 

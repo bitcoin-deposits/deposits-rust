@@ -514,12 +514,33 @@ impl DepositsHandler {
     /// Find our dispute fork for a given ledger_id (if any).
     ///
     /// Returns the compound tracking key if we have a fork entry for this ledger.
+    ///
+    /// With several (a stale un-armed expiry fork and a punitive one at a later
+    /// base, since a punitive dispute is no longer absorbed by the former), the
+    /// choice is deterministic and favours the one that is acting: ours over
+    /// another key's, then Armed, then a punitive Disputed, then an expiry
+    /// Disputed, then a resolved one, then a tombstoned one; ties by key. It
+    /// used to be the first key in HashMap order.
     pub fn find_our_fork(&self, ledger_id: &str) -> Option<String> {
+        use deposits_core::types::DisputeState;
+        let ours = &hex::encode(self.our_node_id.serialize())[..16];
         let ledgers = self.ledgers.lock().unwrap();
         ledgers
-            .keys()
-            .find(|k| k.starts_with(ledger_id) && k.len() > ledger_id.len())
-            .cloned()
+            .iter()
+            .filter(|(k, _)| k.starts_with(ledger_id) && k.len() > ledger_id.len())
+            .map(|(k, arc)| {
+                let l = arc.read().unwrap();
+                let rank = match l.state.dispute_state {
+                    DisputeState::Armed => 0,
+                    DisputeState::Disputed if !fork_enters_on_expiry(&l.history) => 1,
+                    DisputeState::Disputed => 2,
+                    DisputeState::Normal => 3,
+                    DisputeState::Tombstoned => 4,
+                };
+                ((!k.ends_with(ours), rank, k.clone()), k)
+            })
+            .min_by(|a, b| a.0.cmp(&b.0))
+            .map(|(_, k)| k.clone())
     }
 
     /// After winning a confiscation lottery, make the resolved dispute fork the
@@ -3377,6 +3398,26 @@ impl HandlerContext for DepositsHandler {
             Err("Ledger not found for operator/reserves_id".to_string())
         }
     }
+}
+
+/// Whether the latest `DisputeEnter` in a fork's history is an expiry dispute
+/// by its own label (an anchor, or the `quorum_expired` reason). Used only to
+/// rank forks; the stand-down judges by `dispute_is_expiry` against the base.
+pub(crate) fn fork_enters_on_expiry(history: &[SignedLedgerUpdate]) -> bool {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history
+        .iter()
+        .rev()
+        .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                reason,
+                anchor_block_height,
+                ..
+            }) => Some(anchor_block_height.is_some() || reason == "quorum_expired"),
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 // ============================================================================

@@ -1204,3 +1204,205 @@ fn a_checkpoint_off_the_segment_cannot_judge() {
     )
     .is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Pruned history: binding through the verifier's own verified checkpoint.
+//
+// Signet 2026-11-20: a Rust node keeps HISTORY_RETAIN (50 000) updates in memory, so on a
+// 432 510-update ledger its history no longer reaches the seq-0 LedgerOpen. Its Equivocation
+// verifier bound only through the genesis and refused its OWN proof ("update_a does not follow an
+// update of this ledger in its history"); NonConformingUpdate already judged from the checkpoint.
+// Every chain-binding verifier now takes the checkpoint as a root.
+
+/// The state after `chain` (from genesis), as a node's verified checkpoint holds it.
+fn replayed(chain: &[SignedLedgerUpdate]) -> deposits_protocol::types::LedgerState {
+    let mut s = deposits_protocol::fraud::genesis_state(&chain[0]).unwrap();
+    for u in chain {
+        s.apply_update_in_place(u).unwrap();
+    }
+    s
+}
+
+fn equivocating_pair(after: &SignedLedgerUpdate) -> (SignedLedgerUpdate, SignedLedgerUpdate) {
+    let mk = |n: u8| {
+        signed_update(
+            after.sequence_number + 1,
+            ledger(),
+            after.chain_hash(),
+            OP,
+            &credit(n, 1).tlv_encode(),
+            false,
+        )
+    };
+    (mk(30), mk(31))
+}
+
+#[test]
+fn an_equivocation_on_pruned_history_binds_through_the_checkpoint() {
+    use deposits_protocol::fraud::{verify_equivocation, verify_equivocation_rooted};
+    let y = ledger_c_prefix();
+    let (a, b) = equivocating_pair(&y[3]);
+    let proof = equivocation(&a, &b);
+    let cp = replayed(&y[..3]); // checkpoint after seq 2
+    assert_eq!(cp.sequence, 2);
+    assert_eq!(cp.chain_tip_hash, y[2].chain_hash());
+
+    // Pruned below its genesis: refused from the history alone (the signet failure) ...
+    let pruned = y[2..].to_vec();
+    let err = verify_equivocation(&proof, &pruned).unwrap_err();
+    assert!(
+        err.contains("does not follow an update of this ledger"),
+        "{err}"
+    );
+    // ... and verified through the checkpoint, with or without the checkpoint's own update.
+    verify_equivocation_rooted(&proof, &pruned, Some(&cp)).expect("binds through the checkpoint");
+    verify_equivocation_rooted(&proof, &y[3..], Some(&cp))
+        .expect("the checkpoint's tip binds seq 3");
+    // The full history still verifies with no root, and a root changes nothing there.
+    verify_equivocation(&proof, &y).unwrap();
+    verify_equivocation_rooted(&proof, &y, Some(&cp)).unwrap();
+}
+
+#[test]
+fn a_checkpoint_binds_only_its_own_chain() {
+    use deposits_protocol::fraud::verify_equivocation_rooted;
+    let y = ledger_c_prefix();
+    let (a, b) = equivocating_pair(&y[3]);
+    let proof = equivocation(&a, &b);
+    // Another ledger's checkpoint (same operator key) binds nothing on this one.
+    let x = ledger_x();
+    let other = replayed(&x[..3]);
+    assert!(verify_equivocation_rooted(&proof, &y[2..], Some(&other)).is_err());
+    // A checkpoint PAST the equivocation's predecessor cannot vouch for it.
+    let late = replayed(&y[..4]); // after seq 3
+    let (a2, b2) = equivocating_pair(&y[2]); // at seq 3, below the checkpoint
+    assert!(verify_equivocation_rooted(&equivocation(&a2, &b2), &y[3..], Some(&late)).is_err());
+    // An update after the checkpoint that does not chain onto it is not bound.
+    let stray = signed_update(
+        4,
+        ledger(),
+        [0xEE; 32],
+        OP,
+        &credit(40, 1).tlv_encode(),
+        false,
+    );
+    let stray2 = signed_update(
+        4,
+        ledger(),
+        [0xEE; 32],
+        OP,
+        &credit(41, 1).tlv_encode(),
+        false,
+    );
+    let cp = replayed(&y[..3]);
+    assert!(
+        verify_equivocation_rooted(&equivocation(&stray, &stray2), &y[2..], Some(&cp)).is_err()
+    );
+}
+
+#[test]
+fn a_non_conforming_update_on_pruned_history_binds_through_the_checkpoint() {
+    use deposits_protocol::fraud::verify_non_conforming_update_rooted;
+    let prefix = ledger_c_prefix();
+    let fraud = ledger_c_fraud(&prefix, OP);
+    let cp = replayed(&prefix[..3]);
+    let pruned = prefix[2..].to_vec();
+    assert!(verify_non_conforming_update(&proof_for(&fraud), &pruned, &AllowAll).is_err());
+    verify_non_conforming_update_rooted(&proof_for(&fraud), &pruned, Some(&cp), &AllowAll)
+        .expect("judged from the checkpoint");
+    // And a conforming update is still not proof that way.
+    let honest = signed_update(
+        4,
+        ledger(),
+        prefix[3].chain_hash(),
+        OP,
+        &credit(5, 1).tlv_encode(),
+        false,
+    );
+    assert!(verify_non_conforming_update_rooted(
+        &proof_for(&honest),
+        &pruned,
+        Some(&cp),
+        &AllowAll
+    )
+    .is_err());
+}
+
+#[test]
+fn a_non_conforming_cosignature_on_pruned_history_binds_through_the_checkpoint() {
+    use deposits_protocol::fraud::{
+        verify_non_conforming_cosignature, verify_non_conforming_cosignature_rooted,
+    };
+    let prefix = ledger_c_prefix();
+    let fraud = ledger_c_fraud(&prefix, OP);
+    // The fault's own operator, accused on its own ledger (DEP-19 §5), governed by the
+    // QuorumBegin at seq 1: below the checkpoint, so known only as the checkpoint's seat.
+    let proof = FraudProof {
+        proof_type: FraudProofType::NonConformingCosignature,
+        accused: hex::encode(pubkey(OP).serialize()),
+        ledger_id: hex::encode(ledger()),
+        evidence: FraudEvidence::NonConformingCosignature {
+            fault_ledger_id: hex::encode(ledger()),
+            fault_sequence: 4,
+            governing_quorumbegin_seq: 1,
+            fault_update_hex: hex::encode(fraud.tlv_encode()),
+        },
+    };
+    verify_non_conforming_cosignature(&proof, &prefix, &AllowAll).expect("full history");
+    let cp = replayed(&prefix[..3]);
+    assert_eq!(cp.quorum_begin_sequence, Some(1));
+    let pruned = prefix[2..].to_vec();
+    assert!(verify_non_conforming_cosignature(&proof, &pruned, &AllowAll).is_err());
+    verify_non_conforming_cosignature_rooted(&proof, &pruned, Some(&cp), &AllowAll)
+        .expect("judged from the checkpoint");
+    // A governing seq the checkpoint was not seated by fails closed.
+    let mut wrong = proof.clone();
+    if let FraudEvidence::NonConformingCosignature {
+        governing_quorumbegin_seq,
+        ..
+    } = &mut wrong.evidence
+    {
+        *governing_quorumbegin_seq = 0;
+    }
+    assert!(
+        verify_non_conforming_cosignature_rooted(&wrong, &pruned, Some(&cp), &AllowAll).is_err()
+    );
+}
+
+/// Through the dispatcher, as a node calls it: a provider whose history is pruned and which
+/// offers its checkpoint (`LedgerProvider::ledger_checkpoint`) gets the proof verified; one that
+/// offers none still fails closed.
+#[test]
+fn the_dispatcher_passes_the_providers_checkpoint() {
+    use deposits_protocol::fraud::{verify_fraud_evidence, LedgerProvider};
+    struct Pruned {
+        history: Vec<SignedLedgerUpdate>,
+        cp: Option<deposits_protocol::types::LedgerState>,
+    }
+    impl LedgerProvider for Pruned {
+        fn ledger_history(&self, id: &str) -> Option<Vec<SignedLedgerUpdate>> {
+            (id == hex::encode(ledger())).then(|| self.history.clone())
+        }
+        fn ledger_checkpoint(&self, id: &str) -> Option<deposits_protocol::types::LedgerState> {
+            if id == hex::encode(ledger()) {
+                self.cp.clone()
+            } else {
+                None
+            }
+        }
+    }
+    let y = ledger_c_prefix();
+    let (a, b) = equivocating_pair(&y[3]);
+    let with = Pruned {
+        history: y[2..].to_vec(),
+        cp: Some(replayed(&y[..3])),
+    };
+    let without = Pruned {
+        history: y[2..].to_vec(),
+        cp: None,
+    };
+    for proof in [equivocation(&a, &b), proof_for(&ledger_c_fraud(&y, OP))] {
+        verify_fraud_evidence(&proof, &with, &no_blocks, &AllowAll).unwrap();
+        assert!(verify_fraud_evidence(&proof, &without, &no_blocks, &AllowAll).is_err());
+    }
+}

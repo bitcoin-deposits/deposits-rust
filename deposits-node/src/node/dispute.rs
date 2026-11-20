@@ -220,8 +220,6 @@ pub(crate) fn lottery_inputs_line(
     )
 }
 
-/// How long the re-arm pass waits on a ledger after `failures + 1` failed
-/// arms in a row: one minute, doubling, at most 30 minutes.
 /// DEP-03 §Grounded arms: whether an arm with no proof hash, no anchor and no
 /// reason must wait for grounds it can cite. Not when we have ALREADY ENTERED
 /// the dispute on our own fork: that `DisputeEnter` carried our grounds, and
@@ -239,6 +237,105 @@ pub(crate) fn grounds_gate_applies(
     ledger_grounds_arms && !has_reason && !already_entered
 }
 
+/// What one of our forks of a ledger is, for choosing the fork a dispute uses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnForkKind {
+    /// Yielded or lost: over.
+    Tombstoned,
+    /// Disputed on a lapsed quorum (`quorum_expired`) and never armed.
+    ExpiryUnarmed,
+    /// Anything else live: a punitive dispute, or an armed one.
+    Live,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ForkChoice {
+    /// Reuse this fork.
+    Use(String),
+    /// Fork afresh at the requested base; `bypassed` are un-armed expiry forks
+    /// a punitive dispute must not be absorbed by.
+    Create { bypassed: Vec<String> },
+    /// The fork at this base is over.
+    Refuse(String),
+}
+
+/// The fork a dispute at `exact` (`fork_tracking_key` of its base) uses, given
+/// our forks of the ledger. The fork at its own base if live; else, as before,
+/// any live fork of ours, EXCEPT that a punitive dispute is never absorbed by
+/// an un-armed expiry fork: that fork's `DisputeEnter` (`quorum_expired`) is
+/// not acting on the proof (DEP-19 §6 counts a non-expiry `DisputeEnter` or a
+/// `DisputeArmed`), so reusing it signs nothing that answers the fraud.
+/// Tombstoned forks are never reused.
+pub(crate) fn fork_for_dispute(
+    exact: &str,
+    punitive: bool,
+    ours: &[(String, OwnForkKind)],
+) -> ForkChoice {
+    if let Some((_, kind)) = ours.iter().find(|(k, _)| k == exact) {
+        return match kind {
+            OwnForkKind::Tombstoned => ForkChoice::Refuse(format!(
+                "our fork {} at this base is over (yielded or lost)",
+                &exact[..32.min(exact.len())]
+            )),
+            OwnForkKind::ExpiryUnarmed if punitive => ForkChoice::Refuse(format!(
+                "our fork {} at this base is an un-armed expiry dispute; a punitive \
+                 DisputeEnter cannot be appended to it",
+                &exact[..32.min(exact.len())]
+            )),
+            _ => ForkChoice::Use(exact.to_string()),
+        };
+    }
+    let mut bypassed = Vec::new();
+    for (k, kind) in ours {
+        match kind {
+            OwnForkKind::Tombstoned => {}
+            OwnForkKind::ExpiryUnarmed if punitive => bypassed.push(k.clone()),
+            _ => return ForkChoice::Use(k.clone()),
+        }
+    }
+    ForkChoice::Create { bypassed }
+}
+
+impl Node {
+    /// Our forks of `ledger_id` (excluding a base promoted to a resolved fork),
+    /// each with its [`OwnForkKind`], live punitive ones first.
+    pub(crate) fn our_fork_kinds(&self, ledger_id: &str) -> Vec<(String, OwnForkKind)> {
+        let pk16 = hex::encode(self.node_id.serialize())[..16].to_string();
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let base = ledgers.get(ledger_id).cloned();
+        let base_expiry = base
+            .as_ref()
+            .and_then(|b| b.read().unwrap().state.quorum_expiry);
+        let mut out: Vec<(String, OwnForkKind)> = ledgers
+            .iter()
+            .filter(|(k, _)| {
+                k.len() > ledger_id.len() && k.starts_with(ledger_id) && k.ends_with(&pk16)
+            })
+            .filter(|(_, a)| !base.as_ref().is_some_and(|b| Arc::ptr_eq(b, a)))
+            .map(|(k, a)| {
+                let l = a.read().unwrap();
+                let kind = match l.state.dispute_state {
+                    deposits_core::types::DisputeState::Tombstoned => OwnForkKind::Tombstoned,
+                    deposits_core::types::DisputeState::Disputed
+                        if super::expiry_watch::dispute_enter_is_expiry(
+                            &l.history,
+                            base_expiry,
+                        ) == Some(true) =>
+                    {
+                        OwnForkKind::ExpiryUnarmed
+                    }
+                    _ => OwnForkKind::Live,
+                };
+                (k.clone(), kind)
+            })
+            .collect();
+        out.sort_by_key(|(k, kind)| (*kind != OwnForkKind::Live, k.clone()));
+        out
+    }
+}
+
+/// How long the re-arm pass waits on a ledger after `failures + 1` failed
+/// arms in a row: one minute, doubling, at most 30 minutes.
 pub(crate) fn rearm_backoff(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs((60u64 << failures.min(5)).min(30 * 60))
 }
@@ -1073,7 +1170,10 @@ impl Node {
         }
 
         // 0. Create a fork of the disputed ledger (or reuse existing one)
-        let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq)?;
+        // Punitive: not on a lapsed quorum (an expiry dispute carries its anchor). Joining
+        // another member's punitive dispute on cited grounds is punitive too.
+        let punitive = anchor.is_none() && reason.is_none_or(|r| r != "quorum_expired");
+        let fork_key = self.create_dispute_fork(ledger_id, last_valid_seq, punitive)?;
 
         // Get the fork ledger's arc
         let fork_arc = self
@@ -1172,6 +1272,19 @@ impl Node {
 
         // Sign the dispute update on the fork
         self.sign_last_update(&fork_key)?;
+
+        // A fresh DisputeEnter goes out NOW, before anything below can fail: entering is what
+        // acting on a proof means (DEP-19 §6 counts a non-expiry DisputeEnter whether or not it
+        // arms), and every step past here (attestations, collateral lookup, the lottery seed, the
+        // arm) has an early `?` exit that used to leave the entry signed in memory only.
+        // `publish_fork` queues it for the periodic retry if the relay refuses.
+        if added_new_operations {
+            if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
+                tracing::error!("Failed to persist fork ledger after DisputeEnter: {}", e);
+            }
+            let _ = self.publish_fork(&fork_key).await;
+            added_new_operations = false;
+        }
 
         // Test/recovery hook: when `<data_dir>/.pause_auto_dispute_actions`
         // exists, stop after publishing DisputeEnter and skip auto-arm.
@@ -5736,5 +5849,84 @@ mod grounds_gate_tests {
         // A reason, or a ruleset that does not ground arms: never gated.
         assert!(!grounds_gate_applies(true, true, false));
         assert!(!grounds_gate_applies(false, false, false));
+    }
+}
+
+#[cfg(test)]
+mod fork_choice_tests {
+    use super::{fork_for_dispute, ForkChoice, OwnForkKind};
+
+    const L: &str = "5effb9e8465b4e023758ed26f82ba5d5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    fn key(seq: u64) -> String {
+        format!("{}_{:06}_023853c81e318be4", L, seq)
+    }
+
+    /// ref7, signet 2026-11-20: an un-armed quorum_expired fork at 296850 and a
+    /// self-detected Equivocation at 432510. The punitive dispute forks at its
+    /// own base; it used to reuse the expiry fork and sign nothing.
+    #[test]
+    fn a_punitive_dispute_is_not_absorbed_by_an_unarmed_expiry_fork() {
+        let ours = vec![(key(296_850), OwnForkKind::ExpiryUnarmed)];
+        assert_eq!(
+            fork_for_dispute(&key(432_510), true, &ours),
+            ForkChoice::Create {
+                bypassed: vec![key(296_850)]
+            }
+        );
+    }
+
+    /// An expiry dispute still reuses the fork it has (no new fork per watch pass).
+    #[test]
+    fn an_expiry_dispute_reuses_its_fork() {
+        let ours = vec![(key(296_850), OwnForkKind::ExpiryUnarmed)];
+        assert_eq!(
+            fork_for_dispute(&key(296_900), false, &ours),
+            ForkChoice::Use(key(296_850))
+        );
+    }
+
+    /// The fork at the proof's own base is used whatever else exists.
+    #[test]
+    fn the_fork_at_the_proofs_own_base_wins() {
+        let ours = vec![
+            (key(296_850), OwnForkKind::ExpiryUnarmed),
+            (key(432_510), OwnForkKind::Live),
+        ];
+        assert_eq!(
+            fork_for_dispute(&key(432_510), true, &ours),
+            ForkChoice::Use(key(432_510))
+        );
+    }
+
+    /// A live punitive or armed fork elsewhere still absorbs (one dispute per
+    /// ledger acting on it), as before.
+    #[test]
+    fn a_live_punitive_fork_absorbs_a_later_proof() {
+        let ours = vec![(key(400_000), OwnForkKind::Live)];
+        assert_eq!(
+            fork_for_dispute(&key(432_510), true, &ours),
+            ForkChoice::Use(key(400_000))
+        );
+    }
+
+    /// Over is over: a tombstoned fork is skipped elsewhere and refused at its base,
+    /// and an expiry fork at the exact base cannot take a punitive DisputeEnter.
+    #[test]
+    fn tombstoned_and_same_base_expiry_forks() {
+        let ours = vec![(key(296_850), OwnForkKind::Tombstoned)];
+        assert_eq!(
+            fork_for_dispute(&key(432_510), true, &ours),
+            ForkChoice::Create { bypassed: vec![] }
+        );
+        assert!(matches!(
+            fork_for_dispute(&key(296_850), true, &ours),
+            ForkChoice::Refuse(_)
+        ));
+        let ours = vec![(key(296_850), OwnForkKind::ExpiryUnarmed)];
+        assert!(matches!(
+            fork_for_dispute(&key(296_850), true, &ours),
+            ForkChoice::Refuse(_)
+        ));
     }
 }

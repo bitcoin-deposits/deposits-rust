@@ -1472,6 +1472,7 @@ mod tests {
         assert!(DisputeState::Disputed.allows_operation(57)); // DisputeArmed
         assert!(!DisputeState::Disputed.allows_operation(10)); // Random op blocked
         assert!(!DisputeState::Disputed.allows_operation(55)); // DisputeAcquire
+        assert!(DisputeState::Disputed.allows_operation(56)); // DisputeYield, un-armed (DEP-05)
         assert!(DisputeState::Disputed.allows_operation(106)); // ObligationRecord (before arming)
         assert!(!DisputeState::Armed.allows_operation(106)); // ...and not after
 
