@@ -1954,6 +1954,43 @@ impl Node {
         // on-chain WinnerCollateralDeviation step) before acting on it.
         let proof_hash_hex = hex::encode(broadcast.proof.proof_hash());
         if let Err(e) = self.verify_fraud_broadcast_locally(broadcast).await {
+            // Cannot judge yet, or invalid? A proof whose evidence rests on a
+            // sequence our replica has not reached fails for want of history,
+            // not for want of fraud: regtest 1120-075609, ref7 3 s behind
+            // 7341c3d1 at seq 4, refused four seq-9 proofs for good and never
+            // armed. Park it, fetch the history, judge it again on arrival.
+            let needs = broadcast.history_needs();
+            let unmet = super::parked_proofs::unmet_needs(&needs, |l| self.replica_tip(l));
+            if !unmet.is_empty() {
+                let outcome = self.parked_fraud_proofs.lock().unwrap().park(
+                    ledger_id,
+                    broadcast.proof.proof_hash(),
+                    needs,
+                    fp.clone(),
+                    std::time::Instant::now(),
+                    &|l: &str| self.replica_tip(l),
+                );
+                {
+                    let mut stale = self.stale_joined_ledgers.lock().unwrap();
+                    for (l, _) in &unmet {
+                        if l.len() == 64 {
+                            stale.insert(l.clone());
+                        }
+                    }
+                }
+                let (l, s) = &unmet[0];
+                tracing::warn!(
+                    "Fraud proof not judgeable yet ({}...): it needs seq {} of {}... and our \
+                     replica is at {:?}; {:?}, catching up ({})",
+                    &proof_hash_hex[..16],
+                    s,
+                    &l[..16.min(l.len())],
+                    self.replica_tip(l),
+                    outcome,
+                    e
+                );
+                return;
+            }
             tracing::warn!("Fraud proof rejected ({}...): {}", &proof_hash_hex[..16], e);
             return;
         }

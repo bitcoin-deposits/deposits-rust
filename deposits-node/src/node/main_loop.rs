@@ -2942,6 +2942,10 @@ impl Node {
                 metrics::record_run_loop_phase("drain_updates", phase_start.elapsed());
             }
 
+            // Fraud proofs parked while our replica was behind, judged again
+            // once the updates they rest on have arrived.
+            self.rejudge_parked_fraud_proofs().await;
+
             // Check for outbound messages (non-blocking)
             while let Ok(outbound) = self.outbound_rx.lock().unwrap().try_recv() {
                 match tokio::time::timeout(

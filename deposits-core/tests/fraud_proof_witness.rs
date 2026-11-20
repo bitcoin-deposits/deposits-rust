@@ -374,3 +374,57 @@ fn a_redelivered_lock_is_a_duplicate_not_a_replay() {
         NonceVerdict::Expired
     );
 }
+
+/// Regtest 1120-075609: ref7 held seq 0-4 of ledger 7341c3d1 when proofs of a
+/// seq-9 InvalidWitness TransferLock arrived, refused each for good ("follows
+/// an update that is not in this ledger's history"), and never judged them
+/// again once it caught up. The verdict on a replica that is BEHIND the proof
+/// is "cannot judge yet", and the proof's own `history_needs` says so; the same
+/// proof judged once the replica holds the predecessor verifies.
+#[test]
+fn a_replica_behind_the_fault_cannot_judge_it_yet() {
+    use deposits_protocol::fraud::unmet_history_needs;
+    let prefix = prefix();
+    let forged = signed_update(
+        4,
+        prefix[3].chain_hash(),
+        &unsigned_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
+    let proof = proof_for(&forged);
+    let lid = hex::encode(ledger());
+    assert_eq!(proof.history_needs(), vec![(lid.clone(), 3)]);
+
+    // Behind: the replica stops at seq 1.
+    let behind = &prefix[..2];
+    let err = verify_non_conforming_update(&proof, behind, &Dep16Authorizer::new()).unwrap_err();
+    assert!(err.contains("not in this ledger's history"), "{}", err);
+    let tip = |h: &[SignedLedgerUpdate]| {
+        let t = h.last().map(|u| u.sequence_number);
+        let lid = lid.clone();
+        move |l: &str| if l == lid { t } else { None }
+    };
+    assert_eq!(
+        unmet_history_needs(&proof.history_needs(), tip(behind)),
+        vec![(lid.clone(), 3)],
+        "the failure is 'not yet', not 'invalid'"
+    );
+
+    // Caught up: every need is met, and the same proof verifies.
+    assert!(unmet_history_needs(&proof.history_needs(), tip(&prefix)).is_empty());
+    verify_non_conforming_update(&proof, &prefix, &Dep16Authorizer::new())
+        .expect("judged on the caught-up replica, the proof stands");
+
+    // A proof that fails with every need met is invalid: the honest lock.
+    let honest = signed_update(
+        4,
+        prefix[3].chain_hash(),
+        &signed_lock(1, HEIGHT + 10, 1),
+        HEIGHT,
+    );
+    assert!(
+        verify_non_conforming_update(&proof_for(&honest), &prefix, &Dep16Authorizer::new())
+            .is_err()
+    );
+    assert!(unmet_history_needs(&proof_for(&honest).history_needs(), tip(&prefix)).is_empty());
+}

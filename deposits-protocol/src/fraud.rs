@@ -545,6 +545,71 @@ pub enum FraudEvidence {
 }
 
 impl FraudProof {
+    /// The ledger sequences this proof's evidence rests on: for each, a ledger
+    /// and the sequence a verifier's replica of it must have reached before a
+    /// failed verdict means "invalid" rather than "cannot judge yet, history
+    /// missing". A NonConformingUpdate whose fault is at seq N follows an
+    /// update at N-1 at the latest, so a replica that stops short of N-1 cannot
+    /// bind the fault to the ledger ("follows an update that is not in this
+    /// ledger's history") however honest the proof is. Empty for evidence
+    /// resting on no ledger sequence (QuorumExpired, WinnerCollateralDeviation).
+    ///
+    /// Regtest 1120-075609: ref7, 3 s behind ledger 7341c3d1 at seq 4, refused
+    /// four seq-9 proofs for good and never re-judged them once it caught up.
+    pub fn history_needs(&self) -> Vec<(String, u64)> {
+        use crate::TlvDecode;
+        let accused = self.ledger_id.clone();
+        let seq_of = |hex_update: &str| -> Option<u64> {
+            let bytes = hex::decode(hex_update).ok()?;
+            crate::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                .ok()
+                .map(|u| u.sequence_number)
+        };
+        match &self.evidence {
+            FraudEvidence::NonConformingUpdate { fault_sequence, .. } => {
+                vec![(accused, fault_sequence.saturating_sub(1))]
+            }
+            FraudEvidence::NonConforming { sequence, .. }
+            | FraudEvidence::Equivocation { sequence, .. } => {
+                vec![(accused, sequence.saturating_sub(1))]
+            }
+            FraudEvidence::UncreditedOnchain { proof_sequence, .. }
+            | FraudEvidence::UncreditedLightning { proof_sequence, .. } => {
+                vec![(accused, *proof_sequence)]
+            }
+            FraudEvidence::UncreditedMigration { proof_update, .. }
+            | FraudEvidence::UnhonouredObligation { proof_update, .. } => seq_of(proof_update)
+                .map(|s| vec![(accused, s)])
+                .unwrap_or_default(),
+            FraudEvidence::StaleCosign {
+                stale_update_sequence,
+                member_later_sequence,
+                member_ledger_id,
+                ..
+            } => vec![
+                (accused, *stale_update_sequence),
+                (member_ledger_id.clone(), *member_later_sequence),
+            ],
+            FraudEvidence::DisputeDereliction {
+                member_ledger_id,
+                member_active_sequence,
+                ..
+            } => vec![(member_ledger_id.clone(), *member_active_sequence)],
+            FraudEvidence::NonConformingCosignature {
+                fault_ledger_id,
+                fault_sequence,
+                ..
+            } => vec![(fault_ledger_id.clone(), fault_sequence.saturating_sub(1))],
+            FraudEvidence::UnauthorizedVaultSpend {
+                spent_ledger_id,
+                governing_quorumbegin_seq,
+                ..
+            } => vec![(spent_ledger_id.clone(), *governing_quorumbegin_seq)],
+            FraudEvidence::QuorumExpired { .. }
+            | FraudEvidence::WinnerCollateralDeviation { .. } => Vec::new(),
+        }
+    }
+
     /// DEP-03 §Lottery: the x-only keys this proof convicts, from its own evidence: its accused,
     /// plus the signers of the faulty update (non-conforming update or cosignature), the keys that
     /// signed both updates (equivocation), or the spend's witness signers (unauthorised vault
@@ -695,6 +760,21 @@ fn parse_hex32(s: &str, label: &str) -> Result<[u8; 32], String> {
 /// Cosignature signature validity is intentionally *not* checked here —
 /// that's a separate concern (see todo for `verify_cosignatures`). The
 /// staleness check is about temporal ordering of ledger states.
+/// The `needs` (from [`FraudProof::history_needs`]) a verifier's replicas have
+/// not reached: `tip_of(ledger)` is its replica's highest sequence, `None` when
+/// it holds no replica. A proof that fails while this is non-empty CANNOT BE
+/// JUDGED YET; one that fails with it empty is invalid.
+pub fn unmet_history_needs(
+    needs: &[(String, u64)],
+    tip_of: impl Fn(&str) -> Option<u64>,
+) -> Vec<(String, u64)> {
+    needs
+        .iter()
+        .filter(|(l, s)| tip_of(l).is_none_or(|t| t < *s))
+        .cloned()
+        .collect()
+}
+
 pub fn verify_stale_cosignature(
     proof: &FraudProof,
     accused_history: &[crate::types::SignedLedgerUpdate],
@@ -4063,6 +4143,18 @@ pub fn verify_fraud_evidence(
 }
 
 impl FraudBroadcast {
+    /// [`FraudProof::history_needs`], plus the embedding's update for a type
+    /// that requires one.
+    pub fn history_needs(&self) -> Vec<(String, u64)> {
+        let mut needs = self.proof.history_needs();
+        if self.proof.requires_embedding() {
+            if let Some(e) = &self.embedding {
+                needs.push((e.ledger_id.clone(), e.sequence));
+            }
+        }
+        needs
+    }
+
     /// Verify the causal chain integrity.
     ///
     /// Checks that each link's `member_ledger_hash` could follow from the

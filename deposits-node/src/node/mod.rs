@@ -586,6 +586,11 @@ pub struct Node {
     /// Drained and re-imported in the run loop to avoid blocking request handlers.
     stale_joined_ledgers: Mutex<std::collections::HashSet<String>>,
 
+    /// Fraud proofs we could not judge yet because our replica of a ledger
+    /// they rest on is behind; re-judged once it catches up (see
+    /// `parked_proofs`).
+    parked_fraud_proofs: Mutex<parked_proofs::ParkedProofs<crate::nostr::FraudProofEvent>>,
+
     /// Our dispute forks whose own updates did not all reach the relay;
     /// retried every periodic (see `fork_publish`).
     pending_fork_publications: Mutex<std::collections::HashSet<String>>,
@@ -702,6 +707,7 @@ pub mod ledger_repair;
 pub mod lottery_recovery;
 pub mod main_loop;
 pub mod operations;
+pub mod parked_proofs;
 pub mod rearm;
 pub mod replacement_collateral;
 pub mod request_handlers;
