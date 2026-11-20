@@ -329,6 +329,20 @@ impl Node {
         ledger_id: &str,
         view: &RearmView,
     ) -> Result<Option<RoundLottery>, String> {
+        Ok(match self.round_lottery_state(ledger_id, view).await? {
+            RoundState::Current(cur) => Some(cur),
+            RoundState::NotYet(_) | RoundState::Ended(_) => None,
+        })
+    }
+
+    /// `current_round_lottery`, saying why there is none: NOT YET (the vault is unspent, the
+    /// confiscation or a re-arm spend is not found or not confirmed: look again soon) or ENDED
+    /// (a claim spent it, or no further round can be derived).
+    pub(crate) async fn round_lottery_state(
+        &self,
+        ledger_id: &str,
+        view: &RearmView,
+    ) -> Result<RoundState, String> {
         let chain = self.wallet.chain_backend();
         let tip = chain.get_tip_height().map_err(|e| e.to_string())?;
         let ctx = self
@@ -341,27 +355,19 @@ impl Node {
         let mut revealed = ctx.preimages.iter().any(|p| p.is_some());
         // Round 1's output is the confiscation's output 0.
         let Some((vault, _)) = super::vault_watch::current_vault(&view.updates) else {
-            return Ok(None);
+            return Ok(RoundState::NotYet("no vault in the ledger yet"));
         };
         // Scan from the block the confiscation landed in when the chunked landed-spender search
         // knows it, else from the dispute's first arm (a confiscation cannot precede the arms
         // it pays). A bitcoind scan walks at most 4320 blocks from there; it used to refuse any
         // range to the tip longer than that, so a dispute armed at 582 failed every pass and
         // every lottery_rearm_sign at tip 19166 (regtest rearm-rust 1119-013201).
-        if chain
-            .is_output_unspent(&vault.txid, vault.vout)
-            .map_err(|e| e.to_string())?
-            == Some(true)
-        {
-            return Ok(None); // not confiscated: nothing to walk
-        }
         let landed = super::lottery_recovery::confiscation_height(&*chain, &view.updates)
             .or_else(|| super::armers::first_arm_height(&view.updates))
             .unwrap_or(0);
-        let Some(confiscation) =
-            find_spend_or_unknown(&*chain, ledger_id, &vault, bitcoin::Script::new(), landed)?
-        else {
-            return Ok(None);
+        let confiscation = match round1_confiscation(&*chain, ledger_id, &vault, landed)? {
+            Round1::NotYet(why) => return Ok(RoundState::NotYet(why)),
+            Round1::Found(tx) => tx,
         };
         let mut outpoint = OutPoint {
             txid: confiscation.compute_txid(),
@@ -416,7 +422,7 @@ impl Node {
             .get_tx_block_height(&outpoint.txid)
             .map_err(|e| e.to_string())?
         else {
-            return Ok(None);
+            return Ok(RoundState::NotYet("the confiscation is not confirmed"));
         };
         let mut round = 1;
         loop {
@@ -425,7 +431,7 @@ impl Node {
                 .map_err(|e| e.to_string())?
                 == Some(true)
             {
-                return Ok(Some(RoundLottery {
+                return Ok(RoundState::Current(RoundLottery {
                     round,
                     lottery,
                     outpoint,
@@ -436,7 +442,7 @@ impl Node {
                 }));
             }
             if round >= MAX_ROUNDS {
-                return Ok(None);
+                return Ok(RoundState::Ended("the last round's output is spent"));
             }
             let Some(spend) = find_spend_or_unknown(
                 &*chain,
@@ -446,19 +452,19 @@ impl Node {
                 height,
             )?
             else {
-                return Ok(None);
+                return Ok(RoundState::Ended("the round's output is spent by an unknown spend"));
             };
             let Some(spend_height) = chain
                 .get_tx_block_height(&spend.compute_txid())
                 .map_err(|e| e.to_string())?
             else {
                 // In the mempool: judged only once it confirms.
-                return Ok(None);
+                return Ok(RoundState::NotYet("the round's spend is not confirmed"));
             };
             // A re-arm spend has one input and one output paying the next round's lottery;
             // anything else (a claim) ended the dispute.
             if spend.input.len() != 1 || spend.output.len() != 1 {
-                return Ok(None);
+                return Ok(RoundState::Ended("a claim spent the round's output"));
             }
             // DEP-03 §Arm manifests (DEP-06 Phase 4 step 5): the next round is the output the
             // confirmed spend pays, its set named by a valid published manifest for the round;
@@ -479,10 +485,10 @@ impl Node {
                     let Some((next, participants)) =
                         self.rearm_round_lottery(view, round + 1, height, revealed, spend_height)?
                     else {
-                        return Ok(None);
+                        return Ok(RoundState::Ended("no next round derives from the spend"));
                     };
                     if spend.output[0].script_pubkey != next.script_pubkey() {
-                        return Ok(None);
+                        return Ok(RoundState::Ended("the spend pays no round we derive"));
                     }
                     (next, participants)
                 }
@@ -679,8 +685,90 @@ struct PendingRearm {
 /// What a pass over one dispute found, for its back-off.
 pub(crate) enum RearmPass {
     Progress,
-    Idle,
-    NoOutput,
+    /// Nothing due yet (no lottery output yet, or no window open): retried in 60 s.
+    Idle(&'static str),
+    /// The dispute has no unclaimed lottery output and will not get one (claimed, or no
+    /// further round derives): retried in an hour.
+    NoOutput(&'static str),
+}
+
+/// Seconds until the next pass over one dispute, by what this pass found.  "None yet" is
+/// Idle, never NoOutput: a pass that runs before the confiscation confirms must not sleep
+/// through the round (regtest rearm-rust 1120-160245: a 1 h back-off from a pass ~2 min
+/// before the confiscation outlasted the whole round-2 window).
+pub(crate) fn rearm_pass_wait(pass: &RearmPass) -> u64 {
+    match pass {
+        RearmPass::Progress => REARM_PASS_SECS,
+        RearmPass::Idle(_) => 60,
+        RearmPass::NoOutput(_) => 3600,
+    }
+}
+
+/// Whether a dispute whose next pass was scheduled for `next` is due at `now`.
+pub(crate) fn rearm_pass_due(next: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    next.is_none_or(|t| t <= now)
+}
+
+/// What the dispute's chain state says about round 1, before any round is walked.
+pub(crate) enum Round1 {
+    NotYet(&'static str),
+    Found(bitcoin::Transaction),
+}
+
+/// Round 1's confiscation: NOT YET while the vault is unspent or its spend is not found.
+pub(crate) fn round1_confiscation(
+    chain: &dyn crate::chain_backend::ChainBackend,
+    ledger_id: &str,
+    vault: &OutPoint,
+    landed: u32,
+) -> Result<Round1, String> {
+    if chain
+        .is_output_unspent(&vault.txid, vault.vout)
+        .map_err(|e| e.to_string())?
+        == Some(true)
+    {
+        return Ok(Round1::NotYet("the vault is unspent (no confiscation yet)"));
+    }
+    Ok(
+        match find_spend_or_unknown(chain, ledger_id, vault, bitcoin::Script::new(), landed)? {
+            Some(tx) => Round1::Found(tx),
+            None => Round1::NotYet("no confiscation found"),
+        },
+    )
+}
+
+/// What `drive_rearm` found about the dispute's current lottery output.
+pub(crate) enum RoundState {
+    Current(RoundLottery),
+    NotYet(&'static str),
+    Ended(&'static str),
+}
+
+impl RoundState {
+    /// The pass outcome when there is no current output.
+    pub(crate) fn pass(&self) -> Option<RearmPass> {
+        match self {
+            RoundState::Current(_) => None,
+            RoundState::NotYet(why) => Some(RearmPass::Idle(why)),
+            RoundState::Ended(why) => Some(RearmPass::NoOutput(why)),
+        }
+    }
+}
+
+/// The round-2+ arm decision of `drive_rearm` once the current output is known and no next
+/// round is due yet: arm while a window is open and we have not armed it.
+pub(crate) fn rearm_arm_decision(
+    window_open: bool,
+    armed_here: bool,
+    our_arms: usize,
+) -> Option<RearmPass> {
+    if !window_open {
+        return Some(RearmPass::Idle("no arm window open"));
+    }
+    if armed_here || our_arms >= super::armers::MAX_ARMS {
+        return Some(RearmPass::Progress);
+    }
+    None // arm
 }
 
 /// How long a `lottery_rearm_sign` request is waited on before the next open tier is tried.
@@ -824,20 +912,33 @@ impl Node {
         };
         for id in ids {
             {
-                let mut next = next_rearm_pass().lock().unwrap();
-                if next
-                    .get(&id)
-                    .is_some_and(|t| *t > std::time::Instant::now())
-                {
+                let next = next_rearm_pass().lock().unwrap();
+                if !rearm_pass_due(next.get(&id).copied(), std::time::Instant::now()) {
                     continue;
                 }
             }
             // Back off by outcome: 30 s while a round moves, 60 s while nothing is due, 1 h
             // once the dispute has no unclaimed lottery output (claimed, or none yet).
             let wait = match self.drive_rearm(&id).await {
-                Ok(RearmPass::Progress) => REARM_PASS_SECS,
-                Ok(RearmPass::Idle) => 60,
-                Ok(RearmPass::NoOutput) => 3600,
+                Ok(pass) => {
+                    let wait = rearm_pass_wait(&pass);
+                    match &pass {
+                        RearmPass::Progress => {}
+                        RearmPass::Idle(why) => tracing::debug!(
+                            "re-arm {}: idle ({}); next pass in {} s",
+                            &id[..16],
+                            why,
+                            wait
+                        ),
+                        RearmPass::NoOutput(why) => tracing::debug!(
+                            "re-arm {}: no lottery output ({}); next pass in {} s",
+                            &id[..16],
+                            why,
+                            wait
+                        ),
+                    }
+                    wait
+                }
                 Err(e) => {
                     tracing::info!("re-arm {}: {}", &id[..16], e);
                     300
@@ -861,10 +962,14 @@ impl Node {
             .ok_or("no fork of ours")?;
         let view = self.rearm_view(ledger_id).await?;
         if !deposits_core::types::ruleset_strict_lottery(&view.grounds.ruleset) {
-            return Ok(RearmPass::NoOutput);
+            return Ok(RearmPass::NoOutput("not a strict-lottery ruleset"));
         }
-        let Some(cur) = self.current_round_lottery(ledger_id, &view).await? else {
-            return Ok(RearmPass::NoOutput);
+        let state = self.round_lottery_state(ledger_id, &view).await?;
+        if let Some(pass) = state.pass() {
+            return Ok(pass);
+        }
+        let RoundState::Current(cur) = state else {
+            unreachable!("pass() is None only for Current")
         };
         let tip = self
             .wallet
@@ -884,18 +989,17 @@ impl Node {
         match due {
             None => {
                 let o = rearm_round_opens(cur.height, cur.revealed);
-                let Some((_, wo, wc)) =
-                    deposits_core::tapscript_reserves::rearm_open_window(o, view.arm_window, tip)
-                else {
-                    return Ok(RearmPass::Idle);
-                };
+                let window =
+                    deposits_core::tapscript_reserves::rearm_open_window(o, view.arm_window, tip);
                 let rows = super::armers::arm_rows(&view.updates);
-                let ours: Vec<_> = rows.iter().filter(|r| r.armer == self.node_id).collect();
-                let armed_here = super::armers::pick_round_arms(&rows, cur.round + 1, wo, wc)
-                    .into_iter()
-                    .any(|i| rows[i].armer == self.node_id);
-                if armed_here || ours.len() >= super::armers::MAX_ARMS {
-                    return Ok(RearmPass::Progress);
+                let ours = rows.iter().filter(|r| r.armer == self.node_id).count();
+                let armed_here = window.is_some_and(|(_, wo, wc)| {
+                    super::armers::pick_round_arms(&rows, cur.round + 1, wo, wc)
+                        .into_iter()
+                        .any(|i| rows[i].armer == self.node_id)
+                });
+                if let Some(pass) = rearm_arm_decision(window.is_some(), armed_here, ours) {
+                    return Ok(pass);
                 }
                 self.arm_rearm_round(ledger_id, &fork_key, cur.round + 1)
                     .await
@@ -904,7 +1008,7 @@ impl Node {
             }
             Some((next, _)) => {
                 if !cur.lottery.recovery_voters.contains(&me) {
-                    return Ok(RearmPass::Idle);
+                    return Ok(RearmPass::Idle("not a recovery voter"));
                 }
                 self.propose_rearm(ledger_id, &view, &cur, &next, tip)
                     .await
@@ -1383,5 +1487,149 @@ mod scan_window_tests {
         assert!(!is_beyond_scan_window(
             "bitcoind RPC error: connection refused"
         ));
+    }
+}
+
+#[cfg(test)]
+mod backoff_tests {
+    //! A pass that runs before the confiscation confirms backs off 60 s, not an hour, so the
+    //! pass after the confiscation confirms is due within 60 s and arms (regtest rearm-rust
+    //! 1120-160245).
+    use super::{
+        rearm_arm_decision, rearm_pass_due, rearm_pass_wait, round1_confiscation, RearmPass,
+        Round1, RoundState,
+    };
+    use crate::chain_backend::{ChainBackend, UnspentOutput};
+    use crate::Error;
+    use bitcoin::{OutPoint, Script, Transaction, Txid};
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    /// A chain where the vault is unspent until `confiscate` mines its spend.
+    struct Chain {
+        vault: OutPoint,
+        confiscation: Mutex<Option<(Transaction, u32)>>,
+    }
+    impl ChainBackend for Chain {
+        fn get_tip_height(&self) -> Result<u32, Error> {
+            Ok(31_600)
+        }
+        fn get_block_hash(&self, _: u32) -> Result<bitcoin::BlockHash, Error> {
+            Err(Error::Wallet("unused".into()))
+        }
+        fn get_block_height_if_in_best_chain(
+            &self,
+            _: &bitcoin::BlockHash,
+        ) -> Result<Option<u32>, Error> {
+            Ok(None)
+        }
+        fn get_tx(&self, _: &Txid) -> Result<Option<Transaction>, Error> {
+            Ok(None)
+        }
+        fn get_tx_block_height(&self, t: &Txid) -> Result<Option<u32>, Error> {
+            Ok(self
+                .confiscation
+                .lock()
+                .unwrap()
+                .as_ref()
+                .filter(|(tx, _)| tx.compute_txid() == *t)
+                .map(|(_, h)| *h))
+        }
+        fn is_output_unspent(&self, t: &Txid, v: u32) -> Result<Option<bool>, Error> {
+            if OutPoint::new(*t, v) == self.vault {
+                return Ok(Some(self.confiscation.lock().unwrap().is_none()));
+            }
+            Ok(Some(true))
+        }
+        fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+            Ok(None)
+        }
+        fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+            Err(Error::Wallet("unused".into()))
+        }
+        fn find_spending_tx(
+            &self,
+            o: &OutPoint,
+            _: &Script,
+            _: u32,
+        ) -> Result<Option<Transaction>, Error> {
+            Ok(if *o == self.vault {
+                self.confiscation.lock().unwrap().as_ref().map(|(t, _)| t.clone())
+            } else {
+                None
+            })
+        }
+    }
+
+    fn confiscation_of(vault: OutPoint) -> Transaction {
+        Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: bitcoin::absolute::LockTime::ZERO,
+            input: vec![bitcoin::TxIn {
+                previous_output: vault,
+                ..Default::default()
+            }],
+            output: vec![bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1_000_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            }],
+        }
+    }
+
+    fn state(chain: &Chain) -> RoundState {
+        match round1_confiscation(chain, &"09".repeat(32), &chain.vault, 31_500).unwrap() {
+            Round1::NotYet(why) => RoundState::NotYet(why),
+            Round1::Found(_) => RoundState::Ended("stand-in: walked by round_lottery_state"),
+        }
+    }
+
+    #[test]
+    fn a_pass_before_the_confiscation_retries_in_a_minute_and_then_arms() {
+        let vault = OutPoint::new(Txid::from_raw_hash(bitcoin::hashes::Hash::all_zeros()), 0);
+        let chain = Chain {
+            vault,
+            confiscation: Mutex::new(None),
+        };
+        let t0 = Instant::now();
+
+        // Pass 1, before the confiscation: NOT YET -> Idle -> 60 s.
+        let s = state(&chain);
+        assert!(matches!(s, RoundState::NotYet(_)));
+        let pass = s.pass().expect("no current output");
+        assert!(matches!(pass, RearmPass::Idle(_)));
+        let wait = rearm_pass_wait(&pass);
+        assert_eq!(wait, 60);
+        let next = t0 + Duration::from_secs(wait);
+        assert!(!rearm_pass_due(Some(next), t0 + Duration::from_secs(59)));
+
+        // The confiscation confirms; the next pass is due within 60 s of the first.
+        let conf = confiscation_of(vault);
+        *chain.confiscation.lock().unwrap() = Some((conf.clone(), 31_585));
+        assert!(rearm_pass_due(Some(next), t0 + Duration::from_secs(60)));
+        match round1_confiscation(&chain, &"09".repeat(32), &vault, 31_500).unwrap() {
+            Round1::Found(tx) => assert_eq!(tx.compute_txid(), conf.compute_txid()),
+            Round1::NotYet(why) => panic!("still not yet: {}", why),
+        }
+        // Round 2's window is open and we have not armed it: the pass arms.
+        assert!(rearm_arm_decision(true, false, 0).is_none());
+        // ... and not while its window is closed, or once armed.
+        assert!(matches!(rearm_arm_decision(false, false, 0), Some(RearmPass::Idle(_))));
+        assert!(matches!(rearm_arm_decision(true, true, 1), Some(RearmPass::Progress)));
+    }
+
+    #[test]
+    fn only_an_ended_dispute_waits_an_hour() {
+        assert_eq!(rearm_pass_wait(&RearmPass::NoOutput("claimed")), 3600);
+        assert_eq!(rearm_pass_wait(&RearmPass::Idle("not yet")), 60);
+        assert_eq!(rearm_pass_wait(&RearmPass::Progress), 30);
+        assert!(matches!(
+            RoundState::Ended("claimed").pass(),
+            Some(RearmPass::NoOutput(_))
+        ));
+        assert!(matches!(
+            RoundState::NotYet("vault unspent").pass(),
+            Some(RearmPass::Idle(_))
+        ));
+        assert!(rearm_pass_due(None, Instant::now()));
     }
 }
