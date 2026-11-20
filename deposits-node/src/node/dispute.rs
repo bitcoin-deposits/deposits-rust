@@ -5095,6 +5095,37 @@ pub(crate) fn redteam_no_arm() -> bool {
     )
 }
 
+/// Our coins `history` commits, in order: (every replacement collateral a `DisputeArmed` of
+/// ours declares, output 0 of every `DisputeAcquire` claim of ours). A claim pays our own
+/// P2WPKH, where our pledgeable coins are, but it is a ledger's custody until rotated into its
+/// vault: selecting by script would pledge it to another dispute (the select-by-script hazard
+/// of the claim, regtest 1120-090836; cl's `pledge-collateral`).
+pub(crate) fn committed_outpoints(
+    history: &[deposits_core::SignedLedgerUpdate],
+    me: &bitcoin::secp256k1::PublicKey,
+) -> (Vec<bitcoin::OutPoint>, Vec<bitcoin::OutPoint>) {
+    use bitcoin::hashes::Hash;
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let (mut declared, mut custody) = (Vec::new(), Vec::new());
+    for u in history.iter().filter(|u| u.operator_id == *me) {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeArmed {
+                replacement_collateral: Some(rc),
+                ..
+            }) => declared.push(bitcoin::OutPoint::new(
+                bitcoin::Txid::from_byte_array(rc.txid),
+                rc.vout,
+            )),
+            Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => custody.push(
+                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(claim_txid), 0),
+            ),
+            _ => {}
+        }
+    }
+    (declared, custody)
+}
+
 /// What to do with a (re-)arm, given the collateral lookup.
 #[derive(Debug)]
 pub(crate) enum ArmDecision {
@@ -5147,6 +5178,78 @@ mod arm_collateral_tests {
     use crate::chain_backend::fake::ScriptedScans;
     use crate::chain_backend::{ScanRetry, UnspentOutput};
     use deposits_core::messages::LedgerOperation;
+
+    #[test]
+    fn our_claim_output_is_custody_never_a_pledge() {
+        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+        use deposits_core::TlvEncode;
+        let key = |b: u8| {
+            bitcoin::secp256k1::PublicKey::from_secret_key(
+                &Secp256k1::new(),
+                &SecretKey::from_slice(&[b; 32]).unwrap(),
+            )
+        };
+        let (me, other) = (key(1), key(2));
+        let upd = |op: LedgerOperation, by| deposits_core::SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0x8001,
+            operator_id: by,
+            ledger_id: [0u8; 32],
+            sequence_number: 1,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 100,
+            block_hash: [0u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        };
+        let acquire = |txid: [u8; 32], by| {
+            upd(
+                LedgerOperation::DisputeAcquire {
+                    new_custodian: by,
+                    claim_txid: txid,
+                    new_reserves_address: "bcrt1qwinner".into(),
+                    confiscation_txid: None,
+                },
+                by,
+            )
+        };
+        let history = vec![acquire([7u8; 32], me), acquire([8u8; 32], other)];
+        let (declared, custody) = committed_outpoints(&history, &me);
+        let claim = bitcoin::OutPoint::new(
+            {
+                use bitcoin::hashes::Hash;
+                bitcoin::Txid::from_byte_array([7u8; 32])
+            },
+            0,
+        );
+        assert!(declared.is_empty());
+        assert_eq!(custody, vec![claim], "ours only, output 0");
+        // At our address: the claim (the smallest coin covering the floor) and a larger coin.
+        let at = |op, sats| {
+            (
+                UnspentOutput {
+                    outpoint: op,
+                    value_sats: sats,
+                },
+                6,
+            )
+        };
+        let coin = utxo(90_000).outpoint;
+        let utxos = vec![at(claim, 45_330), at(coin, 90_000)];
+        assert_eq!(
+            pick_pledge(&utxos, 30_000, 1, &PledgeExclusion::default())
+                .unwrap()
+                .outpoint,
+            claim,
+            "without the exclusion the custody is the pick"
+        );
+        let ex = PledgeExclusion {
+            own: None,
+            taken: custody.into_iter().collect(),
+        };
+        assert_eq!(pick_pledge(&utxos, 30_000, 1, &ex).unwrap().outpoint, coin);
+    }
 
     fn utxo(sats: u64) -> UnspentOutput {
         UnspentOutput {
@@ -5401,11 +5504,9 @@ impl Node {
     /// Append our DisputeArmed for re-arm round `round` (TLV 366) to our fork, with a fresh
     /// preimage and a replacement-collateral pledge, and publish it.
     /// What a pledge for `ledger_id` must avoid: the latest pledge on our own fork of it (kept
-    /// while unspent), and every coin any `DisputeArmed` of ours on any fork declares.
+    /// while unspent), every coin any `DisputeArmed` of ours on any fork declares, and output 0
+    /// of every claim of ours (`committed_outpoints`).
     pub(crate) fn pledge_exclusion(&self, ledger_id: &str) -> PledgeExclusion {
-        use bitcoin::hashes::Hash;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::TlvDecode;
         let mut ex = PledgeExclusion::default();
         let ledgers = self.handler.ledgers.lock().unwrap();
         for (k, arc) in ledgers.iter() {
@@ -5413,20 +5514,14 @@ impl Node {
             if !super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id) {
                 continue;
             }
-            for u in l.history.iter().filter(|u| u.operator_id == self.node_id) {
-                if let Ok(LedgerOperation::DisputeArmed {
-                    replacement_collateral: Some(rc),
-                    ..
-                }) = LedgerOperation::tlv_decode(&u.message)
-                {
-                    let op =
-                        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout);
-                    ex.taken.insert(op);
-                    if k.starts_with(ledger_id) {
-                        ex.own = Some(op);
-                    }
+            let (declared, custody) = committed_outpoints(&l.history, &self.node_id);
+            if k.starts_with(ledger_id) {
+                if let Some(op) = declared.last() {
+                    ex.own = Some(*op);
                 }
             }
+            ex.taken.extend(declared);
+            ex.taken.extend(custody);
         }
         ex
     }
