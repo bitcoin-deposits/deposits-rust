@@ -4900,14 +4900,28 @@ pub async fn recovery_lottery_claim(args: &[String]) -> Result<(), Box<dyn std::
         &lottery_output.address.to_string()[..20]
     );
 
-    // Find the lottery UTXO on-chain
+    // The lottery UTXO: output 0 of the confiscation that spent this ledger's vault, by
+    // outpoint. Not "an unspent output at the lottery address": another dispute with the same
+    // participants and quorum pays the same script (regtest 2026-11-20).
     let lottery_script = lottery_output.address.script_pubkey();
-    let utxo = crate::chain_backend::from_env(&config.electrum_url)
-        .find_unspent_output_at(lottery_script.as_script())
-        .map_err(|e| format!("Failed to query lottery address: {}", e))?;
-    let (lottery_outpoint, lottery_amount) = utxo.map(|u| (u.outpoint, u.value_sats)).ok_or(
-        "No unspent UTXO found at lottery address. Was confiscation transaction confirmed?",
-    )?;
+    let backend = crate::chain_backend::from_env(&config.electrum_url);
+    let ledger_updates: Vec<SignedLedgerUpdate> = update_events
+        .iter()
+        .filter_map(|e| BASE64.decode(&e.content).ok())
+        .filter_map(|b| SignedLedgerUpdate::tlv_decode(&b).ok())
+        .collect();
+    let landed = crate::node::lottery_recovery::landed_lottery_outpoint(&*backend, &ledger_updates)
+        .ok_or("No confiscation of this ledger's vault found on chain yet")?;
+    let (lottery_amount, _) =
+        crate::chain_backend::unspent_output_paying(&*backend, &landed, &lottery_script)
+            .map_err(|e| format!("Failed to query the lottery output: {}", e))?
+            .ok_or_else(|| {
+                format!(
+                    "The confiscation's output {} is not an unspent output of this lottery",
+                    landed
+                )
+            })?;
+    let lottery_outpoint = landed;
 
     println!(
         "  Found lottery UTXO: {} ({} sats)",
@@ -6101,6 +6115,9 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
         Option<String>,
         u64,
     )> = None;
+    // The vault that QuorumBegin records, so the lookup below is by outpoint (DEP-20 §8.3: a
+    // migration output can sit at the same script).
+    let mut latest_qb_outpoint: Option<bitcoin::OutPoint> = None;
     for u in &updates {
         if u.operator_id != original_operator {
             continue;
@@ -6116,9 +6133,18 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
             quorum_members,
             quorum_expiry,
             protocol_version,
+            new_outpoint_txid,
+            new_outpoint_vout,
             ..
         } = &op
         {
+            {
+                use bitcoin::hashes::Hash;
+                latest_qb_outpoint = Some(bitcoin::OutPoint::new(
+                    bitcoin::Txid::from_byte_array(*new_outpoint_txid),
+                    *new_outpoint_vout,
+                ));
+            }
             latest_qb = Some((
                 reserves_id.clone(),
                 *ledger_hash,
@@ -6240,7 +6266,7 @@ pub async fn recovery_confiscate_plan(args: &[String]) -> Result<(), Box<dyn std
     let reserves_script = reserves_addr.script_pubkey();
     let reserves_utxo = node
         .wallet
-        .find_utxo_for_script(&reserves_script)
+        .vault_utxo(latest_qb_outpoint, &reserves_script)
         .map_err(|e| format!("esplora reserves lookup: {}", e))?;
     let (reserves_outpoint, reserves_amount) = match reserves_utxo {
         Some(u) => u,

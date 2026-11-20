@@ -2110,7 +2110,7 @@ impl Node {
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
         let lottery = ctx.build_lottery(self.wallet.network())?;
         let t_locate = std::time::Instant::now();
-        let mut located = self.locate_lottery_output(&lottery)?;
+        let mut located = self.locate_lottery_output(&lottery, ctx.landed)?;
         // DEP-06 "Authorised confiscation": the confiscation that landed may be a lottery over a
         // subset of the arms counted at its block (a proposer that saw fewer arms). The sole
         // participant of 751e6951's round 1 (ref6) never claimed because it looked only for the
@@ -2139,11 +2139,12 @@ impl Node {
                         recovery_voters: ctx.recovery_voters.clone(),
                         recovery_threshold: ctx.recovery_threshold,
                         our_armed: ctx.our_armed.clone(),
+                        landed: ctx.landed,
                     };
                     let Ok(l) = sub.build_lottery(self.wallet.network()) else {
                         continue;
                     };
-                    if let Some(found) = self.locate_lottery_output(&l)? {
+                    if let Some(found) = self.locate_lottery_output(&l, ctx.landed)? {
                         tracing::info!(
                             "Lottery for {}: the landed output pays a subset of the arms ({} of {})",
                             &ledger_id[..16.min(ledger_id.len())],
@@ -2169,7 +2170,7 @@ impl Node {
         // landed yet), and neither a claim nor a yield may be decided from it. A yield is final
         // (DisputeYield, completed marker), so deciding from a set that is not on chain can leave
         // a sole participant yielding its own custody (soak, 30ea46ac, Nov 5).
-        let Some((_, _, confirmations)) = located else {
+        let Some((lottery_outpoint, lottery_value, confirmations)) = located else {
             // What we derived, so a mismatch with the landed output can be read off the log:
             // 751e6951's round-1 output (Nov 7..10) never matched ref6's set and nothing said why.
             let short = |b: &[u8]| hex::encode(&b[..4.min(b.len())]);
@@ -2225,6 +2226,7 @@ impl Node {
         tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
         self.claim_lottery(
             ledger_id,
+            (lottery_outpoint, lottery_value),
             &ctx.participants,
             &ordered_preimages,
             winner_index,
@@ -2237,10 +2239,13 @@ impl Node {
         .await
     }
 
-    /// Claim the lottery output as the winner
+    /// Claim the lottery output as the winner. `lottery_utxo` is the output the caller located
+    /// BY OUTPOINT (round 1: the landed confiscation's output 0; a later round: the re-arm
+    /// spend's), with its value: the claim spends exactly that output.
     pub(crate) async fn claim_lottery(
         &self,
         ledger_id: &str,
+        lottery_utxo: (bitcoin::OutPoint, u64),
         participants: &[(
             bitcoin::secp256k1::PublicKey,
             deposits_core::tapscript_reserves::LotteryParticipant,
@@ -2273,9 +2278,8 @@ impl Node {
         // ledger's latest QuorumBegin (minus operator) — the SAME set the
         // confiscation TX committed to on-chain. Deriving them from the
         // DisputeArmed participants here (the old stub) produced a
-        // different Taproot address, so `find_utxo_for_script` below found
-        // no UTXO and the claim silently failed — leaving the ledger
-        // disputed forever.
+        // different Taproot address, so the claim's leaf and sighash would
+        // not match the output being spent.
 
         // Build the lottery output
         let lottery_builder = LotteryScriptBuilder::new(
@@ -2289,17 +2293,15 @@ impl Node {
             .build()
             .map_err(|e| Error::Protocol(format!("Failed to build lottery output: {:?}", e)))?;
 
-        // Find the lottery UTXO on-chain
+        // The lottery UTXO is the one the caller located by outpoint. It was once "any unspent
+        // output at the lottery's script" (`find_utxo_for_script`), and a lottery's script
+        // commits to its participants and voters only: ref7, sole armer of round 2 of two
+        // ledgers with one quorum, claimed 70b0abb3's unclaimed round-2 output (46a66b12:0,
+        // same script, same value) as a606a4ca's, spending a606a4ca's declared collateral, and
+        // every later claim of a606a4ca's own output failed bad-txns-inputs-missingorspent
+        // (regtest rearm-rust 1120-090836).
         let lottery_script = lottery_output.address.script_pubkey();
-
-        // Use wallet's esplora to find UTXO
-        let lottery_utxo = self
-            .wallet
-            .find_utxo_for_script(&lottery_script)
-            .map_err(|e| Error::Protocol(format!("Failed to find lottery UTXO: {:?}", e)))?;
-
-        let (lottery_outpoint, lottery_amount) = lottery_utxo
-            .ok_or_else(|| Error::Protocol("No unspent UTXO at lottery address".to_string()))?;
+        let (lottery_outpoint, lottery_amount) = lottery_utxo;
 
         tracing::info!(
             "Found lottery UTXO: {} ({} sats)",
@@ -4431,17 +4433,19 @@ impl Node {
             lottery_output.address
         );
 
-        // Check if lottery address has a UTXO with enough confirmations.
-        // Ask Esplora directly for the tx's confirmation depth; no
-        // local cache file needed.
+        // The confiscation that spent this dispute's vault, and its output 0 if it pays this
+        // lottery: by outpoint, not "a UTXO at the lottery's script", which another dispute
+        // with the same participants and quorum also pays (regtest 2026-11-20).
         let lottery_script = lottery_output.address.script_pubkey();
-        let outpoint = match self.wallet.find_utxo_for_script(&lottery_script)? {
-            Some((op, _value)) => op,
-            None => return Ok(false), // No UTXO at lottery address yet
+        let Some(outpoint) = super::lottery_recovery::landed_lottery_outpoint(
+            &*self.wallet.chain_backend(),
+            &paginated_updates,
+        ) else {
+            return Ok(false); // not confiscated yet (or the search has not reached it)
         };
         let confs = match self
             .wallet
-            .get_outpoint_value_and_confs(outpoint.txid, outpoint.vout)?
+            .unspent_output_paying(outpoint, &lottery_script)?
         {
             Some((_value, c)) => c,
             None => return Ok(false),
@@ -5120,6 +5124,37 @@ pub(crate) fn redteam_no_arm() -> bool {
     )
 }
 
+/// Our coins `history` commits, in order: (every replacement collateral a `DisputeArmed` of
+/// ours declares, output 0 of every `DisputeAcquire` claim of ours). A claim pays our own
+/// P2WPKH, where our pledgeable coins are, but it is a ledger's custody until rotated into its
+/// vault: selecting by script would pledge it to another dispute (the select-by-script hazard
+/// of the claim, regtest 1120-090836; cl's `pledge-collateral`).
+pub(crate) fn committed_outpoints(
+    history: &[deposits_core::SignedLedgerUpdate],
+    me: &bitcoin::secp256k1::PublicKey,
+) -> (Vec<bitcoin::OutPoint>, Vec<bitcoin::OutPoint>) {
+    use bitcoin::hashes::Hash;
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let (mut declared, mut custody) = (Vec::new(), Vec::new());
+    for u in history.iter().filter(|u| u.operator_id == *me) {
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeArmed {
+                replacement_collateral: Some(rc),
+                ..
+            }) => declared.push(bitcoin::OutPoint::new(
+                bitcoin::Txid::from_byte_array(rc.txid),
+                rc.vout,
+            )),
+            Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => custody.push(
+                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(claim_txid), 0),
+            ),
+            _ => {}
+        }
+    }
+    (declared, custody)
+}
+
 /// What to do with a (re-)arm, given the collateral lookup.
 #[derive(Debug)]
 pub(crate) enum ArmDecision {
@@ -5172,6 +5207,78 @@ mod arm_collateral_tests {
     use crate::chain_backend::fake::ScriptedScans;
     use crate::chain_backend::{ScanRetry, UnspentOutput};
     use deposits_core::messages::LedgerOperation;
+
+    #[test]
+    fn our_claim_output_is_custody_never_a_pledge() {
+        use bitcoin::secp256k1::{Secp256k1, SecretKey};
+        use deposits_core::TlvEncode;
+        let key = |b: u8| {
+            bitcoin::secp256k1::PublicKey::from_secret_key(
+                &Secp256k1::new(),
+                &SecretKey::from_slice(&[b; 32]).unwrap(),
+            )
+        };
+        let (me, other) = (key(1), key(2));
+        let upd = |op: LedgerOperation, by| deposits_core::SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 0x8001,
+            operator_id: by,
+            ledger_id: [0u8; 32],
+            sequence_number: 1,
+            previous_hash: [0u8; 32],
+            content_hash: [0u8; 32],
+            block_height: 100,
+            block_hash: [0u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        };
+        let acquire = |txid: [u8; 32], by| {
+            upd(
+                LedgerOperation::DisputeAcquire {
+                    new_custodian: by,
+                    claim_txid: txid,
+                    new_reserves_address: "bcrt1qwinner".into(),
+                    confiscation_txid: None,
+                },
+                by,
+            )
+        };
+        let history = vec![acquire([7u8; 32], me), acquire([8u8; 32], other)];
+        let (declared, custody) = committed_outpoints(&history, &me);
+        let claim = bitcoin::OutPoint::new(
+            {
+                use bitcoin::hashes::Hash;
+                bitcoin::Txid::from_byte_array([7u8; 32])
+            },
+            0,
+        );
+        assert!(declared.is_empty());
+        assert_eq!(custody, vec![claim], "ours only, output 0");
+        // At our address: the claim (the smallest coin covering the floor) and a larger coin.
+        let at = |op, sats| {
+            (
+                UnspentOutput {
+                    outpoint: op,
+                    value_sats: sats,
+                },
+                6,
+            )
+        };
+        let coin = utxo(90_000).outpoint;
+        let utxos = vec![at(claim, 45_330), at(coin, 90_000)];
+        assert_eq!(
+            pick_pledge(&utxos, 30_000, 1, &PledgeExclusion::default())
+                .unwrap()
+                .outpoint,
+            claim,
+            "without the exclusion the custody is the pick"
+        );
+        let ex = PledgeExclusion {
+            own: None,
+            taken: custody.into_iter().collect(),
+        };
+        assert_eq!(pick_pledge(&utxos, 30_000, 1, &ex).unwrap().outpoint, coin);
+    }
 
     fn utxo(sats: u64) -> UnspentOutput {
         UnspentOutput {
@@ -5441,11 +5548,9 @@ impl Node {
     /// Append our DisputeArmed for re-arm round `round` (TLV 366) to our fork, with a fresh
     /// preimage and a replacement-collateral pledge, and publish it.
     /// What a pledge for `ledger_id` must avoid: the latest pledge on our own fork of it (kept
-    /// while unspent), and every coin any `DisputeArmed` of ours on any fork declares.
+    /// while unspent), every coin any `DisputeArmed` of ours on any fork declares, and output 0
+    /// of every claim of ours (`committed_outpoints`).
     pub(crate) fn pledge_exclusion(&self, ledger_id: &str) -> PledgeExclusion {
-        use bitcoin::hashes::Hash;
-        use deposits_core::messages::LedgerOperation;
-        use deposits_core::TlvDecode;
         let mut ex = PledgeExclusion::default();
         let ledgers = self.handler.ledgers.lock().unwrap();
         for (k, arc) in ledgers.iter() {
@@ -5453,20 +5558,14 @@ impl Node {
             if !super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id) {
                 continue;
             }
-            for u in l.history.iter().filter(|u| u.operator_id == self.node_id) {
-                if let Ok(LedgerOperation::DisputeArmed {
-                    replacement_collateral: Some(rc),
-                    ..
-                }) = LedgerOperation::tlv_decode(&u.message)
-                {
-                    let op =
-                        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout);
-                    ex.taken.insert(op);
-                    if k.starts_with(ledger_id) {
-                        ex.own = Some(op);
-                    }
+            let (declared, custody) = committed_outpoints(&l.history, &self.node_id);
+            if k.starts_with(ledger_id) {
+                if let Some(op) = declared.last() {
+                    ex.own = Some(*op);
                 }
             }
+            ex.taken.extend(declared);
+            ex.taken.extend(custody);
         }
         ex
     }

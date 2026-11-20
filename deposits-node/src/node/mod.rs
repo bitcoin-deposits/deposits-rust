@@ -688,6 +688,7 @@ impl Node {
     const RESYNC_BATCH_CAP: usize = 500;
 }
 
+pub mod acquire_binding;
 pub mod armers;
 pub mod auto_tasks;
 pub mod confiscation_rebuild;

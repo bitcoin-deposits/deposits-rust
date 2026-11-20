@@ -76,42 +76,42 @@ pub(crate) fn reimport_reached_tip(
             .any(|u| u.sequence_number == local_next_seq && u.operator_id == *operator)
 }
 
-/// The claim txids of the fetched `DisputeAcquire`s that name a custodian other than
-/// `operator`, filtered by `keep`.
+/// The fetched `DisputeAcquire`s that name a custodian other than `operator`, each with the
+/// vault it is judged against (the latest `QuorumBegin` before it in the fetch, else
+/// `fallback`, our local view's), filtered by `keep`.
 pub(crate) fn foreign_acquire_claims(
     fetched: &[deposits_core::SignedLedgerUpdate],
     operator: &bitcoin::secp256k1::PublicKey,
-    keep: impl Fn(&[u8; 32]) -> bool,
-) -> Vec<[u8; 32]> {
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::TlvDecode;
-    let mut out: Vec<[u8; 32]> = fetched
-        .iter()
-        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::DisputeAcquire {
-                new_custodian,
-                claim_txid,
-                ..
-            }) if new_custodian != *operator && keep(&claim_txid) => Some(claim_txid),
-            _ => None,
-        })
-        .collect();
-    out.sort_unstable();
+    fallback: Option<super::acquire_binding::Vault>,
+    keep: impl Fn(Option<&super::acquire_binding::Vault>, &[u8; 32]) -> bool,
+) -> Vec<(Option<super::acquire_binding::Vault>, [u8; 32])> {
+    let mut out: Vec<(Option<super::acquire_binding::Vault>, [u8; 32])> =
+        super::acquire_binding::acquires_in(fetched, usize::MAX, fallback)
+            .into_iter()
+            .filter(|a| a.custodian != *operator && keep(a.vault.as_ref(), &a.claim))
+            .map(|a| (a.vault, a.claim))
+            .collect();
+    out.sort_unstable_by_key(|(v, c)| (format!("{v:?}"), *c));
     out.dedup();
     out
 }
 
 /// Whether the fetch carries a `DisputeAcquire` that moves custody away from `operator`:
-/// any such acquire before strict-lottery-v8, and under it only one whose claim is confirmed
-/// (DEP-06 §Phase 4). Every acquire sits on a dispute fork, so "on a fork branch" alone says
-/// nothing; an unconfirmed one is a branch that has not won.
+/// any such acquire before strict-lottery-v8, and under it only one that binds: its claim
+/// confirmed AND spending its dispute's lottery outpoint (DEP-06 §Phase 4,
+/// `acquire_binding`). Every acquire sits on a dispute fork, so "on a fork branch" alone says
+/// nothing; one that does not bind is a branch that has not won.
 pub(crate) fn acquire_moves_custody_away(
     fetched: &[deposits_core::SignedLedgerUpdate],
     operator: &bitcoin::secp256k1::PublicKey,
+    fallback: Option<super::acquire_binding::Vault>,
     on_confirm: bool,
-    confirmed: impl Fn(&[u8; 32]) -> bool,
+    binds: impl Fn(&[bitcoin::OutPoint], &[u8; 32]) -> bool,
 ) -> bool {
-    !foreign_acquire_claims(fetched, operator, |c| !on_confirm || confirmed(c)).is_empty()
+    !foreign_acquire_claims(fetched, operator, fallback, |v, c| {
+        !on_confirm || v.is_some_and(|v| binds(v, c))
+    })
+    .is_empty()
 }
 
 /// Whether a relay fetch holds a `LedgerOpen`, i.e. reaches genesis. The
@@ -959,22 +959,35 @@ impl Node {
             // acquire whose claim never confirmed (a phantom, or a loser's) must not drop the
             // main ledger. Ask the chain about the ones not yet known confirmed.
             let on_confirm = deposits_core::types::ruleset_acquire_on_confirm(&ruleset);
+            // The vault a fetched acquire is judged against when the relay window holds no
+            // QuorumBegin before it: our local view's (the pre-dispute chain).
+            let local_vault = self
+                .get_ledger(ledger_id)
+                .and_then(|l| super::acquire_binding::vault_at(&l.history, u64::MAX));
             if on_confirm {
-                let claims = foreign_acquire_claims(&all_fetched, &main_chain_operator, |c| {
-                    !crate::node::cosign_policy::claim_confirmed(c)
-                });
-                if !claims.is_empty() {
-                    crate::node::cosign_policy::note_confirmed_claims(
+                let pending: Vec<(super::acquire_binding::Vault, [u8; 32])> =
+                    foreign_acquire_claims(
+                        &all_fetched,
+                        &main_chain_operator,
+                        local_vault.clone(),
+                        |v, c| v.is_some_and(|v| crate::node::acquire_binding::pending(v, c)),
+                    )
+                    .into_iter()
+                    .filter_map(|(v, c)| Some((v?, c)))
+                    .collect();
+                if !pending.is_empty() {
+                    crate::node::acquire_binding::note_verdicts(
                         self.wallet.chain_backend().as_ref(),
-                        &claims,
+                        &pending,
                     );
                 }
             }
             let relay_transfers_custody_away = acquire_moves_custody_away(
                 &all_fetched,
                 &main_chain_operator,
+                local_vault,
                 on_confirm,
-                crate::node::cosign_policy::claim_confirmed,
+                crate::node::acquire_binding::binds,
             );
 
             if relay_transfers_custody_away && !fetched_holds_ledger_open(&all_fetched) {
@@ -3138,10 +3151,11 @@ mod pagination_tests {
     }
 
     /// A fork branch's acquire drops the main ledger only when it moves custody: under
-    /// strict-lottery-v8, once its claim is confirmed. Before, the reimport took ANY fetched
-    /// acquire naming another custodian, a phantom's or a loser's included.
+    /// strict-lottery-v8, once it binds (its claim confirmed and spending its dispute's
+    /// lottery outpoint). Before, the reimport took ANY fetched acquire naming another
+    /// custodian, a phantom's or a loser's included.
     #[test]
-    fn only_a_confirmed_acquire_moves_custody_under_v8() {
+    fn only_a_binding_acquire_moves_custody_under_v8() {
         use super::{acquire_moves_custody_away, foreign_acquire_claims};
         use deposits_core::messages::LedgerOperation;
         use deposits_core::TlvEncode;
@@ -3157,50 +3171,81 @@ mod pagination_tests {
             .tlv_encode();
             u
         };
+        let vault = bitcoin::OutPoint::new(
+            {
+                use bitcoin::hashes::Hash;
+                bitcoin::Txid::from_byte_array([7; 32])
+            },
+            0,
+        );
+        let v = Some(vec![vault]);
         let mut fetched: Vec<_> = (1..9).map(|s| upd(s, operator)).collect();
         assert!(!acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             true,
-            |_| true
+            |_, _| true
         ));
         // The operator's own acquire never moves custody away from it.
         fetched.push(acquire(operator, 1));
         assert!(!acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             false,
-            |_| true
+            |_, _| true
         ));
-        // A fork's acquire, its claim unconfirmed: custody stays under v8, moves before it.
+        // A fork's acquire that does not bind: custody stays under v8, moves before it.
         fetched.push(acquire(winner, 2));
         assert!(!acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             true,
-            |_| false
+            |_, _| false
         ));
         assert!(acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             false,
-            |_| false
+            |_, _| false
         ));
         assert!(acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             true,
-            |c| *c == [2; 32]
+            |o, c| o == [vault] && *c == [2; 32]
         ));
         assert!(!acquire_moves_custody_away(
             &fetched,
             &operator,
+            v.clone(),
             true,
-            |c| *c == [1; 32]
+            |_, c| *c == [1; 32]
+        ));
+        // Binding is judged per vault: the same confirmed claim for another dispute's vault
+        // (regtest 1120-090836's shape) moves nothing.
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            v.clone(),
+            true,
+            |o, c| o != [vault] && *c == [2; 32]
+        ));
+        // No vault to judge against (no QuorumBegin in the fetch, no local view): never binds.
+        assert!(!acquire_moves_custody_away(
+            &fetched,
+            &operator,
+            None,
+            true,
+            |_, _| true
         ));
         assert_eq!(
-            foreign_acquire_claims(&fetched, &operator, |_| true),
-            vec![[2; 32]]
+            foreign_acquire_claims(&fetched, &operator, v.clone(), |_, _| true),
+            vec![(v, [2; 32])]
         );
     }
 

@@ -1197,6 +1197,8 @@ impl Node {
         let claimed = self
             .claim_lottery(
                 ledger_id,
+                // The round walk's own outpoint, never a by-script lookup (1120-090836).
+                (cur.outpoint, cur.value),
                 &parts,
                 &ordered,
                 winner,

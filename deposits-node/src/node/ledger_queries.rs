@@ -51,6 +51,8 @@ impl Node {
 
         // Find our DisputeAcquire and quorum members
         let mut current_reserves_address: Option<String> = None;
+        // Our DisputeAcquire's claim: its output 0 is the custody we rotate.
+        let mut our_claim_txid: Option<[u8; 32]> = None;
         let mut our_latest: Option<SignedLedgerUpdate> = None;
         // Pubkey → member_ledger_id, sourced from the original QuorumAddMember
         // rows (which DO carry the per-member ledger pairing) for the honest
@@ -64,10 +66,12 @@ impl Node {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
                     if let LedgerOperation::DisputeAcquire {
                         ref new_reserves_address,
+                        claim_txid,
                         ..
                     } = op
                     {
                         current_reserves_address = Some(new_reserves_address.clone());
+                        our_claim_txid = Some(claim_txid);
                     }
                 }
                 if our_latest.is_none()
@@ -176,12 +180,22 @@ impl Node {
             .map_err(|e| Error::Protocol(format!("Network mismatch: {}", e)))?;
 
         let script_pubkey = reserves_addr.script_pubkey();
-        let utxo = self
+        // The claim's output 0, by outpoint. `new_reserves_address` is our own P2WPKH: every
+        // dispute we win pays it, and our pledged replacement collateral sits there too, so
+        // "a UTXO at that address" could rotate another ledger's custody or a coin pledged to
+        // a live arm into this ledger's vault.
+        let claim_txid = our_claim_txid
+            .ok_or_else(|| Error::Protocol("No DisputeAcquire claim to rotate".to_string()))?;
+        let outpoint = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(claim_txid), 0);
+        let (amount, _) = self
             .wallet
-            .find_utxo_for_script(&script_pubkey)?
-            .ok_or_else(|| Error::Protocol("No UTXO at reserves address".to_string()))?;
-
-        let (outpoint, amount) = utxo;
+            .unspent_output_paying(outpoint, &script_pubkey)?
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "Our claim's output {} is not an unspent output at the reserves address",
+                    outpoint
+                ))
+            })?;
 
         // Build new Taproot reserves with quorum
         let current_block = self.wallet.get_block_height().unwrap_or(0);
