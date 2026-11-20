@@ -222,6 +222,23 @@ pub(crate) fn lottery_inputs_line(
 
 /// How long the re-arm pass waits on a ledger after `failures + 1` failed
 /// arms in a row: one minute, doubling, at most 30 minutes.
+/// DEP-03 §Grounded arms: whether an arm with no proof hash, no anchor and no
+/// reason must wait for grounds it can cite. Not when we have ALREADY ENTERED
+/// the dispute on our own fork: that `DisputeEnter` carried our grounds, and
+/// only the arm is left. The gate there turned the background re-arm pass into
+/// a no-op: ref6 (regtest, 2026-11-20T00:32:04Z) failed its arm on 9602cad2
+/// when every quick collateral scan hit bitcoind's "Scan already in progress",
+/// and then logged "no grounds we can cite yet; not joining" once a minute for
+/// 19 minutes without ever scanning again, until a re-broadcast of the proof
+/// happened to arrive.
+pub(crate) fn grounds_gate_applies(
+    ledger_grounds_arms: bool,
+    has_reason: bool,
+    already_entered: bool,
+) -> bool {
+    ledger_grounds_arms && !has_reason && !already_entered
+}
+
 pub(crate) fn rearm_backoff(failures: u32) -> std::time::Duration {
     std::time::Duration::from_secs((60u64 << failures.min(5)).min(30 * 60))
 }
@@ -946,7 +963,14 @@ impl Node {
                 }
                 Err(e) => {
                     let mut b = backoff.lock().unwrap();
-                    let failures = b.get(&ledger_id).map(|(_, f)| f + 1).unwrap_or(0);
+                    // A shared bitcoind busy with another member's scan is
+                    // contention, not a reason to back off for half an hour:
+                    // retry it at the base interval, not a growing one.
+                    let failures = if crate::chain_backend::is_scan_in_progress(&e) {
+                        0
+                    } else {
+                        b.get(&ledger_id).map(|(_, f)| f + 1).unwrap_or(0)
+                    };
                     let wait = rearm_backoff(failures);
                     b.insert(
                         ledger_id.clone(),
@@ -1077,7 +1101,12 @@ impl Node {
                 // DEP-03 §Grounded arms: under grounded-arms-v7 a member does not join a dispute on
                 // no grounds; it waits for a proof it can verify (the proof that started the
                 // dispute reaches it moments later, and it enters then).
-                None if self.ledger_grounds_arms(ledger_id) && reason.is_none() => {
+                None if grounds_gate_applies(
+                    self.ledger_grounds_arms(ledger_id),
+                    reason.is_some(),
+                    self.entered_own_fork(ledger_id, last_valid_seq),
+                ) =>
+                {
                     tracing::info!(
                         "Dispute on {}: no grounds we can cite yet; not joining until we have a proof",
                         &ledger_id[..16.min(ledger_id.len())]
@@ -5378,6 +5407,21 @@ impl crate::node::Node {
 }
 
 impl crate::node::Node {
+    /// Whether we have already entered a dispute on `ledger_id` at
+    /// `last_valid_seq`: our fork of it exists, we operate it, and it is past
+    /// Normal (our `DisputeEnter` is applied).
+    pub(crate) fn entered_own_fork(&self, ledger_id: &str, last_valid_seq: u64) -> bool {
+        let base = dispute_base(last_valid_seq, self.handler.first_non_conforming(ledger_id));
+        let key =
+            crate::handler::DepositsHandler::fork_tracking_key(ledger_id, base, &self.node_id);
+        let arc = self.handler.ledgers.lock().unwrap().get(&key).cloned();
+        arc.is_some_and(|a| {
+            let l = a.read().unwrap();
+            l.state.parent_pubkey == self.node_id
+                && l.state.dispute_state != deposits_core::types::DisputeState::Normal
+        })
+    }
+
     /// Whether `ledger_id`'s active ruleset grounds arms (DEP-18 grounded-arms-v7).
     pub(crate) fn ledger_grounds_arms(&self, ledger_id: &str) -> bool {
         let ledgers = self.handler.ledgers.lock().unwrap();
@@ -5573,5 +5617,25 @@ mod pledge_pick_vector {
             n += 1;
         }
         assert_eq!(n, 9);
+    }
+}
+
+#[cfg(test)]
+mod grounds_gate_tests {
+    use super::grounds_gate_applies;
+
+    /// ref6 / 9602cad2: entered on a verified proof, arm refused for want of
+    /// collateral (every quick scan lost to another scan), then the re-arm pass
+    /// (no hash, no anchor, no reason) was gated as "no grounds" forever. Once
+    /// we have entered, only the arm is left and the gate must not apply.
+    #[test]
+    fn an_entered_dispute_is_not_gated_on_grounds_again() {
+        // Joining on no grounds under grounded arms: wait for a proof.
+        assert!(grounds_gate_applies(true, false, false));
+        // Already entered on our own fork: the re-arm pass proceeds.
+        assert!(!grounds_gate_applies(true, false, true));
+        // A reason, or a ruleset that does not ground arms: never gated.
+        assert!(!grounds_gate_applies(true, true, false));
+        assert!(!grounds_gate_applies(false, false, false));
     }
 }
