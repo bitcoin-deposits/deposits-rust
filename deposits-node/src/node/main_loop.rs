@@ -1875,6 +1875,9 @@ impl Node {
                 {
                     let node = Arc::clone(self);
                     tokio::spawn(async move {
+                        // A loser yield we published but never recorded (before b758991): adopt
+                        // the exact relay bytes so the fork concludes and its pledge is free.
+                        node.reconcile_published_yields().await;
                         node.stand_down_reestablished_expiry_disputes().await;
                         node.expiry_stand_down_running
                             .store(false, std::sync::atomic::Ordering::Release);

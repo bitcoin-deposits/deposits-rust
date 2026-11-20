@@ -4677,6 +4677,39 @@ impl NostrTransport {
         Ok(None)
     }
 
+    /// Every update the relays hold for `ledger_id` at exactly `seq` (any signer: the operator's
+    /// and every member's fork branch), filtered relay-side by `#d` and `#n`. `Err` when the
+    /// query itself failed, so a caller deciding whether WE ever signed something at this
+    /// sequence can tell "the relays hold none" from "we could not ask".
+    pub async fn fetch_ledger_updates_at_seq(
+        &self,
+        ledger_id: &str,
+        seq: u64,
+    ) -> Result<Vec<deposits_protocol::types::SignedLedgerUpdate>, Error> {
+        use ::base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+        let filter = Filter::new()
+            .kind(Kind::Custom(KIND_LEDGER_UPDATE))
+            .custom_tag(TAG_LEDGER_ID, [ledger_tag(ledger_id)])
+            .custom_tag(TAG_SEQUENCE, [seq.to_string()]);
+        let events = self
+            .history_client
+            .fetch_events(vec![filter], Some(std::time::Duration::from_secs(10)))
+            .await
+            .map_err(|e| Error::Nostr(format!("Failed to fetch updates at seq {}: {}", seq, e)))?;
+        let mut updates = Vec::new();
+        for event in events.iter() {
+            if let Ok(bytes) = BASE64.decode(&event.content) {
+                if let Ok(update) = deposits_protocol::types::SignedLedgerUpdate::tlv_decode(&bytes)
+                {
+                    if update.sequence_number == seq {
+                        updates.push(update);
+                    }
+                }
+            }
+        }
+        Ok(updates)
+    }
+
     /// Fetch a range of ledger updates [from_seq, to_seq] from the relay.
     /// Filters by `#d` (ledger_id) relay-side, then by seq range client-side.
     pub async fn fetch_ledger_updates_range(

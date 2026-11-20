@@ -2975,6 +2975,28 @@ impl Node {
                 })
                 .map(|(k, _)| k.clone())
         };
+        // Sign a yield at arm+1 only if nothing of ours is there yet: a retry of this path (or a
+        // restart between the broadcast and the lottery marker) would otherwise sign a second
+        // yield at the same sequence with another header, an equivocation by us.
+        match self.yield_backfill_for(ledger_id, our_armed, false).await {
+            super::yield_backfill::Backfill::Sign => {}
+            super::yield_backfill::Backfill::Adopt(y) => {
+                if let Some(fork_key) = &own_fork {
+                    self.handler
+                        .commit_self_authored_update(fork_key, &LedgerOperation::DisputeYield, y.clone(), y.block_height)
+                        .map_err(Error::Protocol)?;
+                }
+                tracing::info!(
+                    "DisputeYield for {} already published at seq {}; recorded those bytes",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    y.sequence_number
+                );
+                return Ok(());
+            }
+            super::yield_backfill::Backfill::Hold(why) => {
+                return Err(Error::Protocol(format!("DisputeYield not signed: {}", why)));
+            }
+        }
         if let Some(fork_key) = own_fork {
             return self.withdraw_dispute(&fork_key, current_block).await;
         }
