@@ -775,6 +775,35 @@ pub fn unmet_history_needs(
         .collect()
 }
 
+/// DEP-06 §Judging a proof: what a member does with a proof, from whether it
+/// verified and whether the history it rests on is in the member's replicas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProofVerdict {
+    /// It verified: act on it.
+    Judge,
+    /// It failed while a need is unmet: hold it, catch up, judge it again. Not invalid.
+    Park,
+    /// It failed with every need met: invalid.
+    Refuse,
+}
+
+/// [`ProofVerdict`] for a proof with `needs` ([`FraudProof::history_needs`]),
+/// replica tips `tip_of`, and verification result `verifies`.
+/// Vector: `tests/vectors/proof_history_needs.json`.
+pub fn proof_verdict(
+    needs: &[(String, u64)],
+    tip_of: impl Fn(&str) -> Option<u64>,
+    verifies: bool,
+) -> ProofVerdict {
+    if verifies {
+        ProofVerdict::Judge
+    } else if unmet_history_needs(needs, tip_of).is_empty() {
+        ProofVerdict::Refuse
+    } else {
+        ProofVerdict::Park
+    }
+}
+
 pub fn verify_stale_cosignature(
     proof: &FraudProof,
     accused_history: &[crate::types::SignedLedgerUpdate],

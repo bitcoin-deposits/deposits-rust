@@ -1961,7 +1961,10 @@ impl Node {
             // armed. Park it, fetch the history, judge it again on arrival.
             let needs = broadcast.history_needs();
             let unmet = super::parked_proofs::unmet_needs(&needs, |l| self.replica_tip(l));
-            if !unmet.is_empty() {
+            // DEP-06 §Judging a proof (vector: proof_history_needs.json).
+            if deposits_core::fraud::proof_verdict(&needs, |l| self.replica_tip(l), false)
+                == deposits_core::fraud::ProofVerdict::Park
+            {
                 let outcome = self.parked_fraud_proofs.lock().unwrap().park(
                     ledger_id,
                     broadcast.proof.proof_hash(),

@@ -1,0 +1,791 @@
+{
+ "description": "DEP-06 \u00a7Judging a proof: the history a fraud proof rests on, and what a member does when its replica lacks it. `needs` is FraudProof::history_needs / fr:proof-history-needs: the (ledger_id, sequence) pairs a verifier's replica must have reached before a failed verification means the proof is invalid. A fault update at seq N follows one at N-1 at the latest; an omission rests on the accused's update at its proof sequence (proof_sequence, or the proof_update's own sequence); QuorumExpired and WinnerCollateralDeviation rest on none. Needs are at the proof level: a type that requires an embedding (UncreditedLightningPayment) adds the embedding's update, and cl declines such types. `verdicts`: `tips` maps a ledger to our replica's tip sequence (null: no replica held), `verifies` is the verification result; `expect` is `judge` (it verified: act on it), `park` (it failed and a need is unmet: hold it, catch up, judge it again; MUST NOT be treated as invalid), or `refuse` (it failed with every need met: invalid). From regtest run 1120-075609 (2026-11-20T08:02:51Z): ref7, 3 s behind 7341c3d1 at seq 4, refused four seq-9 NonConformingUpdate proofs for good. Generated; shared by deposits-rust (deposits-protocol/tests/vectors), cl-deposits (inspect/vectors) and the spec (vectors/).",
+ "cases": [
+  {
+   "name": "non-conforming update at seq 9 (ref7, regtest 1120-075609)",
+   "broadcast": {
+    "proof": {
+     "proof_type": "NonConformingUpdate",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "NonConformingUpdate": {
+       "fault_sequence": 9,
+       "fault_update_hex": "00"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     8
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 8
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 8
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 7
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 13
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "non-conforming update at seq 0",
+   "broadcast": {
+    "proof": {
+     "proof_type": "NonConformingUpdate",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "NonConformingUpdate": {
+       "fault_sequence": 0,
+       "fault_update_hex": "00"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     0
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 0
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 0
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 5
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "equivocation at seq 12",
+   "broadcast": {
+    "proof": {
+     "proof_type": "Equivocation",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "Equivocation": {
+       "sequence": 12,
+       "update_a_hex": "00",
+       "update_b_hex": "01"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     11
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 11
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 11
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 10
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 16
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "non-conforming cosignature: the fault ledger, before the fault",
+   "broadcast": {
+    "proof": {
+     "proof_type": "NonConformingCosignature",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "NonConformingCosignature": {
+       "fault_ledger_id": "65935d21e53ca623abababababababababababababababababababababababab",
+       "fault_sequence": 30,
+       "governing_quorumbegin_seq": 4,
+       "fault_update_hex": "00"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "65935d21e53ca623abababababababababababababababababababababababab",
+     29
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 29
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 29
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 28
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 34
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "unauthorized vault spend: the spent ledger, at its governing QuorumBegin",
+   "broadcast": {
+    "proof": {
+     "proof_type": "UnauthorizedVaultSpend",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "UnauthorizedVaultSpend": {
+       "spent_ledger_id": "65935d21e53ca623abababababababababababababababababababababababab",
+       "governing_quorumbegin_seq": 17,
+       "spend_tx_hex": "00",
+       "spend_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+       "prevouts": []
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "65935d21e53ca623abababababababababababababababababababababababab",
+     17
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 17
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 17
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 16
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 22
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "stale cosignature: the accused's update and the member's later one",
+   "broadcast": {
+    "proof": {
+     "proof_type": "StaleCosignature",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "StaleCosign": {
+       "stale_update_sequence": 21,
+       "stale_update_hash": "aa",
+       "declared_member_hash": "bb",
+       "member_later_sequence": 6,
+       "member_later_hash": "cc",
+       "member_ledger_id": "65935d21e53ca623abababababababababababababababababababababababab"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     21
+    ],
+    [
+     "65935d21e53ca623abababababababababababababababababababababababab",
+     6
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 6,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 21
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 6,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 21
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 5,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 20
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": null,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 11,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 26
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 6,
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 20
+     },
+     "verifies": false,
+     "expect": "park"
+    }
+   ]
+  },
+  {
+   "name": "dispute dereliction: the member's ledger at its active sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "DisputeDereliction",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "DisputeDereliction": {
+       "original_proof": {
+        "proof_type": "QuorumExpired",
+        "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+        "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+        "evidence": {
+         "QuorumExpired": {
+          "anchor_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+          "quorum_expiry": 100
+         }
+        }
+       },
+       "original_fraud_hash": "aa",
+       "disclosure_update": "00",
+       "quorum_begin_update": "00",
+       "visibility_update": "00",
+       "member_ledger_id": "65935d21e53ca623abababababababababababababababababababababababab",
+       "member_active_sequence": 40,
+       "member_pubkey": "0277ce824b0bd88711111111111111111111111111111111111111111111111111"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "65935d21e53ca623abababababababababababababababababababababababab",
+     40
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 40
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 40
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 39
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "65935d21e53ca623abababababababababababababababababababababababab": 45
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "uncredited on-chain payment (offer evidence): the accused's update at proof_sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "UncreditedOnchainPayment",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "UncreditedOnchain": {
+       "offer_id": "aa",
+       "funding_address": "bcrt1q",
+       "accused_operator_pubkey": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+       "deadline_block": 50,
+       "cosigner_pubkey": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+       "cosigner_ledger_hash": "aa",
+       "cosign_signature": "aa",
+       "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "vout": 0,
+       "amount_sats": 1000,
+       "confirmed_at_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+       "required_confirmations": 1,
+       "proof_sequence": 25
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     25
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 25
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 25
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 24
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 30
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "uncredited migration: the accused's proof update, by its own sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "UncreditedOnchainPayment",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "UncreditedMigration": {
+       "source_notice_update": "00",
+       "source_qb_update": "00",
+       "confirmed_at_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+       "proof_update": "00210373e7039a4adb9fb7af35682fc7edb22a56f05e4823068b267a43c0cdf94ee1c90220995f9e69ba7ee1a0a7b84fdf98b80391fc2012563864a3fd84d678115c9a4a8f0408000000000000000e06208807b9758c6f8a024760a6c92fc5f3bf81cba3f6eb53114e85d1dc88b48f58630854000123020800000000001e84804220d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d74404000000004a0b6263727431716f66666572c81055754f4b83e9638599d6e10b9d38c0c90a040000012c0c202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c1440dc0f7e8eeae4cb0b421b5aca3250051c107b37a63834e7d2d49834d9d92724baf70909661712c08e7d88ecae06b721ae3c447e3292f4b62f06920351d5611fa5"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     14
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 14
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 14
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 13
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 19
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "unhonoured obligation: the new operator's proof update, by its own sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "UnhonouredObligation",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "UnhonouredObligation": {
+       "acquire_update": "00",
+       "confiscation_tx": "00",
+       "proof_update": "00210373e7039a4adb9fb7af35682fc7edb22a56f05e4823068b267a43c0cdf94ee1c90220995f9e69ba7ee1a0a7b84fdf98b80391fc2012563864a3fd84d678115c9a4a8f0408000000000000000e06208807b9758c6f8a024760a6c92fc5f3bf81cba3f6eb53114e85d1dc88b48f58630854000123020800000000001e84804220d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d74404000000004a0b6263727431716f66666572c81055754f4b83e9638599d6e10b9d38c0c90a040000012c0c202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c1440dc0f7e8eeae4cb0b421b5aca3250051c107b37a63834e7d2d49834d9d92724baf70909661712c08e7d88ecae06b721ae3c447e3292f4b62f06920351d5611fa5"
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     14
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 14
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 14
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 13
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 19
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "uncredited lightning payment: the accused's update at proof_sequence (its embedding is a further need)",
+   "broadcast": {
+    "proof": {
+     "proof_type": "UncreditedLightningPayment",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "UncreditedLightning": {
+       "invoice": "lnbc",
+       "payment_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "deposit_id": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+       "amount_msat": 1000,
+       "cosigner_pubkey": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+       "cosigner_ledger_hash": "aa",
+       "cosign_signature": "aa",
+       "preimage": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+       "proof_sequence": 33
+      }
+     }
+    }
+   },
+   "needs": [
+    [
+     "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     33
+    ]
+   ],
+   "verdicts": [
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 33
+     },
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 33
+     },
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 32
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": null
+     },
+     "verifies": false,
+     "expect": "park"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 38
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "quorum expired: rests on no ledger sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "QuorumExpired",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "QuorumExpired": {
+       "anchor_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b",
+       "quorum_expiry": 100
+      }
+     }
+    }
+   },
+   "needs": [],
+   "verdicts": [
+    {
+     "tips": {},
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {},
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 0
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  },
+  {
+   "name": "winner collateral deviation: rests on no ledger sequence",
+   "broadcast": {
+    "proof": {
+     "proof_type": "WinnerCollateralDeviation",
+     "accused": "0277ce824b0bd88711111111111111111111111111111111111111111111111111",
+     "ledger_id": "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059",
+     "evidence": {
+      "WinnerCollateralDeviation": {
+       "winner_armed_update_hex": "00",
+       "claim_txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+       "claim_block_hash": "5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b5b"
+      }
+     }
+    }
+   },
+   "needs": [],
+   "verdicts": [
+    {
+     "tips": {},
+     "verifies": true,
+     "expect": "judge"
+    },
+    {
+     "tips": {},
+     "verifies": false,
+     "expect": "refuse"
+    },
+    {
+     "tips": {
+      "7341c3d17651952c3d6ba043578afabec9145784da1ab3805c5b46d00a34d059": 0
+     },
+     "verifies": false,
+     "expect": "refuse"
+    }
+   ]
+  }
+ ]
+}
