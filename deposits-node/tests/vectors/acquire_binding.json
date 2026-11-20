@@ -1,0 +1,666 @@
+{
+ "_doc": "DEP-06 'An acquire binds once its claim confirms' (strict-lottery-v8): a DisputeAcquire binds iff its claim_txid is confirmed and its input 0 spends the dispute's current lottery outpoint. Judged from the chain alone, from the claim back: the claim must not itself be re-arm shaped (one input, one output, input nSequence a recovery tier's CSV: 144, 1008, 4032 or 8064); its input 0 spends output 0 of a transaction T; while T is re-arm shaped and confirmed, step to the output 0 its input spends (at most 8 rounds); the lottery is this dispute's iff the transaction reached spends the dispute's vault: any outpoint in 'vaults', the vault outpoint of every rung of the governing QuorumBegin's fee ladder (DEP-03), since any rung may be the one that confirmed. On a consistent chain this is the forward round walk's answer: the claim is the spender of the round's lottery outpoint. reason: binds | unconfirmed (claim unknown or not confirmed: judged again later) | not-a-claim (the named transaction is a re-arm spend) | not-this-lottery (final). txids are display-order hex; the 1120-090836 case uses the real txids of 5c4d78fe, 1d89bd45, 46a66b12 and 21910507, and placeholders for the two vaults, 70b0abb3's confiscation, the anchor and the collateral. A transaction absent from 'txs' is unknown to the judge. Shared cl-deposits / deposits-rust vector.",
+ "tier_csvs": [
+  144,
+  1008,
+  4032,
+  8064
+ ],
+ "max_rounds": 8,
+ "cases": [
+  {
+   "name": "round 1: a confirmed claim of the confiscation's output 0",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "4444444444444444444444444444444444444444444444444444444444444444",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "4444444444444444444444444444444444444444444444444444444444444444",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "round 1 through the subset leaf (nSequence 72)",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "6666666666666666666666666666666666666666666666666666666666666666",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 72
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "6666666666666666666666666666666666666666666666666666666666666666",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "a sole participant with no collateral: one input, one output, not a re-arm",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "4444444444444444444444444444444444444444444444444444444444444444",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "4444444444444444444444444444444444444444444444444444444444444444",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "round 2: a claim of the re-arm spend's output 0",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "5555555555555555555555555555555555555555555555555555555555555555",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "5555555555555555555555555555555555555555555555555555555555555555",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "round 3, the round-2 spend through tier 2 (CSV 4032)",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+       "vout": 0,
+       "sequence": 4032
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "DEP-03 fee ladder: the vault is whichever rung confirmed; the confiscation spent rung 1's output",
+   "vaults": [
+    {
+     "txid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "vout": 0
+    },
+    {
+     "txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 2,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+   "binds": true,
+   "reason": "binds"
+  },
+  {
+   "name": "unconfirmed claim",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "7777777777777777777777777777777777777777777777777777777777777777",
+     "confirmed": false,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "7777777777777777777777777777777777777777777777777777777777777777",
+   "binds": false,
+   "reason": "unconfirmed"
+  },
+  {
+   "name": "claim the judge cannot see",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    }
+   ],
+   "claim_txid": "7777777777777777777777777777777777777777777777777777777777777777",
+   "binds": false,
+   "reason": "unconfirmed"
+  },
+  {
+   "name": "an older round's outpoint: the acquire names the re-arm spend that moved round 1's output on",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "3333333333333333333333333333333333333333333333333333333333333333",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "3333333333333333333333333333333333333333333333333333333333333333",
+   "binds": false,
+   "reason": "not-a-claim"
+  },
+  {
+   "name": "a claim of the confiscation's output 1, not the lottery",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "8888888888888888888888888888888888888888888888888888888888888888",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "8888888888888888888888888888888888888888888888888888888888888888",
+   "binds": false,
+   "reason": "not-this-lottery"
+  },
+  {
+   "name": "any confirmed transaction named as a claim (a payment unrelated to the dispute)",
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "2222222222222222222222222222222222222222222222222222222222222222",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    },
+    {
+     "txid": "8888888888888888888888888888888888888888888888888888888888888888",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 3,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 2
+    }
+   ],
+   "claim_txid": "8888888888888888888888888888888888888888888888888888888888888888",
+   "binds": false,
+   "reason": "not-this-lottery"
+  },
+  {
+   "name": "regtest rearm-rust 1120-090836: a606a4ca's acquire names 21910507, which spent 70b0abb3's round-2 output 46a66b12:0",
+   "vaults": [
+    {
+     "txid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "5c4d78fe83add8b4703362b5db9e6458b1d15831f62bd87be57cbef295a23750",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 3
+    },
+    {
+     "txid": "1d89bd450f0da02f3890536f1b51fb1eb650300c945ff58a8c3d7ab9f0f88dca",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "5c4d78fe83add8b4703362b5db9e6458b1d15831f62bd87be57cbef295a23750",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+       "vout": 2,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 3
+    },
+    {
+     "txid": "46a66b127e0e3afd04f2e4399681128399caab6d6133320c7d02d3569f5c3c79",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "46a66b127e0e3afd04f2e4399681128399caab6d6133320c7d02d3569f5c3c79",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
+   "binds": false,
+   "reason": "not-this-lottery"
+  },
+  {
+   "name": "the same claim judged for 70b0abb3, whose round-2 output it spent",
+   "vaults": [
+    {
+     "txid": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "5c4d78fe83add8b4703362b5db9e6458b1d15831f62bd87be57cbef295a23750",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 3
+    },
+    {
+     "txid": "1d89bd450f0da02f3890536f1b51fb1eb650300c945ff58a8c3d7ab9f0f88dca",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "5c4d78fe83add8b4703362b5db9e6458b1d15831f62bd87be57cbef295a23750",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5",
+       "vout": 2,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 3
+    },
+    {
+     "txid": "46a66b127e0e3afd04f2e4399681128399caab6d6133320c7d02d3569f5c3c79",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "46a66b127e0e3afd04f2e4399681128399caab6d6133320c7d02d3569f5c3c79",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
+   "binds": true,
+   "reason": "binds"
+  }
+ ]
+}

@@ -99,12 +99,30 @@ pub(crate) fn refusal_for(
                     _ => None,
                 })
                 .collect();
+            // DEP-06: an acquire binds iff its claim is confirmed AND spends this dispute's
+            // lottery outpoint (`acquire_binding`), judged against the vault it confiscated.
+            let acquires = if claims.is_empty() {
+                Vec::new()
+            } else {
+                super::acquire_binding::acquires_in(
+                    &fork.history,
+                    usize::MAX,
+                    super::acquire_binding::vault_at(
+                        &base.history,
+                        fork.state.dispute_fork_sequence,
+                    ),
+                )
+            };
             Some(DisputeView {
                 forker: hex::encode(fork.state.parent_pubkey.serialize()),
                 last_valid_sequence: fork.state.dispute_fork_sequence,
                 reason,
                 acquired: !claims.is_empty(),
-                acquire_confirmed: claims.iter().any(claim_confirmed),
+                acquire_confirmed: acquires.iter().any(|a| {
+                    a.vault
+                        .as_ref()
+                        .is_some_and(|v| super::acquire_binding::binds(v, &a.claim))
+                }),
             })
         })
         .collect();
@@ -123,96 +141,52 @@ pub(crate) fn refusal_for(
     )
 }
 
-/// Claim txids (internal byte order) seen confirmed. Filled off the co-sign path by
-/// [`note_confirmed_claims`], so a co-sign decision never waits on the chain backend; a
-/// confirmation is never re-read.
-fn confirmed_claims() -> &'static std::sync::Mutex<std::collections::HashSet<[u8; 32]>> {
-    static SET: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<[u8; 32]>>> =
-        std::sync::OnceLock::new();
-    SET.get_or_init(Default::default)
-}
-
-/// Whether the claim `txid` of a `DisputeAcquire` is known confirmed.
-pub(crate) fn claim_confirmed(txid: &[u8; 32]) -> bool {
-    confirmed_claims()
-        .lock()
-        .map(|s| s.contains(txid))
-        .unwrap_or(false)
-}
-
-/// The `claim_txid` of every `DisputeAcquire` on any fork in `ledgers` not yet known confirmed.
-pub(crate) fn unconfirmed_claims(
+/// Every `DisputeAcquire` near the tail of a fork (or of a replica carrying the winner's
+/// chain) in `ledgers` whose binding is not yet judged, with the vault it is judged against.
+/// A fork whose own history holds no `QuorumBegin` before its acquire falls back to its base
+/// replica's at the fork point.
+pub(crate) fn pending_acquires(
     ledgers: &std::collections::HashMap<
         String,
         std::sync::Arc<std::sync::RwLock<deposits_core::Ledger>>,
     >,
-) -> Vec<[u8; 32]> {
-    use deposits_core::messages::LedgerOperation;
-    use deposits_core::TlvDecode;
+) -> Vec<(super::acquire_binding::Vault, [u8; 32])> {
     let mut out = Vec::new();
-    for arc in ledgers.values() {
+    for (k, arc) in ledgers.iter() {
         let Ok(l) = arc.read() else { continue };
-        // An acquire sits near the tail of the winner's fork (or of a replica carrying its chain).
-        for u in l.history.iter().rev().take(64) {
-            if let Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) =
-                LedgerOperation::tlv_decode(&u.message)
-            {
-                if !claim_confirmed(&claim_txid) {
-                    out.push(claim_txid);
+        let tail = l.history.len().saturating_sub(64);
+        if !l.history[tail..].iter().any(|u| {
+            matches!(
+                <deposits_core::messages::LedgerOperation as deposits_core::TlvDecode>::tlv_decode(
+                    &u.message
+                ),
+                Ok(deposits_core::messages::LedgerOperation::DisputeAcquire { .. })
+            )
+        }) {
+            continue;
+        }
+        let base_vault = || {
+            (k.len() > 64)
+                .then(|| ledgers.get(&k[..64]))
+                .flatten()
+                .and_then(|b| {
+                    b.read().ok().and_then(|b| {
+                        super::acquire_binding::vault_at(&b.history, l.state.dispute_fork_sequence)
+                    })
+                })
+        };
+        for a in super::acquire_binding::acquires_in(&l.history, 64, None) {
+            if let Some(v) = a.vault.or_else(base_vault) {
+                let v: super::acquire_binding::Vault = v;
+                if super::acquire_binding::pending(&v, &a.claim) {
+                    out.push((v, a.claim));
                 }
             }
         }
     }
-    out.sort_unstable();
+    out.sort_unstable_by_key(|(v, c)| (format!("{v:?}"), *c));
     out.dedup();
     out
-}
-
-/// Claim txid -> when it was last found unconfirmed: asked again after a minute, not on every
-/// pass (a phantom acquire's claim never confirms; asking every claim on every pass flooded the
-/// regtest bitcoind's RPC, 2026-11-10).
-fn unconfirmed_seen(
-) -> &'static std::sync::Mutex<std::collections::HashMap<[u8; 32], std::time::Instant>> {
-    static MAP: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<[u8; 32], std::time::Instant>>,
-    > = std::sync::OnceLock::new();
-    MAP.get_or_init(Default::default)
-}
-
-/// At most this many chain lookups per pass; the rest wait for the next.
-const CLAIM_LOOKUPS_PER_PASS: usize = 16;
-
-/// Ask the chain about `claims` (from [`unconfirmed_claims`]) and remember the confirmed ones.
-pub(crate) fn note_confirmed_claims(
-    backend: &dyn crate::chain_backend::ChainBackend,
-    claims: &[[u8; 32]],
-) {
-    use bitcoin::hashes::Hash;
-    let now = std::time::Instant::now();
-    let due: Vec<[u8; 32]> = {
-        let seen = unconfirmed_seen().lock().unwrap();
-        claims
-            .iter()
-            .filter(|c| {
-                seen.get(*c)
-                    .map(|t| now.duration_since(*t).as_secs() >= 60)
-                    .unwrap_or(true)
-            })
-            .take(CLAIM_LOOKUPS_PER_PASS)
-            .copied()
-            .collect()
-    };
-    for c in due {
-        let txid = bitcoin::Txid::from_byte_array(c);
-        if let Ok(Some(_height)) = backend.get_tx_block_height(&txid) {
-            if let Ok(mut s) = confirmed_claims().lock() {
-                s.insert(c);
-            }
-            unconfirmed_seen().lock().unwrap().remove(&c);
-        } else {
-            unconfirmed_seen().lock().unwrap().insert(c, now);
-        }
-    }
 }
 
 #[cfg(test)]

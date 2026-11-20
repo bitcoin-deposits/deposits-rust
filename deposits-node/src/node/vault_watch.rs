@@ -333,13 +333,14 @@ impl crate::Node {
         let Ok(tip) = backend.get_tip_height() else {
             return;
         };
-        // DEP-06 §Phase 4 (strict-lottery-v8): an acquire moves custody once its claim confirms.
-        // Learn the confirmations here, off the co-sign path, which only reads the cache.
-        let claims = {
+        // DEP-06 §Phase 4 (strict-lottery-v8): an acquire moves custody once its claim confirms
+        // and spends the dispute's lottery outpoint. Judged here, off the co-sign path, which
+        // only reads the verdicts.
+        let acquires = {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            crate::node::cosign_policy::unconfirmed_claims(&ledgers)
+            crate::node::cosign_policy::pending_acquires(&ledgers)
         };
-        crate::node::cosign_policy::note_confirmed_claims(backend.as_ref(), &claims);
+        crate::node::acquire_binding::note_verdicts(backend.as_ref(), &acquires);
         // Retry what we still owe even when there is nothing new to scan.
         self.publish_owed_vault_spends(tip).await;
         let Some(to) = tip.checked_sub(VAULT_SPEND_GRACE_BLOCKS) else {
