@@ -942,7 +942,7 @@ pub const DEFAULT_COMPENSATION_FREQUENCY_BLOCKS: u32 = 2016;
 /// ARMED
 ///   │  - No more quorum/collateral changes
 ///   │  - Candidate is locked in for entropy selection
-///   │  - Only DisputeAcquire or DisputeYield allowed
+///   │  - Only DisputeAcquire or DisputeYield allowed (DisputeYield also from DISPUTED)
 ///   │
 ///   ├─── DisputeAcquire ──► NORMAL (new operator, reserves spent)
 ///   │
@@ -1010,8 +1010,14 @@ impl DisputeState {
                 !matches!(operation_discriminant, 55..=57) // DisputeArmed, DisputeAcquire, DisputeYield
             }
             DisputeState::Disputed => {
-                // QuorumAddMember, DisputeArmed, and ObligationRecord (DEP-06: recorded before arming)
-                matches!(operation_discriminant, 43 | 57 | 106)
+                // QuorumAddMember, DisputeArmed, ObligationRecord (DEP-06: recorded before
+                // arming), and DisputeYield (56): DEP-05 §"When a quorum_expired dispute ends"
+                // and DEP-06 §Race have an UN-ARMED disputant yield too ("whether or not it
+                // armed"), as cl-deposits' ledger accepts. Refusing it left ref7's unarmed
+                // expiry fork of 5effb9e8 (signet, opened 2026-11-14) standing for six days, and
+                // it then absorbed ref7's punitive dispute on the same ledger (2026-11-20:
+                // dereliction proof against ref7, published by cld4).
+                matches!(operation_discriminant, 43 | 56 | 57 | 106)
             }
             DisputeState::Armed => {
                 // DisputeAcquire (55), DisputeYield (56) — terminal

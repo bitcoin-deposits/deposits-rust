@@ -1789,6 +1789,19 @@ impl Node {
                     .flat_map(|(_, arc)| arc.read().unwrap().history.clone())
                     .collect()
             }
+            // Our replayed checkpoint, so a binding verifier still binds once the in-memory
+            // history is trimmed to HISTORY_RETAIN (signet 2026-11-20: ref7 refused its own
+            // Equivocation on 5effb9e8 at seq 432510 for want of the genesis).
+            fn ledger_checkpoint(
+                &self,
+                ledger_id: &str,
+            ) -> Option<deposits_core::types::LedgerState> {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                let l = ledgers.get(ledger_id)?.read().unwrap();
+                let cp = l.verified_checkpoint.as_ref()?;
+                (cp.state.sequence == cp.seq && cp.state.chain_tip_hash == cp.chain_hash)
+                    .then(|| cp.state.clone())
+            }
         }
         // `confirms_block` fails closed (None on unknown / not-best-chain /
         // network error), so the verifier's chain checks can't be spoofed.
@@ -2331,6 +2344,7 @@ impl Node {
         &self,
         ledger_id: &str,
         last_valid_seq: u64,
+        punitive: bool,
     ) -> Result<String, Error> {
         use crate::handler::DepositsHandler;
 
@@ -2347,14 +2361,34 @@ impl Node {
             )));
         }
 
-        // Check if we already have a fork for this ledger
-        if let Some(existing_fork) = self.handler.find_our_fork(ledger_id) {
-            tracing::info!(
-                "Already have fork for ledger {}: {}",
-                &ledger_id[..16],
-                &existing_fork[..32.min(existing_fork.len())]
-            );
-            return Ok(existing_fork);
+        // Our forks of this ledger, and which of them this dispute may use
+        // (`fork_for_dispute`). A punitive dispute is never absorbed by an
+        // un-armed expiry fork: ref7 (signet, 2026-11-20) self-detected the
+        // Equivocation on 5effb9e8, reused its un-armed quorum_expired fork of
+        // 2026-11-14, signed no punitive DisputeEnter, and was proved derelict.
+        let exact = DepositsHandler::fork_tracking_key(ledger_id, last_valid_seq, &our_pubkey);
+        let ours = self.our_fork_kinds(ledger_id);
+        match super::dispute::fork_for_dispute(&exact, punitive, &ours) {
+            super::dispute::ForkChoice::Use(existing_fork) => {
+                tracing::info!(
+                    "Already have fork for ledger {}: {}",
+                    &ledger_id[..16],
+                    &existing_fork[..32.min(existing_fork.len())]
+                );
+                return Ok(existing_fork);
+            }
+            super::dispute::ForkChoice::Refuse(why) => return Err(Error::Protocol(why)),
+            super::dispute::ForkChoice::Create { bypassed } => {
+                for k in &bypassed {
+                    tracing::warn!(
+                        "Punitive dispute on {}: not absorbed by our un-armed expiry fork {} \
+                         (it stands down when its ground is answered); forking at {}",
+                        &ledger_id[..16],
+                        &k[..32.min(k.len())],
+                        last_valid_seq
+                    );
+                }
+            }
         }
 
         // Clone the Partner copy of the disputed ledger
