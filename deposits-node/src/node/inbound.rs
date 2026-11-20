@@ -1919,6 +1919,36 @@ impl Node {
             return;
         }
 
+        // DEP-06 §Enter: the accused operator never disputes its own ledger.
+        // `is_quorum_member_of_ledger` answers yes for the operator, so without
+        // this the accused itself armed: ref4, operator of 5effb9e8 (signet,
+        // 2026-11-19T21:46:18Z), forked its own ledger at 432509 on a
+        // QuorumExpired proof against it and signed a DisputeEnter at 432510,
+        // then signed the main chain's 432510 at 22:17. Two signatures by the
+        // operator at one sequence: a valid Equivocation proof against itself,
+        // published by its members the moment a restart republished the fork.
+        {
+            let current_operator = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(ledger_id)
+                    .map(|arc| arc.read().unwrap().state.parent_pubkey)
+            };
+            if let Some(why) = self_dispute_refusal(
+                &self.node_id,
+                &broadcast.proof.accused,
+                current_operator.as_ref(),
+            ) {
+                tracing::warn!(
+                    "Not acting on {:?} proof on {}: {}; an operator never disputes its own ledger",
+                    broadcast.proof.proof_type,
+                    &ledger_id[..16.min(ledger_id.len())],
+                    why
+                );
+                return;
+            }
+        }
+
         // A fraud notice is a SIGNAL, not authoritative: fully verify it
         // (gap-fill + structural/embedding/causal/per-type evidence + the
         // on-chain WinnerCollateralDeviation step) before acting on it.
@@ -2206,6 +2236,15 @@ impl Node {
     }
 
     /// Check if we're a quorum member of a ledger (by ledger_id hash)
+    /// Whether we are the current operator (`parent_pubkey`) of our copy of
+    /// `ledger_id`. A ledger we operate is never one we dispute (DEP-06 §Enter).
+    pub(crate) fn operates_ledger(&self, ledger_id: &str) -> bool {
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers
+            .get(ledger_id)
+            .is_some_and(|arc| arc.read().unwrap().state.parent_pubkey == self.node_id)
+    }
+
     pub(crate) fn is_quorum_member_of_ledger(&self, ledger_id: &str) -> bool {
         let t0 = std::time::Instant::now();
         // Check if we have this ledger and are the operator
@@ -2298,6 +2337,15 @@ impl Node {
         // Operator pubkey straight from the signer — no per-call seed
         // derivation, and no operator_secret field on Wallet anymore.
         let our_pubkey = self.node_id;
+
+        // DEP-06 §Enter: never a fork of a ledger we operate, not even an
+        // existing one (a self-fork left on disk by an older binary is void).
+        if self.operates_ledger(ledger_id) {
+            return Err(Error::Protocol(format!(
+                "refusing to fork ledger {}: we operate it (DEP-06 §Enter)",
+                &ledger_id[..16.min(ledger_id.len())]
+            )));
+        }
 
         // Check if we already have a fork for this ledger
         if let Some(existing_fork) = self.handler.find_our_fork(ledger_id) {
@@ -2511,6 +2559,29 @@ pub(crate) fn contagion_proof_on_its_fault_ledger(
     )
 }
 
+/// Why this node must not dispute a ledger on a proof, or `None` when it may.
+///
+/// DEP-06 §Enter: the accused operator never signs a `DisputeEnter` on its own
+/// ledger. A node refuses when the proof accuses its own key, or when it is the
+/// ledger's current operator (`parent_pubkey` of its copy) whoever the proof
+/// names. Its key already signs the ledger's chain, so any fork it opened would
+/// put a second update under that key at the fork's first sequence: an
+/// equivocation proof against itself, handed to its members. Vector
+/// `self_dispute.json`.
+pub(crate) fn self_dispute_refusal(
+    our_key: &bitcoin::secp256k1::PublicKey,
+    accused_hex: &str,
+    current_operator: Option<&bitcoin::secp256k1::PublicKey>,
+) -> Option<&'static str> {
+    if hex::decode(accused_hex).is_ok_and(|a| a[..] == our_key.serialize()[..]) {
+        return Some("the proof accuses us");
+    }
+    if current_operator == Some(our_key) {
+        return Some("we operate the ledger");
+    }
+    None
+}
+
 /// Whether a verified fraud proof accuses the ledger's current operator
 /// (`parent_pubkey` of our replica), the only case in which it may dispute
 /// the ledger. A proof against a former operator, whose custody has already
@@ -2651,6 +2722,114 @@ mod fraud_proof_base_tests {
             n += 1;
         }
         assert_eq!(n, 7);
+    }
+
+    /// What `handle_fraud_proof` does with a VERIFIED proof once it holds the
+    /// ledger: enter only when the proof accuses the current operator and we
+    /// are not that operator (nor the accused).
+    fn enters_dispute(
+        us: &bitcoin::secp256k1::PublicKey,
+        accused: &str,
+        operator: Option<&bitcoin::secp256k1::PublicKey>,
+    ) -> bool {
+        super::self_dispute_refusal(us, accused, operator).is_none()
+            && fraud_proof_accuses_current_operator(accused, operator)
+    }
+
+    fn vector_key(n: &str) -> bitcoin::secp256k1::PublicKey {
+        match n {
+            "op" => key(1),
+            "m1" => key(2),
+            "m2" => key(3),
+            "w" => key(4),
+            other => panic!("unknown key name {other}"),
+        }
+    }
+
+    /// DEP-06 §Enter, shared with cl-deposits (`self_dispute.json`,
+    /// `proof_cases`): an operator node that receives a proof against itself
+    /// opens no fork and signs nothing.
+    #[test]
+    fn self_dispute_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/self_dispute.json")).unwrap();
+        let mut n = 0;
+        for case in v["proof_cases"].as_array().unwrap() {
+            let us = vector_key(case["us"].as_str().unwrap());
+            let operator = case["operator"].as_str().map(vector_key);
+            let accused = hex::encode(vector_key(case["accused"].as_str().unwrap()).serialize());
+            let dispute = enters_dispute(&us, &accused, operator.as_ref());
+            assert_eq!(
+                dispute,
+                case["expect"]["dispute"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+            // Entering signs exactly one update, the fork's DisputeEnter.
+            assert_eq!(
+                if dispute { 1 } else { 0 },
+                case["expect"]["signatures"].as_u64().unwrap(),
+                "{}",
+                case["name"]
+            );
+            n += 1;
+        }
+        assert_eq!(n, 9);
+    }
+
+    /// The property the rule keeps: for every (us, operator, accused) the
+    /// decision lets through, the fork it would open puts no update under our
+    /// key that conflicts with one we signed on the base chain; and for the
+    /// operator, the fork it is refused WOULD have (so the guard is the thing
+    /// standing between it and an equivocation proof against itself).
+    #[test]
+    fn no_permitted_dispute_makes_us_equivocate() {
+        use crate::node::fork_publish::{fork_tail, own_conflicting_signatures};
+        use deposits_core::SignedLedgerUpdate;
+        let signed = |seq: u64, by: bitcoin::secp256k1::PublicKey, c: u8| SignedLedgerUpdate {
+            message: Vec::new(),
+            message_type: 0,
+            operator_id: by,
+            ledger_id: [7u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [c; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        };
+        let names = ["op", "m1", "m2", "w"];
+        let mut permitted = 0;
+        for us_n in names {
+            for op_n in names {
+                for acc_n in names {
+                    let (us, op) = (vector_key(us_n), vector_key(op_n));
+                    let accused = hex::encode(vector_key(acc_n).serialize());
+                    // The operator keeps signing its chain past any fork point.
+                    let base: Vec<_> = (0..=20u64).map(|s| signed(s, op, 1)).collect();
+                    let fork_point = 9;
+                    let mut fork: Vec<_> = base
+                        .iter()
+                        .filter(|u| u.sequence_number <= fork_point)
+                        .cloned()
+                        .collect();
+                    fork.push(signed(fork_point + 1, us, 2)); // our DisputeEnter
+                    let conflicts =
+                        own_conflicting_signatures(&us, &base, &fork_tail(&fork, fork_point));
+                    if enters_dispute(&us, &accused, Some(&op)) {
+                        permitted += 1;
+                        assert!(conflicts.is_empty(), "{us_n} {op_n} {acc_n}");
+                    }
+                    if us == op {
+                        assert!(!enters_dispute(&us, &accused, Some(&op)));
+                        assert_eq!(conflicts, vec![fork_point + 1]);
+                    }
+                }
+            }
+        }
+        // A member (3 choices of us != op) disputing the operator it accuses: 4 * 3.
+        assert_eq!(permitted, 12);
     }
 
     #[test]

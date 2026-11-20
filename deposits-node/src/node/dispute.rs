@@ -1007,6 +1007,15 @@ impl Node {
 
         let our_pubkey = self.node_id;
 
+        // DEP-06 §Enter: the operator never disputes its own ledger, whatever
+        // the caller (a fraud proof, our own expiry sweep, an auto-arm pass).
+        if self.operates_ledger(ledger_id) {
+            return Err(Error::Protocol(format!(
+                "refusing to dispute ledger {}: we operate it (DEP-06 §Enter)",
+                &ledger_id[..16.min(ledger_id.len())]
+            )));
+        }
+
         // Never fork past a known fault. The replica applies updates it
         // flags as non-conforming and follows the chain past them, so a
         // caller that took its base from the replica's tip (ref3 disputed

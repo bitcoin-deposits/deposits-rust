@@ -27,6 +27,25 @@
 //!   and retried every periodic until it does; at startup our live forks
 //!   (Disputed or Armed) are queued once, so a tail lost before an upgrade or
 //!   restart goes out too.
+//!
+//! What a startup must NOT republish (signet soak, 2026-11-20): ref4, operator
+//! of 5effb9e8, had forked its OWN ledger at 432509 on a QuorumExpired proof
+//! against itself (2026-11-19T21:46:50Z) and then signed the main chain's
+//! 432510 too. Its next restart queued that fork as live and republished its
+//! DisputeEnter at 432510, and every member that held the main chain's 432510
+//! saw two operator signatures at one sequence and published an Equivocation
+//! proof. So at startup:
+//!
+//! - a fork of a ledger we operate is VOID (DEP-06 §Enter): dropped from
+//!   memory, its actor stopped, its JSONL renamed `.jsonl.void` for the record,
+//!   and never published or yielded;
+//! - a fork superseded by a later `QuorumBegin` on its base, past the fork
+//!   point, is RETIRED from publication (kept, so the expiry stand-down can
+//!   still yield it); under `strict-lottery-v8` an expiry fork stays published
+//!   until the re-establishment's spend confirms, as `stand_down` judges it;
+//! - and no fork update is ever sent that conflicts with an update we signed
+//!   on the base chain at the same sequence (`own_conflicting_signatures`), the
+//!   property the two rules above exist to keep.
 
 use super::*;
 
@@ -67,6 +86,84 @@ pub(crate) fn fork_tail(
         .collect();
     tail.sort_by_key(|u| u.sequence_number);
     tail
+}
+
+/// What startup does with a fork record we hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkFate {
+    /// Not our live fork (another member's, concluded, or tombstoned).
+    NotOurs,
+    /// Our live fork: republish its tail.
+    Publish,
+    /// Superseded by a later `QuorumBegin` on the base: do not republish.
+    Retire,
+    /// A fork of a ledger we operate: void (DEP-06 §Enter).
+    Void,
+}
+
+/// The facts `fork_fate` decides on, read from the fork and its base record.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ForkFacts {
+    /// The fork's branch owner (`parent_pubkey`).
+    pub fork_owner: bitcoin::secp256k1::PublicKey,
+    /// Disputed or Armed.
+    pub live: bool,
+    /// The base key points at this same fork (a won dispute, promoted).
+    pub promoted: bool,
+    /// The base ledger's current operator (`parent_pubkey`), if we hold it.
+    pub base_operator: Option<bitcoin::secp256k1::PublicKey>,
+    /// The fork point (`last_valid_sequence`).
+    pub fork_point: u64,
+    /// The base's latest `QuorumBegin` sequence, if any.
+    pub base_quorum_begin: Option<u64>,
+    /// An expiry dispute under a ruleset where only a confirmed spend ends it.
+    pub expiry_ends_on_spend: bool,
+}
+
+/// Startup's verdict on one fork record (see the module comment).
+pub(crate) fn fork_fate(our_key: &bitcoin::secp256k1::PublicKey, f: &ForkFacts) -> ForkFate {
+    if f.fork_owner != *our_key || !f.live {
+        return ForkFate::NotOurs;
+    }
+    if f.promoted {
+        return ForkFate::Publish;
+    }
+    if f.base_operator.as_ref() == Some(our_key) {
+        return ForkFate::Void;
+    }
+    if f.base_quorum_begin.is_some_and(|qb| qb > f.fork_point) && !f.expiry_ends_on_spend {
+        return ForkFate::Retire;
+    }
+    ForkFate::Publish
+}
+
+/// The sequences at which `fork_tail` holds an update signed by `our_key`
+/// whose content differs from an update `our_key` signed on the base chain at
+/// the same sequence: each is an equivocation proof against us. A node must
+/// never publish such an update; empty for every honest fork, whose updates
+/// are signed by a member that is not the base's signer at those sequences.
+pub(crate) fn own_conflicting_signatures(
+    our_key: &bitcoin::secp256k1::PublicKey,
+    base_history: &[SignedLedgerUpdate],
+    fork_tail: &[SignedLedgerUpdate],
+) -> Vec<u64> {
+    let ours: std::collections::HashMap<u64, [u8; 32]> = base_history
+        .iter()
+        .filter(|u| u.operator_id == *our_key)
+        .map(|u| (u.sequence_number, u.content_hash))
+        .collect();
+    let mut seqs: Vec<u64> = fork_tail
+        .iter()
+        .filter(|u| u.operator_id == *our_key)
+        .filter(|u| {
+            ours.get(&u.sequence_number)
+                .is_some_and(|h| *h != u.content_hash)
+        })
+        .map(|u| u.sequence_number)
+        .collect();
+    seqs.sort_unstable();
+    seqs.dedup();
+    seqs
 }
 
 /// Why a publication pass stopped.
@@ -134,6 +231,20 @@ impl Node {
     /// fork is queued for the periodic retry and the error is logged; on
     /// success it leaves the queue.
     pub(crate) async fn publish_fork(&self, fork_key: &str) -> Result<usize, Error> {
+        if let Some(seqs) = self.fork_conflicts_with_our_base(fork_key) {
+            self.void_fork(
+                fork_key,
+                &format!(
+                    "its update(s) at seq {:?} conflict with ones we signed on the base",
+                    seqs
+                ),
+            );
+            return Err(Error::Protocol(format!(
+                "fork {} not published: it would equivocate at seq {:?}",
+                &fork_key[..32.min(fork_key.len())],
+                seqs
+            )));
+        }
         let result = self.publish_fork_tail(fork_key).await;
         let mut pending = self.pending_fork_publications.lock().unwrap();
         match &result {
@@ -214,25 +325,120 @@ impl Node {
         }
     }
 
-    /// Startup: queue our live forks (Disputed or Armed, operated by us) for
+    /// `own_conflicting_signatures` of a fork against our copy of its base,
+    /// or `None` when it has none (or either record is missing).
+    pub(crate) fn fork_conflicts_with_our_base(&self, fork_key: &str) -> Option<Vec<u64>> {
+        let last_valid_seq = fork_key_last_valid_seq(fork_key)?;
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        let fork = ledgers.get(fork_key)?;
+        let base = ledgers.get(fork_key.get(..64)?)?;
+        if Arc::ptr_eq(fork, base) {
+            return None;
+        }
+        let tail = fork_tail(&fork.read().unwrap().history, last_valid_seq);
+        let seqs = own_conflicting_signatures(&self.node_id, &base.read().unwrap().history, &tail);
+        (!seqs.is_empty()).then_some(seqs)
+    }
+
+    /// Void a fork record (DEP-06 §Enter): drop it from memory and from the
+    /// publication queue, stop its actor, and rename its JSONL to
+    /// `.jsonl.void` (kept for the record; the loader reads only `.jsonl`).
+    /// Nothing is signed or published: a void fork is never yielded either,
+    /// since a yield would be one more update under our key past the fork point.
+    pub(crate) fn void_fork(&self, fork_key: &str, why: &str) {
+        self.handler.ledgers.lock().unwrap().remove(fork_key);
+        self.ledger_actors.lock().unwrap().remove(fork_key);
+        self.pending_fork_publications
+            .lock()
+            .unwrap()
+            .remove(fork_key);
+        let dir = self.data_dir.join("wallet").join("ledgers");
+        let from = dir.join(format!("{}.jsonl", fork_key));
+        let to = dir.join(format!("{}.jsonl.void", fork_key));
+        if from.exists() {
+            if let Err(e) = std::fs::rename(&from, &to) {
+                tracing::error!(
+                    "Voiding fork {}: could not rename its JSONL: {}",
+                    fork_key,
+                    e
+                );
+            }
+        }
+        tracing::warn!(
+            "Voided dispute fork {}: {} (DEP-06 §Enter); not published, not yielded",
+            &fork_key[..32.min(fork_key.len())],
+            why
+        );
+    }
+
+    /// The `ForkFacts` of every fork record we hold, keyed by fork key.
+    fn fork_facts(&self) -> Vec<(String, ForkFacts)> {
+        use super::expiry_watch::{
+            dispute_enter_is_expiry, dispute_enter_last_valid, latest_quorum_begin_seq,
+        };
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers
+            .iter()
+            .filter(|(key, _)| key.len() > 64)
+            .filter_map(|(key, arc)| {
+                let fork_point = fork_key_last_valid_seq(key)?;
+                let base_arc = ledgers.get(&key[..64]);
+                let fork = arc.read().unwrap();
+                let promoted = base_arc.is_some_and(|b| Arc::ptr_eq(b, arc));
+                let (base_operator, base_quorum_begin, base_expiry) = match base_arc {
+                    Some(b) if !promoted => {
+                        let b = b.read().unwrap();
+                        let qb =
+                            latest_quorum_begin_seq(&b.history).max(b.state.quorum_begin_sequence);
+                        (Some(b.state.parent_pubkey), qb, b.state.quorum_expiry)
+                    }
+                    _ => (None, None, None),
+                };
+                let fork_point = dispute_enter_last_valid(&fork.history).unwrap_or(fork_point);
+                // Unknown ground counts as an expiry dispute: kept published, as before.
+                let expiry = dispute_enter_is_expiry(&fork.history, base_expiry).unwrap_or(true);
+                let expiry_ends_on_spend = expiry
+                    && deposits_core::types::ruleset_expiry_ends_on_spend(
+                        &fork.state.active_ruleset_name,
+                    );
+                Some((
+                    key.clone(),
+                    ForkFacts {
+                        fork_owner: fork.state.parent_pubkey,
+                        live: matches!(
+                            fork.state.dispute_state,
+                            DisputeState::Disputed | DisputeState::Armed
+                        ),
+                        promoted,
+                        base_operator,
+                        fork_point,
+                        base_quorum_begin,
+                        expiry_ends_on_spend,
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// Startup: void our forks of ledgers we operate, then queue our live
+    /// forks (Disputed or Armed, operated by us, not superseded) for
     /// publication, so a tail lost before a restart still goes out.
     pub(crate) fn queue_live_forks_for_publication(&self) {
-        let live: Vec<String> = {
-            let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .iter()
-                .filter(|(key, _)| key.len() > 64 && fork_key_last_valid_seq(key).is_some())
-                .filter(|(_, arc)| {
-                    let l = arc.read().unwrap();
-                    l.state.parent_pubkey == self.node_id
-                        && matches!(
-                            l.state.dispute_state,
-                            DisputeState::Disputed | DisputeState::Armed
-                        )
-                })
-                .map(|(key, _)| key.clone())
-                .collect()
-        };
+        let mut live = Vec::new();
+        for (key, facts) in self.fork_facts() {
+            match fork_fate(&self.node_id, &facts) {
+                ForkFate::NotOurs => {}
+                ForkFate::Publish => live.push(key),
+                ForkFate::Retire => tracing::info!(
+                    "Dispute fork {} retired from publication: superseded by QuorumBegin \
+                     seq {:?} past its fork point {}",
+                    &key[..32.min(key.len())],
+                    facts.base_quorum_begin,
+                    facts.fork_point
+                ),
+                ForkFate::Void => self.void_fork(&key, "a fork of a ledger we operate"),
+            }
+        }
         if !live.is_empty() {
             tracing::info!("Queued {} live dispute fork(s) for publication", live.len());
             self.pending_fork_publications.lock().unwrap().extend(live);
@@ -275,6 +481,82 @@ mod tests {
         let mut h: Vec<_> = (0..=lvs).map(|s| upd(s, operator)).collect();
         h.extend((lvs + 1..=lvs + 4).map(|s| upd(s, us)));
         h
+    }
+
+    /// DEP-06 §Enter, shared with cl-deposits (`self_dispute.json`, `fork_cases`).
+    #[test]
+    fn fork_fate_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/self_dispute.json")).unwrap();
+        let name_key = |n: &str| match n {
+            "op" => pk(1),
+            "m1" => pk(2),
+            "m2" => pk(3),
+            "w" => pk(4),
+            other => panic!("unknown key name {other}"),
+        };
+        let mut n = 0;
+        for case in v["fork_cases"].as_array().unwrap() {
+            let facts = ForkFacts {
+                fork_owner: name_key(case["fork_owner"].as_str().unwrap()),
+                live: case["live"].as_bool().unwrap(),
+                promoted: case["promoted"].as_bool().unwrap(),
+                base_operator: case["base_operator"].as_str().map(name_key),
+                fork_point: case["fork_point"].as_u64().unwrap(),
+                base_quorum_begin: case["base_quorum_begin"].as_u64(),
+                expiry_ends_on_spend: case["expiry_ends_on_spend"].as_bool().unwrap(),
+            };
+            let want = match case["expect"]["fate"].as_str().unwrap() {
+                "void" => ForkFate::Void,
+                "retire" => ForkFate::Retire,
+                "publish" => ForkFate::Publish,
+                "not_ours" => ForkFate::NotOurs,
+                other => panic!("unknown fate {other}"),
+            };
+            let us = name_key(case["us"].as_str().unwrap());
+            assert_eq!(fork_fate(&us, &facts), want, "{}", case["name"]);
+            n += 1;
+        }
+        assert_eq!(n, 9);
+    }
+
+    fn upd_c(seq: u64, operator: PublicKey, content: u8) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            content_hash: [content; 32],
+            ..upd(seq, operator)
+        }
+    }
+
+    /// ref4's shape (signet, 2026-11-19): its main chain's 432510 and its own
+    /// fork's DisputeEnter at 432510, both under its key, different content.
+    #[test]
+    fn a_self_fork_tail_conflicts_with_our_own_chain() {
+        let us = pk(1);
+        let base: Vec<_> = (432_500..=432_520).map(|s| upd_c(s, us, 0xA0)).collect();
+        let fork: Vec<_> = (432_500..=432_509)
+            .map(|s| upd_c(s, us, 0xA0))
+            .chain(std::iter::once(upd_c(432_510, us, 0x0F)))
+            .collect();
+        let tail = fork_tail(&fork, 432_509);
+        assert_eq!(own_conflicting_signatures(&us, &base, &tail), vec![432_510]);
+        // Before the main chain reached 432510 (21:46 to 22:17Z) there was nothing
+        // to conflict with yet: why the guard has to be at the dispute, not here.
+        let short: Vec<_> = (432_500..=432_509).map(|s| upd_c(s, us, 0xA0)).collect();
+        assert!(own_conflicting_signatures(&us, &short, &tail).is_empty());
+    }
+
+    /// The honest shape: a member's fork tail is under the member's key, the
+    /// base under the operator's, so nothing of ours conflicts.
+    #[test]
+    fn a_member_fork_tail_never_conflicts() {
+        let (operator, us) = (pk(1), pk(2));
+        let base: Vec<_> = (0..=60).map(|s| upd_c(s, operator, 1)).collect();
+        let tail = fork_tail(&fork_history(50), 50);
+        assert!(own_conflicting_signatures(&us, &base, &tail).is_empty());
+        // Same content re-signed is a duplicate, not an equivocation.
+        let same: Vec<_> = (51..=54).map(|s| upd_c(s, us, s as u8)).collect();
+        let base_us: Vec<_> = (51..=54).map(|s| upd(s, us)).collect();
+        assert!(own_conflicting_signatures(&us, &base_us, &same).is_empty());
     }
 
     #[test]

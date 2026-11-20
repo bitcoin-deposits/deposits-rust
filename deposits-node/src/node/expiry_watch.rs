@@ -223,6 +223,14 @@ impl Node {
                     }
                     let base_id = key[..64].to_string();
                     let base = ledgers.get(&base_id);
+                    // A fork of a ledger we operate is void (DEP-06 §Enter), never
+                    // yielded: its DisputeYield would be another update under our
+                    // key past the fork point, conflicting with our own chain.
+                    if base.is_some_and(|b| {
+                        !Arc::ptr_eq(b, arc) && b.read().unwrap().state.parent_pubkey == self.node_id
+                    }) {
+                        return None;
+                    }
                     let base_expiry = base.and_then(|b| b.read().unwrap().state.quorum_expiry);
                     if !dispute_enter_is_expiry(&fork.history, base_expiry)? {
                         return None;
