@@ -1,51 +1,554 @@
 {
-  "description": "DEP-03 Replacement collateral declaration: the coin a member pledges in a DisputeArmed. Its own earlier pledge for this dispute while unspent; else the smallest coin with at least max(1, min_confs) confirmations that covers need and that no other live arm of the member pledges (taken), ties to the lexicographically smaller outpoint; else none. A coin pledged to two disputes is spent by whichever claim lands first and strands the other (regtest rearm-rust 1119-100553, deposits-rust). Shared by cl-deposits (inspect/lottery-test.lisp, pick-pledge) and deposits-rust (dispute.rs, pick_pledge).",
-  "cases": [
-    {"name": "the smallest coin that covers the need",
-     "need": 20000, "min_confs": 1, "own": null, "taken": [],
-     "utxos": [{"outpoint": "aa:0", "sats": 50000, "confirmations": 6},
-               {"outpoint": "bb:1", "sats": 30000, "confirmations": 6},
-               {"outpoint": "cc:0", "sats": 10000, "confirmations": 6}],
-     "expect": "bb:1"},
-    {"name": "a coin another live arm pledges is skipped",
-     "need": 20000, "min_confs": 1, "own": null, "taken": ["bb:1"],
-     "utxos": [{"outpoint": "aa:0", "sats": 50000, "confirmations": 6},
-               {"outpoint": "bb:1", "sats": 30000, "confirmations": 6},
-               {"outpoint": "cc:0", "sats": 10000, "confirmations": 6}],
-     "expect": "aa:0"},
-    {"name": "this dispute's own unspent pledge is kept, though declared and under the need",
-     "need": 20000, "min_confs": 1, "own": "cc:0", "taken": ["cc:0"],
-     "utxos": [{"outpoint": "aa:0", "sats": 50000, "confirmations": 6},
-               {"outpoint": "cc:0", "sats": 10000, "confirmations": 6}],
-     "expect": "cc:0"},
-    {"name": "its own pledge spent: pledge afresh",
-     "need": 20000, "min_confs": 1, "own": "dd:0", "taken": ["dd:0"],
-     "utxos": [{"outpoint": "aa:0", "sats": 50000, "confirmations": 6}],
-     "expect": "aa:0"},
-    {"name": "an unconfirmed coin is never pledged, whatever min_confs says",
-     "need": 20000, "min_confs": 0, "own": null, "taken": [],
-     "utxos": [{"outpoint": "ee:0", "sats": 25000, "confirmations": 0}],
-     "expect": null},
-    {"name": "min_confs is honoured",
-     "need": 20000, "min_confs": 3, "own": null, "taken": [],
-     "utxos": [{"outpoint": "aa:0", "sats": 50000, "confirmations": 3},
-               {"outpoint": "bb:1", "sats": 30000, "confirmations": 2}],
-     "expect": "aa:0"},
-    {"name": "equal coins: the smaller outpoint",
-     "need": 20000, "min_confs": 1, "own": null, "taken": [],
-     "utxos": [{"outpoint": "ff:2", "sats": 30000, "confirmations": 6},
-               {"outpoint": "ff:1", "sats": 30000, "confirmations": 6}],
-     "expect": "ff:1"},
-    {"name": "nothing unpledged covers the need",
-     "need": 60000, "min_confs": 1, "own": null, "taken": ["aa:0"],
-     "utxos": [{"outpoint": "aa:0", "sats": 70000, "confirmations": 6},
-               {"outpoint": "bb:1", "sats": 30000, "confirmations": 6}],
-     "expect": null},
-    {"name": "regtest rearm-rust: the fresh coin, not the one another dispute's claim spends",
-     "need": 5000, "min_confs": 1, "own": null,
-     "taken": ["f9c1f75435edab411a7789fee9fba73a799ed2b829efedb47d4ff3177afc910f:0"],
-     "utxos": [{"outpoint": "f9c1f75435edab411a7789fee9fba73a799ed2b829efedb47d4ff3177afc910f:0", "sats": 4995330, "confirmations": 400},
-               {"outpoint": "e8a325a7abcb5a128a00490b8a45382ffea953152d06dbebfd858b8064301532:0", "sats": 50000000, "confirmations": 80}],
-     "expect": "e8a325a7abcb5a128a00490b8a45382ffea953152d06dbebfd858b8064301532:0"}
-  ]
+ "description": "DEP-03 Replacement collateral declaration: the coin a member pledges in a DisputeArmed. Its own earlier pledge for this dispute while unspent; else the smallest coin with at least max(1, min_confs) confirmations that covers need and that no other live arm of the member pledges (taken), ties to the lexicographically smaller outpoint; else none. A coin pledged to two disputes is spent by whichever claim lands first and strands the other (regtest rearm-rust 1119-100553, deposits-rust). Shared by cl-deposits (inspect/lottery-test.lisp, pick-pledge) and deposits-rust (dispute.rs, pick_pledge). Cases with `forks` add what each of the member's forks still holds to `taken` (DEP-03, a pledge is held while its dispute is live): a fork's `ops` are its own DisputeEnter (`enter`), DisputeArmed (`arm`, with the `pledge` it declares or null), DisputeYield (`yield`, also the tombstone a lost lottery leaves) and DisputeAcquire (`acquire`, output 0 of `claim` and whether it `binds`). A pledge is held from its arm until a later yield, a binding acquire, or the fork's retirement (`retired`); output 0 of a binding claim is custody, held while that acquire stands. Regtest 1120-next4: ref6 held 31 coins and could pledge none, 30 held by disputes long ended.",
+ "cases": [
+  {
+   "name": "the smallest coin that covers the need",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "cc:0",
+     "sats": 10000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "a coin another live arm pledges is skipped",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [
+    "bb:1"
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "cc:0",
+     "sats": 10000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "this dispute's own unspent pledge is kept, though declared and under the need",
+   "need": 20000,
+   "min_confs": 1,
+   "own": "cc:0",
+   "taken": [
+    "cc:0"
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "cc:0",
+     "sats": 10000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "cc:0"
+  },
+  {
+   "name": "its own pledge spent: pledge afresh",
+   "need": 20000,
+   "min_confs": 1,
+   "own": "dd:0",
+   "taken": [
+    "dd:0"
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "an unconfirmed coin is never pledged, whatever min_confs says",
+   "need": 20000,
+   "min_confs": 0,
+   "own": null,
+   "taken": [],
+   "utxos": [
+    {
+     "outpoint": "ee:0",
+     "sats": 25000,
+     "confirmations": 0
+    }
+   ],
+   "expect": null
+  },
+  {
+   "name": "min_confs is honoured",
+   "need": 20000,
+   "min_confs": 3,
+   "own": null,
+   "taken": [],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 3
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 2
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "equal coins: the smaller outpoint",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "utxos": [
+    {
+     "outpoint": "ff:2",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "ff:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "ff:1"
+  },
+  {
+   "name": "nothing unpledged covers the need",
+   "need": 60000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [
+    "aa:0"
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 70000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": null
+  },
+  {
+   "name": "regtest rearm-rust: the fresh coin, not the one another dispute's claim spends",
+   "need": 5000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [
+    "f9c1f75435edab411a7789fee9fba73a799ed2b829efedb47d4ff3177afc910f:0"
+   ],
+   "utxos": [
+    {
+     "outpoint": "f9c1f75435edab411a7789fee9fba73a799ed2b829efedb47d4ff3177afc910f:0",
+     "sats": 4995330,
+     "confirmations": 400
+    },
+    {
+     "outpoint": "e8a325a7abcb5a128a00490b8a45382ffea953152d06dbebfd858b8064301532:0",
+     "sats": 50000000,
+     "confirmations": 80
+    }
+   ],
+   "expect": "e8a325a7abcb5a128a00490b8a45382ffea953152d06dbebfd858b8064301532:0"
+  },
+  {
+   "name": "a yielded dispute's pledge is pledgeable again",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "yield"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "a lost lottery: the tombstoned fork frees its pledge, collateral upgrades included",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": null
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "yield"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "a binding acquire frees the pledge; the claim's output 0 is custody",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "acquire",
+       "claim": "cc",
+       "binds": true
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "cc:0",
+     "sats": 25000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "an acquire that does not bind yet holds the pledge",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "acquire",
+       "claim": "cc",
+       "binds": false
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "a retired fork holds nothing",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      }
+     ],
+     "retired": true
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "an armed dispute holds its pledge",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "entered and not yet armed: a disputed fork declares no pledge",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "a re-arm round after a yield holds its own pledge, not the earlier round's",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "yield"
+      },
+      {
+       "op": "arm",
+       "pledge": "aa:0"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "dd:0",
+     "sats": 60000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "one live and one ended dispute: only the live one's pledge is held",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      },
+      {
+       "op": "yield"
+      }
+     ],
+     "retired": false
+    },
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "ee:0"
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "ee:0",
+     "sats": 25000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  }
+ ]
 }

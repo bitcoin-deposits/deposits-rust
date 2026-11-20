@@ -2953,6 +2953,32 @@ impl Node {
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
+        // Our own fork whose tip is this arm takes the yield through the ordinary append, so
+        // it is recorded, persisted and tombstoned HERE too. It used to be broadcast only: the
+        // fork stayed Armed in our own records for good, and its pledge was never released
+        // (regtest 1120-next4: 86 of ref6's 151 forks entered and armed, never concluded
+        // locally, 29 of them marked lottery_completed).
+        let own_fork = {
+            let tip = our_armed.chain_hash();
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .find(|(k, arc)| {
+                    let l = arc.read().unwrap();
+                    k.len() > ledger_id.len()
+                        && k.starts_with(ledger_id)
+                        && super::rearm::is_our_fork(k, &l.state.parent_pubkey, &our_pubkey)
+                        && l.history.last().is_some_and(|u| u.chain_hash() == tip)
+                        && l.state
+                            .dispute_state
+                            .allows_operation(LedgerOperation::DisputeYield.discriminant())
+                })
+                .map(|(k, _)| k.clone())
+        };
+        if let Some(fork_key) = own_fork {
+            return self.withdraw_dispute(&fork_key, current_block).await;
+        }
+
         // Create DisputeYield operation
         let operation = LedgerOperation::DisputeYield;
         let message_bytes = operation.tlv_encode();
@@ -5268,6 +5294,102 @@ pub(crate) fn committed_outpoints(
     (declared, custody)
 }
 
+/// One of our own dispute operations on a fork, as the pledge hold reads it (`fork_holds`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ForkEvent {
+    Enter,
+    /// A DisputeArmed and the coin it declares, if any.
+    Arm(Option<bitcoin::OutPoint>),
+    Yield,
+    /// A DisputeAcquire: output 0 of its claim, and whether the acquire binds (DEP-06 "An
+    /// acquire binds once its claim confirms"; for our own claim, that it confirmed).
+    Acquire {
+        claim: bitcoin::OutPoint,
+        binds: bool,
+    },
+}
+
+/// What one of our forks holds against a new pledge (DEP-03 "Replacement collateral
+/// declaration", a coin pledged in a live dispute): `(pledges, custody)`.
+///
+/// A pledge is held from the DisputeArmed that declares it until the dispute ends for us:
+/// - a `DisputeYield` after it (a yield, or the tombstone a lost lottery leaves, ends the
+///   round; a later round's arm declares afresh);
+/// - a binding `DisputeAcquire` (our claim confirmed; it spent the winner's pledge, or left
+///   it free);
+/// - retiring the fork (`retired`: voided or dropped as concluded).
+///
+/// Output 0 of a binding claim is the ledger's custody, held while that acquire stands (no
+/// later arm on the fork; the caller only sees it while it is unspent). An acquire that does
+/// not bind (yet) ends nothing: the claim may still confirm, and it spends the pledge.
+/// Regtest 1120-next4: ref6 held 31 coins and could arm on nothing, 30 of them pledged by
+/// disputes that had long ended. Vector `pledge_pick.json` (its `forks` cases).
+pub(crate) fn fork_holds(
+    events: &[ForkEvent],
+    retired: bool,
+) -> (Vec<bitcoin::OutPoint>, Option<bitcoin::OutPoint>) {
+    let (mut pledges, mut custody) = (Vec::new(), None);
+    if retired {
+        return (pledges, custody);
+    }
+    for e in events {
+        match e {
+            ForkEvent::Enter => {}
+            ForkEvent::Arm(p) => {
+                pledges.extend(*p);
+                custody = None;
+            }
+            ForkEvent::Yield => {
+                pledges.clear();
+                custody = None;
+            }
+            ForkEvent::Acquire { claim, binds } => {
+                if *binds {
+                    pledges.clear();
+                    custody = Some(*claim);
+                } else {
+                    custody = None;
+                }
+            }
+        }
+    }
+    (pledges, custody)
+}
+
+/// Our dispute operations in `history`, oldest first; an acquire's `binds` from `confirmed`
+/// (whether its claim txid is in a block).
+pub(crate) fn fork_events(
+    history: &[deposits_core::SignedLedgerUpdate],
+    me: &bitcoin::secp256k1::PublicKey,
+    confirmed: &dyn Fn(&bitcoin::Txid) -> bool,
+) -> Vec<ForkEvent> {
+    use bitcoin::hashes::Hash;
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    history
+        .iter()
+        .filter(|u| u.operator_id == *me)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter { .. }) => Some(ForkEvent::Enter),
+            Ok(LedgerOperation::DisputeArmed {
+                replacement_collateral,
+                ..
+            }) => Some(ForkEvent::Arm(replacement_collateral.map(|rc| {
+                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout)
+            }))),
+            Ok(LedgerOperation::DisputeYield) => Some(ForkEvent::Yield),
+            Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => {
+                let txid = bitcoin::Txid::from_byte_array(claim_txid);
+                Some(ForkEvent::Acquire {
+                    claim: bitcoin::OutPoint::new(txid, 0),
+                    binds: confirmed(&txid),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 /// What to do with a (re-)arm, given the collateral lookup.
 #[derive(Debug)]
 pub(crate) enum ArmDecision {
@@ -5661,23 +5783,42 @@ impl Node {
     /// Append our DisputeArmed for re-arm round `round` (TLV 366) to our fork, with a fresh
     /// preimage and a replacement-collateral pledge, and publish it.
     /// What a pledge for `ledger_id` must avoid: the latest pledge on our own fork of it (kept
-    /// while unspent), every coin any `DisputeArmed` of ours on any fork declares, and output 0
-    /// of every claim of ours (`committed_outpoints`).
+    /// while unspent), and what each fork of ours still holds (`fork_holds`): the pledges of
+    /// disputes that have not ended for us, and the custody of a binding claim. A pledge of a
+    /// yielded, tombstoned, acquired or retired dispute is free again; counting every pledge
+    /// ever declared left ref6 (regtest 1120-next4) with 31 coins and nothing it could pledge.
     pub(crate) fn pledge_exclusion(&self, ledger_id: &str) -> PledgeExclusion {
         let mut ex = PledgeExclusion::default();
-        let ledgers = self.handler.ledgers.lock().unwrap();
-        for (k, arc) in ledgers.iter() {
-            let l = arc.read().unwrap();
-            if !super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id) {
-                continue;
-            }
-            let (declared, custody) = committed_outpoints(&l.history, &self.node_id);
+        // (fork key, our updates on it) -- copied out, so the chain is not asked under the lock.
+        let ours: Vec<(String, Vec<deposits_core::SignedLedgerUpdate>)> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter_map(|(k, arc)| {
+                    let l = arc.read().unwrap();
+                    super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id).then(|| {
+                        let mine: Vec<_> = l
+                            .history
+                            .iter()
+                            .filter(|u| u.operator_id == self.node_id)
+                            .cloned()
+                            .collect();
+                        (k.clone(), mine)
+                    })
+                })
+                .collect()
+        };
+        let confirmed = |t: &bitcoin::Txid| matches!(self.wallet.tx_block_height(*t), Ok(Some(_)));
+        for (k, mine) in ours {
             if k.starts_with(ledger_id) {
+                let (declared, _) = committed_outpoints(&mine, &self.node_id);
                 if let Some(op) = declared.last() {
                     ex.own = Some(*op);
                 }
             }
-            ex.taken.extend(declared);
+            let (pledges, custody) =
+                fork_holds(&fork_events(&mine, &self.node_id, &confirmed), false);
+            ex.taken.extend(pledges);
             ex.taken.extend(custody);
         }
         ex
@@ -5774,7 +5915,7 @@ impl Node {
 
 #[cfg(test)]
 mod pledge_pick_vector {
-    use super::{pick_pledge, PledgeExclusion};
+    use super::{fork_holds, pick_pledge, ForkEvent, PledgeExclusion};
     use crate::chain_backend::UnspentOutput;
 
     /// "aa:0" in the vector is a short stand-in for a txid: pad it to 64 hex digits.
@@ -5804,7 +5945,7 @@ mod pledge_pick_vector {
                     )
                 })
                 .collect();
-            let exclude = PledgeExclusion {
+            let mut exclude = PledgeExclusion {
                 own: c["own"].as_str().map(outpoint),
                 taken: c["taken"]
                     .as_array()
@@ -5813,6 +5954,26 @@ mod pledge_pick_vector {
                     .map(|t| outpoint(t.as_str().unwrap()))
                     .collect(),
             };
+            for f in c["forks"].as_array().into_iter().flatten() {
+                let events: Vec<ForkEvent> = f["ops"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|o| match o["op"].as_str().unwrap() {
+                        "enter" => ForkEvent::Enter,
+                        "arm" => ForkEvent::Arm(o["pledge"].as_str().map(outpoint)),
+                        "yield" => ForkEvent::Yield,
+                        "acquire" => ForkEvent::Acquire {
+                            claim: outpoint(&format!("{}:0", o["claim"].as_str().unwrap())),
+                            binds: o["binds"].as_bool().unwrap(),
+                        },
+                        other => panic!("unknown fork op {other}"),
+                    })
+                    .collect();
+                let (pledges, custody) = fork_holds(&events, f["retired"].as_bool().unwrap());
+                exclude.taken.extend(pledges);
+                exclude.taken.extend(custody);
+            }
             let got = pick_pledge(
                 &utxos,
                 c["need"].as_u64().unwrap(),
@@ -5828,7 +5989,7 @@ mod pledge_pick_vector {
             );
             n += 1;
         }
-        assert_eq!(n, 9);
+        assert_eq!(n, 18);
     }
 }
 
