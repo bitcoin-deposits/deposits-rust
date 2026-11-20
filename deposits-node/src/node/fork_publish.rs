@@ -39,13 +39,15 @@
 //! - a fork of a ledger we operate is VOID (DEP-06 §Enter): dropped from
 //!   memory, its actor stopped, its JSONL renamed `.jsonl.void` for the record,
 //!   and never published or yielded;
-//! - a fork superseded by a later `QuorumBegin` on its base, past the fork
-//!   point, is RETIRED from publication (kept, so the expiry stand-down can
-//!   still yield it); under `strict-lottery-v8` an expiry fork stays published
-//!   until the re-establishment's spend confirms, as `stand_down` judges it;
 //! - and no fork update is ever sent that conflicts with an update we signed
 //!   on the base chain at the same sequence (`own_conflicting_signatures`), the
-//!   property the two rules above exist to keep.
+//!   property the rule above exists to keep.
+//!
+//! Every other live fork of ours is republished, whatever has happened on its
+//! base since. In particular a later `QuorumBegin` past the fork point does
+//! NOT stop republication: the accused operator, or a colluding quorum, can
+//! extend the base with one, and republication exists for liveness after relay
+//! loss, so it must not be something the accused can switch off.
 
 use super::*;
 
@@ -95,8 +97,6 @@ pub(crate) enum ForkFate {
     NotOurs,
     /// Our live fork: republish its tail.
     Publish,
-    /// Superseded by a later `QuorumBegin` on the base: do not republish.
-    Retire,
     /// A fork of a ledger we operate: void (DEP-06 §Enter).
     Void,
 }
@@ -112,12 +112,6 @@ pub(crate) struct ForkFacts {
     pub promoted: bool,
     /// The base ledger's current operator (`parent_pubkey`), if we hold it.
     pub base_operator: Option<bitcoin::secp256k1::PublicKey>,
-    /// The fork point (`last_valid_sequence`).
-    pub fork_point: u64,
-    /// The base's latest `QuorumBegin` sequence, if any.
-    pub base_quorum_begin: Option<u64>,
-    /// An expiry dispute under a ruleset where only a confirmed spend ends it.
-    pub expiry_ends_on_spend: bool,
 }
 
 /// Startup's verdict on one fork record (see the module comment).
@@ -130,9 +124,6 @@ pub(crate) fn fork_fate(our_key: &bitcoin::secp256k1::PublicKey, f: &ForkFacts) 
     }
     if f.base_operator.as_ref() == Some(our_key) {
         return ForkFate::Void;
-    }
-    if f.base_quorum_begin.is_some_and(|qb| qb > f.fork_point) && !f.expiry_ends_on_spend {
-        return ForkFate::Retire;
     }
     ForkFate::Publish
 }
@@ -373,35 +364,19 @@ impl Node {
 
     /// The `ForkFacts` of every fork record we hold, keyed by fork key.
     fn fork_facts(&self) -> Vec<(String, ForkFacts)> {
-        use super::expiry_watch::{
-            dispute_enter_is_expiry, dispute_enter_last_valid, latest_quorum_begin_seq,
-        };
         let ledgers = self.handler.ledgers.lock().unwrap();
         ledgers
             .iter()
-            .filter(|(key, _)| key.len() > 64)
-            .filter_map(|(key, arc)| {
-                let fork_point = fork_key_last_valid_seq(key)?;
+            .filter(|(key, _)| key.len() > 64 && fork_key_last_valid_seq(key).is_some())
+            .map(|(key, arc)| {
                 let base_arc = ledgers.get(&key[..64]);
                 let fork = arc.read().unwrap();
                 let promoted = base_arc.is_some_and(|b| Arc::ptr_eq(b, arc));
-                let (base_operator, base_quorum_begin, base_expiry) = match base_arc {
-                    Some(b) if !promoted => {
-                        let b = b.read().unwrap();
-                        let qb =
-                            latest_quorum_begin_seq(&b.history).max(b.state.quorum_begin_sequence);
-                        (Some(b.state.parent_pubkey), qb, b.state.quorum_expiry)
-                    }
-                    _ => (None, None, None),
+                let base_operator = match base_arc {
+                    Some(b) if !promoted => Some(b.read().unwrap().state.parent_pubkey),
+                    _ => None,
                 };
-                let fork_point = dispute_enter_last_valid(&fork.history).unwrap_or(fork_point);
-                // Unknown ground counts as an expiry dispute: kept published, as before.
-                let expiry = dispute_enter_is_expiry(&fork.history, base_expiry).unwrap_or(true);
-                let expiry_ends_on_spend = expiry
-                    && deposits_core::types::ruleset_expiry_ends_on_spend(
-                        &fork.state.active_ruleset_name,
-                    );
-                Some((
+                (
                     key.clone(),
                     ForkFacts {
                         fork_owner: fork.state.parent_pubkey,
@@ -411,17 +386,14 @@ impl Node {
                         ),
                         promoted,
                         base_operator,
-                        fork_point,
-                        base_quorum_begin,
-                        expiry_ends_on_spend,
                     },
-                ))
+                )
             })
             .collect()
     }
 
     /// Startup: void our forks of ledgers we operate, then queue our live
-    /// forks (Disputed or Armed, operated by us, not superseded) for
+    /// forks (Disputed or Armed, operated by us) for
     /// publication, so a tail lost before a restart still goes out.
     pub(crate) fn queue_live_forks_for_publication(&self) {
         let mut live = Vec::new();
@@ -429,13 +401,6 @@ impl Node {
             match fork_fate(&self.node_id, &facts) {
                 ForkFate::NotOurs => {}
                 ForkFate::Publish => live.push(key),
-                ForkFate::Retire => tracing::info!(
-                    "Dispute fork {} retired from publication: superseded by QuorumBegin \
-                     seq {:?} past its fork point {}",
-                    &key[..32.min(key.len())],
-                    facts.base_quorum_begin,
-                    facts.fork_point
-                ),
                 ForkFate::Void => self.void_fork(&key, "a fork of a ledger we operate"),
             }
         }
@@ -502,13 +467,9 @@ mod tests {
                 live: case["live"].as_bool().unwrap(),
                 promoted: case["promoted"].as_bool().unwrap(),
                 base_operator: case["base_operator"].as_str().map(name_key),
-                fork_point: case["fork_point"].as_u64().unwrap(),
-                base_quorum_begin: case["base_quorum_begin"].as_u64(),
-                expiry_ends_on_spend: case["expiry_ends_on_spend"].as_bool().unwrap(),
             };
             let want = match case["expect"]["fate"].as_str().unwrap() {
                 "void" => ForkFate::Void,
-                "retire" => ForkFate::Retire,
                 "publish" => ForkFate::Publish,
                 "not_ours" => ForkFate::NotOurs,
                 other => panic!("unknown fate {other}"),
@@ -517,7 +478,7 @@ mod tests {
             assert_eq!(fork_fate(&us, &facts), want, "{}", case["name"]);
             n += 1;
         }
-        assert_eq!(n, 9);
+        assert_eq!(n, 8);
     }
 
     fn upd_c(seq: u64, operator: PublicKey, content: u8) -> SignedLedgerUpdate {

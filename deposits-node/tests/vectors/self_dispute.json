@@ -1,106 +1,210 @@
 {
-  "description": "DEP-06 §Enter: the accused operator never signs a DisputeEnter on its own ledger, and a fork a node opened on a ledger it operates is void. `proof_cases`: node `us` holds a ledger whose current operator is `operator` and receives a VERIFIED fraud proof accusing `accused`; expect whether it enters a dispute (opens a fork) and how many updates it signs doing so (its DisputeEnter). A node enters only when the proof accuses the ledger's current operator and `us` is neither the accused nor the operator. `fork_cases`: a fork record held at startup; `fate` is `void` (a fork of a ledger we operate: never published, never yielded), `retire` (superseded by a QuorumBegin on the base past the fork point: not republished; an expiry dispute under a ruleset where only a confirmed spend ends it is not judged here and stays `publish`), `publish`, or `not_ours` (another member's fork, or not Disputed/Armed). Keys are names; `null` means the record is not held. From the signet soak, 2026-11-19/20: ref4, operator of 5effb9e8, forked its own ledger at 432509 on a QuorumExpired proof against itself and later signed the main chain's 432510; a restart republished the fork and its members proved Equivocation.",
+  "description": "DEP-06 \u00a7Enter: the accused operator never signs a DisputeEnter on its own ledger, and a fork a node opened on a ledger it operates is void. `proof_cases`: node `us` holds a ledger whose current operator is `operator` and receives a VERIFIED fraud proof accusing `accused`; expect whether it enters a dispute (opens a fork) and how many updates it signs doing so (its DisputeEnter). A node enters only when the proof accuses the ledger's current operator and `us` is neither the accused nor the operator. `fork_cases`: a fork record held at startup; `fate` is `void` (a fork of a ledger we operate: never published, never yielded), `publish` (our live fork: its tail is republished, whatever has happened on its base since; a later QuorumBegin past the fork point does not stop it, since the accused or a colluding quorum can append one), or `not_ours` (another member's fork, or not Disputed/Armed). `fork_point` and `base_quorum_begin` are context and never change the fate. Keys are names; `null` means the record is not held. From the signet soak, 2026-11-19/20: ref4, operator of 5effb9e8, forked its own ledger at 432509 on a QuorumExpired proof against itself and later signed the main chain's 432510; a restart republished the fork and its members proved Equivocation.",
   "proof_cases": [
     {
       "name": "operator receives a QuorumExpired proof against itself (ref4, 5effb9e8, 2026-11-19T21:46:18Z)",
-      "us": "op", "operator": "op", "accused": "op", "proof_type": "QuorumExpired",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "op",
+      "operator": "op",
+      "accused": "op",
+      "proof_type": "QuorumExpired",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "operator receives an Equivocation proof against itself",
-      "us": "op", "operator": "op", "accused": "op", "proof_type": "Equivocation",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "op",
+      "operator": "op",
+      "accused": "op",
+      "proof_type": "Equivocation",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "operator receives a proof on its own ledger naming another key",
-      "us": "op", "operator": "op", "accused": "m1", "proof_type": "NonConformingUpdate",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "op",
+      "operator": "op",
+      "accused": "m1",
+      "proof_type": "NonConformingUpdate",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "member receives a QuorumExpired proof against the operator",
-      "us": "m1", "operator": "op", "accused": "op", "proof_type": "QuorumExpired",
-      "expect": { "dispute": true, "signatures": 1 }
+      "us": "m1",
+      "operator": "op",
+      "accused": "op",
+      "proof_type": "QuorumExpired",
+      "expect": {
+        "dispute": true,
+        "signatures": 1
+      }
     },
     {
       "name": "member receives an Equivocation proof against the operator",
-      "us": "m1", "operator": "op", "accused": "op", "proof_type": "Equivocation",
-      "expect": { "dispute": true, "signatures": 1 }
+      "us": "m1",
+      "operator": "op",
+      "accused": "op",
+      "proof_type": "Equivocation",
+      "expect": {
+        "dispute": true,
+        "signatures": 1
+      }
     },
     {
       "name": "member receives a proof accusing itself",
-      "us": "m1", "operator": "op", "accused": "m1", "proof_type": "NonConformingUpdate",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "m1",
+      "operator": "op",
+      "accused": "m1",
+      "proof_type": "NonConformingUpdate",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "former operator, custody moved to w, receives the old proof against itself",
-      "us": "op", "operator": "w", "accused": "op", "proof_type": "NonConformingUpdate",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "op",
+      "operator": "w",
+      "accused": "op",
+      "proof_type": "NonConformingUpdate",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "new custodian receives the old proof against its predecessor",
-      "us": "w", "operator": "w", "accused": "op", "proof_type": "NonConformingUpdate",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "w",
+      "operator": "w",
+      "accused": "op",
+      "proof_type": "NonConformingUpdate",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     },
     {
       "name": "ledger not held: nothing to judge against",
-      "us": "m1", "operator": null, "accused": "op", "proof_type": "Equivocation",
-      "expect": { "dispute": false, "signatures": 0 }
+      "us": "m1",
+      "operator": null,
+      "accused": "op",
+      "proof_type": "Equivocation",
+      "expect": {
+        "dispute": false,
+        "signatures": 0
+      }
     }
   ],
   "fork_cases": [
     {
       "name": "ref4's self-fork of 5effb9e8 at 432509, left on disk (republished 2026-11-20T06:26:57Z)",
-      "us": "op", "fork_owner": "op", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 432509, "base_quorum_begin": 432511, "expiry_ends_on_spend": true,
-      "expect": { "fate": "void" }
+      "us": "op",
+      "fork_owner": "op",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 432509,
+      "base_quorum_begin": 432511,
+      "expect": {
+        "fate": "void"
+      }
     },
     {
       "name": "a self-fork with no later QuorumBegin is void too",
-      "us": "op", "fork_owner": "op", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 100, "base_quorum_begin": 50, "expiry_ends_on_spend": false,
-      "expect": { "fate": "void" }
+      "us": "op",
+      "fork_owner": "op",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 100,
+      "base_quorum_begin": 50,
+      "expect": {
+        "fate": "void"
+      }
     },
     {
       "name": "member fork, live, no later QuorumBegin",
-      "us": "m1", "fork_owner": "m1", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 100, "base_quorum_begin": 50, "expiry_ends_on_spend": false,
-      "expect": { "fate": "publish" }
+      "us": "m1",
+      "fork_owner": "m1",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 100,
+      "base_quorum_begin": 50,
+      "expect": {
+        "fate": "publish"
+      }
     },
     {
-      "name": "member fork superseded by a later QuorumBegin",
-      "us": "m1", "fork_owner": "m1", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 432509, "base_quorum_begin": 432511, "expiry_ends_on_spend": false,
-      "expect": { "fate": "retire" }
+      "name": "member fork past a later QuorumBegin: still republished (the accused can append one)",
+      "us": "m1",
+      "fork_owner": "m1",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 432509,
+      "base_quorum_begin": 432511,
+      "expect": {
+        "fate": "publish"
+      }
     },
     {
-      "name": "QuorumBegin at the fork point does not supersede",
-      "us": "m1", "fork_owner": "m1", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 432509, "base_quorum_begin": 432509, "expiry_ends_on_spend": false,
-      "expect": { "fate": "publish" }
-    },
-    {
-      "name": "expiry fork under strict-lottery-v8 past a later QuorumBegin: left to the stand-down",
-      "us": "m1", "fork_owner": "m1", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 432509, "base_quorum_begin": 432511, "expiry_ends_on_spend": true,
-      "expect": { "fate": "publish" }
+      "name": "member expiry fork past a later QuorumBegin: still republished (the stand-down, not startup, ends it)",
+      "us": "m1",
+      "fork_owner": "m1",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 432509,
+      "base_quorum_begin": 432511,
+      "expect": {
+        "fate": "publish"
+      }
     },
     {
       "name": "won and promoted fork: the base is this fork",
-      "us": "m1", "fork_owner": "m1", "live": true, "promoted": true, "base_operator": null,
-      "fork_point": 100, "base_quorum_begin": null, "expiry_ends_on_spend": false,
-      "expect": { "fate": "publish" }
+      "us": "m1",
+      "fork_owner": "m1",
+      "live": true,
+      "promoted": true,
+      "base_operator": null,
+      "fork_point": 100,
+      "base_quorum_begin": null,
+      "expect": {
+        "fate": "publish"
+      }
     },
     {
       "name": "another member's fork",
-      "us": "m1", "fork_owner": "m2", "live": true, "promoted": false, "base_operator": "op",
-      "fork_point": 100, "base_quorum_begin": null, "expiry_ends_on_spend": false,
-      "expect": { "fate": "not_ours" }
+      "us": "m1",
+      "fork_owner": "m2",
+      "live": true,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 100,
+      "base_quorum_begin": null,
+      "expect": {
+        "fate": "not_ours"
+      }
     },
     {
       "name": "our fork, already tombstoned",
-      "us": "m1", "fork_owner": "m1", "live": false, "promoted": false, "base_operator": "op",
-      "fork_point": 100, "base_quorum_begin": null, "expiry_ends_on_spend": false,
-      "expect": { "fate": "not_ours" }
+      "us": "m1",
+      "fork_owner": "m1",
+      "live": false,
+      "promoted": false,
+      "base_operator": "op",
+      "fork_point": 100,
+      "base_quorum_begin": null,
+      "expect": {
+        "fate": "not_ours"
+      }
     }
   ]
 }
