@@ -426,13 +426,23 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
             *e = (*seq, *lvs);
         }
     }
+    // A disputant takes part through its counted DisputeEnter only: a repeat entry it signed
+    // after it, below Q (or at or above Q but superseded), names no fork point and carries no
+    // grounds, so it is not in the scope (vector rearm_round_agree.json, late_enter, repeat_enter).
     updates
         .iter()
         .filter(|u| {
             u.operator_id == origin
                 || fork_of
                     .get(&u.operator_id.serialize())
-                    .is_some_and(|(_, lvs)| u.sequence_number > *lvs)
+                    .is_some_and(|(seq, lvs)| {
+                        u.sequence_number > *lvs
+                            && (u.sequence_number == *seq
+                                || !matches!(
+                                    LedgerOperation::tlv_decode(&u.message),
+                                    Ok(LedgerOperation::DisputeEnter { .. })
+                                ))
+                    })
         })
         .cloned()
         .collect()

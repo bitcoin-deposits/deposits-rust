@@ -2600,7 +2600,8 @@ mod rearm_round_agree_vector {
                 .unwrap();
         let mut cases = 0;
         for c in v["late_enter"].as_array().unwrap() {
-            let name = &c["name"].as_str().unwrap()[..10];
+            let full = c["name"].as_str().unwrap();
+            let name = &full[..full.find(':').unwrap()];
             let updates: Vec<SignedLedgerUpdate> = c["updates"]
                 .as_array()
                 .unwrap()
@@ -2675,6 +2676,16 @@ mod rearm_round_agree_vector {
                     "{name} {arm}: Accused(grounds)"
                 );
                 let rows = arm_rows(&scope);
+                // the arms of the disputants' forks after their counted fork points: a repeat
+                // entry must not move the fork point
+                if let Some(want) = e.get("dispute_arms") {
+                    let mut got: Vec<(String, u64)> = rows
+                        .iter()
+                        .map(|r| (hex::encode(r.armer.serialize()), r.seq))
+                        .collect();
+                    got.sort();
+                    assert_eq!(got, pairs(want), "{name} {arm}: the dispute's arms");
+                }
                 for w in e["window_cuts"].as_array().unwrap() {
                     let mut got: Vec<(String, u64)> = pick_round_arms(
                         &rows,
@@ -2701,22 +2712,31 @@ mod rearm_round_agree_vector {
                     voters_hex, expect_voters,
                     "{name} {arm}: the lottery's voters"
                 );
-                let named = collect_manifest_armers(&scope, &manifest, 1, -1, c_height).unwrap();
-                let mut parts: Vec<_> = named.into_iter().map(|a| a.participant).collect();
-                parts.sort_by_key(|p| p.pubkey.serialize());
-                let spk =
-                    LotteryScriptBuilder::new(parts, voters, threshold, bitcoin::Network::Regtest)
+                // an arm the manifest names that takes no part: no lottery at all
+                let spk = collect_manifest_armers(&scope, &manifest, 1, -1, c_height)
+                    .ok()
+                    .map(|named| {
+                        let mut parts: Vec<_> = named.into_iter().map(|a| a.participant).collect();
+                        parts.sort_by_key(|p| p.pubkey.serialize());
+                        LotteryScriptBuilder::new(
+                            parts,
+                            voters,
+                            threshold,
+                            bitcoin::Network::Regtest,
+                        )
                         .build()
                         .unwrap()
-                        .script_pubkey();
+                        .script_pubkey()
+                    });
                 assert_eq!(
-                    hex::encode(spk.as_bytes()) == c["chain"]["lottery_spk"].as_str().unwrap(),
+                    spk.is_some_and(|spk| hex::encode(spk.as_bytes())
+                        == c["chain"]["lottery_spk"].as_str().unwrap()),
                     arm == "final",
                     "{name} {arm}: the lottery pays the chain's output iff the rule is applied"
                 );
             }
             cases += 1;
         }
-        assert_eq!(cases, 1, "every late_enter case ran");
+        assert_eq!(cases, 3, "every late_enter case ran");
     }
 }

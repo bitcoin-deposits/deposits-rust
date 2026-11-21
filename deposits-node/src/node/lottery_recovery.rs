@@ -977,20 +977,112 @@ pub(crate) fn confiscation_height(
     backend: &dyn crate::chain_backend::ChainBackend,
     updates: &[deposits_core::SignedLedgerUpdate],
 ) -> Option<u32> {
-    let (vault, _) = super::vault_watch::current_vault(updates)?;
-    let floor = super::armers::first_arm_height(updates)?;
-    landed_spender(backend, &vault, floor).map(|(_, h, _)| h)
+    dispute_confiscation(backend, updates).map(|(h, _)| h)
 }
 
-/// Round 1's lottery outpoint: output 0 of the confirmed spend of the vault the ledger's latest
-/// `QuorumBegin` names (the confiscation), once the search has found it.
+/// Round 1's lottery outpoint: output 0 of the confirmed confiscation of the dispute's vault
+/// ([`dispute_confiscation`]), once the search has found it.
 pub(crate) fn landed_lottery_outpoint(
     backend: &dyn crate::chain_backend::ChainBackend,
     updates: &[deposits_core::SignedLedgerUpdate],
 ) -> Option<OutPoint> {
-    let (vault, _) = super::vault_watch::current_vault(updates)?;
+    dispute_confiscation(backend, updates).map(|(_, txid)| OutPoint { txid, vout: 0 })
+}
+
+/// The dispute's confiscation, (block C, txid): the confirmed spend of the vault of the
+/// dispute's own fork point, Q read over the DisputeEnters signed at or below C (DEP-03 §When
+/// the set is final), never the vault of whatever QuorumBegin is latest. The latest one can be
+/// a disputant's fork's, or the operator's past the fork point; and a DisputeEnter signed after
+/// the confiscation naming a higher fork point would otherwise move Q, the vault and C with it,
+/// and so count itself back in.
+///
+/// The DisputeEnters are taken in block order. For each prefix, Q is the original operator's
+/// latest QuorumBegin at or below the prefix's highest `last_valid_sequence`, and its vault's
+/// landed spend at C answers when the prefix is exactly the DisputeEnters at or below C (its
+/// last at or below C, the next above it). A spend that is a later QuorumBegin's rotation (one
+/// of its rungs) confiscates nothing: the dispute moved on with the vault. The search for a
+/// spend is chunked across calls (`landed_spender`); until a prefix's spent vault is found the
+/// answer is `None`, never a later prefix's.
+pub(crate) fn dispute_confiscation(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    updates: &[deposits_core::SignedLedgerUpdate],
+) -> Option<(u32, bitcoin::Txid)> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let origin = updates
+        .iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id)?;
     let floor = super::armers::first_arm_height(updates)?;
-    landed_spender(backend, &vault, floor).map(|(_, _, txid)| OutPoint { txid, vout: 0 })
+    // the original operator's QuorumBegins: (seq, vault, rungs)
+    let mut qbs: Vec<(u64, OutPoint, Vec<[u8; 32]>)> = updates
+        .iter()
+        .filter(|u| u.operator_id == origin)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(
+                op @ LedgerOperation::QuorumBegin {
+                    new_outpoint_txid,
+                    new_outpoint_vout,
+                    ..
+                },
+            ) => Some((
+                u.sequence_number,
+                OutPoint::new(
+                    bitcoin::Txid::from_byte_array(new_outpoint_txid),
+                    new_outpoint_vout,
+                ),
+                deposits_core::vault_spend::quorum_begin_rungs(&op),
+            )),
+            _ => None,
+        })
+        .collect();
+    qbs.sort_by_key(|q| q.0);
+    qbs.dedup_by_key(|q| q.0);
+    let mut enters: Vec<(u32, u64, u64)> = updates
+        .iter()
+        .filter(|u| u.operator_id != origin)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                ..
+            }) => Some((u.block_height, u.sequence_number, last_valid_sequence)),
+            _ => None,
+        })
+        .collect();
+    enters.sort();
+    let mut top = 0u64;
+    for k in 0..enters.len() {
+        top = top.max(enters[k].2);
+        let Some(qi) = qbs.iter().rposition(|q| q.0 <= top) else {
+            continue;
+        };
+        let (_, vault, _) = &qbs[qi];
+        let Some((_, c, txid)) = landed_spender(backend, vault, floor) else {
+            // Unspent: no confiscation of this Q's vault, so the next enter may move Q.
+            // Spent but not yet found (the search is chunked): wait, or a later prefix's
+            // vault, found first, would answer for this one.
+            if backend
+                .is_output_unspent(&vault.txid, vault.vout)
+                .ok()
+                .flatten()
+                == Some(true)
+            {
+                continue;
+            }
+            return None;
+        };
+        let rotation = qbs[qi + 1..]
+            .iter()
+            .any(|q| q.2.contains(&txid.to_byte_array()));
+        if rotation {
+            continue;
+        }
+        let next_above = enters.get(k + 1).is_none_or(|e| e.0 > c);
+        if enters[k].0 <= c && next_above {
+            return Some((c, txid));
+        }
+    }
+    None
 }
 
 /// The landed spender of `vault` (its first output's script), the block it confirmed
@@ -1412,5 +1504,231 @@ mod tests {
                 57
             ]
         );
+    }
+
+    /// DEP-03 §When the set is final: C is the confiscation of the vault of the dispute's own
+    /// fork point. A DisputeEnter signed after it that names a higher fork point (past a later
+    /// QuorumBegin of the operator, whose vault was spent later) must not move Q to that vault,
+    /// C to that spend, and so count itself back in.
+    mod dispute_confiscation_tests {
+        use super::*;
+        use crate::chain_backend::{ChainBackend, ConfirmedSpend, UnspentOutput};
+        use crate::error::Error;
+        use bitcoin::hashes::Hash as _;
+        use bitcoin::{BlockHash, Script, Txid};
+        use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+        use deposits_core::{SignedLedgerUpdate, TlvEncode};
+
+        /// vault -> (created at, its confirmed spender, confirmed at)
+        struct Chain {
+            tip: u32,
+            spends: HashMap<OutPoint, (u32, Transaction, u32)>,
+        }
+        impl ChainBackend for Chain {
+            fn get_tip_height(&self) -> Result<u32, Error> {
+                Ok(self.tip)
+            }
+            fn get_block_hash(&self, _: u32) -> Result<BlockHash, Error> {
+                unimplemented!()
+            }
+            fn get_block_height_if_in_best_chain(
+                &self,
+                _: &BlockHash,
+            ) -> Result<Option<u32>, Error> {
+                unimplemented!()
+            }
+            fn get_tx(&self, _: &Txid) -> Result<Option<Transaction>, Error> {
+                Ok(None)
+            }
+            fn get_tx_block_height(&self, t: &Txid) -> Result<Option<u32>, Error> {
+                Ok(self.spends.iter().find_map(|(o, (created, tx, h))| {
+                    if o.txid == *t {
+                        Some(*created)
+                    } else if tx.compute_txid() == *t {
+                        Some(*h)
+                    } else {
+                        None
+                    }
+                }))
+            }
+            fn is_output_unspent(&self, t: &Txid, v: u32) -> Result<Option<bool>, Error> {
+                Ok(Some(!self.spends.contains_key(&OutPoint::new(*t, v))))
+            }
+            fn find_unspent_output_at(&self, _: &Script) -> Result<Option<UnspentOutput>, Error> {
+                Ok(None)
+            }
+            fn find_spending_tx(
+                &self,
+                o: &OutPoint,
+                _: &Script,
+                _: u32,
+            ) -> Result<Option<Transaction>, Error> {
+                Ok(self.spends.get(o).map(|x| x.1.clone()))
+            }
+            fn confirmed_spend(
+                &self,
+                o: &OutPoint,
+                _: &Script,
+                from: u32,
+            ) -> Result<ConfirmedSpend, Error> {
+                Ok(match self.spends.get(o) {
+                    None => ConfirmedSpend::Unspent,
+                    Some((_, _, h)) if *h >= from => ConfirmedSpend::SpentAt(*h),
+                    Some(_) => ConfirmedSpend::SpentBefore(from),
+                })
+            }
+            fn broadcast_tx(&self, _: &Transaction) -> Result<Txid, Error> {
+                unimplemented!()
+            }
+        }
+
+        fn update(
+            seq: u64,
+            height: u32,
+            operator_id: PublicKey,
+            op: LedgerOperation,
+        ) -> SignedLedgerUpdate {
+            SignedLedgerUpdate {
+                message: op.tlv_encode(),
+                message_type: 0x8001,
+                operator_id,
+                ledger_id: [0x5c; 32],
+                sequence_number: seq,
+                previous_hash: [0u8; 32],
+                content_hash: [0u8; 32],
+                block_height: height,
+                block_hash: [0u8; 32],
+                operator_signature: [0u8; 64],
+                cosignatures: Vec::new(),
+            }
+        }
+        fn qb(vault: [u8; 32], members: &[PublicKey]) -> LedgerOperation {
+            LedgerOperation::QuorumBegin {
+                exit_cutoff_height: None,
+                exit_outputs: Vec::new(),
+                splice_in_outpoint: None,
+                splice_in_amount: None,
+                reference_feerate: None,
+                dormancy_outputs: Vec::new(),
+                migration_manifest: Vec::new(),
+                migration_receiver: None,
+                migration_vout: None,
+                consumed_notice: None,
+                rotation_rungs: vec![],
+                reserves_id: "bcrt1q...".to_string(),
+                spending_txid: [0; 32],
+                new_outpoint_txid: vault,
+                new_outpoint_vout: 0,
+                amount: 1_000_000,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0; 32],
+                quorum_members: members
+                    .iter()
+                    .copied()
+                    .map(QuorumMemberRef::pubkey_only)
+                    .collect(),
+                collateral_amount: 0,
+                protocol_version: Some("cltv-offset-v2".to_string()),
+            }
+        }
+        fn enter(lvs: u64) -> LedgerOperation {
+            LedgerOperation::DisputeEnter {
+                last_valid_sequence: lvs,
+                reason: "fraud_proof".to_string(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
+                fraud_proof_hash: None,
+                fraud_proof: None,
+            }
+        }
+        fn armed() -> LedgerOperation {
+            LedgerOperation::DisputeArmed {
+                armed_block: 1_000,
+                commitment_hash: [1; 20],
+                target_reserves: "t".into(),
+                replacement_collateral: None,
+                rearm_round: None,
+            }
+        }
+        fn spender(tag: u32) -> Transaction {
+            Transaction {
+                version: bitcoin::transaction::Version::TWO,
+                lock_time: bitcoin::absolute::LockTime::from_consensus(tag),
+                input: vec![],
+                output: vec![TxOut {
+                    value: bitcoin::Amount::from_sat(1_000),
+                    script_pubkey: bitcoin::ScriptBuf::new(),
+                }],
+            }
+        }
+
+        #[test]
+        fn a_late_enter_naming_a_higher_fork_point_cannot_redirect_c() {
+            let (op, a, b, late) = (pubkey(0x51), pubkey(0x52), pubkey(0x53), pubkey(0x54));
+            // unique vault txids: landed_spender's progress cache is process-wide
+            let (v1, v2) = ([0xd1; 32], [0xd2; 32]);
+            let o1 = OutPoint::new(Txid::from_byte_array(v1), 0);
+            let o2 = OutPoint::new(Txid::from_byte_array(v2), 0);
+            let open = LedgerOperation::LedgerOpen {
+                operator_id: op,
+                reserves_id: "bcrt1q...".to_string(),
+                genesis_block: 0,
+                reserves_amount: 100_000,
+                collateral_amount: 0,
+                protocol_version: None,
+            };
+            let members = [op, a, b, late];
+            let mut updates = vec![
+                update(0, 900, op, open),
+                update(3, 950, op, qb(v1, &members)),
+                // in time: A and B fork after 4, Q = 3, vault v1
+                update(5, 1_000, a, enter(4)),
+                update(5, 1_001, b, enter(4)),
+                update(6, 1_002, a, armed()),
+            ];
+            // the operator goes on and records QuorumBegin 9 on its own chain (vault v2)
+            updates.push(update(9, 1_100, op, qb(v2, &members)));
+            let (c1, c2) = (2_000u32, 2_500u32);
+            let (t1, t2) = (spender(1), spender(2));
+            let chain = Chain {
+                tip: 3_000,
+                spends: HashMap::from([(o1, (950, t1.clone(), c1)), (o2, (1_100, t2.clone(), c2))]),
+            };
+            // the search is chunked, a call at a time: poll as the node's passes do
+            let settle =
+                |u: &[SignedLedgerUpdate]| (0..200).find_map(|_| dispute_confiscation(&chain, u));
+            // the dispute's vault is v1, confiscated at c1
+            assert_eq!(settle(&updates), Some((c1, t1.compute_txid())));
+            // a DisputeEnter signed after C naming fork point 10 (Q would be 9, vault v2)
+            updates.push(update(11, c1 + 100, late, enter(10)));
+            assert_eq!(
+                settle(&updates),
+                Some((c1, t1.compute_txid())),
+                "a late enter must not move Q to v2 and C to its spend"
+            );
+            assert_eq!(confiscation_height(&chain, &updates), Some(c1));
+            assert_eq!(
+                landed_lottery_outpoint(&chain, &updates),
+                Some(OutPoint {
+                    txid: t1.compute_txid(),
+                    vout: 0
+                })
+            );
+            // so dispute_scope_final drops the late enter, and its fork takes no part
+            let scoped = deposits_core::rotation_order::dispute_scope_final(&updates, Some(c1));
+            assert!(
+                scoped.iter().all(|u| u.operator_id != late),
+                "the late enter's fork takes no part"
+            );
+            // control: the ledger's latest QuorumBegin (the old lookup) is v2, spent at c2, under
+            // which the late enter (signed at c1+100 < c2) would have counted
+            let (latest, _) = super::super::super::vault_watch::current_vault(&updates).unwrap();
+            assert_eq!(latest, o2);
+            let unscoped = deposits_core::rotation_order::dispute_scope_final(&updates, Some(c2));
+            assert!(
+                unscoped.iter().any(|u| u.operator_id == late),
+                "control: under c2 it counts"
+            );
+        }
     }
 }
