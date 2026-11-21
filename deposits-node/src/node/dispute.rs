@@ -5840,6 +5840,23 @@ impl Node {
             }
             let (pledges, custody) =
                 fork_holds(&fork_events(&mine, &self.node_id, &confirmed), false);
+            // Name every holder, so a coin that stays taken can be traced to the fork that holds it
+            // (regtest 1121-next4c: 24 of ref6's coins, held by 25 forks the rule reads as live).
+            for p in &pledges {
+                tracing::debug!(
+                    "pledge_exclusion: {} held as the pledge of our live fork {} (its last op of ours: {})",
+                    p,
+                    &k[..k.len().min(88)],
+                    mine.last().map(|u| ledger_op_name(&u.message)).unwrap_or("none")
+                );
+            }
+            if let Some(c) = &custody {
+                tracing::debug!(
+                    "pledge_exclusion: {} held as custody of our fork {} (a binding acquire)",
+                    c,
+                    &k[..k.len().min(88)]
+                );
+            }
             ex.taken.extend(pledges);
             ex.taken.extend(custody);
         }
@@ -6111,5 +6128,19 @@ mod fork_choice_tests {
             fork_for_dispute(&key(296_850), true, &ours),
             ForkChoice::Refuse(_)
         ));
+    }
+}
+
+/// The operation's name, for logs.
+fn ledger_op_name(message: &[u8]) -> &'static str {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    match LedgerOperation::tlv_decode(message) {
+        Ok(LedgerOperation::DisputeEnter { .. }) => "DisputeEnter",
+        Ok(LedgerOperation::DisputeArmed { .. }) => "DisputeArmed",
+        Ok(LedgerOperation::DisputeYield) => "DisputeYield",
+        Ok(LedgerOperation::DisputeAcquire { .. }) => "DisputeAcquire",
+        Ok(_) => "other",
+        Err(_) => "undecodable",
     }
 }
