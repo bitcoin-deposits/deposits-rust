@@ -369,6 +369,17 @@ impl Node {
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
+        // A retry publishes the QuorumBegin we already signed here (it is on our base, written
+        // ahead); it never signs a second update at this sequence.
+        if let Some(stored) = self.own_update_at(ledger_id, sequence) {
+            self.nostr
+                .broadcast_ledger_update(&stored)
+                .await
+                .map_err(|e| Error::Protocol(format!("Failed to rebroadcast seq {}: {:?}", sequence, e)))?;
+            self.published_all(ledger_id);
+            tracing::info!("QuorumBegin already signed at seq {}: republished those bytes", sequence);
+            return Ok(());
+        }
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
@@ -393,34 +404,27 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
+        // WRITE-AHEAD: apply to our OWN base and persist (fsync'd) BEFORE the broadcast, and
+        // publish only if both succeed. Publishing to the relay alone once left the winner's
+        // local base stuck at the DisputeAcquire tip (its next DepositOpen then collided with
+        // this QuorumBegin's sequence, an equivocation to every cosigner); broadcasting before
+        // persisting left the other half: a kill in between, and the retry signed a second
+        // QuorumBegin here.
+        self.handler
+            .apply_updates_to_ledger(ledger_id, vec![signed_update.clone()])
+            .map_err(|e| {
+                Error::Protocol(format!(
+                    "Rotation QuorumBegin not applied to local base {}: {}; not publishing it",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    e
+                ))
+            })?;
+        let pending = self.write_ahead(ledger_id, &signed_update, true)?;
         self.nostr
             .broadcast_ledger_update(&signed_update)
             .await
             .map_err(|e| Error::Protocol(format!("Failed to broadcast QuorumBegin: {:?}", e)))?;
-
-        // Apply the rotation QuorumBegin to our OWN base ledger too. Publishing
-        // to the relay alone left the winner's local base stuck at the
-        // DisputeAcquire tip (seq N): the losers fetched + applied this seq-(N+1)
-        // QuorumBegin and advanced, but the winner's next_sequence stayed N+1,
-        // so a subsequent `deposit_open` committed a DepositOpen at the SAME
-        // seq the network already holds a QuorumBegin for — and every cosigner
-        // refused it as an equivocation ("seq N+1 already committed to a
-        // different update"). Applying locally keeps the winner in lockstep
-        // with what it just broadcast, so the re-opened deposits land at N+2+.
-        if let Err(e) = self
-            .handler
-            .apply_updates_to_ledger(ledger_id, vec![signed_update])
-        {
-            tracing::warn!(
-                "Rotation QuorumBegin broadcast but not applied to local base {}: {} \
-                 (local base will lag the relay by one op)",
-                &ledger_id[..16.min(ledger_id.len())],
-                e
-            );
-        }
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist rotated base ledger {}: {}", ledger_id, e);
-        }
+        self.published(&pending);
 
         tracing::info!(
             "QuorumBegin published. New reserves at: {}",
@@ -535,6 +539,28 @@ impl Node {
                 .try_into()
                 .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
+            // A retry publishes what we already signed at this sequence (written ahead on our
+            // base) and carries on from it; it never signs a second update there.
+            if let Some(stored) = self.own_update_at(ledger_id, sequence) {
+                self.nostr
+                    .broadcast_ledger_update(&stored)
+                    .await
+                    .map_err(|e| Error::Protocol(format!("Failed to rebroadcast seq {}: {:?}", sequence, e)))?;
+                tracing::info!("seq {} already signed: republished those bytes", sequence);
+                let reopened = matches!(
+                    LedgerOperation::tlv_decode(&stored.message),
+                    Ok(LedgerOperation::DepositOpen { deposit_id: d, .. }) if d == deposit_id
+                );
+                our_latest = stored;
+                if reopened {
+                    continue;
+                }
+                return Err(Error::Protocol(format!(
+                    "seq {} holds another update of ours; continue again from there",
+                    sequence
+                )));
+            }
+
             let mut signed_update = SignedLedgerUpdate {
                 message: message_bytes,
                 message_type: deposits_core::messages::consts::DEPOSIT_OPEN,
@@ -558,28 +584,26 @@ impl Node {
                 )
                 .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
+            // WRITE-AHEAD: apply the re-opened DepositOpen to our OWN base (the same lockstep
+            // invariant as the rotation QuorumBegin above) and persist it, fsync'd, BEFORE the
+            // broadcast; publish only if both succeed.
+            self.handler
+                .apply_updates_to_ledger(ledger_id, vec![signed_update.clone()])
+                .map_err(|e| {
+                    Error::Protocol(format!(
+                        "Continued DepositOpen not applied to local base {}: {}; not publishing it",
+                        &ledger_id[..16.min(ledger_id.len())],
+                        e
+                    ))
+                })?;
+            let pending = self.write_ahead(ledger_id, &signed_update, true)?;
             self.nostr
                 .broadcast_ledger_update(&signed_update)
                 .await
                 .map_err(|e| {
                     Error::Protocol(format!("Failed to broadcast DepositOpen: {:?}", e))
                 })?;
-
-            // Apply the re-opened DepositOpen to our OWN base ledger too — the
-            // same lockstep invariant as the rotation QuorumBegin above.
-            // Without it the winner's local next_sequence trails every op it
-            // continues, and the next real depositor's open collides with an
-            // already-committed sequence.
-            if let Err(e) = self
-                .handler
-                .apply_updates_to_ledger(ledger_id, vec![signed_update.clone()])
-            {
-                tracing::warn!(
-                    "Continued DepositOpen broadcast but not applied to local base {}: {}",
-                    &ledger_id[..16.min(ledger_id.len())],
-                    e
-                );
-            }
+            self.published(&pending);
 
             tracing::info!("Re-opened deposit {}...", hex::encode(&deposit_id[..8]));
 

@@ -557,17 +557,26 @@ impl LedgerActor {
         // with the inbound apply path above).
         self.apply_wakeup.notify_waiters();
 
-        // 5. Persist the authoritative `<id>.jsonl` so the on-disk
-        //    view matches the in-memory tip even if the daemon dies
-        //    before broadcast completes.
-        if let Err(e) = self.handler.persist_ledger_to_disk(&self.ledger_id) {
-            tracing::warn!(
-                "LedgerActor[{}…] handle_commit persist seq {} failed: {}",
+        // 5. WRITE-AHEAD (node::write_ahead): the pending file, then the authoritative
+        //    `<id>.jsonl`, durable before the broadcast. A failure is an error and the update
+        //    is never published: published-but-not-saved is what let a retry sign a second
+        //    update at this sequence.
+        let sync = super::write_ahead::fsync_operator_updates();
+        let pending = super::write_ahead::write_pending(
+            &self.handler.data_dir,
+            &self.ledger_id,
+            &update_for_return,
+            sync,
+        )
+        .and_then(|p| self.handler.persist_ledger_durable(&self.ledger_id, sync).map(|_| p))
+        .map_err(|e| {
+            format!(
+                "LedgerActor[{}…] seq {} not persisted ({}); not publishing it",
                 &self.ledger_id[..16.min(self.ledger_id.len())],
                 update_for_return.sequence_number,
                 e
-            );
-        }
+            )
+        })?;
 
         // 6. Broadcast over Nostr via the outbox. Wait for the
         //    event id so callers (whose API contract returns
@@ -585,10 +594,15 @@ impl LedgerActor {
         }
         // Tolerate broadcast failure — the relay echo or a peer's
         // gap-fill will deliver the update if our publish dropped.
-        let event_id = brx
+        let sent = brx
             .await
-            .map_err(|_| "Broadcast reply dropped".to_string())?
-            .unwrap_or_default();
+            .map_err(|_| "Broadcast reply dropped".to_string())?;
+        // Sent: the pending file has done its job. Not sent: it stays, and the next pass (or
+        // start) publishes these bytes.
+        if sent.is_ok() {
+            let _ = std::fs::remove_file(&pending);
+        }
+        let event_id = sent.unwrap_or_default();
 
         Ok(CommitResult {
             event_id,

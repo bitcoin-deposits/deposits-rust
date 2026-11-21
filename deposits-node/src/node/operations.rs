@@ -379,16 +379,14 @@ impl Node {
         self.validate_chain_before_persist(ledger_id)?;
         let validate_elapsed = t_validate.elapsed();
 
-        // Persist the ledger
+        // Persist, then broadcast (write-ahead): a failed persist is an error and the update is
+        // never published.
         let t_persist2 = std::time::Instant::now();
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist ledger after signing: {}", e);
-        }
+        let result = self
+            .persist_then_broadcast_last(ledger_id, super::write_ahead::fsync_operator_updates())
+            .await;
         let persist2_elapsed = t_persist2.elapsed();
-
-        // Broadcast
         let t_broadcast = std::time::Instant::now();
-        let result = self.broadcast_last_update(ledger_id).await;
         let broadcast_elapsed = t_broadcast.elapsed();
 
         tracing::debug!("[PROFILE] sign_and_broadcast inner: cosign_wait=included_above, sign_op={:?}, validate={:?}, persist={:?}, broadcast={:?}",
