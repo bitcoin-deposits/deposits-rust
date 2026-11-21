@@ -1495,17 +1495,18 @@ impl crate::node::Node {
         }
         // DEP-03 §"The dispute": only the current dispute's arms (and the bound counts only
         // those); a stale DisputeEnter's fork takes no part. Vector rearm_round_agree.json.
-        let updates =
-            deposits_core::rotation_order::dispute_scope(&self.lottery_updates(ledger_id).await);
-        let updates: &[SignedLedgerUpdate] = &updates;
-        if updates.is_empty() {
+        let raw = self.lottery_updates(ledger_id).await;
+        if raw.is_empty() {
             return Err("failed to fetch ledger updates from relay".into());
         }
         let chain = self.wallet.chain_backend();
         let t = std::time::Instant::now();
         // DEP-03 "When the set is final": once the confiscation confirmed, arms above its
-        // block do not count (a restarted member's late re-arm moved E past it).
-        let confiscated_at = super::lottery_recovery::confiscation_height(&*chain, &updates);
+        // block do not count (a restarted member's late re-arm moved E past it), and neither do
+        // DisputeEnters (their grounds convict nobody: regtest 12bc96d2, 2026-11-21).
+        let confiscated_at = super::lottery_recovery::confiscation_height(&*chain, &raw);
+        let updates = deposits_core::rotation_order::dispute_scope_final(&raw, confiscated_at);
+        let updates: &[SignedLedgerUpdate] = &updates;
         // DEP-03 §Grounded arms: each disputant's grounds, judged here.
         let grounds = Box::pin(self.grounds_verdicts(&updates)).await;
         let set = eligible_armers_grounded_at(&*chain, &updates, None, confiscated_at, &grounds)?;
@@ -2304,5 +2305,140 @@ mod rearm_round_agree_vector {
             cases += 1;
         }
         assert_eq!(cases, 4, "every rearm_round_agree case ran");
+    }
+
+    /// DEP-03 §When the set is final, for DisputeEnters: 12bc96d2's DisputeEnter signed at
+    /// 34763, after the confiscation at 23996, takes no part (`final`); read without the rule
+    /// (`control`) its proof convicts c30c1b29, empties round 2's cut and changes the voters.
+    #[test]
+    fn a_dispute_enter_above_the_confiscation_takes_no_part() {
+        use super::{
+            dispute_accused_keys, dispute_enter_grounds, lottery_voters_with, GroundsClass,
+            GroundsVerdicts, Verdict,
+        };
+        use deposits_core::rotation_order::dispute_scope_final;
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/rearm_round_agree.json"))
+                .unwrap();
+        let mut cases = 0;
+        for c in v["late_enter"].as_array().unwrap() {
+            let name = &c["name"].as_str().unwrap()[..10];
+            let updates: Vec<SignedLedgerUpdate> = c["updates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    SignedLedgerUpdate::tlv_decode(&hex::decode(h.as_str().unwrap()).unwrap())
+                        .unwrap()
+                })
+                .collect();
+            let operator = updates
+                .iter()
+                .find(|u| u.sequence_number == 0)
+                .unwrap()
+                .operator_id
+                .x_only_public_key()
+                .0;
+            let manifest: Vec<(PublicKey, u64)> = c["manifests"][0]["arms"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| {
+                    (
+                        PublicKey::from_str(a[0].as_str().unwrap()).unwrap(),
+                        a[1].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            let c_height = c["chain"]["confiscation_height"].as_u64().unwrap() as u32;
+            for (arm, at) in [("final", Some(c_height)), ("control", None)] {
+                let e = &c[arm];
+                let scope = dispute_scope_final(&updates, at);
+                let mut enters: Vec<String> = scope
+                    .iter()
+                    .filter(|u| {
+                        matches!(
+                            LedgerOperation::tlv_decode(&u.message),
+                            Ok(LedgerOperation::DisputeEnter { .. })
+                        )
+                    })
+                    .map(|u| hex::encode(u.operator_id.serialize()))
+                    .collect();
+                enters.sort();
+                enters.dedup();
+                assert_eq!(
+                    enters,
+                    strs(&e["in_dispute"]),
+                    "{name} {arm}: the disputants"
+                );
+                // Every carried proof taken as grounded (each verifies on regtest).
+                let judged = dispute_enter_grounds(&scope)
+                    .into_iter()
+                    .map(|(k, reason, class)| {
+                        let v = match class {
+                            GroundsClass::Ungrounded(w) => (Verdict::Ungrounded, w),
+                            _ => (Verdict::Grounded, "taken as grounded".to_string()),
+                        };
+                        (k, reason, v)
+                    })
+                    .collect();
+                let grounds = GroundsVerdicts::from_judged(&scope, judged);
+                let mut convicted: Vec<XOnlyPublicKey> = dispute_accused_keys(&scope, &grounds);
+                convicted.push(operator);
+                convicted.sort_by_key(|k| k.serialize());
+                convicted.dedup();
+                let convicted_hex: Vec<String> = convicted
+                    .iter()
+                    .map(|k| hex::encode(k.serialize()))
+                    .collect();
+                assert_eq!(
+                    convicted_hex,
+                    strs(&e["convicted_if_grounded"]),
+                    "{name} {arm}: Accused(grounds)"
+                );
+                let rows = arm_rows(&scope);
+                for w in e["window_cuts"].as_array().unwrap() {
+                    let mut got: Vec<(String, u64)> = pick_round_arms(
+                        &rows,
+                        w["round"].as_u64().unwrap() as u32,
+                        w["opens"].as_u64().unwrap() as u32,
+                        w["closes"].as_u64().unwrap() as u32,
+                    )
+                    .into_iter()
+                    .filter(|&i| !convicted.contains(&rows[i].armer.x_only_public_key().0))
+                    .map(|i| (hex::encode(rows[i].armer.serialize()), rows[i].seq))
+                    .collect();
+                    got.sort();
+                    assert_eq!(got, pairs(&w["arms"]), "{name} {arm}: the window's cut");
+                }
+                let (voters, threshold) = lottery_voters_with(&scope, &grounds).unwrap();
+                let voters_hex: Vec<String> =
+                    voters.iter().map(|k| hex::encode(k.serialize())).collect();
+                let expect_voters = if arm == "final" {
+                    strs(&e["lottery"]["voters"])
+                } else {
+                    strs(&e["lottery_voters"])
+                };
+                assert_eq!(
+                    voters_hex, expect_voters,
+                    "{name} {arm}: the lottery's voters"
+                );
+                let named = collect_manifest_armers(&scope, &manifest, 1, -1, c_height).unwrap();
+                let mut parts: Vec<_> = named.into_iter().map(|a| a.participant).collect();
+                parts.sort_by_key(|p| p.pubkey.serialize());
+                let spk =
+                    LotteryScriptBuilder::new(parts, voters, threshold, bitcoin::Network::Regtest)
+                        .build()
+                        .unwrap()
+                        .script_pubkey();
+                assert_eq!(
+                    hex::encode(spk.as_bytes()) == c["chain"]["lottery_spk"].as_str().unwrap(),
+                    arm == "final",
+                    "{name} {arm}: the lottery pays the chain's output iff the rule is applied"
+                );
+            }
+            cases += 1;
+        }
+        assert_eq!(cases, 1, "every late_enter case ran");
     }
 }

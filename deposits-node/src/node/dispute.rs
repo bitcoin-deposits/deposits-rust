@@ -4541,9 +4541,13 @@ impl Node {
         // Paginated relay fetch — bloated forks would otherwise
         // hide DisputeArmed at the tail beyond a single 500-event
         // window.
-        let paginated_updates = deposits_core::rotation_order::dispute_scope(
-            &self.fetch_lottery_updates(ledger_id).await,
-        );
+        // DEP-03 §When the set is final: a DisputeEnter above the confiscation's block takes no
+        // part, in the voters below as in the armer set.
+        let fetched = self.fetch_lottery_updates(ledger_id).await;
+        let confiscated_at =
+            super::lottery_recovery::confiscation_height(&*self.wallet.chain_backend(), &fetched);
+        let paginated_updates =
+            deposits_core::rotation_order::dispute_scope_final(&fetched, confiscated_at);
         if paginated_updates.is_empty() {
             return Err(Error::Protocol(
                 "Failed to fetch ledger updates from relay".to_string(),

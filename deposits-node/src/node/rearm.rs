@@ -161,7 +161,11 @@ impl Node {
         // DEP-03 §"The dispute", as cl's `%all-arms` reads it through `dispute-forks`: a round's
         // arms, the four-arm bound, the manifests and the voters are the current dispute's. A
         // stale fork's round-2 arms (cld364 on 8082521c, regtest 2026-11-20) are no arms.
-        let updates = deposits_core::rotation_order::dispute_scope(&updates);
+        // DEP-03 §When the set is final: a DisputeEnter signed above the confiscation's block
+        // takes no part (its grounds convict no later round's armer: regtest 12bc96d2).
+        let confiscated_at =
+            super::lottery_recovery::confiscation_height(&*self.wallet.chain_backend(), &updates);
+        let updates = deposits_core::rotation_order::dispute_scope_final(&updates, confiscated_at);
         let grounds = Box::pin(self.grounds_verdicts(&updates)).await;
         let (voters, threshold) = super::armers::lottery_voters_with(&updates, &grounds)
             .ok_or("no QuorumBegin to derive the recovery voters from")?;

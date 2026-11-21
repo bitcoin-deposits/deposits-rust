@@ -128,7 +128,7 @@ pub fn rebuild_matching(
     spend_height: Option<u32>,
     grounds: &crate::node::armers::GroundsVerdicts,
 ) -> Result<(), String> {
-    let scoped = deposits_core::rotation_order::dispute_scope(updates);
+    let scoped = deposits_core::rotation_order::dispute_scope_final(updates, spend_height);
     match rebuild_matching_in(
         chain,
         ledger_id,
@@ -188,7 +188,7 @@ pub fn rebuild_arm_set(
     spend_height: Option<u32>,
     grounds: &crate::node::armers::GroundsVerdicts,
 ) -> Result<Vec<(bitcoin::secp256k1::PublicKey, u64)>, String> {
-    let scoped = deposits_core::rotation_order::dispute_scope(updates);
+    let scoped = deposits_core::rotation_order::dispute_scope_final(updates, spend_height);
     rebuild_set_in(
         chain,
         ledger_id,
@@ -484,7 +484,7 @@ pub fn rebuild_matching_manifest(
     if !deposits_core::types::ruleset_strict_lottery(&grounds.ruleset) {
         return Err("arm manifests are read only under strict-lottery-v8".into());
     }
-    let scoped = deposits_core::rotation_order::dispute_scope(updates);
+    let scoped = deposits_core::rotation_order::dispute_scope_final(updates, spend_height);
     let mut why = Vec::new();
     for (i, m) in manifests.iter().enumerate() {
         match rebuild_matching_in(
@@ -769,6 +769,9 @@ impl crate::node::Node {
         txid: bitcoin::Txid,
         matched: &std::sync::Mutex<std::collections::HashSet<bitcoin::Txid>>,
     ) -> bool {
+        // DEP-03 §When the set is final: a DisputeEnter signed above the spend's block takes no
+        // part (its grounds are not judged, so they convict nobody).
+        let updates = deposits_core::rotation_order::without_enters_above(&updates, height);
         // DEP-03 §Grounded arms: each disputant's grounds, judged here before the rebuild.
         // Boxed: judging a carried vault-spend proof can ask this again for the spend it cites.
         let grounds = Box::pin(self.grounds_verdicts(&updates)).await;

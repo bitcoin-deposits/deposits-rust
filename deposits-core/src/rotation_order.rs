@@ -438,6 +438,65 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
         .collect()
 }
 
+/// DEP-03 §When the set is final: `updates` without the `DisputeEnter`s signed above block
+/// `confiscated_at`, the block the dispute's confiscation confirmed in (none dropped when it has
+/// not confirmed). Such a DisputeEnter takes no part in the dispute, as an arm above that block
+/// does not: it names no fork point, its grounds convict nobody (so neither `Accused(grounds)`
+/// nor the recovery voters change), and it admits its author to no later re-arm round; its
+/// author takes part through its latest DisputeEnter at or below the block, if any. On regtest
+/// (12bc96d2, 2026-11-21) a contagion proof re-sent after the confiscation at 23996 made a member
+/// enter at 34763 on a `NonConformingCosignature` convicting c30c1b29, which emptied round 2's
+/// only window cut. Vector `rearm_round_agree.json`, `late_enter`.
+pub fn without_enters_above(
+    updates: &[SignedLedgerUpdate],
+    confiscated_at: Option<u32>,
+) -> Vec<SignedLedgerUpdate> {
+    let Some(c) = confiscated_at else {
+        return updates.to_vec();
+    };
+    updates
+        .iter()
+        .filter(|u| {
+            u.block_height <= c
+                || !matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeEnter { .. })
+                )
+        })
+        .cloned()
+        .collect()
+}
+
+/// [`dispute_scope`] once the confiscation has confirmed in block `confiscated_at`: the current
+/// dispute without the DisputeEnters signed above it ([`without_enters_above`]).
+///
+/// When every DisputeEnter was signed above it, no disputant takes part and only the original
+/// operator's chain remains ([`dispute_scope`] alone keeps everything when there is no
+/// DisputeEnter, which is right only for a ledger never disputed).
+pub fn dispute_scope_final(
+    updates: &[SignedLedgerUpdate],
+    confiscated_at: Option<u32>,
+) -> Vec<SignedLedgerUpdate> {
+    let kept = without_enters_above(updates, confiscated_at);
+    let is_enter = |u: &SignedLedgerUpdate| {
+        matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::DisputeEnter { .. })
+        )
+    };
+    if kept.len() < updates.len() && !kept.iter().any(is_enter) {
+        let origin = updates
+            .iter()
+            .find(|u| u.sequence_number == 0)
+            .map(|u| u.operator_id);
+        return kept
+            .into_iter()
+            .filter(|u| Some(u.operator_id) == origin)
+            .collect();
+    }
+    dispute_scope(&kept)
+}
+
 /// DEP-06 recovery voters: the members, other than the original operator (author of sequence
 /// 0), of the latest `QuorumBegin` the original operator authored at a sequence at or below the
 /// dispute's fork point: the lowest `last_valid_sequence` among the DisputeEnters of the CURRENT
