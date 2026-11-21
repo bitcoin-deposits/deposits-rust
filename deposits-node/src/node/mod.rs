@@ -187,6 +187,9 @@ struct CosignCollector {
     results: std::sync::Mutex<Vec<CoSignResult>>,
     seen_pubkeys: std::sync::Mutex<std::collections::HashSet<[u8; 33]>>,
     notify: tokio::sync::Notify,
+    /// Refusals of this draft's height as too old (`cosign_restage::is_stale_refusal`), and the
+    /// last such reason: the round reports them so the draft is re-staged rather than resent.
+    stale_refusals: std::sync::Mutex<(usize, String)>,
 }
 
 impl CosignCollector {
@@ -197,6 +200,7 @@ impl CosignCollector {
             results: std::sync::Mutex::new(Vec::new()),
             seen_pubkeys: std::sync::Mutex::new(std::collections::HashSet::new()),
             notify: tokio::sync::Notify::new(),
+            stale_refusals: std::sync::Mutex::new((0, String::new())),
         }
     }
 
@@ -255,6 +259,26 @@ impl CosignCollector {
 
     fn count(&self) -> usize {
         self.results.lock().unwrap().len()
+    }
+
+    /// A cosigner refused this draft's height as too old. Wakes the waiting round when our own
+    /// tip (`our_height`) has moved past the draft, so it is re-staged now instead of after the
+    /// whole deadline; otherwise re-staging could not help and the round waits for the others.
+    fn note_stale_refusal(&self, reason: &str, our_height: u32) {
+        {
+            let mut s = self.stale_refusals.lock().unwrap();
+            s.0 += 1;
+            s.1 = reason.to_string();
+        }
+        let draft = self.cosign_data.as_deref().and_then(cosign_restage::cosign_data_height);
+        if draft.is_some_and(|d| cosign_restage::draft_is_stale(our_height, d, true)) {
+            self.notify.notify_one();
+        }
+    }
+
+    /// (count, last reason) of stale-height refusals.
+    fn stale_refusals(&self) -> (usize, String) {
+        self.stale_refusals.lock().unwrap().clone()
     }
 
     /// The results so far; the round keeps them for a retry.
@@ -702,6 +726,9 @@ pub mod auto_tasks;
 pub mod confiscation_rebuild;
 pub mod coordination;
 pub mod cosign_policy;
+pub mod cosign_restage;
+#[cfg(test)]
+mod cosign_restage_tests;
 pub mod cosign_rounds;
 pub mod dereliction;
 pub mod dispute;

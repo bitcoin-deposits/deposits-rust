@@ -220,6 +220,7 @@ impl Node {
                     signer: handler_arc.signer.clone(),
                     handler: handler_arc.clone(),
                     apply_wakeup: Arc::clone(&apply_wakeup),
+                    chain_tip: super::ledger_actor::wallet_chain_tip(wallet.clone()),
                 };
                 tokio::spawn(actor.run());
                 ledger_actors.insert(
@@ -668,6 +669,7 @@ impl Node {
             signer: self.handler.signer.clone(),
             handler: self.handler.clone(),
             apply_wakeup: Arc::clone(&apply_wakeup),
+            chain_tip: super::ledger_actor::wallet_chain_tip(self.wallet.clone()),
         };
         tokio::spawn(actor.run());
         let mut map = self.ledger_actors.lock().unwrap();
