@@ -1,5 +1,5 @@
 {
- "_doc": "DEP-06 'An acquire binds once its claim confirms' (strict-lottery-v8): a DisputeAcquire binds iff its claim_txid is confirmed and its input 0 spends the dispute's current lottery outpoint. Judged from the chain alone, from the claim back: the claim must not itself be re-arm shaped (one input, one output, input nSequence a recovery tier's CSV: 144, 1008, 4032 or 8064); its input 0 spends output 0 of a transaction T; while T is re-arm shaped and confirmed, step to the output 0 its input spends (at most 8 rounds); the lottery is this dispute's iff the transaction reached spends the dispute's vault: any outpoint in 'vaults', the vault outpoint of every rung of the governing QuorumBegin's fee ladder (DEP-03), since any rung may be the one that confirmed. On a consistent chain this is the forward round walk's answer: the claim is the spender of the round's lottery outpoint. reason: binds | unconfirmed (claim unknown or not confirmed: judged again later) | not-a-claim (the named transaction is a re-arm spend) | not-this-lottery (final). txids are display-order hex; the 1120-090836 case uses the real txids of 5c4d78fe, 1d89bd45, 46a66b12 and 21910507, and placeholders for the two vaults, 70b0abb3's confiscation, the anchor and the collateral. A transaction absent from 'txs' is unknown to the judge. Shared cl-deposits / deposits-rust vector.",
+ "_doc": "DEP-06 'An acquire binds once its claim confirms' (strict-lottery-v8): a DisputeAcquire binds iff its claim_txid is confirmed and its input 0 spends the dispute's current lottery outpoint. Judged from the chain alone, from the claim back: the claim must not itself be re-arm shaped (one input, one output, input nSequence a recovery tier's CSV: 144, 1008, 4032 or 8064); its input 0 spends output 0 of a transaction T; while T is re-arm shaped and confirmed, step to the output 0 its input spends (at most 8 rounds); the lottery is this dispute's iff the transaction reached spends the dispute's vault: any outpoint in 'vaults', the vault outpoint of every rung of the governing QuorumBegin's fee ladder (DEP-03), since any rung may be the one that confirmed. On a consistent chain this is the forward round walk's answer: the claim is the spender of the round's lottery outpoint. reason: binds | unconfirmed (claim unknown or not confirmed: judged again later) | not-a-claim (the named transaction is a re-arm spend) | not-this-lottery (final). txids are display-order hex; the 1120-090836 case uses the real txids of 5c4d78fe, 1d89bd45, 46a66b12 and 21910507, and placeholders for the two vaults, 70b0abb3's confiscation, the anchor and the collateral. A transaction absent from 'txs' is unknown to the judge. Shared cl-deposits / deposits-rust vector. `round` is the round a binding claim closes: 1 when its input 0 spends the confiscation's output 0, one more for each re-arm spend followed back; 0 when it does not bind (DEP-03 \"When a pledge is live\": another participant's binding acquire ends our arms of that round).",
  "tier_csvs": [
   144,
   1008,
@@ -49,7 +49,8 @@
    ],
    "claim_txid": "4444444444444444444444444444444444444444444444444444444444444444",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 1
   },
   {
    "name": "round 1 through the subset leaf (nSequence 72)",
@@ -92,7 +93,8 @@
    ],
    "claim_txid": "6666666666666666666666666666666666666666666666666666666666666666",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 1
   },
   {
    "name": "a sole participant with no collateral: one input, one output, not a re-arm",
@@ -130,7 +132,8 @@
    ],
    "claim_txid": "4444444444444444444444444444444444444444444444444444444444444444",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 1
   },
   {
    "name": "round 2: a claim of the re-arm spend's output 0",
@@ -185,7 +188,8 @@
    ],
    "claim_txid": "5555555555555555555555555555555555555555555555555555555555555555",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 2
   },
   {
    "name": "round 3, the round-2 spend through tier 2 (CSV 4032)",
@@ -252,7 +256,8 @@
    ],
    "claim_txid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 3
   },
   {
    "name": "DEP-03 fee ladder: the vault is whichever rung confirmed; the confiscation spent rung 1's output",
@@ -299,7 +304,8 @@
    ],
    "claim_txid": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 1
   },
   {
    "name": "unconfirmed claim",
@@ -342,7 +348,8 @@
    ],
    "claim_txid": "7777777777777777777777777777777777777777777777777777777777777777",
    "binds": false,
-   "reason": "unconfirmed"
+   "reason": "unconfirmed",
+   "round": 0
   },
   {
    "name": "claim the judge cannot see",
@@ -368,7 +375,8 @@
    ],
    "claim_txid": "7777777777777777777777777777777777777777777777777777777777777777",
    "binds": false,
-   "reason": "unconfirmed"
+   "reason": "unconfirmed",
+   "round": 0
   },
   {
    "name": "an older round's outpoint: the acquire names the re-arm spend that moved round 1's output on",
@@ -406,7 +414,8 @@
    ],
    "claim_txid": "3333333333333333333333333333333333333333333333333333333333333333",
    "binds": false,
-   "reason": "not-a-claim"
+   "reason": "not-a-claim",
+   "round": 0
   },
   {
    "name": "a claim of the confiscation's output 1, not the lottery",
@@ -444,7 +453,8 @@
    ],
    "claim_txid": "8888888888888888888888888888888888888888888888888888888888888888",
    "binds": false,
-   "reason": "not-this-lottery"
+   "reason": "not-this-lottery",
+   "round": 0
   },
   {
    "name": "any confirmed transaction named as a claim (a payment unrelated to the dispute)",
@@ -482,7 +492,8 @@
    ],
    "claim_txid": "8888888888888888888888888888888888888888888888888888888888888888",
    "binds": false,
-   "reason": "not-this-lottery"
+   "reason": "not-this-lottery",
+   "round": 0
   },
   {
    "name": "regtest rearm-rust 1120-090836: a606a4ca's acquire names 21910507, which spent 70b0abb3's round-2 output 46a66b12:0",
@@ -571,7 +582,8 @@
    ],
    "claim_txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
    "binds": false,
-   "reason": "not-this-lottery"
+   "reason": "not-this-lottery",
+   "round": 0
   },
   {
    "name": "the same claim judged for 70b0abb3, whose round-2 output it spent",
@@ -660,7 +672,8 @@
    ],
    "claim_txid": "21910507ef3364bc74d898f339b19c293d49abcd478b99168c907d02de3b3711",
    "binds": true,
-   "reason": "binds"
+   "reason": "binds",
+   "round": 2
   }
  ]
 }

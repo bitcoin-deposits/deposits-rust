@@ -60,31 +60,42 @@ pub(crate) fn judge_acquire(
     vaults: &[OutPoint],
     claim: &Txid,
 ) -> AcquireVerdict {
+    judge_acquire_round(tx, vaults, claim).0
+}
+
+/// [`judge_acquire`], with the round the claim closes when it binds: 1 when it spends the
+/// confiscation's lottery output, one more for each re-arm spend followed back (0 when it
+/// does not bind).
+pub(crate) fn judge_acquire_round(
+    tx: impl Fn(&Txid) -> Option<(Transaction, bool)>,
+    vaults: &[OutPoint],
+    claim: &Txid,
+) -> (AcquireVerdict, u32) {
     let Some((claim_tx, true)) = tx(claim) else {
-        return AcquireVerdict::Unconfirmed;
+        return (AcquireVerdict::Unconfirmed, 0);
     };
     if rearm_shaped(&claim_tx) {
-        return AcquireVerdict::NotAClaim;
+        return (AcquireVerdict::NotAClaim, 0);
     }
     let Some(mut spent) = claim_tx.input.first().map(|i| i.previous_output) else {
-        return AcquireVerdict::NotThisLottery;
+        return (AcquireVerdict::NotThisLottery, 0);
     };
-    for _ in 0..=MAX_ROUNDS {
+    for hops in 0..=MAX_ROUNDS {
         if spent.vout != 0 {
-            return AcquireVerdict::NotThisLottery;
+            return (AcquireVerdict::NotThisLottery, 0);
         }
         let Some((t, confirmed)) = tx(&spent.txid) else {
-            return AcquireVerdict::Unconfirmed;
+            return (AcquireVerdict::Unconfirmed, 0);
         };
         if t.input.iter().any(|i| vaults.contains(&i.previous_output)) {
-            return AcquireVerdict::Binds;
+            return (AcquireVerdict::Binds, hops as u32 + 1);
         }
         if !(confirmed && rearm_shaped(&t)) {
-            return AcquireVerdict::NotThisLottery;
+            return (AcquireVerdict::NotThisLottery, 0);
         }
         spent = t.input[0].previous_output;
     }
-    AcquireVerdict::NotThisLottery
+    (AcquireVerdict::NotThisLottery, 0)
 }
 
 /// [`judge_acquire`] against a chain backend.
@@ -93,7 +104,16 @@ pub(crate) fn judge_acquire_on(
     vaults: &[OutPoint],
     claim: &Txid,
 ) -> AcquireVerdict {
-    judge_acquire(
+    judge_acquire_round_on(backend, vaults, claim).0
+}
+
+/// [`judge_acquire_round`] against a chain backend.
+pub(crate) fn judge_acquire_round_on(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    vaults: &[OutPoint],
+    claim: &Txid,
+) -> (AcquireVerdict, u32) {
+    judge_acquire_round(
         |t| {
             let tx = backend.get_tx(t).ok().flatten()?;
             let confirmed = matches!(backend.get_tx_block_height(t), Ok(Some(_)));
@@ -204,6 +224,19 @@ fn verdicts() -> &'static std::sync::Mutex<std::collections::HashMap<VerdictKey,
     M.get_or_init(Default::default)
 }
 
+/// The round each binding (vault, claim) closes ([`judge_acquire_round`]).
+fn rounds() -> &'static std::sync::Mutex<std::collections::HashMap<VerdictKey, u32>> {
+    static M: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<VerdictKey, u32>>> =
+        std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// The round the acquire naming `claim` closes, when it is known to bind against `vault`.
+pub(crate) fn binds_round(vault: &[OutPoint], claim: &[u8; 32]) -> Option<u32> {
+    let k = key(vault, claim)?;
+    rounds().lock().ok()?.get(&k).copied()
+}
+
 /// (vault, claim) -> when it was last judged not final: asked again after a minute, not on
 /// every pass (a phantom acquire's claim never confirms; asking every claim on every pass
 /// flooded the regtest bitcoind's RPC, 2026-11-10).
@@ -262,7 +295,10 @@ pub(crate) fn note_verdicts(
             .collect()
     };
     for (vault, claim, k) in due {
-        let v = judge_acquire_on(backend, &vault, &Txid::from_byte_array(claim));
+        let (v, round) = judge_acquire_round_on(backend, &vault, &Txid::from_byte_array(claim));
+        if v == AcquireVerdict::Binds {
+            rounds().lock().unwrap().insert(k, round);
+        }
         if v.is_final() {
             if v != AcquireVerdict::Binds {
                 tracing::warn!(
@@ -350,6 +386,30 @@ mod tests {
             .collect();
         let claim = Txid::from_str(c["claim_txid"].as_str().unwrap()).unwrap();
         judge_acquire(|t| txs.get(t).cloned(), &vaults, &claim)
+    }
+
+    /// The round a binding claim closes (0 when it does not bind): DEP-03 "When a pledge is
+    /// live" frees our arms of that round when another participant's acquire binds.
+    #[test]
+    fn the_round_a_claim_closes_matches_the_shared_vector() {
+        let v = vector();
+        for c in v["cases"].as_array().unwrap() {
+            let txs = view(c);
+            let vaults: Vec<OutPoint> = c["vaults"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    OutPoint::new(
+                        Txid::from_str(v["txid"].as_str().unwrap()).unwrap(),
+                        v["vout"].as_u64().unwrap() as u32,
+                    )
+                })
+                .collect();
+            let claim = Txid::from_str(c["claim_txid"].as_str().unwrap()).unwrap();
+            let (_, round) = judge_acquire_round(|t| txs.get(t).cloned(), &vaults, &claim);
+            assert_eq!(round as u64, c["round"].as_u64().unwrap(), "{}", c["name"]);
+        }
     }
 
     #[test]

@@ -1770,6 +1770,10 @@ impl Node {
                     op_address,
                     required_sats
                 ),
+                Ok(CollateralLookup::Reserved { free }) => tracing::warn!(
+                    "Auto-arm: {} free coins are within the re-arm reserve",
+                    free
+                ),
                 Err(e) => tracing::warn!(
                     "Auto-arm: replacement-collateral lookup failed after retries: {}",
                     e
@@ -2221,6 +2225,24 @@ impl Node {
             .our_armed
             .clone()
             .ok_or_else(|| Error::Protocol("Could not find our DisputeArmed".to_string()))?;
+        // DEP-03 "When a pledge is live": another participant's binding acquire for our arm's
+        // round (or a later one) ended the lottery. Its claim spent the output, so the locate
+        // below never finds it and we would neither claim nor yield, holding our pledge for
+        // good (regtest 1121-next4c: 12 of ref6's forks). Yield as the loser, once: the yield
+        // goes through `publish_custody_yield`, which adopts a yield of ours already published
+        // and never signs a second at one sequence.
+        self.refresh_relay_acquires(ledger_id).await;
+        if let Some(won) = self.lost_to_another(ledger_id, &our_armed) {
+            tracing::info!(
+                "Lottery for {}: {} acquired with claim {} (binding, round {}); we lost. Publishing DisputeYield.",
+                &ledger_id[..16.min(ledger_id.len())],
+                &hex::encode(won.acquirer.serialize())[..16],
+                bitcoin::Txid::from_byte_array(won.claim),
+                won.round
+            );
+            self.publish_custody_yield(ledger_id, &our_armed).await?;
+            return Ok(true);
+        }
         let lottery = ctx.build_lottery(self.wallet.network())?;
         let t_locate = std::time::Instant::now();
         let mut located = self.locate_lottery_output(&lottery, ctx.landed)?;
@@ -5189,6 +5211,11 @@ pub(crate) enum CollateralLookup {
         value_sats: u64,
     },
     NotFound,
+    /// Free coins covering the need exist, but no more than the reserve a re-arm leaves for
+    /// new disputes (`PledgeExclusion::reserve`).
+    Reserved {
+        free: usize,
+    },
 }
 
 /// Look up the replacement collateral at `script` (our operator-key
@@ -5201,6 +5228,24 @@ pub(crate) enum CollateralLookup {
 pub(crate) struct PledgeExclusion {
     pub own: Option<bitcoin::OutPoint>,
     pub taken: std::collections::HashSet<bitcoin::OutPoint>,
+    /// Local policy, not DEP-03: a new coin is pledged only while MORE than this many free
+    /// coins cover the need, so the last `reserve` stay for new disputes. 0 for a round-1 arm
+    /// (a new dispute's arm may take the last coin: not arming is what dereliction is judged
+    /// on); [`rearm_pledge_reserve`] for a re-arm round of an old dispute. Keeping its own
+    /// unspent pledge (`own`) takes nothing and is never refused.
+    pub reserve: usize,
+}
+
+/// The coins a re-arm (round >= 2) must leave free for new disputes' round-1 arms
+/// (`DEPOSITS_REARM_PLEDGE_RESERVE`, default 2). Local policy: an old, unclaimed lottery
+/// re-armed round after round would otherwise take every coin, and a node with nothing to
+/// pledge cannot arm the next dispute (regtest 1121-next4c: ref6's re-arm passes spent 10 of
+/// the 14 coins the pledge fix freed).
+pub(crate) fn rearm_pledge_reserve() -> usize {
+    std::env::var("DEPOSITS_REARM_PLEDGE_RESERVE")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(2)
 }
 
 /// The coin to pledge in a `DisputeArmed` (DEP-03 §Replacement collateral declaration): `own`
@@ -5222,11 +5267,16 @@ pub(crate) fn pick_pledge(
             return Some(u.clone());
         }
     }
-    utxos
+    let free: Vec<_> = utxos
         .iter()
         .filter(|(u, c)| {
             *c >= min_confs.max(1) && !exclude.taken.contains(&u.outpoint) && u.value_sats >= need
         })
+        .collect();
+    if free.len() <= exclude.reserve {
+        return None;
+    }
+    free.into_iter()
         .min_by(|(a, _), (b, _)| {
             a.value_sats
                 .cmp(&b.value_sats)
@@ -5251,6 +5301,21 @@ pub(crate) async fn find_replacement_collateral(
                 amount: u.value_sats,
             },
         ));
+    }
+    if exclude.reserve > 0 {
+        let unreserved = PledgeExclusion {
+            reserve: 0,
+            ..exclude.clone()
+        };
+        if pick_pledge(&utxos, required_sats, 1, &unreserved).is_some() {
+            let free = utxos
+                .iter()
+                .filter(|(u, c)| {
+                    *c >= 1 && !exclude.taken.contains(&u.outpoint) && u.value_sats >= required_sats
+                })
+                .count();
+            return Ok(CollateralLookup::Reserved { free });
+        }
     }
     // Nothing free covers it: report the largest free coin, as the single-coin lookup did.
     Ok(utxos
@@ -5316,12 +5381,96 @@ pub(crate) fn committed_outpoints(
     (declared, custody)
 }
 
+/// The dispute our fork (`fork_history`) is in: its vault (the latest QuorumBegin at or below
+/// our DisputeEnter) and every `DisputeAcquire` in `histories` (the ledger's base and the forks
+/// we hold, ours included) after that DisputeEnter, by someone other than `me` and naming
+/// someone other than `me`, as (acquirer, claim), each claim once. `None` when we never
+/// entered on this fork or no vault precedes the entry. Whether each binds is
+/// `acquire_binding`'s to judge.
+pub(crate) fn dispute_acquire_candidates(
+    fork_history: &[deposits_core::SignedLedgerUpdate],
+    histories: &[&[deposits_core::SignedLedgerUpdate]],
+    me: &bitcoin::secp256k1::PublicKey,
+) -> Option<(
+    super::acquire_binding::Vault,
+    Vec<(bitcoin::secp256k1::PublicKey, [u8; 32])>,
+)> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let enter_seq = fork_history
+        .iter()
+        .filter(|u| u.operator_id == *me)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeEnter { .. })
+            )
+        })
+        .map(|u| u.sequence_number)
+        .max()?;
+    let vault = super::acquire_binding::vault_at(fork_history, enter_seq)?;
+    let mut candidates: Vec<(bitcoin::secp256k1::PublicKey, [u8; 32])> = Vec::new();
+    for h in histories {
+        for u in h
+            .iter()
+            .filter(|u| u.sequence_number > enter_seq && u.operator_id != *me)
+        {
+            if let Ok(LedgerOperation::DisputeAcquire {
+                claim_txid,
+                new_custodian,
+                ..
+            }) = LedgerOperation::tlv_decode(&u.message)
+            {
+                if new_custodian != *me && !candidates.iter().any(|(_, c)| *c == claim_txid) {
+                    candidates.push((u.operator_id, claim_txid));
+                }
+            }
+        }
+    }
+    Some((vault, candidates))
+}
+
+/// The `DisputeAcquire`s the relay holds for a ledger, as last fetched by
+/// `Node::refresh_relay_acquires`. The base ledger in memory cannot be asked: its loader drops
+/// every update not by the ledger's operator, so a winner's acquire on its fork, adopted into
+/// the base on disk, is gone after a restart (ref6's 9e23c858 holds 023d42a6's at seq 17 on
+/// disk and not in memory).
+fn relay_acquires_cache(
+) -> &'static std::sync::Mutex<HashMap<String, Vec<deposits_core::SignedLedgerUpdate>>> {
+    static M: std::sync::OnceLock<
+        std::sync::Mutex<HashMap<String, Vec<deposits_core::SignedLedgerUpdate>>>,
+    > = std::sync::OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+fn relay_acquires(ledger_id: &str) -> Vec<deposits_core::SignedLedgerUpdate> {
+    relay_acquires_cache()
+        .lock()
+        .map(|m| m.get(ledger_id).cloned().unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// A binding `DisputeAcquire` by another participant of one of our disputes
+/// (`Node::others_binding_acquires`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OtherAcquire {
+    pub acquirer: bitcoin::secp256k1::PublicKey,
+    /// Its claim txid, internal byte order.
+    pub claim: [u8; 32],
+    /// The round the claim closes (`acquire_binding::judge_acquire_round`).
+    pub round: u32,
+}
+
 /// One of our own dispute operations on a fork, as the pledge hold reads it (`fork_holds`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ForkEvent {
     Enter,
-    /// A DisputeArmed and the coin it declares, if any.
-    Arm(Option<bitcoin::OutPoint>),
+    /// A DisputeArmed, the coin it declares (if any) and its round (TLV 366; round 1 when
+    /// absent).
+    Arm {
+        pledge: Option<bitcoin::OutPoint>,
+        round: u32,
+    },
     Yield,
     /// A DisputeAcquire: output 0 of its claim, and whether the acquire binds (DEP-06 "An
     /// acquire binds once its claim confirms"; for our own claim, that it confirmed).
@@ -5339,7 +5488,13 @@ pub(crate) enum ForkEvent {
 ///   round; a later round's arm declares afresh);
 /// - a binding `DisputeAcquire` (our claim confirmed; it spent the winner's pledge, or left
 ///   it free);
-/// - retiring the fork (`retired`: voided or dropped as concluded).
+/// - retiring the fork (`retired`: voided or dropped as concluded);
+/// - a binding `DisputeAcquire` by ANOTHER participant of the round of the arm (`others`: the
+///   rounds of the dispute's binding acquires by others, judged by `acquire_binding` against
+///   the dispute's lottery): that claim spent the round's lottery output, so the round is over
+///   whether or not we ever yielded to it. It frees the pledges of our arms at that round or
+///   earlier, never a later round's. Regtest 1121-next4c: 12 of ref6's 25 holding forks were
+///   disputes another member had won, acquired and claimed, with no yield of ours.
 ///
 /// Output 0 of a binding claim is the ledger's custody, held while that acquire stands (no
 /// later arm on the fork; the caller only sees it while it is unspent). An acquire that does
@@ -5349,16 +5504,17 @@ pub(crate) enum ForkEvent {
 pub(crate) fn fork_holds(
     events: &[ForkEvent],
     retired: bool,
+    others: &[u32],
 ) -> (Vec<bitcoin::OutPoint>, Option<bitcoin::OutPoint>) {
-    let (mut pledges, mut custody) = (Vec::new(), None);
+    let (mut pledges, mut custody) = (Vec::<(bitcoin::OutPoint, u32)>::new(), None);
     if retired {
-        return (pledges, custody);
+        return (Vec::new(), custody);
     }
     for e in events {
         match e {
             ForkEvent::Enter => {}
-            ForkEvent::Arm(p) => {
-                pledges.extend(*p);
+            ForkEvent::Arm { pledge, round } => {
+                pledges.extend(pledge.map(|p| (p, *round)));
                 custody = None;
             }
             ForkEvent::Yield => {
@@ -5375,7 +5531,10 @@ pub(crate) fn fork_holds(
             }
         }
     }
-    (pledges, custody)
+    if let Some(ended) = others.iter().max() {
+        pledges.retain(|(_, round)| round > ended);
+    }
+    (pledges.into_iter().map(|(p, _)| p).collect(), custody)
 }
 
 /// Our dispute operations in `history`, oldest first; an acquire's `binds` from `confirmed`
@@ -5395,10 +5554,14 @@ pub(crate) fn fork_events(
             Ok(LedgerOperation::DisputeEnter { .. }) => Some(ForkEvent::Enter),
             Ok(LedgerOperation::DisputeArmed {
                 replacement_collateral,
+                rearm_round,
                 ..
-            }) => Some(ForkEvent::Arm(replacement_collateral.map(|rc| {
-                bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout)
-            }))),
+            }) => Some(ForkEvent::Arm {
+                pledge: replacement_collateral.map(|rc| {
+                    bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout)
+                }),
+                round: rearm_round.unwrap_or(1),
+            }),
             Ok(LedgerOperation::DisputeYield) => Some(ForkEvent::Yield),
             Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => {
                 let txid = bitcoin::Txid::from_byte_array(claim_txid);
@@ -5533,6 +5696,7 @@ mod arm_collateral_tests {
         let ex = PledgeExclusion {
             own: None,
             taken: custody.into_iter().collect(),
+            ..Default::default()
         };
         assert_eq!(pick_pledge(&utxos, 30_000, 1, &ex).unwrap().outpoint, coin);
     }
@@ -5831,6 +5995,7 @@ impl Node {
                 .collect()
         };
         let confirmed = |t: &bitcoin::Txid| matches!(self.wallet.tx_block_height(*t), Ok(Some(_)));
+        let backend = self.wallet.chain_backend();
         for (k, mine) in ours {
             if k.starts_with(ledger_id) {
                 let (declared, _) = committed_outpoints(&mine, &self.node_id);
@@ -5838,8 +6003,13 @@ impl Node {
                     ex.own = Some(*op);
                 }
             }
+            let others: Vec<u32> = self
+                .others_binding_acquires(&k, backend.as_ref())
+                .into_iter()
+                .map(|a| a.round)
+                .collect();
             let (pledges, custody) =
-                fork_holds(&fork_events(&mine, &self.node_id, &confirmed), false);
+                fork_holds(&fork_events(&mine, &self.node_id, &confirmed), false, &others);
             // Name every holder, so a coin that stays taken can be traced to the fork that holds it
             // (regtest 1121-next4c: 24 of ref6's coins, held by 25 forks the rule reads as live).
             for p in &pledges {
@@ -5861,6 +6031,148 @@ impl Node {
             ex.taken.extend(custody);
         }
         ex
+    }
+
+    /// The binding `DisputeAcquire`s by OTHER participants of the dispute our fork `fork_key`
+    /// is in (DEP-03 "When a pledge is live"): every acquire on the ledger's base or any of its
+    /// forks we hold, after our fork's DisputeEnter, not by us and not naming us, judged by
+    /// `acquire_binding` against the dispute's vault (the latest QuorumBegin at the fork point),
+    /// with the round its claim closes. Verdicts are cached (`note_verdicts`); one not yet final
+    /// counts as not binding and is asked again on a later pass.
+    pub(crate) fn others_binding_acquires(
+        &self,
+        fork_key: &str,
+        backend: &dyn crate::chain_backend::ChainBackend,
+    ) -> Vec<OtherAcquire> {
+        use super::acquire_binding as ab;
+        if fork_key.len() <= 64 {
+            return Vec::new();
+        }
+        let ledger = &fork_key[..64];
+        let found = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            let Some(fork) = ledgers.get(fork_key).cloned() else {
+                return Vec::new();
+            };
+            let fork = fork.read().unwrap();
+            let others: Vec<_> = ledgers
+                .iter()
+                .filter(|(k, _)| k.starts_with(ledger) && k.as_str() != fork_key)
+                .map(|(_, a)| a.clone())
+                .collect();
+            let others: Vec<_> = others.iter().map(|a| a.read().unwrap()).collect();
+            let relay = relay_acquires(ledger);
+            let mut histories: Vec<&[deposits_core::SignedLedgerUpdate]> = vec![&fork.history];
+            histories.extend(others.iter().map(|l| l.history.as_slice()));
+            histories.push(&relay);
+            dispute_acquire_candidates(&fork.history, &histories, &self.node_id)
+        };
+        let Some((vault, candidates)) = found else {
+            return Vec::new();
+        };
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let due: Vec<(ab::Vault, [u8; 32])> =
+            candidates.iter().map(|(_, c)| (vault.clone(), *c)).collect();
+        ab::note_verdicts(backend, &due);
+        candidates
+            .into_iter()
+            .filter_map(|(acquirer, claim)| {
+                ab::binds_round(&vault, &claim).map(|round| OtherAcquire {
+                    acquirer,
+                    claim,
+                    round,
+                })
+            })
+            .collect()
+    }
+
+    /// Fetch the relay's `DisputeAcquire`s for `ledger_id` (op-type tag 55: a few events, not
+    /// the ledger) into the cache `pledge_exclusion` reads.
+    pub(crate) async fn refresh_relay_acquires(&self, ledger_id: &str) {
+        // At most every five minutes per ledger: the claim-or-yield pass runs every minute over
+        // every armed fork.
+        static LAST: std::sync::OnceLock<std::sync::Mutex<HashMap<String, std::time::Instant>>> =
+            std::sync::OnceLock::new();
+        {
+            let mut last = LAST.get_or_init(Default::default).lock().unwrap();
+            if last
+                .get(ledger_id)
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300))
+            {
+                return;
+            }
+            last.insert(ledger_id.to_string(), std::time::Instant::now());
+        }
+        let discriminant = deposits_core::messages::LedgerOperation::DisputeAcquire {
+            new_custodian: self.node_id,
+            claim_txid: [0; 32],
+            new_reserves_address: String::new(),
+            confiscation_txid: None,
+        }
+        .discriminant();
+        let (fetched, _) = self
+            .fetch_ledger_updates_window(ledger_id, &[discriminant], None)
+            .await;
+        if !fetched.is_empty() {
+            relay_acquires_cache()
+                .lock()
+                .unwrap()
+                .insert(ledger_id.to_string(), fetched);
+        }
+    }
+
+    /// Another participant's binding acquire that ends the lottery `our_armed` is in: one for
+    /// its round or a later one ([`Node::others_binding_acquires`]), whose claim does not pay
+    /// our own target (a claim of ours someone else named is not a loss of ours).
+    pub(crate) fn lost_to_another(
+        &self,
+        ledger_id: &str,
+        our_armed: &deposits_core::SignedLedgerUpdate,
+    ) -> Option<OtherAcquire> {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::TlvDecode;
+        let Ok(LedgerOperation::DisputeArmed {
+            rearm_round,
+            target_reserves,
+            ..
+        }) = LedgerOperation::tlv_decode(&our_armed.message)
+        else {
+            return None;
+        };
+        let round = rearm_round.unwrap_or(1);
+        let tip = our_armed.chain_hash();
+        let fork_key = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .find(|(k, arc)| {
+                    let l = arc.read().unwrap();
+                    k.starts_with(ledger_id)
+                        && super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id)
+                        && l.history.iter().any(|u| u.chain_hash() == tip)
+                })
+                .map(|(k, _)| k.clone())?
+        };
+        let backend = self.wallet.chain_backend();
+        let ours = target_reserves
+            .parse::<bitcoin::Address<bitcoin::address::NetworkUnchecked>>()
+            .ok()
+            .map(|a| a.assume_checked().script_pubkey());
+        self.others_binding_acquires(&fork_key, backend.as_ref())
+            .into_iter()
+            .filter(|a| a.round >= round)
+            .find(|a| {
+                let txid = bitcoin::Txid::from_byte_array(a.claim);
+                match backend.get_tx(&txid) {
+                    Ok(Some(tx)) => tx
+                        .output
+                        .first()
+                        .is_some_and(|o| Some(&o.script_pubkey) != ours.as_ref()),
+                    _ => false,
+                }
+            })
     }
 
     pub(crate) async fn arm_rearm_round(
@@ -5900,12 +6212,31 @@ impl Node {
             op_address.script_pubkey().as_script(),
             required_sats,
             &crate::chain_backend::ScanRetry::quick(),
-            &self.pledge_exclusion(ledger_id),
+            &PledgeExclusion {
+                reserve: if round >= 2 { rearm_pledge_reserve() } else { 0 },
+                ..self.pledge_exclusion(ledger_id)
+            },
         )
         .await
         .map_err(|e| e.to_string())?
         {
             CollateralLookup::Found(rc) => rc,
+            CollateralLookup::Reserved { free } => {
+                tracing::warn!(
+                    "Re-arm round {} of {} skipped for the reserve: {} free coin(s) cover {} sats, \
+                     and a re-arm leaves the last {} for new disputes (DEPOSITS_REARM_PLEDGE_RESERVE)",
+                    round,
+                    &ledger_id[..16.min(ledger_id.len())],
+                    free,
+                    required_sats,
+                    rearm_pledge_reserve()
+                );
+                return Err(format!(
+                    "re-arm skipped for the reserve ({} free, reserve {})",
+                    free,
+                    rearm_pledge_reserve()
+                ));
+            }
             _ => {
                 return Err(format!(
                     "no collateral of {} sats at {}",
@@ -5992,6 +6323,7 @@ mod pledge_pick_vector {
                     .iter()
                     .map(|t| outpoint(t.as_str().unwrap()))
                     .collect(),
+                ..Default::default()
             };
             for f in c["forks"].as_array().into_iter().flatten() {
                 let events: Vec<ForkEvent> = f["ops"]
@@ -6000,7 +6332,10 @@ mod pledge_pick_vector {
                     .iter()
                     .map(|o| match o["op"].as_str().unwrap() {
                         "enter" => ForkEvent::Enter,
-                        "arm" => ForkEvent::Arm(o["pledge"].as_str().map(outpoint)),
+                        "arm" => ForkEvent::Arm {
+                            pledge: o["pledge"].as_str().map(outpoint),
+                            round: o["round"].as_u64().unwrap_or(1) as u32,
+                        },
                         "yield" => ForkEvent::Yield,
                         "acquire" => ForkEvent::Acquire {
                             claim: outpoint(&format!("{}:0", o["claim"].as_str().unwrap())),
@@ -6009,7 +6344,16 @@ mod pledge_pick_vector {
                         other => panic!("unknown fork op {other}"),
                     })
                     .collect();
-                let (pledges, custody) = fork_holds(&events, f["retired"].as_bool().unwrap());
+                // Binding acquires by other participants of the dispute, by round.
+                let others: Vec<u32> = f["others"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|a| a["binds"].as_bool().unwrap())
+                    .map(|a| a["round"].as_u64().unwrap() as u32)
+                    .collect();
+                let (pledges, custody) =
+                    fork_holds(&events, f["retired"].as_bool().unwrap(), &others);
                 exclude.taken.extend(pledges);
                 exclude.taken.extend(custody);
             }
@@ -6028,7 +6372,112 @@ mod pledge_pick_vector {
             );
             n += 1;
         }
-        assert_eq!(n, 18);
+        assert_eq!(n, 21);
+    }
+
+    /// ref6's own disk (regtest 1121-next4c, ledger 9e23c858…): its fork at seq 12, entered at
+    /// 13 and armed (round 1) at 23, never yielded; the base on its disk carries 023d42a6's
+    /// DisputeAcquire at 17, claim fa26e514…, a ROUND-2 claim on chain: it spends the re-arm
+    /// spend 10c3f9f2 (CSV 144), which spends output 0 of the confiscation eac2120a of this
+    /// dispute's vault 6556e3bc:0. That acquire is the one candidate, judged against the vault before the
+    /// fork; ref6's own fork holds none.
+    #[test]
+    fn ref6s_lost_dispute_names_the_winners_acquire() {
+        use crate::handler::DepositsHandler;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+        let lid = "9e23c858c7537cd1c61476d0122ba056cf16607716f54aa31e3e6a2dc21f6689";
+        let fork = DepositsHandler::load_single_ledger_from_jsonl(
+            &format!("{lid}_000012_02a417593a974f4f"),
+            &dir.join("ref6_lost_fork.jsonl"),
+        )
+        .expect("fork loads");
+        // The base's rows as written, the winner's included (what the relay delivers; the base's
+        // loader would drop them as foreign-operator updates).
+        let base_rows: Vec<deposits_core::SignedLedgerUpdate> =
+            std::fs::read_to_string(dir.join("ref6_lost_base.jsonl"))
+                .unwrap()
+                .lines()
+                .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .filter(|v| v["type"] == "Update")
+                .map(|mut v| {
+                    v.as_object_mut().unwrap().remove("type");
+                    serde_json::from_value(v).unwrap()
+                })
+                .collect();
+        let loaded = DepositsHandler::load_single_ledger_from_jsonl(lid, &dir.join("ref6_lost_base.jsonl"))
+            .expect("base loads");
+        assert!(
+            loaded.history.iter().all(|u| u.sequence_number <= 12),
+            "the loaded base keeps only the operator's chain"
+        );
+        let ref6 = fork.history.last().unwrap().operator_id;
+        assert_eq!(&hex::encode(ref6.serialize())[..16], "02a417593a974f4f");
+        let (vault, cands) =
+            super::dispute_acquire_candidates(&fork.history, &[&fork.history, &base_rows], &ref6)
+                .expect("entered, with a vault");
+        // The vault before the fork (QuorumBegin at 12, rung 0), which the confiscation
+        // eac2120a spent on chain.
+        assert_eq!(
+            vault[0].to_string(),
+            "6556e3bc21d138c52f50188fa0ba2edf546632b388783f5ee1e3dc9956b9cb8b:0"
+        );
+        assert_eq!(cands.len(), 1, "{cands:?}");
+        let mut claim = cands[0].1;
+        claim.reverse();
+        assert_eq!(
+            hex::encode(claim),
+            "fa26e5147cc81c3c5305418156671aed674bf303ccfd3774b99359e1829cc843"
+        );
+        assert_eq!(&hex::encode(cands[0].0.serialize())[..16], "023d42a6c1ace983");
+        // Our own fork alone holds no one else's acquire.
+        let (_, alone) =
+            super::dispute_acquire_candidates(&fork.history, &[&fork.history], &ref6).unwrap();
+        assert!(alone.is_empty());
+        // And the fork, read as it stands, still holds its pledge until that acquire is judged.
+        let held = super::fork_holds(&super::fork_events(&fork.history, &ref6, &|_| false), false, &[]).0;
+        assert!(!held.is_empty());
+        let freed = super::fork_holds(&super::fork_events(&fork.history, &ref6, &|_| false), false, &[2]).0;
+        assert!(freed.is_empty(), "023d42a6's binding round-2 acquire ends our round-1 arm");
+    }
+
+    /// Local policy (not in the shared vector): a re-arm leaves the last `reserve` free coins
+    /// for new disputes; a round-1 arm (reserve 0) may take the last; keeping its own pledge
+    /// is never refused.
+    #[test]
+    fn a_rearm_leaves_the_reserve_and_a_new_dispute_may_take_it() {
+        let coin = |s: &str, sats: u64| {
+            (
+                UnspentOutput {
+                    outpoint: outpoint(s),
+                    value_sats: sats,
+                },
+                6u32,
+            )
+        };
+        let utxos = vec![coin("aa:0", 50_000), coin("bb:1", 30_000), coin("cc:0", 10_000)];
+        let ex = |own: Option<&str>, taken: &[&str], reserve| PledgeExclusion {
+            own: own.map(outpoint),
+            taken: taken.iter().map(|t| outpoint(t)).collect(),
+            reserve,
+        };
+        // Two coins cover 20000: a re-arm with reserve 2 takes neither, a round-1 arm takes one.
+        assert_eq!(pick_pledge(&utxos, 20_000, 1, &ex(None, &[], 2)), None);
+        assert_eq!(
+            pick_pledge(&utxos, 20_000, 1, &ex(None, &[], 0)).map(|u| u.outpoint),
+            Some(outpoint("bb:1"))
+        );
+        // Three cover 5000: the re-arm takes the smallest, two stay.
+        assert_eq!(
+            pick_pledge(&utxos, 5_000, 1, &ex(None, &[], 2)).map(|u| u.outpoint),
+            Some(outpoint("cc:0"))
+        );
+        // A taken coin is not free: two left of three, the re-arm takes none.
+        assert_eq!(pick_pledge(&utxos, 5_000, 1, &ex(None, &["aa:0"], 2)), None);
+        // Its own unspent pledge is kept whatever the reserve.
+        assert_eq!(
+            pick_pledge(&utxos, 20_000, 1, &ex(Some("bb:1"), &["bb:1"], 2)).map(|u| u.outpoint),
+            Some(outpoint("bb:1"))
+        );
     }
 }
 

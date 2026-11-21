@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(&ref6.serialize()[..8], &hex::decode("02a417593a974f4f").unwrap()[..]);
         assert_eq!(ledger.state.dispute_state, deposits_core::types::DisputeState::Armed);
         let tip = armed_round1_tip(&ledger.history, &ref6).expect("tip is ref6's round-1 arm").clone();
-        let held = |h: &[SignedLedgerUpdate]| super::super::dispute::fork_holds(&super::super::dispute::fork_events(h, &ref6, &|_| false), false).0;
+        let held = |h: &[SignedLedgerUpdate]| super::super::dispute::fork_holds(&super::super::dispute::fork_events(h, &ref6, &|_| false), false, &[]).0;
         assert_eq!(held(&ledger.history).len(), 1, "the arm holds its pledge");
 
         // The relay's yield, as published: ref6's, chained onto the arm, at arm+1.
