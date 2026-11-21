@@ -1694,49 +1694,37 @@ impl Node {
                             let node = Arc::clone(&node);
                             let lid = lid.clone();
                             tokio::spawn(async move {
-                                let mut result = node
-                                    .request_cosign(&lid, &update)
-                                    .await
-                                    .map_err(|e| e.to_string());
-
                                 // QuorumBegin only: a cosign timeout on the
                                 // FIRST round is usually a member that hasn't
                                 // ingested the staged-quorum history yet — and
                                 // that same failed round marks the member
                                 // stale, triggering its immediate gap-fill
                                 // (see cosign.rs stale_joined_ledgers). The
-                                // update is already built and signed, so
+                                // draft is not yet operator-signed (the actor
+                                // signs after the cosignatures are in), so
                                 // re-running the message round is free; give
                                 // the member's refetch a chance instead of
                                 // stranding the activation tx on-chain.
+                                //
+                                // Before each attempt, and after a stale-height
+                                // refusal, the round asks whether the draft has
+                                // fallen behind the cosigners' window: then it
+                                // answers `CosignFailure::Stale` and the actor
+                                // re-stages it at our tip instead of resending
+                                // the same bytes (cosign_restage; regtest
+                                // 1121-101522).
                                 let is_quorum_begin = matches!(
                                     deposits_core::LedgerOperation::tlv_decode(&update.message),
                                     Ok(deposits_core::LedgerOperation::QuorumBegin { .. })
                                 );
-                                if is_quorum_begin {
-                                    let mut attempts = 1;
-                                    while result
-                                        .as_ref()
-                                        .err()
-                                        .map(|e| e.contains("Cosign timeout"))
-                                        .unwrap_or(false)
-                                        && attempts < 4
-                                    {
-                                        tracing::warn!(
-                                            "actor_outbox[{}…] QuorumBegin cosign round {} timed out; \
-                                             retrying in 8s (members may be gap-filling)",
-                                            &lid[..16.min(lid.len())],
-                                            attempts,
-                                        );
-                                        tokio::time::sleep(tokio::time::Duration::from_secs(8))
-                                            .await;
-                                        result = node
-                                            .request_cosign(&lid, &update)
-                                            .await
-                                            .map_err(|e| e.to_string());
-                                        attempts += 1;
-                                    }
-                                }
+                                let result = super::cosign_restage::drive_cosign_round(
+                                    &update,
+                                    is_quorum_begin,
+                                    || node.wallet.get_block_height().unwrap_or(0),
+                                    || node.request_cosign_typed(&lid, &update),
+                                    tokio::time::Duration::from_secs(8),
+                                )
+                                .await;
 
                                 if let Err(ref e) = result {
                                     tracing::warn!(

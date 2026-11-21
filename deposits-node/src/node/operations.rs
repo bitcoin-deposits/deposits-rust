@@ -310,7 +310,31 @@ impl Node {
 
         for attempt in 1..=max_attempts {
             let attempt_start = std::time::Instant::now();
-            match self.request_cosign(ledger_id, &update_clone).await {
+            // This path's draft is ALREADY in the ledger's history (appended unsigned before this
+            // call), so it cannot be re-dated here: `write_ahead::check_restampable` refuses a
+            // sequence the ledger records. A draft that has fallen behind the cosigners' window
+            // is therefore not resent (every member would refuse it the same way, regtest
+            // 1121-101522); the error says to commit it through the ledger actor
+            // (`commit_operation`), which re-stages. NOTE: nothing in the tree calls this today.
+            let cur = self.wallet.get_block_height().unwrap_or(0);
+            if super::cosign_restage::draft_is_stale(cur, update_clone.block_height, false) {
+                last_error = Some(Error::Protocol(format!(
+                    "seq {} drafted at block_height {} is more than {} blocks behind our tip {}; \
+                     not resending it (re-stage it through commit_operation)",
+                    update_clone.sequence_number,
+                    update_clone.block_height,
+                    super::cosign_restage::RESTAMP_LAG,
+                    cur
+                )));
+                break;
+            }
+            match self.request_cosign_typed(ledger_id, &update_clone).await.map_err(|e| {
+                if matches!(e, super::cosign_restage::CosignFailure::StaleRefused(_)) {
+                    (true, Error::Protocol(e.to_string()))
+                } else {
+                    (false, Error::Protocol(e.to_string()))
+                }
+            }) {
                 Ok(entries) => {
                     let label = format!("success_attempt_{}", attempt);
                     metrics::record_cosign_attempt(&label, attempt_start.elapsed());
@@ -335,11 +359,15 @@ impl Node {
                     last_error = None;
                     break;
                 }
-                Err(e) => {
+                Err((stale, e)) => {
                     let label = format!("timeout_attempt_{}", attempt);
                     metrics::record_cosign_attempt(&label, attempt_start.elapsed());
                     tracing::warn!("Co-sign attempt {}/{} failed: {}", attempt, max_attempts, e);
                     last_error = Some(e);
+                    if stale {
+                        // Refused for its height: the identical bytes would be refused again.
+                        break;
+                    }
                     if attempt < max_attempts {
                         // Brief delay before retry — keep short since success latency
                         // is 5-9ms; if the update hasn't arrived by now, a longer wait

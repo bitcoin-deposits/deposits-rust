@@ -82,7 +82,7 @@ pub enum LedgerOutbound {
         update: Box<SignedLedgerUpdate>,
         members: Vec<PublicKey>,
         threshold: usize,
-        reply: oneshot::Sender<Result<Vec<CosignEntry>, String>>,
+        reply: oneshot::Sender<Result<Vec<CosignEntry>, super::cosign_restage::CosignFailure>>,
     },
 
     /// Apply-edge wakeup: the actor just observed a fork-branch
@@ -159,6 +159,21 @@ pub struct LedgerActor {
     /// advance, so external waiters (e.g. the inbound cosign dispatcher
     /// waiting for a prior update to land) get woken event-driven.
     pub apply_wakeup: std::sync::Arc<tokio::sync::Notify>,
+    /// Our chain tip (height, block hash), read when a draft must be re-staged
+    /// (`cosign_restage`). `None` when unknown.
+    pub chain_tip: ChainTip,
+}
+
+/// Where a ledger actor reads our chain tip.
+pub type ChainTip = std::sync::Arc<dyn Fn() -> Option<(u32, [u8; 32])> + Send + Sync>;
+
+/// The wallet's cached tip, as `Node::commit_operation_floored` reads it.
+pub fn wallet_chain_tip(wallet: std::sync::Arc<crate::wallet::Wallet>) -> ChainTip {
+    std::sync::Arc::new(move || {
+        let h = wallet.get_block_height().ok()?;
+        let hash = wallet.get_block_hash().ok()?;
+        (h != 0).then_some((h, hash))
+    })
 }
 
 impl LedgerActor {
@@ -450,45 +465,58 @@ impl LedgerActor {
     ) -> Result<CommitResult, String> {
         use bitcoin::hashes::{sha256, Hash};
 
-        // 1. Stage. Take the read lock briefly and release it before
-        //    any .await so the cosig round doesn't block readers.
-        let (mut staged, quorum_active, members) = {
-            let ledger = self.ledger.read().unwrap();
-            // Fill DEP-02 balance commitments before staging so the
-            // operator declares the post-op (balance, locked_balance) it
-            // computes; cosigners recompute and compare (verify-when-present,
-            // intrinsic to every ruleset). Safe unconditionally per DEP-18.
-            let operation = ledger
-                .state
-                .fill_balance_commitments_at(operation, block_height);
-            // Speculative-apply conformance during stage uses the same
-            // chain_tip the StagedUpdate carries — so descriptor
-            // `after(N)` checks on the operator side match what
-            // cosigners will see when they re-run conformance.
-            let staged = ledger
-                .stage_operation(operation, block_height, block_hash)
-                .map_err(|e| format!("stage failed: {}", e))?;
-            let quorum_active = ledger.state.quorum_state == deposits_core::QuorumState::Active;
-            let members: Vec<PublicKey> = ledger
-                .state
-                .quorum_members
-                .iter()
-                .map(|m| m.pubkey)
-                .collect();
-            (staged, quorum_active, members)
-        };
+        // 1+2. Stage, then cosign. A draft that falls behind the cosigners' window before its
+        //      cosignatures are in comes back `CosignFailure::Stale` and is RE-STAGED at our
+        //      tip, whole (balance commitments, conformance, tier), and asked for again, at most
+        //      `MAX_RESTAGES` times. It is unsigned (step 3 signs), so re-dating it signs nothing
+        //      twice; `write_ahead::check_restampable` checks that rather than assuming it.
+        //      (cosign_restage: regtest 1121-101522, a post-expiry rotation lost to a draft every
+        //      retry resent at the same stale height.)
+        let operation_in = operation;
+        let (mut block_height, mut block_hash) = (block_height, block_hash);
+        let mut restages = 0usize;
+        let mut staged = loop {
+            // Take the read lock briefly and release it before any .await so the cosig round
+            // doesn't block readers.
+            let (mut staged, quorum_active, members) = {
+                let ledger = self.ledger.read().unwrap();
+                // Fill DEP-02 balance commitments before staging so the
+                // operator declares the post-op (balance, locked_balance) it
+                // computes; cosigners recompute and compare (verify-when-present,
+                // intrinsic to every ruleset). Safe unconditionally per DEP-18.
+                let operation = ledger
+                    .state
+                    .fill_balance_commitments_at(operation_in.clone(), block_height);
+                // Speculative-apply conformance during stage uses the same
+                // chain_tip the StagedUpdate carries — so descriptor
+                // `after(N)` checks on the operator side match what
+                // cosigners will see when they re-run conformance.
+                let staged = ledger
+                    .stage_operation(operation, block_height, block_hash)
+                    .map_err(|e| format!("stage failed: {}", e))?;
+                let quorum_active = ledger.state.quorum_state == deposits_core::QuorumState::Active;
+                let members: Vec<PublicKey> = ledger
+                    .state
+                    .quorum_members
+                    .iter()
+                    .map(|m| m.pubkey)
+                    .collect();
+                (staged, quorum_active, members)
+            };
 
-        // 2. Cosign — required when the quorum is active OR when
-        //    this is the very first QuorumBegin (which transitions
-        //    the state machine PreQuorum -> Active and so needs
-        //    member attestation even though state is still PreQuorum
-        //    at stage time).
-        let is_first_quorum_begin =
-            !quorum_active && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
-        if quorum_active || is_first_quorum_begin {
+            // Cosign — required when the quorum is active OR when
+            // this is the very first QuorumBegin (which transitions
+            // the state machine PreQuorum -> Active and so needs
+            // member attestation even though state is still PreQuorum
+            // at stage time).
+            let is_first_quorum_begin =
+                !quorum_active && matches!(&staged.operation, LedgerOperation::QuorumBegin { .. });
+            if !(quorum_active || is_first_quorum_begin) {
+                break staged;
+            }
             let threshold = (members.len() / 2 + 1)
                 .max(tier_floor.as_ref().map(|(_, n)| *n).unwrap_or(0));
-            let (tx, rx) = oneshot::channel::<Result<Vec<CosignEntry>, String>>();
+            let (tx, rx) = oneshot::channel();
             let send_res = self.outbox.send((
                 self.ledger_id.clone(),
                 LedgerOutbound::RequestCosig {
@@ -501,18 +529,56 @@ impl LedgerActor {
             if let Err(e) = send_res {
                 return Err(format!("RequestCosig outbox send failed: {}", e));
             }
-            let entries = rx
-                .await
-                .map_err(|_| "RequestCosig reply dropped".to_string())??;
-            let mut sorted = entries;
-            sorted.sort_by(|a, b| {
-                a.cosigner_pubkey
-                    .serialize()
-                    .cmp(&b.cosigner_pubkey.serialize())
-            });
-            staged.update.cosignatures = sorted;
-            staged.update.content_hash = staged.update.compute_hash();
-        }
+            match rx.await.map_err(|_| "RequestCosig reply dropped".to_string())? {
+                Ok(entries) => {
+                    let mut sorted = entries;
+                    sorted.sort_by(|a, b| {
+                        a.cosigner_pubkey
+                            .serialize()
+                            .cmp(&b.cosigner_pubkey.serialize())
+                    });
+                    staged.update.cosignatures = sorted;
+                    staged.update.content_hash = staged.update.compute_hash();
+                    break staged;
+                }
+                Err(super::cosign_restage::CosignFailure::Stale { draft_height, current_height, reason })
+                    if restages < super::cosign_restage::MAX_RESTAGES =>
+                {
+                    {
+                        let ledger = self.ledger.read().unwrap();
+                        super::write_ahead::check_restampable(
+                            &self.handler.data_dir,
+                            &self.ledger_id,
+                            &ledger.history,
+                            &staged.update,
+                        )?;
+                    }
+                    let (h, hash) = match (self.chain_tip)() {
+                        Some((h, hash)) if h > draft_height => (h, hash),
+                        other => {
+                            return Err(format!(
+                                "{} (our chain tip {:?} gives no later height to re-stage at)",
+                                super::cosign_restage::CosignFailure::Stale { draft_height, current_height, reason },
+                                other.map(|(h, _)| h)
+                            ))
+                        }
+                    };
+                    tracing::warn!(
+                        "LedgerActor[{}…] re-staging seq {}: drafted at block_height {}, our tip is {} ({}); \
+                         the draft is unsigned, so it is re-dated rather than resent",
+                        &self.ledger_id[..16.min(self.ledger_id.len())],
+                        staged.update.sequence_number,
+                        draft_height,
+                        h,
+                        reason
+                    );
+                    restages += 1;
+                    block_height = h;
+                    block_hash = hash;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        };
         // DEP-06: a rotating QuorumBegin answers a challenge of its rungs only at the spent tier's
         // floor; below it nothing is recorded (signet C, 2026-11-16). Mirrors cl-deposits'
         // APPEND-OPERATION :tier-floor.

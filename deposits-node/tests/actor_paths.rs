@@ -156,6 +156,7 @@ async fn actor_inbound_apply_visible_through_handler_ledgers() {
         signer: signer.clone(),
         handler: Arc::clone(&handler),
         apply_wakeup: std::sync::Arc::new(tokio::sync::Notify::new()),
+        chain_tip: std::sync::Arc::new(|| None),
     };
     tokio::spawn(actor.run());
 

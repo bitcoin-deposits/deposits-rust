@@ -37,17 +37,7 @@ impl Node {
         // This is important because co-sign requests are multicast and non-quorum-members
         // will respond with errors before the actual quorum member responds.
         if !response.success {
-            let has_pending = {
-                let pending = self.pending_cosign_requests.lock().unwrap();
-                pending.contains_key(&response.request_id)
-            };
-            if has_pending {
-                tracing::debug!(
-                    "Ignoring error co-sign response for {}: {} (waiting for quorum member)",
-                    &response.request_id[..16.min(response.request_id.len())],
-                    response.error.as_deref().unwrap_or("unknown error")
-                );
-            }
+            self.note_cosign_refusal(&response);
             return;
         }
 
@@ -116,6 +106,44 @@ impl Node {
         // Non-cosign responses are not handled here - they'll be processed later by handle_ledger_response
     }
 
+    /// A refused cosign request: log WHO refused and WHY (a stale-height refusal used to sit at
+    /// debug level, so an operator whose draft every member refused saw only "Cosign timeout"),
+    /// and count a stale-height refusal on the round.
+    fn note_cosign_refusal(&self, response: &crate::nostr::LedgerResponse) {
+        let Some(collector) = self.cosign_collector_for(&response.request_id) else {
+            return;
+        };
+        let reason = response.error.as_deref().unwrap_or("unknown error");
+        let who = response
+            .responder_pubkey
+            .map(|p| p.to_hex()[..16].to_string())
+            .unwrap_or_else(|| "?".to_string());
+        let draft = collector
+            .cosign_data
+            .as_deref()
+            .and_then(super::cosign_restage::cosign_data_height);
+        if super::cosign_restage::is_stale_refusal(reason) {
+            let ours = self.wallet.get_block_height().unwrap_or(0);
+            tracing::warn!(
+                "Cosign refused by {} for request {} (draft block_height {:?}, our tip {}): {}",
+                who,
+                &response.request_id[..16.min(response.request_id.len())],
+                draft,
+                ours,
+                reason
+            );
+            collector.note_stale_refusal(reason, ours);
+        } else {
+            tracing::info!(
+                "Cosign refused by {} for request {} (draft block_height {:?}): {}",
+                who,
+                &response.request_id[..16.min(response.request_id.len())],
+                draft,
+                reason
+            );
+        }
+    }
+
     /// Handle a ledger response (for auto-recording attestations and co-sign responses)
     pub(crate) async fn handle_ledger_response(&self, response: crate::nostr::LedgerResponse) {
         // First, check if this is a response to a pending co-sign request
@@ -124,13 +152,10 @@ impl Node {
 
         if is_cosign_request {
             if !response.success {
-                // Ignore error responses - non-quorum-members respond with errors
-                // but we need to wait for the actual quorum member's success response
-                tracing::debug!(
-                    "Ignoring error co-sign response for {}: {} (waiting for quorum member)",
-                    &response.request_id[..16.min(response.request_id.len())],
-                    response.error.clone().unwrap_or_default()
-                );
+                // A refusal does not end the round (non-members answer with errors too, and
+                // another member may still sign), but its reason is logged and a stale-height
+                // refusal is counted, so the draft is re-staged instead of resent.
+                self.note_cosign_refusal(&response);
                 return;
             }
 
@@ -311,6 +336,19 @@ impl Node {
         ledger_id: &str,
         update: &deposits_core::SignedLedgerUpdate,
     ) -> Result<Vec<deposits_core::CosignEntry>, Error> {
+        self.request_cosign_typed(ledger_id, update)
+            .await
+            .map_err(|e| Error::Protocol(e.to_string()))
+    }
+
+    /// One cosign attempt for one draft: [`Self::request_cosign`], its failure kept typed so a
+    /// round refused for its height ([`CosignFailure::StaleRefused`]) can be told from any other.
+    pub(crate) async fn request_cosign_typed(
+        &self,
+        ledger_id: &str,
+        update: &deposits_core::SignedLedgerUpdate,
+    ) -> Result<Vec<deposits_core::CosignEntry>, super::cosign_restage::CosignFailure> {
+        use super::cosign_restage::CosignFailure;
         use tokio::time::Duration;
 
         // Acquire semaphore to serialize cosign requests. Multiple concurrent
@@ -323,7 +361,7 @@ impl Node {
             .cosign_semaphore
             .acquire()
             .await
-            .map_err(|_| Error::Protocol("Cosign semaphore closed".to_string()))?;
+            .map_err(|_| CosignFailure::Failed("Cosign semaphore closed".to_string()))?;
         let queued = queue_start.elapsed();
         metrics::record_cosign_phase("queue", queued);
         if queued.as_millis() > 50 {
@@ -500,7 +538,7 @@ impl Node {
             .nostr
             .send_ledger_request(ledger_id, "cosign_update", params)
             .await
-            .map_err(|e| Error::Protocol(format!("Failed to send co_sign request: {:?}", e)))?;
+            .map_err(|e| CosignFailure::Failed(format!("Failed to send co_sign request: {:?}", e)))?;
         self.track_sent_event(&request_id);
         self.cosign_rounds
             .lock()
@@ -561,7 +599,19 @@ impl Node {
         metrics::record_cosign_phase("rtt", cosign_rtt);
 
         if results.len() < threshold {
-            return Err(Error::Protocol(format!(
+            let (stale, reason) = collector.stale_refusals();
+            if stale > 0 {
+                return Err(CosignFailure::StaleRefused(format!(
+                    "got {}/{} cosigs in {}ms; {} refused the draft's block_height {} as too old: {}",
+                    results.len(),
+                    threshold,
+                    cosign_rtt.as_millis(),
+                    stale,
+                    update.block_height,
+                    reason
+                )));
+            }
+            return Err(CosignFailure::Failed(format!(
                 "Cosign timeout: got {}/{} cosigs in {}ms",
                 results.len(),
                 threshold,

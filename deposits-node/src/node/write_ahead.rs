@@ -138,6 +138,36 @@ pub(crate) fn journal_get(data_dir: &Path, ledger_id: &str, seq: u64) -> Option<
     read_update(&journal_dir(data_dir).join(format!("{}_{}.json", ledger_id, seq)))
 }
 
+/// May the unsigned draft `draft` for `key`'s ledger be replaced by a re-dated one
+/// (`cosign_restage`)?  Only while nothing of ours exists at its (ledger, sequence): the draft
+/// carries no operator signature, the ledger records nothing there, no pending file names that
+/// sequence, and the fork-less journal holds nothing there.  Every update we sign is in one of
+/// those three places before a relay sees it (the module comment), so all four empty means we
+/// have signed nothing at that sequence and DEP-02's "MUST NOT sign a different update at a
+/// (ledger, sequence) it has already signed" cannot be at stake.
+pub(crate) fn check_restampable(
+    data_dir: &Path,
+    key: &str,
+    history: &[SignedLedgerUpdate],
+    draft: &SignedLedgerUpdate,
+) -> Result<(), String> {
+    let seq = draft.sequence_number;
+    let short = &key[..16.min(key.len())];
+    if draft.operator_signature != [0u8; 64] {
+        return Err(format!("{short} seq {seq}: the draft is already operator-signed; not re-dating it"));
+    }
+    if history.iter().any(|u| u.sequence_number == seq) {
+        return Err(format!("{short} seq {seq}: the ledger already records an update there; not re-dating"));
+    }
+    if pending_dir(data_dir).join(format!("{}_{}.json", key, seq)).exists() {
+        return Err(format!("{short} seq {seq}: a write-ahead pending file names that sequence; not re-dating"));
+    }
+    if journal_get(data_dir, key, seq).is_some() {
+        return Err(format!("{short} seq {seq}: the signed journal holds an update there; not re-dating"));
+    }
+    Ok(())
+}
+
 impl Node {
     /// Step 2 of the module comment: `key`'s history already holds `update` (signed); make it
     /// durable before it is published. `Err` means do not publish.
