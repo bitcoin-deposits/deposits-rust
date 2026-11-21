@@ -288,6 +288,12 @@ impl Node {
         };
         let updates = self.fetch_lottery_updates(ledger_id).await;
         slow("fetch_lottery_updates", t0);
+        // DEP-03 §"The dispute": the arms, manifests and voters of the CURRENT dispute only. A
+        // stale DisputeEnter (a yielded dispute of a vault since rotated) is no part of it; read
+        // over every DisputeEnter it took the voters to the old QuorumBegin (regtest 8082521c,
+        // 34651658, 12bc96d2: "no unspent output pays our participant set"). Vector
+        // rearm_round_agree.json.
+        let updates = deposits_core::rotation_order::dispute_scope(&updates);
 
         let mut our_armed = None;
         let mut has_ledger_open = false;

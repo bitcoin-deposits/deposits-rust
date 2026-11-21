@@ -1,5 +1,6 @@
 //! DEP-06 lottery recovery voters: the members, minus the original operator, of the latest
-//! QuorumBegin the original operator authored at or below the dispute's fork point. Pinned by
+//! QuorumBegin the original operator authored at or below the dispute's fork point (the lowest
+//! last_valid_sequence of the CURRENT dispute, DEP-03 §"The dispute": so Q's). Pinned by
 //! the vector shared with cl-deposits (inspect/vectors/lottery_recovery_voters.txt there);
 //! `REGEN_VECTORS=1` rewrites it. Each case lists abstract updates; both implementations build
 //! them and must derive the same voters and threshold.
@@ -111,14 +112,43 @@ fn cases() -> Vec<(&'static str, Vec<(u64, u8, &'static str, Vec<u64>)>)> {
                 (4, 2, "enter", vec![3]),
             ],
         ),
+        // Was `lowest_fork_point_wins` (QuorumBegin 1's voters): written before DEP-03 §"The
+        // dispute", it read the fork point over every DisputeEnter. Key 3's DisputeEnter at 2 is
+        // below Q = 4 (the vault it disputed was rotated away by QuorumBegin 4), so it is no part
+        // of the dispute and names no fork point: the voters are Q's. Regtest 8082521c (2026-11-20).
         (
-            "lowest_fork_point_wins",
+            "stale_enter_below_q_takes_no_part",
             vec![
                 (0, 1, "open", vec![]),
                 (1, 1, "qb", vec![1, 2, 3]),
                 (4, 1, "qb", vec![1, 4, 5, 6, 7]),
                 (9, 2, "enter", vec![8]),
                 (9, 3, "enter", vec![2]),
+            ],
+        ),
+        // The lowest fork point of the current dispute: at Q itself it still counts.
+        (
+            "lowest_fork_point_in_the_dispute",
+            vec![
+                (0, 1, "open", vec![]),
+                (1, 1, "qb", vec![1, 2, 3]),
+                (4, 1, "qb", vec![1, 4, 5, 6, 7]),
+                (9, 2, "enter", vec![8]),
+                (9, 3, "enter", vec![4]),
+            ],
+        ),
+        // A yielded stale dispute (the regtest shape: enter at the old QuorumBegin, yield, then
+        // the vault rotates): its author drops out and the voters are the new QuorumBegin's.
+        (
+            "yielded_stale_enter_then_rotation",
+            vec![
+                (0, 1, "open", vec![]),
+                (4, 1, "qb", vec![1, 2, 3, 4]),
+                (5, 4, "enter", vec![4]),
+                (6, 4, "yield", vec![]),
+                (8, 1, "qb", vec![1, 2, 3, 5]),
+                (9, 2, "enter", vec![8]),
+                (9, 5, "enter", vec![8]),
             ],
         ),
         (
@@ -139,6 +169,7 @@ fn build(us: &[(u64, u8, &'static str, Vec<u64>)]) -> Vec<SignedLedgerUpdate> {
                 "open" => open(),
                 "qb" => qb(&args.iter().map(|a| *a as u8).collect::<Vec<_>>()),
                 "enter" => enter(args[0]),
+                "yield" => LedgerOperation::DisputeYield,
                 _ => unreachable!(),
             };
             upd(*seq, *author, &op)
