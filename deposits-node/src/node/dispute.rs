@@ -6656,10 +6656,38 @@ mod pledge_pick_vector {
                 .collect();
         let loaded = DepositsHandler::load_single_ledger_from_jsonl(lid, &dir.join("ref6_lost_base.jsonl"))
             .expect("base loads");
-        assert!(
-            loaded.history.iter().all(|u| u.sequence_number <= 12),
-            "the loaded base keeps only the operator's chain"
-        );
+        // The loaded base keeps the operator's chain (0..=12) and the custody transfer chained
+        // onto it: 023d42a6's Enter/Armed/Yield/Armed/Acquire at 13..=17, chained by hash (90f5f8a).
+        {
+            use deposits_core::messages::LedgerOperation;
+            use deposits_core::tlv::TlvDecode;
+            let seqs: Vec<u64> = loaded.history.iter().map(|u| u.sequence_number).collect();
+            assert_eq!(seqs, (0..=17).collect::<Vec<u64>>());
+            let winner = loaded.history[13].operator_id;
+            assert_eq!(&hex::encode(winner.serialize())[..8], "023d42a6");
+            assert!(
+                loaded.history[..13].iter().all(|u| u.operator_id == loaded.history[0].operator_id),
+                "0..=12 are the operator's chain"
+            );
+            assert!(loaded.history[..13].iter().all(|u| u.operator_id != winner));
+            assert!(loaded.history[13..].iter().all(|u| u.operator_id == winner));
+            let ops: Vec<&str> = loaded.history[13..]
+                .iter()
+                .map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::DisputeEnter { .. }) => "enter",
+                    Ok(LedgerOperation::DisputeArmed { .. }) => "armed",
+                    Ok(LedgerOperation::DisputeYield { .. }) => "yield",
+                    Ok(LedgerOperation::DisputeAcquire { .. }) => "acquire",
+                    Ok(_) => "other",
+                    Err(_) => "undecodable",
+                })
+                .collect();
+            assert_eq!(ops, ["enter", "armed", "yield", "armed", "acquire"]);
+            for w in loaded.history[12..].windows(2) {
+                assert_eq!(w[1].previous_hash, w[0].chain_hash(), "seq {}", w[1].sequence_number);
+            }
+            assert_eq!(loaded.state.operator_key, winner, "the operator after load is 023d42a6");
+        }
         let ref6 = fork.history.last().unwrap().operator_id;
         assert_eq!(&hex::encode(ref6.serialize())[..16], "02a417593a974f4f");
         let (vault, cands) =
