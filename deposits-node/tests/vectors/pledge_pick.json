@@ -1,5 +1,5 @@
 {
- "description": "DEP-03 Replacement collateral declaration: the coin a member pledges in a DisputeArmed. Its own earlier pledge for this dispute while unspent; else the smallest coin with at least max(1, min_confs) confirmations that covers need and that no other live arm of the member pledges (taken), ties to the lexicographically smaller outpoint; else none. A coin pledged to two disputes is spent by whichever claim lands first and strands the other (regtest rearm-rust 1119-100553, deposits-rust). Shared by cl-deposits (inspect/lottery-test.lisp, pick-pledge) and deposits-rust (dispute.rs, pick_pledge). Cases with `forks` add what each of the member's forks still holds to `taken` (DEP-03, a pledge is held while its dispute is live): a fork's `ops` are its own DisputeEnter (`enter`), DisputeArmed (`arm`, with the `pledge` it declares or null), DisputeYield (`yield`, also the tombstone a lost lottery leaves) and DisputeAcquire (`acquire`, output 0 of `claim` and whether it `binds`). A pledge is held from its arm until a later yield, a binding acquire, or the fork's retirement (`retired`); output 0 of a binding claim is custody, held while that acquire stands. Regtest 1120-next4: ref6 held 31 coins and could pledge none, 30 held by disputes long ended.",
+ "description": "DEP-03 Replacement collateral declaration: the coin a member pledges in a DisputeArmed. Its own earlier pledge for this dispute while unspent; else the smallest coin with at least max(1, min_confs) confirmations that covers need and that no other live arm of the member pledges (taken), ties to the lexicographically smaller outpoint; else none. A coin pledged to two disputes is spent by whichever claim lands first and strands the other (regtest rearm-rust 1119-100553, deposits-rust). Shared by cl-deposits (inspect/lottery-test.lisp, pick-pledge) and deposits-rust (dispute.rs, pick_pledge). Cases with `forks` add what each of the member's forks still holds to `taken` (DEP-03, a pledge is held while its dispute is live): a fork's `ops` are its own DisputeEnter (`enter`), DisputeArmed (`arm`, with the `pledge` it declares or null), DisputeYield (`yield`, also the tombstone a lost lottery leaves) and DisputeAcquire (`acquire`, output 0 of `claim` and whether it `binds`). An `arm` may carry its `round` (TLV 366; 1 when absent). A fork's `others` are the DisputeAcquires by OTHER participants of its dispute, each with the `round` its claim closes and whether it `binds` (DEP-06 acquire_binding.json). A pledge is held from its arm until a later yield, a binding acquire of ours, a binding acquire by another participant for the arm's round or a later one, or the fork's retirement (`retired`); output 0 of a binding claim is custody, held while that acquire stands. Regtest 1120-next4: ref6 held 31 coins and could pledge none, 30 held by disputes long ended.",
  "cases": [
   {
    "name": "the smallest coin that covers the need",
@@ -549,6 +549,131 @@
     }
    ],
    "expect": "bb:1"
+  },
+  {
+   "name": "another participant's binding acquire frees our pledge",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      }
+     ],
+     "others": [
+      {
+       "round": 1,
+       "binds": true
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "bb:1"
+  },
+  {
+   "name": "a non-binding acquire by another frees nothing",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1"
+      }
+     ],
+     "others": [
+      {
+       "round": 1,
+       "binds": false
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
+  },
+  {
+   "name": "an acquire for an earlier round frees nothing for our later-round arm",
+   "need": 20000,
+   "min_confs": 1,
+   "own": null,
+   "taken": [],
+   "forks": [
+    {
+     "ops": [
+      {
+       "op": "enter"
+      },
+      {
+       "op": "arm",
+       "pledge": null
+      },
+      {
+       "op": "arm",
+       "pledge": "bb:1",
+       "round": 2
+      }
+     ],
+     "others": [
+      {
+       "round": 1,
+       "binds": true
+      }
+     ],
+     "retired": false
+    }
+   ],
+   "utxos": [
+    {
+     "outpoint": "aa:0",
+     "sats": 50000,
+     "confirmations": 6
+    },
+    {
+     "outpoint": "bb:1",
+     "sats": 30000,
+     "confirmations": 6
+    }
+   ],
+   "expect": "aa:0"
   }
  ]
 }
