@@ -437,7 +437,7 @@ impl Node {
 
     /// The base ledger's updates at `seqs`, from the ledger we hold (its in-memory history,
     /// then the disk log); `None` unless every one is found.
-    fn local_updates_at(
+    pub(crate) fn local_updates_at(
         &self,
         ledger_id: &str,
         seqs: &[u64],

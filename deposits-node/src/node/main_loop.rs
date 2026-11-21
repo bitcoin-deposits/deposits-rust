@@ -23,6 +23,76 @@ pub(crate) enum ReimportPage {
 /// page, left any member more than one page behind permanently stranded — the
 /// root of the joined-ledger wedge. Terminating on a stall instead is robust to
 /// whatever the relay's real cap turns out to be.
+/// The joined-ledger cache (`Node::get_joined_ledger_ids`): the ledger ids named by a
+/// QuorumJoin in a ledger we operate, the history length of each of ours it scanned up to, and
+/// how many ledgers were tracked then.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct JoinedCache {
+    pub joined: Option<Vec<String>>,
+    pub versions: std::collections::HashMap<String, usize>,
+    pub total: Option<usize>,
+}
+
+impl JoinedCache {
+    /// Whether the cache still answers: filled, the tracked-ledger count is unchanged, and every
+    /// ledger we operate (`ours`: id and history length) is one it scanned, at the length it
+    /// scanned. The count compared is the TOTAL, not the number of our ledgers: comparing the
+    /// two made the cache miss on every call of a node that tracks any ledger it does not
+    /// operate (signet ref4: every call rescanned, 4-10 ms, up to 878 ms under lock contention).
+    pub(crate) fn fresh(
+        &self,
+        ledger_count: usize,
+        ours: impl IntoIterator<Item = (String, usize)>,
+    ) -> bool {
+        self.joined.is_some()
+            && self.total == Some(ledger_count)
+            && ours
+                .into_iter()
+                .all(|(id, len)| self.versions.get(&id) == Some(&len))
+    }
+
+    /// The cache a rescan fills: the cached ids (a rescan only adds), no versions yet.
+    pub(crate) fn begin_rescan(&self, ledger_count: usize) -> JoinedCache {
+        JoinedCache {
+            joined: Some(self.joined.clone().unwrap_or_default()),
+            versions: std::collections::HashMap::new(),
+            total: Some(ledger_count),
+        }
+    }
+
+    /// Scan our ledger `id`'s `history` past the length `prev` scanned it to (capped in case
+    /// history was truncated), adding each QuorumJoin's ledger id; returns how many entries
+    /// were scanned.
+    pub(crate) fn scan(
+        &mut self,
+        prev: &JoinedCache,
+        id: &str,
+        history: &[deposits_core::SignedLedgerUpdate],
+    ) -> usize {
+        let prev_len = prev
+            .versions
+            .get(id)
+            .copied()
+            .unwrap_or(0)
+            .min(history.len());
+        self.versions.insert(id.to_string(), history.len());
+        let joined = self.joined.get_or_insert_with(Vec::new);
+        for update in &history[prev_len..] {
+            if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
+                continue;
+            }
+            if let Ok(LedgerOperation::QuorumJoin { ledger_id, .. }) =
+                LedgerOperation::tlv_decode(&update.message)
+            {
+                if !joined.contains(&ledger_id) {
+                    joined.push(ledger_id);
+                }
+            }
+        }
+        history.len() - prev_len
+    }
+}
+
 pub(crate) fn plan_reimport_page(
     fresh: usize,
     page_min_ts: Option<u64>,
@@ -214,94 +284,43 @@ impl Node {
     /// calls, only scans new entries since the last scan. This avoids the O(full_history)
     /// scan that was triggered every 2s reload when history grows during sustained load.
     pub(crate) fn get_joined_ledger_ids(&self) -> Vec<String> {
-        // Fast path: check if cache is populated AND history hasn't grown.
-        //
         // IMPORTANT: Clone cache data BEFORE acquiring handler.ledgers to avoid
-        // ABBA deadlock. The cache-miss path below acquires handler.ledgers first,
-        // then joined_ledger_cache. If we held joined_ledger_cache while waiting
-        // for handler.ledgers here, a concurrent task in the cache-miss path
-        // (holding handler.ledgers, waiting for joined_ledger_cache) would deadlock.
-        {
-            let (cached_data, cached_versions) = {
-                let cache = self.joined_ledger_cache.lock().unwrap();
-                let versions = self.joined_ledger_cache_versions.lock().unwrap();
-                (cache.clone(), versions.clone())
-            };
-            // Cache locks released — safe to acquire handler.ledgers
-
-            if let Some(ref cached) = cached_data {
-                let ledgers = self.handler.ledgers.lock().unwrap();
-                let mut stale = false;
-
-                if ledgers.len() != cached_versions.len() {
-                    stale = true;
-                } else {
-                    for (lid, arc) in ledgers.iter() {
-                        let l = arc.read().unwrap();
-                        if l.operator_key() == self.node_id {
-                            match cached_versions.get(lid) {
-                                Some(&v) if v == l.history.len() => {}
-                                _ => {
-                                    stale = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                if !stale {
-                    return cached.clone();
-                }
-            }
-        }
-
-        // Cache miss — incremental scan: only check entries we haven't seen yet.
-        // QuorumJoin entries are rare and only appear early in history, so after
-        // the first full scan, incremental scans process near-zero new entries.
+        // ABBA deadlock: never hold a joined-cache lock while waiting for
+        // handler.ledgers (another task holds handler.ledgers and then takes
+        // the cache locks to store its result).
+        let prev = JoinedCache {
+            joined: self.joined_ledger_cache.lock().unwrap().clone(),
+            versions: self.joined_ledger_cache_versions.lock().unwrap().clone(),
+            total: *self.joined_ledger_cache_total.lock().unwrap(),
+        };
         let t0 = std::time::Instant::now();
-        let mut new_versions = HashMap::new();
-        let ledgers = self.handler.ledgers.lock().unwrap();
-
-        // Start from previous cached result + scan offsets
-        let prev_cache = self.joined_ledger_cache.lock().unwrap().clone();
-        let prev_versions = self.joined_ledger_cache_versions.lock().unwrap().clone();
-        let mut joined = prev_cache.unwrap_or_default();
-        let mut scanned_new = 0usize;
-
-        for (ledger_id, ledger_arc) in ledgers.iter() {
-            let ledger = ledger_arc.read().unwrap();
-            if ledger.operator_key() == self.node_id {
-                let history_len = ledger.history.len();
-                new_versions.insert(ledger_id.clone(), history_len);
-
-                // Only scan entries beyond what we've already scanned.
-                // Cap at history_len in case history was truncated.
-                let prev_len = prev_versions
-                    .get(ledger_id)
-                    .copied()
-                    .unwrap_or(0)
-                    .min(ledger.history.len());
-                for update in ledger.history.iter().skip(prev_len) {
-                    scanned_new += 1;
-                    if update.message_type != deposits_core::messages::consts::QUORUM_JOIN {
-                        continue;
-                    }
-                    if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
-                        if let LedgerOperation::QuorumJoin { ledger_id, .. } = op {
-                            if !joined.contains(&ledger_id) {
-                                joined.push(ledger_id);
-                            }
-                        }
-                    }
+        let (joined, next, scanned_new) = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            // One ledger lock at a time, as before: holding every read guard at once could
+            // deadlock against a writer that takes two ledgers' locks.
+            let ours: Vec<(String, usize)> = ledgers
+                .iter()
+                .filter_map(|(lid, arc)| {
+                    let l = arc.read().unwrap();
+                    (l.operator_key() == self.node_id).then(|| (lid.clone(), l.history.len()))
+                })
+                .collect();
+            if prev.fresh(ledgers.len(), ours) {
+                return prev.joined.unwrap_or_default();
+            }
+            let mut next = prev.begin_rescan(ledgers.len());
+            let mut scanned_new = 0usize;
+            for (lid, arc) in ledgers.iter() {
+                let l = arc.read().unwrap();
+                if l.operator_key() == self.node_id {
+                    scanned_new += next.scan(&prev, lid, &l.history);
                 }
             }
-        }
-        drop(ledgers);
-
+            (next.joined.clone().unwrap_or_default(), next, scanned_new)
+        };
         let elapsed = t0.elapsed();
         if elapsed.as_millis() > 1 || scanned_new > 100 {
-            let total: usize = new_versions.values().sum();
+            let total: usize = next.versions.values().sum();
             tracing::info!(
                 "[PROFILE] get_joined_ledger_ids: scanned {} new entries ({} total) in {:?}",
                 scanned_new,
@@ -310,11 +329,27 @@ impl Node {
             );
         }
 
-        let mut cache = self.joined_ledger_cache.lock().unwrap();
-        *cache = Some(joined.clone());
-        *self.joined_ledger_cache_versions.lock().unwrap() = new_versions;
-
+        *self.joined_ledger_cache.lock().unwrap() = next.joined;
+        *self.joined_ledger_cache_versions.lock().unwrap() = next.versions;
+        *self.joined_ledger_cache_total.lock().unwrap() = next.total;
         joined
+    }
+
+    /// Whether `ledger_id` is a ledger we joined (a QuorumJoin in a ledger we operate): the
+    /// answer of `get_joined_ledger_ids().contains(ledger_id)`. The cached list only ever grows
+    /// between invalidations (a rescan starts from it), so a hit in it is the answer without
+    /// the freshness check; only a miss rescans.
+    pub(crate) fn is_joined_ledger(&self, ledger_id: &str) -> bool {
+        if self
+            .joined_ledger_cache
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|c| c.iter().any(|j| j == ledger_id))
+        {
+            return true;
+        }
+        self.get_joined_ledger_ids().iter().any(|j| j == ledger_id)
     }
 
     /// Force-invalidate the joined ledger cache.
@@ -323,6 +358,7 @@ impl Node {
         let mut cache = self.joined_ledger_cache.lock().unwrap();
         *cache = None;
         self.joined_ledger_cache_versions.lock().unwrap().clear();
+        *self.joined_ledger_cache_total.lock().unwrap() = None;
         // Also invalidate cosign member cache since QuorumJoin mappings may have changed
         self.cosign_member_cache.lock().unwrap().clear();
     }
@@ -3262,5 +3298,164 @@ mod pagination_tests {
             plan_reimport_page(1, None, 1, 50, &mut stalls),
             ReimportPage::Stop
         );
+    }
+}
+
+#[cfg(test)]
+mod joined_cache_tests {
+    use super::JoinedCache;
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvEncode;
+    use deposits_core::SignedLedgerUpdate;
+
+    fn key(b: u8) -> bitcoin::secp256k1::PublicKey {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[b; 32]).unwrap())
+    }
+
+    fn upd(seq: u64, join: Option<&str>) -> SignedLedgerUpdate {
+        let (message, message_type) = match join {
+            Some(id) => {
+                let op = LedgerOperation::QuorumJoin {
+                    operator_id: key(9),
+                    ledger_id: id.to_string(),
+                    membership_expires: 0,
+                };
+                (op.tlv_encode(), op.message_type())
+            }
+            None => {
+                let op = LedgerOperation::DisputeYield;
+                (op.tlv_encode(), op.message_type())
+            }
+        };
+        SignedLedgerUpdate {
+            message,
+            message_type,
+            operator_id: key(1),
+            ledger_id: [0u8; 32],
+            sequence_number: seq,
+            previous_hash: [0u8; 32],
+            content_hash: [seq as u8; 32],
+            block_height: 0,
+            block_hash: [0u8; 32],
+            operator_signature: [0u8; 64],
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// What `get_joined_ledger_ids` must answer: every QuorumJoin in every ledger we operate,
+    /// plus whatever the cache held (a rescan never forgets).
+    fn full_scan(ours: &[(String, Vec<SignedLedgerUpdate>)]) -> Vec<String> {
+        use deposits_core::TlvDecode;
+        let mut out = Vec::new();
+        for (_, h) in ours {
+            for u in h {
+                if let Ok(LedgerOperation::QuorumJoin { ledger_id, .. }) =
+                    LedgerOperation::tlv_decode(&u.message)
+                {
+                    if !out.contains(&ledger_id) {
+                        out.push(ledger_id);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// One `get_joined_ledger_ids` call over `total` tracked ledgers of which `ours` are ours:
+    /// the same two steps it takes (freshness, then the incremental rescan).
+    fn call(
+        cache: &mut JoinedCache,
+        total: usize,
+        ours: &[(String, Vec<SignedLedgerUpdate>)],
+    ) -> (Vec<String>, usize) {
+        if cache.fresh(total, ours.iter().map(|(id, h)| (id.clone(), h.len()))) {
+            return (cache.joined.clone().unwrap_or_default(), 0);
+        }
+        let mut next = cache.begin_rescan(total);
+        let mut scanned = 0;
+        for (id, h) in ours {
+            scanned += next.scan(cache, id, h);
+        }
+        *cache = next;
+        (cache.joined.clone().unwrap(), scanned)
+    }
+
+    fn sorted(mut v: Vec<String>) -> Vec<String> {
+        v.sort();
+        v
+    }
+
+    /// The cache answers exactly what a full scan answers, through growth, a new ledger of ours,
+    /// a tracked ledger that is not ours, and a truncated history; and a call with nothing
+    /// changed scans nothing. Before the fix the freshness check compared the number of TRACKED
+    /// ledgers with the number of OURS, so with one non-ours ledger every call rescanned.
+    #[test]
+    fn the_cache_answers_as_a_full_scan_and_hits_when_nothing_changed() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let mut ours = vec![(
+            "own1".to_string(),
+            vec![upd(0, None), upd(1, Some(&a)), upd(2, None)],
+        )];
+        let mut c = JoinedCache::default();
+        // 3 tracked ledgers, 1 ours.
+        let (got, scanned) = call(&mut c, 3, &ours);
+        assert_eq!(sorted(got), sorted(full_scan(&ours)));
+        assert_eq!(scanned, 3);
+        // Nothing changed: a hit, nothing scanned (it rescanned every call before).
+        let (got, scanned) = call(&mut c, 3, &ours);
+        assert_eq!(sorted(got), vec![a.clone()]);
+        assert_eq!(scanned, 0);
+        assert_ne!(
+            c.versions.len(),
+            3,
+            "the old check (tracked != versions) was always stale"
+        );
+
+        // Our history grows: only the new entries are scanned.
+        ours[0].1.push(upd(3, Some(&b)));
+        let (got, scanned) = call(&mut c, 3, &ours);
+        assert_eq!(sorted(got), sorted(full_scan(&ours)));
+        assert_eq!(scanned, 1);
+
+        // A new tracked ledger that is not ours: stale by count, nothing new to find.
+        let (got, scanned) = call(&mut c, 4, &ours);
+        assert_eq!(sorted(got.clone()), sorted(full_scan(&ours)));
+        assert_eq!(scanned, 0);
+        assert_eq!(call(&mut c, 4, &ours), (got, 0));
+
+        // A ledger that becomes ours in place (custody acquired), count unchanged: scanned whole.
+        let cdx = "c".repeat(64);
+        ours.push(("own2".to_string(), vec![upd(0, Some(&cdx))]));
+        let (got, scanned) = call(&mut c, 4, &ours);
+        assert_eq!(sorted(got), sorted(full_scan(&ours)));
+        assert_eq!(scanned, 1);
+
+        // A truncated history rescans from its new end and forgets nothing.
+        ours[0].1.truncate(1);
+        let (got, _) = call(&mut c, 4, &ours);
+        assert_eq!(sorted(got), sorted(vec![a.clone(), b.clone(), cdx.clone()]));
+        ours[0].1.push(upd(9, None));
+        let (got, scanned) = call(&mut c, 4, &ours);
+        assert_eq!(sorted(got), sorted(vec![a, b, cdx]));
+        assert_eq!(scanned, 1);
+    }
+
+    /// Membership by the cached list is membership by the rescanned one: a rescan starts from
+    /// the cached ids and only adds, so `is_joined_ledger`'s early hit agrees with
+    /// `get_joined_ledger_ids().contains`.
+    #[test]
+    fn a_rescan_only_adds_to_the_cached_ids() {
+        let a = "a".repeat(64);
+        let mut c = JoinedCache::default();
+        let ours = vec![("own".to_string(), vec![upd(0, Some(&a))])];
+        call(&mut c, 1, &ours);
+        let cached = c.joined.clone().unwrap();
+        // Any later state, even with the joining ledger gone: the rescan keeps the cached ids.
+        for (total, o) in [(1, ours.clone()), (2, vec![]), (5, ours.clone())] {
+            let (got, _) = call(&mut c, total, &o);
+            assert!(cached.iter().all(|id| got.contains(id)));
+        }
     }
 }

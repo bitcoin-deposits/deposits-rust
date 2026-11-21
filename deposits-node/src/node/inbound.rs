@@ -1966,7 +1966,33 @@ impl Node {
         // (gap-fill + structural/embedding/causal/per-type evidence + the
         // on-chain WinnerCollateralDeviation step) before acting on it.
         let proof_hash_hex = hex::encode(broadcast.proof.proof_hash());
-        if let Err(e) = self.verify_fraud_broadcast_locally(broadcast).await {
+        let recent_key = RecentVerified::key(broadcast);
+        let recently_verified = recent_key.is_some_and(|k| {
+            self.recent_verified_proofs
+                .lock()
+                .unwrap()
+                .hit(&k, std::time::Instant::now())
+        });
+        let verified = if recently_verified {
+            tracing::debug!(
+                "Fraud proof {}... verified here in the last {} s; not verifying this copy again",
+                &proof_hash_hex[..16],
+                RECENT_VERIFIED_TTL.as_secs()
+            );
+            // As a verification would (the known-broadcast map is bounded and may have cleared).
+            remember_broadcast(broadcast);
+            Ok(())
+        } else {
+            let r = self.verify_fraud_broadcast_locally(broadcast).await;
+            if let (Ok(()), Some(k)) = (&r, recent_key) {
+                self.recent_verified_proofs
+                    .lock()
+                    .unwrap()
+                    .insert(k, std::time::Instant::now());
+            }
+            r
+        };
+        if let Err(e) = verified {
             // Cannot judge yet, or invalid? A proof whose evidence rests on a
             // sequence our replica has not reached fails for want of history,
             // not for want of fraud: regtest 1120-075609, ref7 3 s behind
@@ -2321,18 +2347,15 @@ impl Node {
         drop(ledgers);
 
         // Check our joined ledgers (QuorumJoin records in our ledger history)
-        let joined = self.get_joined_ledger_ids();
-        for jid in joined {
-            if jid == ledger_id {
-                let elapsed = t0.elapsed();
-                if elapsed.as_millis() > 1 {
-                    tracing::info!(
-                        "[PROFILE] is_quorum_member_of_ledger (found via history scan): {:?}",
-                        elapsed
-                    );
-                }
-                return true;
+        if self.is_joined_ledger(ledger_id) {
+            let elapsed = t0.elapsed();
+            if elapsed.as_millis() > 1 {
+                tracing::info!(
+                    "[PROFILE] is_quorum_member_of_ledger (found via history scan): {:?}",
+                    elapsed
+                );
             }
+            return true;
         }
 
         let elapsed = t0.elapsed();
@@ -3367,6 +3390,62 @@ fn known_broadcasts() -> &'static std::sync::Mutex<std::collections::HashMap<[u8
     KNOWN.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
+/// Received fraud broadcasts that verified here, by the hash of the whole broadcast (proof,
+/// embedding and causal chain), for [`RECENT_VERIFIED_TTL`]. A sender that re-sends one proof
+/// every pass (cld7 on signet: four QuorumExpired proofs every ~72 s, 2026-11-21) had each copy
+/// re-verified, gap-fill and relay fetches included. A copy inside the window skips only the
+/// verification: everything after it (custody moved, membership, the dispute itself) is judged
+/// again from current state, as before. Only a SUCCESS is kept, never a rejection: a proof that
+/// cannot verify yet (a QuorumExpired before its expiry height, history not reached) must be
+/// judged again on its next copy. The window bounds how long a verdict that rests on the chain
+/// (a reorg) is trusted.
+#[derive(Default)]
+pub(crate) struct RecentVerified {
+    at: std::collections::HashMap<[u8; 32], std::time::Instant>,
+    /// Verifications skipped, for logs and tests.
+    pub skipped: u64,
+}
+
+pub(crate) const RECENT_VERIFIED_TTL: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const RECENT_VERIFIED_CAP: usize = 4096;
+
+impl RecentVerified {
+    /// The key: SHA-256 of the broadcast's canonical JSON.
+    pub(crate) fn key(b: &deposits_core::fraud::FraudBroadcast) -> Option<[u8; 32]> {
+        use bitcoin::hashes::{sha256, Hash};
+        serde_json::to_vec(b)
+            .ok()
+            .map(|j| sha256::Hash::hash(&j).to_byte_array())
+    }
+
+    /// Whether `key` verified within the window at `now`; counts a hit as a skip.
+    pub(crate) fn hit(&mut self, key: &[u8; 32], now: std::time::Instant) -> bool {
+        match self.at.get(key) {
+            Some(t) if now.saturating_duration_since(*t) < RECENT_VERIFIED_TTL => {
+                self.skipped += 1;
+                true
+            }
+            Some(_) => {
+                self.at.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// `key` verified at `now`. Bounded: expired entries go first, then everything.
+    pub(crate) fn insert(&mut self, key: [u8; 32], now: std::time::Instant) {
+        if self.at.len() >= RECENT_VERIFIED_CAP {
+            self.at
+                .retain(|_, t| now.saturating_duration_since(*t) < RECENT_VERIFIED_TTL);
+            if self.at.len() >= RECENT_VERIFIED_CAP {
+                self.at.clear();
+            }
+        }
+        self.at.insert(key, now);
+    }
+}
+
 pub(crate) fn remember_broadcast(b: &deposits_core::fraud::FraudBroadcast) {
     if let Ok(j) = serde_json::to_string(b) {
         let mut known = known_broadcasts().lock().unwrap();
@@ -3418,5 +3497,60 @@ impl crate::node::Node {
     ) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
         let grounds = Box::pin(self.grounds_verdicts(updates)).await;
         crate::node::armers::lottery_voters_with(updates, &grounds)
+    }
+}
+
+#[cfg(test)]
+mod recent_verified_tests {
+    use super::{RecentVerified, RECENT_VERIFIED_TTL};
+
+    /// A verified broadcast's copies skip verification for the window, then are verified again;
+    /// a broadcast that differs in anything (here, the key) is never skipped.
+    #[test]
+    fn copies_of_a_verified_broadcast_skip_verification_within_the_window() {
+        let mut r = RecentVerified::default();
+        let now = std::time::Instant::now();
+        let k = [7u8; 32];
+        assert!(!r.hit(&k, now), "never verified: verify");
+        r.insert(k, now);
+        assert!(r.hit(&k, now + std::time::Duration::from_secs(72)));
+        assert!(!r.hit(&[8u8; 32], now), "another broadcast: verify");
+        assert!(
+            !r.hit(&k, now + RECENT_VERIFIED_TTL),
+            "the window passed: verify again"
+        );
+        assert!(!r.hit(&k, now + RECENT_VERIFIED_TTL), "and it was dropped");
+        assert_eq!(r.skipped, 1);
+    }
+
+    /// The key covers the whole broadcast: one proof with another expiry, or another ledger, is
+    /// another key; an identical copy is the same key.
+    #[test]
+    fn the_key_is_the_whole_broadcast() {
+        use deposits_core::fraud::{FraudBroadcast, FraudEvidence, FraudProof, FraudProofType};
+        let mk = |expiry: u32, ledger: &str| FraudBroadcast {
+            proof: FraudProof {
+                proof_type: FraudProofType::QuorumExpired,
+                accused: "02".repeat(33),
+                ledger_id: ledger.to_string(),
+                evidence: FraudEvidence::QuorumExpired {
+                    anchor_block_hash: [3u8; 32],
+                    quorum_expiry: expiry,
+                },
+            },
+            embedding: None,
+            causal_chain: Vec::new(),
+        };
+        let a = mk(5, &"a".repeat(64));
+        assert!(RecentVerified::key(&a).is_some());
+        assert_eq!(RecentVerified::key(&a), RecentVerified::key(&a.clone()));
+        assert_ne!(
+            RecentVerified::key(&a),
+            RecentVerified::key(&mk(6, &"a".repeat(64)))
+        );
+        assert_ne!(
+            RecentVerified::key(&a),
+            RecentVerified::key(&mk(5, &"b".repeat(64)))
+        );
     }
 }

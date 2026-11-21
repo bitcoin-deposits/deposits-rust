@@ -1331,34 +1331,100 @@ pub(crate) struct LotteryUpdates {
     keys: std::collections::HashSet<([u8; 33], [u8; 32])>,
     /// The newest `created_at` fetched.
     pub newest_ts: u64,
+    /// The last whole-ledger fetch.
     full_at: std::time::Instant,
+    /// The last [`LOTTERY_SWEEP_OP_TYPES`] sweep (or whole fetch, which covers it).
+    swept_at: std::time::Instant,
 }
 
 /// A pass fetches from this long before the newest event it holds, for events published late
 /// with a slightly older `created_at`.
 const LOTTERY_FETCH_OVERLAP_SECS: u64 = 600;
-/// And refetches the whole ledger this often, for an event backdated past the overlap (an arm
-/// can be: docs/ADVERSARIAL.md §Backdated arms).
+/// How often a pass also sweeps the WHOLE time range for the operations the armer set is built
+/// from ([`LOTTERY_SWEEP_OP_TYPES`]), for one backdated past the overlap (an arm can be:
+/// DEP-03 §"Backdated arms"). It used to refetch the whole ledger this often: 250k updates,
+/// 27-140 s per fetch, five ledgers, every 30 minutes (signet ref4, 2026-11-21). The `t`-tag
+/// sweep is a handful of events, and the whole fetch it replaced was capped at
+/// `RELAY_FETCH_MAX_PAGES` x `RELAY_FETCH_PAGE_LIMIT` = 250k newest events, so it never saw an
+/// arm backdated below that on these ledgers either.
+const LOTTERY_SWEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+/// A whole-ledger refetch happens only when a pass cannot vouch for what it holds (the
+/// incremental fetch's overlap failed, or a DisputeEnter's fork point is held nowhere), and
+/// then at most this often.
 const LOTTERY_FULL_REFETCH: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// What an armer set reads off the forks and the ruleset (`t` tags): LedgerOpen, QuorumBegin,
+/// QuorumUpgrade, DisputeEnter, DisputeAcquire, DisputeYield, DisputeArmed. The canonical chain
+/// below the fork point is the operator's signed history, which a pass already holds and a
+/// backdated event cannot change.
+pub(crate) const LOTTERY_SWEEP_OP_TYPES: [u8; 7] = [1, 12, 45, 54, 55, 56, 57];
+
+/// The kind of relay fetch a pass makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LotteryFetch {
+    /// Nothing held: the whole ledger.
+    Whole,
+    /// From `since`; with `sweep`, also the backdated-arm sweep.
+    Incremental { since: u64, sweep: bool },
+}
+
+/// What [`LotteryUpdates::merge_checked`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Merged {
+    /// How many updates were new.
+    pub fresh: usize,
+    /// Whether the fetch re-served anything already held. An incremental fetch starts
+    /// [`LOTTERY_FETCH_OVERLAP_SECS`] before the newest event held, so a complete one always
+    /// brings that event back; one that does not was cut short (the page cap) or the relay lost
+    /// what we hold, and the gap between can only be closed by a whole fetch.
+    pub overlapped: bool,
+}
 
 impl LotteryUpdates {
     pub(crate) fn new(updates: Vec<SignedLedgerUpdate>, newest_ts: Option<u64>) -> Self {
-        let keys = updates
-            .iter()
-            .map(|u| (u.operator_id.serialize(), u.content_hash))
-            .collect();
+        let mut keys = std::collections::HashSet::with_capacity(updates.len());
+        let mut kept = Vec::with_capacity(updates.len());
+        for u in updates {
+            if keys.insert((u.operator_id.serialize(), u.content_hash)) {
+                kept.push(u);
+            }
+        }
+        let now = std::time::Instant::now();
         Self {
-            updates: std::sync::Arc::new(updates),
+            updates: std::sync::Arc::new(kept),
             keys,
             newest_ts: newest_ts.unwrap_or(0),
-            full_at: std::time::Instant::now(),
+            full_at: now,
+            swept_at: now,
         }
     }
 
-    /// Where the next incremental fetch starts, or `None` when a whole refetch is due.
-    pub(crate) fn since(&self, now: std::time::Instant) -> Option<u64> {
-        (now.duration_since(self.full_at) < LOTTERY_FULL_REFETCH)
-            .then(|| self.newest_ts.saturating_sub(LOTTERY_FETCH_OVERLAP_SECS))
+    /// Where the next incremental fetch starts: just before the newest event held.
+    pub(crate) fn since(&self) -> u64 {
+        self.newest_ts.saturating_sub(LOTTERY_FETCH_OVERLAP_SECS)
+    }
+
+    /// The next pass's fetch: always incremental once something is held, with the backdated-arm
+    /// sweep every [`LOTTERY_SWEEP_EVERY`].
+    pub(crate) fn plan(&self, now: std::time::Instant) -> LotteryFetch {
+        LotteryFetch::Incremental {
+            since: self.since(),
+            sweep: now.duration_since(self.swept_at) >= LOTTERY_SWEEP_EVERY,
+        }
+    }
+
+    /// Whether a whole refetch may run now (it is rate-limited even when a pass asks for one).
+    pub(crate) fn full_allowed(&self, now: std::time::Instant) -> bool {
+        now.duration_since(self.full_at) >= LOTTERY_FULL_REFETCH
+    }
+
+    pub(crate) fn mark_swept(&mut self, now: std::time::Instant) {
+        self.swept_at = now;
+    }
+
+    pub(crate) fn mark_full(&mut self, now: std::time::Instant) {
+        self.full_at = now;
+        self.swept_at = now;
     }
 
     /// Add what an incremental fetch brought that is not held yet (keyed as the fetch keys
@@ -1368,11 +1434,24 @@ impl LotteryUpdates {
         fetched: Vec<SignedLedgerUpdate>,
         newest_ts: Option<u64>,
     ) -> usize {
+        self.merge_checked(fetched, newest_ts).fresh
+    }
+
+    /// [`Self::merge`], also reporting whether the fetch overlapped what was held.
+    pub(crate) fn merge_checked(
+        &mut self,
+        fetched: Vec<SignedLedgerUpdate>,
+        newest_ts: Option<u64>,
+    ) -> Merged {
+        let mut overlapped = false;
         let fresh: Vec<SignedLedgerUpdate> = fetched
             .into_iter()
             .filter(|u| {
-                self.keys
-                    .insert((u.operator_id.serialize(), u.content_hash))
+                let new = self
+                    .keys
+                    .insert((u.operator_id.serialize(), u.content_hash));
+                overlapped |= !new;
+                new
             })
             .collect();
         if let Some(ts) = newest_ts {
@@ -1380,65 +1459,137 @@ impl LotteryUpdates {
         }
         let n = fresh.len();
         if n > 0 {
-            let mut all = (*self.updates).clone();
-            all.extend(fresh);
-            self.updates = std::sync::Arc::new(all);
+            // In place when no caller still holds the previous pass's updates: no 250k copy.
+            std::sync::Arc::make_mut(&mut self.updates).extend(fresh);
         }
-        n
+        Merged {
+            fresh: n,
+            overlapped,
+        }
     }
 }
 
-fn lottery_updates_cache() -> &'static Mutex<HashMap<String, LotteryUpdates>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, LotteryUpdates>>> = OnceLock::new();
+/// Per ledger, one slot behind an async lock: two passes over one ledger (the claim periodic and
+/// a request handler) queue instead of each fetching, and a pass mutates the kept updates in
+/// place instead of copying them out of the cache and back.
+type LotterySlot = std::sync::Arc<tokio::sync::Mutex<Option<LotteryUpdates>>>;
+
+fn lottery_updates_cache() -> &'static Mutex<HashMap<String, LotterySlot>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, LotterySlot>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Relay fetches made by [`crate::node::Node::lottery_updates`], by kind, for tests and logs.
+#[derive(Default, Debug)]
+pub(crate) struct LotteryFetchCounts {
+    pub whole: std::sync::atomic::AtomicU64,
+    pub incremental: std::sync::atomic::AtomicU64,
+    pub sweep: std::sync::atomic::AtomicU64,
+}
+
+pub(crate) fn lottery_fetch_counts() -> &'static LotteryFetchCounts {
+    static C: OnceLock<LotteryFetchCounts> = OnceLock::new();
+    C.get_or_init(LotteryFetchCounts::default)
+}
+
+/// Whether a pass must refetch the whole ledger: its incremental fetch brought events and none
+/// of them was held (the overlap failed), or a DisputeEnter's fork point is held nowhere.
+pub(crate) fn lottery_needs_whole(
+    incremental: Option<Merged>,
+    fetched_any: bool,
+    missing_fork_points: bool,
+) -> bool {
+    let overlap_failed = fetched_any && incremental.is_some_and(|m| !m.overlapped);
+    overlap_failed || missing_fork_points
+}
+
 impl crate::node::Node {
-    /// A dispute's updates for its armer set: the whole ledger on the first pass and every
-    /// [`LOTTERY_FULL_REFETCH`], and in between only what came since the last pass.
+    /// A dispute's updates for its armer set: the whole ledger on the first pass, and after it
+    /// only what came since the last pass plus, every [`LOTTERY_SWEEP_EVERY`], the armer-set
+    /// operations over the whole time range. A whole refetch again only when a pass cannot vouch
+    /// for what it holds ([`lottery_needs_whole`]), at most every [`LOTTERY_FULL_REFETCH`]; it
+    /// MERGES, so a capped refetch never drops what an earlier pass held.
     async fn lottery_updates(&self, ledger_id: &str) -> std::sync::Arc<Vec<SignedLedgerUpdate>> {
-        let cached = lottery_updates_cache()
+        use std::sync::atomic::Ordering::Relaxed;
+        let slot = lottery_updates_cache()
             .lock()
             .unwrap()
-            .get(ledger_id)
-            .cloned();
-        let since = cached
-            .as_ref()
-            .and_then(|c| c.since(std::time::Instant::now()));
+            .entry(ledger_id.to_string())
+            .or_default()
+            .clone();
+        let mut guard = slot.lock().await;
+        let now = std::time::Instant::now();
         let t = std::time::Instant::now();
-        let entry = match (cached, since) {
-            (Some(mut c), Some(since)) => {
+        let counts = lottery_fetch_counts();
+        let mut kind = "whole ledger";
+        let plan = guard
+            .as_ref()
+            .map(|c| c.plan(now))
+            .unwrap_or(LotteryFetch::Whole);
+        match (guard.as_mut(), plan) {
+            (Some(c), LotteryFetch::Incremental { since, sweep }) => {
+                kind = "incremental";
+                counts.incremental.fetch_add(1, Relaxed);
                 let (fetched, newest) = self
                     .fetch_ledger_updates_window(ledger_id, &[], Some(since))
                     .await;
-                c.merge(fetched, newest);
-                c
+                let fetched_any = !fetched.is_empty();
+                let merged = c.merge_checked(fetched, newest);
+                let mut fresh = merged.fresh;
+                if sweep {
+                    kind = "incremental + sweep";
+                    counts.sweep.fetch_add(1, Relaxed);
+                    let (swept, newest) = self
+                        .fetch_ledger_updates_window(ledger_id, &LOTTERY_SWEEP_OP_TYPES, None)
+                        .await;
+                    fresh += c.merge(swept, newest);
+                    c.mark_swept(now);
+                }
+                // A fork point can only go missing with a new DisputeEnter: no decode pass over
+                // the whole ledger when nothing arrived.
+                let mut missing = if fresh > 0 {
+                    super::lottery_recovery::missing_fork_points(&c.updates)
+                } else {
+                    Vec::new()
+                };
+                if !missing.is_empty() {
+                    if let Some(found) = self.local_updates_at(ledger_id, &missing) {
+                        c.merge(found, None);
+                        missing.clear();
+                    }
+                }
+                if lottery_needs_whole(Some(merged), fetched_any, !missing.is_empty())
+                    && c.full_allowed(now)
+                {
+                    kind = "whole ledger (overlap or fork point)";
+                    counts.whole.fetch_add(1, Relaxed);
+                    let (fetched, newest) =
+                        self.fetch_ledger_updates_window(ledger_id, &[], None).await;
+                    c.merge(fetched, newest);
+                    c.mark_full(now);
+                }
             }
             _ => {
+                counts.whole.fetch_add(1, Relaxed);
                 let (fetched, newest) =
                     self.fetch_ledger_updates_window(ledger_id, &[], None).await;
-                LotteryUpdates::new(fetched, newest)
+                if !fetched.is_empty() {
+                    *guard = Some(LotteryUpdates::new(fetched, newest));
+                }
             }
-        };
+        }
+        let updates = guard
+            .as_ref()
+            .map(|c| c.updates.clone())
+            .unwrap_or_default();
         if t.elapsed().as_millis() >= 1000 {
             tracing::warn!(
                 "lottery {}: fetching {} updates took {} ms ({})",
                 &ledger_id[..16.min(ledger_id.len())],
-                entry.updates.len(),
+                updates.len(),
                 t.elapsed().as_millis(),
-                if since.is_some() {
-                    "incremental"
-                } else {
-                    "whole ledger"
-                }
+                kind
             );
-        }
-        let updates = entry.updates.clone();
-        if !updates.is_empty() {
-            lottery_updates_cache()
-                .lock()
-                .unwrap()
-                .insert(ledger_id.to_string(), entry);
         }
         updates
     }
@@ -1983,7 +2134,10 @@ mod tests {
 
 #[cfg(test)]
 mod lottery_updates_cache_tests {
-    use super::{LotteryUpdates, LOTTERY_FETCH_OVERLAP_SECS, LOTTERY_FULL_REFETCH};
+    use super::{
+        lottery_needs_whole, LotteryFetch, LotteryUpdates, Merged, LOTTERY_FETCH_OVERLAP_SECS,
+        LOTTERY_FULL_REFETCH, LOTTERY_SWEEP_EVERY,
+    };
     use deposits_core::SignedLedgerUpdate;
 
     fn upd(seq: u64, op: u8) -> SignedLedgerUpdate {
@@ -2008,12 +2162,20 @@ mod lottery_updates_cache_tests {
 
     /// A pass after the first fetches from just before the newest event held, adds only what
     /// it does not hold (a fork's update at an OLD sequence included: the key is the operator
-    /// and content, never the sequence), and refetches the whole ledger every 30 minutes.
+    /// and content, never the sequence), and every 30 minutes sweeps the whole time range for
+    /// the armer-set operations (it refetched the whole ledger then, before cpu-trim).
     #[test]
-    fn a_pass_fetches_only_what_is_new_and_refetches_whole_on_schedule() {
+    fn a_pass_fetches_only_what_is_new_and_sweeps_on_schedule() {
         let mut c = LotteryUpdates::new((0..100).map(|s| upd(s, 1)).collect(), Some(5_000));
         let now = std::time::Instant::now();
-        assert_eq!(c.since(now), Some(5_000 - LOTTERY_FETCH_OVERLAP_SECS));
+        assert_eq!(c.since(), 5_000 - LOTTERY_FETCH_OVERLAP_SECS);
+        assert_eq!(
+            c.plan(now),
+            LotteryFetch::Incremental {
+                since: 5_000 - LOTTERY_FETCH_OVERLAP_SECS,
+                sweep: false
+            }
+        );
 
         // The overlap re-serves 98 and 99; a disputant's arm at seq 40 is new.
         let fetched = vec![upd(98, 1), upd(99, 1), upd(100, 1), upd(40, 2)];
@@ -2026,6 +2188,122 @@ mod lottery_updates_cache_tests {
         assert_eq!(std::sync::Arc::as_ptr(&c.updates), before);
         assert_eq!(c.newest_ts, 5_200);
 
-        assert_eq!(c.since(now + LOTTERY_FULL_REFETCH), None);
+        // Every 30 minutes the pass is still incremental, and adds the backdated-arm sweep.
+        assert_eq!(
+            c.plan(now + LOTTERY_SWEEP_EVERY),
+            LotteryFetch::Incremental {
+                since: 5_200 - LOTTERY_FETCH_OVERLAP_SECS,
+                sweep: true
+            }
+        );
+        assert!(matches!(
+            c.plan(now),
+            LotteryFetch::Incremental { sweep: false, .. }
+        ));
+        c.mark_swept(now + LOTTERY_SWEEP_EVERY);
+        assert!(matches!(
+            c.plan(now + LOTTERY_SWEEP_EVERY),
+            LotteryFetch::Incremental { sweep: false, .. }
+        ));
+    }
+
+    /// The overlap check: an incremental fetch starts before the newest event held, so a
+    /// complete one re-serves something held; one that re-serves nothing was cut short.
+    #[test]
+    fn the_overlap_check_and_when_a_whole_refetch_is_due() {
+        let mut c = LotteryUpdates::new((0..10).map(|s| upd(s, 1)).collect(), Some(1_000));
+        let m = c.merge_checked(vec![upd(9, 1), upd(10, 1)], Some(1_100));
+        assert_eq!(
+            m,
+            Merged {
+                fresh: 1,
+                overlapped: true
+            }
+        );
+        let gap = c.merge_checked(vec![upd(50, 1), upd(51, 1)], Some(2_000));
+        assert_eq!(
+            gap,
+            Merged {
+                fresh: 2,
+                overlapped: false
+            }
+        );
+        // Whole only on a failed overlap that brought events, or a fork point held nowhere.
+        assert!(!lottery_needs_whole(Some(m), true, false));
+        assert!(lottery_needs_whole(Some(gap), true, false));
+        // An empty fetch (relay error, or nothing new and nothing re-served) is no evidence.
+        assert!(!lottery_needs_whole(
+            Some(Merged {
+                fresh: 0,
+                overlapped: false
+            }),
+            false,
+            false
+        ));
+        assert!(lottery_needs_whole(Some(m), true, true));
+        // And rate-limited: not again within LOTTERY_FULL_REFETCH of the last whole fetch.
+        let now = std::time::Instant::now();
+        assert!(!c.full_allowed(now));
+        assert!(c.full_allowed(now + LOTTERY_FULL_REFETCH));
+        c.mark_full(now + LOTTERY_FULL_REFETCH);
+        assert!(!c.full_allowed(now + LOTTERY_FULL_REFETCH));
+    }
+
+    /// A merge extends in place when no caller holds the previous updates, and leaves a
+    /// caller's copy untouched when one does.
+    #[test]
+    fn a_merge_does_not_copy_unless_the_updates_are_shared() {
+        let mut c = LotteryUpdates::new((0..200).map(|s| upd(s, 1)).collect(), Some(1));
+        let p = std::sync::Arc::as_ptr(&c.updates);
+        assert_eq!(c.merge(vec![upd(200, 2)], None), 1);
+        assert_eq!(
+            std::sync::Arc::as_ptr(&c.updates),
+            p,
+            "unique: extended in place"
+        );
+        let held = c.updates.clone();
+        assert_eq!(c.merge(vec![upd(201, 2)], None), 1);
+        assert_eq!(held.len(), 201, "a caller's updates do not change under it");
+        assert_eq!(c.updates.len(), 202);
+    }
+
+    /// Counting the work: a non-final dispute's passes every 5 minutes for 6 hours. Before
+    /// cpu-trim a pass refetched the whole ledger every 30 minutes (13 whole fetches of up to
+    /// 250k updates); now only the first is whole, and 12 passes add a `t`-filtered sweep.
+    #[test]
+    fn six_hours_of_passes_fetch_the_whole_ledger_once() {
+        let mut c = LotteryUpdates::new((0..10).map(|s| upd(s, 1)).collect(), Some(1_000));
+        let t0 = std::time::Instant::now();
+        let (mut whole, mut sweeps, mut incremental) = (1u32, 0u32, 0u32);
+        let mut old_whole = 1u32;
+        let mut old_full_at = t0;
+        for k in 1..=72u32 {
+            let now = t0 + std::time::Duration::from_secs(300 * k as u64);
+            // The previous schedule, for the comparison.
+            if now.duration_since(old_full_at) >= LOTTERY_FULL_REFETCH {
+                old_whole += 1;
+                old_full_at = now;
+            }
+            match c.plan(now) {
+                LotteryFetch::Whole => whole += 1,
+                LotteryFetch::Incremental { sweep, .. } => {
+                    incremental += 1;
+                    // The incremental fetch re-serves the newest held event: overlap passes.
+                    let m = c.merge_checked(vec![upd(9, 1)], None);
+                    if lottery_needs_whole(Some(m), true, false) && c.full_allowed(now) {
+                        whole += 1;
+                        c.mark_full(now);
+                    }
+                    if sweep {
+                        sweeps += 1;
+                        c.mark_swept(now);
+                    }
+                }
+            }
+        }
+        assert_eq!(old_whole, 13);
+        assert_eq!(whole, 1);
+        assert_eq!(incremental, 72);
+        assert_eq!(sweeps, 12);
     }
 }
