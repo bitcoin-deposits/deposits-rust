@@ -152,6 +152,98 @@ enum LedgerLogRow {
     },
 }
 
+/// A main ledger log's chain (`rows` in file order): the custodian's updates, first per
+/// sequence as the loader always kept them, starting with the first update's operator; a
+/// foreign-operator run joins it only as a custody transfer, i.e. when it hash-chains onto the
+/// kept tail at the next sequence and carries a DisputeAcquire naming its own author, which is
+/// the branch `reimport_joined_ledger`'s best-chain walk adopts. The run's author is the
+/// custodian after it. Anything else foreign is a fork-branch artifact and is dropped, as before.
+fn custody_chain(ledger_id: &str, rows: Vec<SignedLedgerUpdate>) -> Vec<SignedLedgerUpdate> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::tlv::TlvDecode;
+    let Some(first) = rows.first() else {
+        return Vec::new();
+    };
+    let mut custodian = first.operator_id;
+    let mut at: std::collections::BTreeMap<u64, Vec<SignedLedgerUpdate>> =
+        std::collections::BTreeMap::new();
+    for u in rows {
+        let same = at.entry(u.sequence_number).or_default();
+        if !same
+            .iter()
+            .any(|v| v.operator_id == u.operator_id && v.content_hash == u.content_hash)
+        {
+            same.push(u);
+        }
+    }
+    let acquires_for = |u: &SignedLedgerUpdate| {
+        matches!(
+            LedgerOperation::tlv_decode(&u.message),
+            Ok(LedgerOperation::DisputeAcquire { new_custodian, .. }) if new_custodian == u.operator_id
+        )
+    };
+    let mut kept: Vec<SignedLedgerUpdate> = Vec::new();
+    let seqs: Vec<u64> = at.keys().copied().collect();
+    let mut skip_through: Option<u64> = None;
+    for seq in seqs {
+        if skip_through.is_some_and(|s| seq <= s) {
+            continue;
+        }
+        let here = &at[&seq];
+        if let Some(u) = here.iter().find(|u| u.operator_id == custodian) {
+            kept.push(u.clone());
+            continue;
+        }
+        // A custody transfer: the run from a foreign update chained onto our tail.
+        let run = kept
+            .last()
+            .filter(|t| t.sequence_number + 1 == seq)
+            .and_then(|tail| {
+                here.iter().find_map(|start| {
+                    if start.previous_hash != tail.chain_hash() {
+                        return None;
+                    }
+                    let mut run = vec![start.clone()];
+                    loop {
+                        let cur = run.last().unwrap();
+                        let next = at.get(&(cur.sequence_number + 1)).and_then(|n| {
+                            n.iter().find(|v| {
+                                v.operator_id == start.operator_id
+                                    && v.previous_hash == cur.chain_hash()
+                            })
+                        });
+                        match next {
+                            Some(v) => run.push(v.clone()),
+                            None => break,
+                        }
+                    }
+                    run.iter().any(|u| acquires_for(u)).then_some(run)
+                })
+            });
+        match run {
+            Some(run) => {
+                custodian = run[0].operator_id;
+                skip_through = run.last().map(|u| u.sequence_number);
+                kept.extend(run);
+            }
+            None => {
+                for u in here {
+                    tracing::warn!(
+                        "Ledger {} seq {}: dropping foreign-operator update {} (main operator \
+                         {}). Likely fork-branch artifact from an older binary; the main jsonl \
+                         should only contain main-chain updates.",
+                        ledger_id,
+                        u.sequence_number,
+                        hex::encode(&u.operator_id.serialize()[..8]),
+                        hex::encode(&custodian.serialize()[..8]),
+                    );
+                }
+            }
+        }
+    }
+    kept
+}
+
 /// Request to persist ledgers (sent from handler to persistence thread)
 #[derive(Debug, Clone)]
 enum PersistRequest {
@@ -1014,8 +1106,17 @@ impl DepositsHandler {
         // disputant from there on. The filter would mis-fire there and
         // strip every disputant update, so it's disabled for the
         // fork-branch file format.
+        //
+        // EXCEPT across a custody transfer (DEP-06 Phase 4): `reimport_joined_ledger` adopts the
+        // DisputeAcquire-bearing branch as the main chain, so a resolved ledger's log legitimately
+        // continues under the winner's operator_id from the fork point on. Dropping that run
+        // (ref6, 9e23c858, regtest 2026-11-20: 023d42a6's Enter/Arm/Yield/Arm/Acquire at seq
+        // 13..17) put every restart back on the pre-dispute chain at seq 12 until the next
+        // reimport, with the dispute's updates absent from `history`. [`custody_chain`] keeps a
+        // foreign run only when it hash-chains onto the kept tail and carries the DisputeAcquire
+        // naming its author; any other foreign update is still the artifact and is dropped.
         let is_fork_file = ledger_id.len() > 64;
-        let mut main_operator: Option<bitcoin::secp256k1::PublicKey> = None;
+        let mut raw_updates: Vec<SignedLedgerUpdate> = Vec::new();
 
         // Every reader of a log (this loader, `recovery`, `discover`) uses only its LAST
         // `State` row, so a copy keeping every other row in order and that one row is the same
@@ -1058,26 +1159,12 @@ impl DepositsHandler {
                     state = Some(s);
                 }
                 Ok(LedgerLogRow::Update(u)) => {
-                    if !is_fork_file {
-                        if main_operator.is_none() {
-                            main_operator = Some(u.operator_id);
+                    if is_fork_file {
+                        if seen_sequences.insert(u.sequence_number) {
+                            updates.push(u);
                         }
-                        if Some(u.operator_id) != main_operator {
-                            tracing::warn!(
-                                "Ledger {} seq {}: dropping foreign-operator update \
-                                 {} (main operator {}). Likely fork-branch artifact \
-                                 from an older binary; the main jsonl should only \
-                                 contain main-chain updates.",
-                                ledger_id,
-                                u.sequence_number,
-                                hex::encode(&u.operator_id.serialize()[..8]),
-                                hex::encode(&main_operator.unwrap().serialize()[..8]),
-                            );
-                            continue;
-                        }
-                    }
-                    if seen_sequences.insert(u.sequence_number) {
-                        updates.push(u);
+                    } else {
+                        raw_updates.push(u);
                     }
                 }
                 Ok(LedgerLogRow::CreatedAt { content_hash, ts }) => {
@@ -1125,6 +1212,9 @@ impl DepositsHandler {
             LedgerRole::Partner
         });
 
+        if !is_fork_file {
+            updates = custody_chain(ledger_id, raw_updates);
+        }
         updates.sort_by_key(|u| u.sequence_number);
         // The replay below falls back to the State row when seq 0 is missing or is not a
         // LedgerOpen.
@@ -3669,6 +3759,144 @@ mod load_tests {
         let ledgers = DepositsHandler::load_ledgers_from_jsonl(&dir.path().to_path_buf());
         assert_eq!(ledgers.len(), 11);
         assert!(ledgers.contains_key("l10"));
+    }
+
+    /// ref6's own log of 9e23c858 (regtest 2026-11-20), written by `reimport_joined_ledger`
+    /// after 023d42a6 acquired it: the operator 02cb2524's seq 0..12, then the winner's
+    /// DisputeEnter, DisputeArmed, DisputeYield, DisputeArmed and DisputeAcquire at 13..17.
+    const CUSTODY_TRANSFER_ID: &str =
+        "9e23c858c7537cd1c61476d0122ba056cf16607716f54aa31e3e6a2dc21f6689";
+    const CUSTODY_TRANSFER_LOG: &str =
+        include_str!("../tests/vectors/custody_transfer_9e23c858.jsonl");
+
+    fn op_name(u: &SignedLedgerUpdate) -> &'static str {
+        use deposits_core::tlv::TlvDecode;
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter { .. }) => "enter",
+            Ok(LedgerOperation::DisputeArmed { .. }) => "armed",
+            Ok(LedgerOperation::DisputeYield) => "yield",
+            Ok(LedgerOperation::DisputeAcquire { .. }) => "acquire",
+            Ok(_) => "other",
+            Err(_) => "undecodable",
+        }
+    }
+
+    /// A restart reads a custody-transferred ledger back as it was written: the winner's run
+    /// is the main chain, not a fork-branch artifact. Before, every restart dropped seq 13..17
+    /// and left `history` (and the dispute's updates with it) at seq 12 until a reimport.
+    #[test]
+    fn a_restart_keeps_the_custody_transfer_reimport_adopted() {
+        let data = tempfile::tempdir().unwrap();
+        let ledgers_dir = data.path().join("ledgers");
+        std::fs::create_dir_all(&ledgers_dir).unwrap();
+        std::fs::write(
+            ledgers_dir.join(format!("{CUSTODY_TRANSFER_ID}.jsonl")),
+            CUSTODY_TRANSFER_LOG,
+        )
+        .unwrap();
+        // The restart path: the whole data directory, as `DepositsHandler::new` loads it.
+        let ledgers = DepositsHandler::load_ledgers_from_disk(&data.path().to_path_buf());
+        let l = ledgers[CUSTODY_TRANSFER_ID].read().unwrap();
+        let seqs: Vec<u64> = l.history.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(seqs, (0..=17).collect::<Vec<u64>>());
+        let winner = l.history[13].operator_id;
+        assert_eq!(hex::encode(&winner.serialize()[..4]), "023d42a6");
+        assert!(l.history[..13].iter().all(|u| u.operator_id != winner));
+        assert!(l.history[13..].iter().all(|u| u.operator_id == winner));
+        let ops: Vec<&str> = l.history[13..].iter().map(op_name).collect();
+        assert_eq!(ops, ["enter", "armed", "yield", "armed", "acquire"]);
+        for w in l.history.windows(2) {
+            assert_eq!(
+                w[1].previous_hash,
+                w[0].chain_hash(),
+                "seq {}",
+                w[1].sequence_number
+            );
+        }
+        assert_eq!(l.state.sequence, 17);
+        assert_eq!(l.state.chain_tip_hash, l.history[17].chain_hash());
+        // The state is the one `reimport_joined_ledger` built when it wrote this log: the
+        // same chain through `Ledger::from_export`.
+        let open = l.history[0].clone();
+        let Ok(LedgerOperation::LedgerOpen {
+            operator_id,
+            reserves_id,
+            genesis_block,
+            ..
+        }) = <LedgerOperation as deposits_core::tlv::TlvDecode>::tlv_decode(&open.message)
+        else {
+            panic!("seq 0 is not a LedgerOpen");
+        };
+        let mut id = [0u8; 32];
+        id.copy_from_slice(&hex::decode(CUSTODY_TRANSFER_ID).unwrap());
+        let imported = deposits_core::ledger::Ledger::from_export(
+            deposits_core::validation::LedgerExport::new(
+                id,
+                genesis_block,
+                operator_id,
+                reserves_id,
+                l.history.clone(),
+                0,
+            ),
+        )
+        .expect("reimport's import of the same chain");
+        // Less the QuorumBegin anchor, which only the loader's replay records (as for any
+        // ledger, custody transfer or not).
+        let state_of = |s: &LedgerState| {
+            let mut v = serde_json::to_value(s).unwrap();
+            for k in [
+                "quorum_begin_block",
+                "quorum_begin_sequence",
+                "quorum_begin_hash",
+            ] {
+                v.as_object_mut().unwrap().remove(k);
+            }
+            v
+        };
+        assert_eq!(state_of(&l.state), state_of(&imported.state));
+        assert_eq!(l.state.operator_key, winner);
+        assert_eq!(l.state.quorum_begin_sequence, Some(12));
+        // The dispute's own updates are in the history a reader of it sees.
+        let scope = deposits_core::rotation_order::dispute_scope(&l.history);
+        assert!(scope
+            .iter()
+            .any(|u| u.operator_id == winner && op_name(u) == "enter"));
+        assert!(scope
+            .iter()
+            .any(|u| u.operator_id == winner && op_name(u) == "acquire"));
+    }
+
+    /// The heal the filter was written for still holds: a foreign run with no acquire for its
+    /// author (the same log less its DisputeAcquire) is a fork-branch artifact and is dropped.
+    #[test]
+    fn a_foreign_run_without_its_acquire_is_still_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = CUSTODY_TRANSFER_LOG
+            .lines()
+            .filter(|l| !l.contains(r#""sequence_number":17,"#))
+            .map(str::to_string)
+            .collect();
+        assert_eq!(lines.len(), CUSTODY_TRANSFER_LOG.lines().count() - 1);
+        let path = write(dir.path(), CUSTODY_TRANSFER_ID, &lines);
+        let l = DepositsHandler::load_single_ledger_from_jsonl(CUSTODY_TRANSFER_ID, &path).unwrap();
+        let seqs: Vec<u64> = l.history.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(seqs, (0..=12).collect::<Vec<u64>>());
+        assert_eq!(l.state.sequence, 12);
+    }
+
+    /// A foreign run that does not chain onto the kept tail is no transfer either, acquire or not.
+    #[test]
+    fn a_foreign_run_off_the_tail_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines: Vec<String> = CUSTODY_TRANSFER_LOG
+            .lines()
+            .filter(|l| !l.contains(r#""sequence_number":12,"#))
+            .map(str::to_string)
+            .collect();
+        let path = write(dir.path(), CUSTODY_TRANSFER_ID, &lines);
+        let l = DepositsHandler::load_single_ledger_from_jsonl(CUSTODY_TRANSFER_ID, &path).unwrap();
+        let seqs: Vec<u64> = l.history.iter().map(|u| u.sequence_number).collect();
+        assert_eq!(seqs, (0..=11).collect::<Vec<u64>>());
     }
 }
 
