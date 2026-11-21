@@ -113,6 +113,23 @@ pub fn collect_armers_round(
     collect_armers_in(updates, until, round, None)
 }
 
+/// DEP-03 §"The dispute": whether `key` takes part in the current dispute, i.e. holds a
+/// `DisputeEnter` at or above Q ([`deposits_core::rotation_order::dispute_scope`]). A member
+/// whose only `DisputeEnter` is stale (an old dispute of a vault since rotated, yielded or not)
+/// MUST NOT arm a later re-arm round (DEP-06 Phase 4 step 2): its arms count in no round. Mirrors
+/// cl's `rearm-fork-out-of-dispute`; vector `rearm_round_agree.json`.
+pub fn in_current_dispute(updates: &[SignedLedgerUpdate], key: &PublicKey) -> bool {
+    deposits_core::rotation_order::dispute_scope(updates)
+        .iter()
+        .any(|u| {
+            u.operator_id == *key
+                && matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeEnter { .. })
+                )
+        })
+}
+
 /// One arm, as [`pick_round_arms`] sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArmRow<K> {
@@ -867,7 +884,33 @@ pub fn lottery_voters_with(
     updates: &[SignedLedgerUpdate],
     grounds: &GroundsVerdicts,
 ) -> Option<(Vec<XOnlyPublicKey>, usize)> {
-    let (voters, threshold) = deposits_core::rotation_order::lottery_recovery_voters(updates)?;
+    strict_voters_over(
+        deposits_core::rotation_order::lottery_recovery_voters(updates)?,
+        updates,
+        grounds,
+    )
+}
+
+/// [`lottery_voters_with`] with the fork point read over every `DisputeEnter` in `updates`
+/// ([`deposits_core::rotation_order::lottery_recovery_voters_every_enter`]): for the judge's
+/// rebuild, which excuses a confiscation built under the reading before DEP-03 §"The dispute"
+/// when handed the unreduced updates, and agrees with [`lottery_voters_with`] on reduced ones.
+pub fn lottery_voters_every_enter_with(
+    updates: &[SignedLedgerUpdate],
+    grounds: &GroundsVerdicts,
+) -> Option<(Vec<XOnlyPublicKey>, usize)> {
+    strict_voters_over(
+        deposits_core::rotation_order::lottery_recovery_voters_every_enter(updates)?,
+        updates,
+        grounds,
+    )
+}
+
+fn strict_voters_over(
+    (voters, threshold): (Vec<XOnlyPublicKey>, usize),
+    updates: &[SignedLedgerUpdate],
+    grounds: &GroundsVerdicts,
+) -> Option<(Vec<XOnlyPublicKey>, usize)> {
     if !deposits_core::types::ruleset_strict_lottery(&grounds.ruleset) {
         return Some((voters, threshold));
     }
@@ -1450,7 +1493,10 @@ impl crate::node::Node {
         if let Some(set) = ledger_cache().lock().unwrap().get(ledger_id) {
             return Ok(set.clone());
         }
-        let updates = self.lottery_updates(ledger_id).await;
+        // DEP-03 §"The dispute": only the current dispute's arms (and the bound counts only
+        // those); a stale DisputeEnter's fork takes no part. Vector rearm_round_agree.json.
+        let updates =
+            deposits_core::rotation_order::dispute_scope(&self.lottery_updates(ledger_id).await);
         let updates: &[SignedLedgerUpdate] = &updates;
         if updates.is_empty() {
             return Err("failed to fetch ledger updates from relay".into());
@@ -2027,5 +2073,236 @@ mod lottery_updates_cache_tests {
         assert_eq!(c.newest_ts, 5_200);
 
         assert_eq!(c.since(now + LOTTERY_FULL_REFETCH), None);
+    }
+}
+
+/// `tests/vectors/rearm_round_agree.json`: DEP-03 §"The dispute" and DEP-06 Phase 4 step 2 over
+/// real regtest ledgers (2026-11-19/21), shared with cl-deposits (inspect/lottery-test.lisp) and
+/// the spec. A stale DisputeEnter (cld364's, below Q and yielded) took our voters to the old
+/// QuorumBegin, so ref6 never found four lotteries and refused 12bc96d2's subset attestations;
+/// and cl re-armed round 2 on that stale fork every pass. The views are read as the node reads
+/// them: the relay's updates reduced by `dispute_scope` (lottery_context, lottery_armer_set,
+/// rearm_view), the voters by `lottery_recovery_voters`.
+#[cfg(test)]
+mod rearm_round_agree_vector {
+    use super::{
+        arm_rows, collect_manifest_armers, in_current_dispute, manifest_arms, pick_round_arms,
+    };
+    use bitcoin::secp256k1::{PublicKey, XOnlyPublicKey};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::rotation_order::{dispute_scope, lottery_recovery_voters};
+    use deposits_core::tapscript_reserves::LotteryScriptBuilder;
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
+    use std::str::FromStr;
+
+    fn strs(v: &serde_json::Value) -> Vec<String> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_string())
+            .collect()
+    }
+    fn pairs(v: &serde_json::Value) -> Vec<(String, u64)> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|a| {
+                (
+                    a["armer"].as_str().unwrap().to_string(),
+                    a["seq"].as_u64().unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_current_dispute_s_voters_arms_and_manifests_match_the_shared_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/rearm_round_agree.json"))
+                .unwrap();
+        let mut cases = 0;
+        for c in v["cases"].as_array().unwrap() {
+            let name = &c["name"].as_str().unwrap()[..8];
+            let e = &c["expect"];
+            let updates: Vec<SignedLedgerUpdate> = c["updates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|h| {
+                    SignedLedgerUpdate::tlv_decode(&hex::decode(h.as_str().unwrap()).unwrap())
+                        .unwrap()
+                })
+                .collect();
+            let scoped = dispute_scope(&updates);
+            let enters_of = |us: &[SignedLedgerUpdate]| {
+                let mut ks: Vec<String> = us
+                    .iter()
+                    .filter(|u| {
+                        matches!(
+                            LedgerOperation::tlv_decode(&u.message),
+                            Ok(LedgerOperation::DisputeEnter { .. })
+                        )
+                    })
+                    .map(|u| hex::encode(u.operator_id.serialize()))
+                    .collect();
+                ks.sort();
+                ks.dedup();
+                ks
+            };
+            assert_eq!(
+                enters_of(&scoped),
+                strs(&e["in_dispute"]),
+                "{name}: the disputants in the current dispute"
+            );
+            for k in strs(&e["in_dispute"]) {
+                assert!(
+                    in_current_dispute(&updates, &PublicKey::from_str(&k).unwrap()),
+                    "{name}: {k} may arm a later round"
+                );
+            }
+            for k in strs(&e["out_of_dispute"]) {
+                let pk = PublicKey::from_str(&k).unwrap();
+                assert!(
+                    !in_current_dispute(&updates, &pk),
+                    "{name}: {k}'s stale fork may not arm a later round"
+                );
+                assert!(
+                    scoped.iter().all(|u| u.operator_id != pk),
+                    "{name}: {k}'s stale fork's arms are no arms"
+                );
+            }
+            let fork_point = scoped
+                .iter()
+                .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                    Ok(LedgerOperation::DisputeEnter {
+                        last_valid_sequence,
+                        ..
+                    }) => Some(last_valid_sequence),
+                    _ => None,
+                })
+                .min();
+            assert_eq!(
+                fork_point,
+                e["fork_point"].as_u64(),
+                "{name}: the fork point"
+            );
+            let (voters, threshold) = lottery_recovery_voters(&updates).unwrap();
+            let voters: Vec<String> = voters.iter().map(|k| hex::encode(k.serialize())).collect();
+            assert_eq!(
+                voters,
+                strs(&e["recovery_voters"]),
+                "{name}: the recovery voters are Q's members less the operator"
+            );
+            assert_eq!(
+                threshold as u64,
+                e["recovery_threshold"].as_u64().unwrap(),
+                "{name}: the recovery threshold"
+            );
+
+            let rows = arm_rows(&scoped);
+            let picked = |round: u32, opens: i64, closes: u32| {
+                let mut got: Vec<(String, u64)> =
+                    pick_round_arms(&rows, round, opens.max(0) as u32, closes)
+                        .into_iter()
+                        .map(|i| (hex::encode(rows[i].armer.serialize()), rows[i].seq))
+                        .collect();
+                got.sort();
+                got
+            };
+            let c_height = c["chain"]["confiscation_height"].as_u64().unwrap() as u32;
+            assert_eq!(
+                picked(1, -1, c_height),
+                pairs(&e["round1_arms"]),
+                "{name}: round 1's arms at the confiscation"
+            );
+            for w in e["windows"].as_array().unwrap() {
+                assert_eq!(
+                    picked(
+                        w["round"].as_u64().unwrap() as u32,
+                        w["opens"].as_i64().unwrap(),
+                        w["closes"].as_u64().unwrap() as u32
+                    ),
+                    pairs(&w["arms"]),
+                    "{name}: round {} arms in ({}, {}]",
+                    w["round"],
+                    w["opens"],
+                    w["closes"]
+                );
+            }
+            let manifest_of = |m: &serde_json::Value| -> Vec<(PublicKey, u64)> {
+                m["arms"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|a| {
+                        (
+                            PublicKey::from_str(a[0].as_str().unwrap()).unwrap(),
+                            a[1].as_u64().unwrap(),
+                        )
+                    })
+                    .collect()
+            };
+            for m in e["manifests"].as_array().unwrap() {
+                let (round, opens, closes) = (
+                    m["round"].as_u64().unwrap() as u32,
+                    m["opens"].as_i64().unwrap(),
+                    m["closes"].as_u64().unwrap() as u32,
+                );
+                let valid = manifest_arms(&rows, &manifest_of(m), round, opens, closes).is_ok();
+                assert_eq!(
+                    valid,
+                    m["valid"].as_bool().unwrap(),
+                    "{name}: manifest of round {round} in ({opens}, {closes}]"
+                );
+                assert_eq!(
+                    collect_manifest_armers(&scoped, &manifest_of(m), round, opens, closes).is_ok(),
+                    valid,
+                    "{name}: collect_manifest_armers agrees with manifest_arms"
+                );
+            }
+            // the landed lottery: manifest 0's arms, Q's voters less the accused; the chain's spk
+            let l = &e["lottery"];
+            let m = &e["manifests"][l["manifest"].as_u64().unwrap() as usize];
+            let named = collect_manifest_armers(
+                &scoped,
+                &manifest_of(m),
+                m["round"].as_u64().unwrap() as u32,
+                m["opens"].as_i64().unwrap(),
+                m["closes"].as_u64().unwrap() as u32,
+            )
+            .unwrap();
+            let accused = strs(&e["accused"]);
+            let kept: Vec<String> = voters
+                .iter()
+                .filter(|v| !accused.contains(v))
+                .cloned()
+                .collect();
+            assert_eq!(
+                kept,
+                strs(&l["voters"]),
+                "{name}: the voters less the accused"
+            );
+            let mut parts: Vec<_> = named.into_iter().map(|a| a.participant).collect();
+            parts.sort_by_key(|p| p.pubkey.serialize());
+            let kept_keys: Vec<XOnlyPublicKey> = kept
+                .iter()
+                .map(|k| XOnlyPublicKey::from_str(k).unwrap())
+                .collect();
+            let lottery = LotteryScriptBuilder::new(
+                parts,
+                kept_keys,
+                kept.len() / 2 + 1,
+                bitcoin::Network::Regtest,
+            )
+            .build()
+            .unwrap();
+            assert_eq!(
+                hex::encode(lottery.script_pubkey().as_bytes()),
+                c["chain"]["lottery_spk"].as_str().unwrap(),
+                "{name}: the lottery is the confirmed output's"
+            );
+            cases += 1;
+        }
+        assert_eq!(cases, 4, "every rearm_round_agree case ran");
     }
 }

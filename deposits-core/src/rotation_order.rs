@@ -440,9 +440,29 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
 
 /// DEP-06 recovery voters: the members, other than the original operator (author of sequence
 /// 0), of the latest `QuorumBegin` the original operator authored at a sequence at or below the
-/// dispute's fork point (the lowest `last_valid_sequence` any `DisputeEnter` names; with no
-/// `DisputeEnter`, every sequence). Sorted by x-only key; threshold floor(r/2) + 1.
+/// dispute's fork point: the lowest `last_valid_sequence` among the DisputeEnters of the CURRENT
+/// dispute (DEP-03 §"The dispute", [`dispute_scope`]), which is always Q, the QuorumBegin of the
+/// vault being confiscated; with no `DisputeEnter`, every sequence. Sorted by x-only key;
+/// threshold floor(r/2) + 1.
+///
+/// A stale `DisputeEnter` (below Q: a dispute of a vault since rotated, even one its author
+/// yielded) names no fork point. Read over every `DisputeEnter`, it took the voters to the old
+/// QuorumBegin: on regtest (2026-11-19/21) cld364's yielded expiry dispute at
+/// last_valid_sequence 4 made ref6 derive QuorumBegin 4's voters for 8082521c, 34651658,
+/// 0f8ead80, f6b7ab1a and 12bc96d2, so it never found their lotteries and refused 12bc96d2's
+/// subset attestations "no pending lottery on chain". Vectors `lottery_recovery_voters.txt`
+/// and `rearm_round_agree.json`.
 pub fn lottery_recovery_voters(
+    updates: &[SignedLedgerUpdate],
+) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
+    lottery_recovery_voters_every_enter(&dispute_scope(updates))
+}
+
+/// [`lottery_recovery_voters`] with the fork point read over every `DisputeEnter` in
+/// `updates`, the reading before DEP-03 §"The dispute". On updates already reduced to the
+/// current dispute the two agree; a judge uses this one only to excuse a confiscation built
+/// under the old reading (DEP-06 §Authorised confiscation: that reading only excuses more).
+pub fn lottery_recovery_voters_every_enter(
     updates: &[SignedLedgerUpdate],
 ) -> Option<(Vec<bitcoin::secp256k1::XOnlyPublicKey>, usize)> {
     let operator = updates.iter().find(|u| u.sequence_number == 0)?.operator_id;

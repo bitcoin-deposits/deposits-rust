@@ -158,6 +158,10 @@ impl Node {
         if updates.is_empty() {
             return Err("no ledger updates on the relay".into());
         }
+        // DEP-03 §"The dispute", as cl's `%all-arms` reads it through `dispute-forks`: a round's
+        // arms, the four-arm bound, the manifests and the voters are the current dispute's. A
+        // stale fork's round-2 arms (cld364 on 8082521c, regtest 2026-11-20) are no arms.
+        let updates = deposits_core::rotation_order::dispute_scope(&updates);
         let grounds = Box::pin(self.grounds_verdicts(&updates)).await;
         let (voters, threshold) = super::armers::lottery_voters_with(&updates, &grounds)
             .ok_or("no QuorumBegin to derive the recovery voters from")?;
@@ -1000,6 +1004,13 @@ impl Node {
                 });
                 if let Some(pass) = rearm_arm_decision(window.is_some(), armed_here, ours) {
                     return Ok(pass);
+                }
+                // A fork outside the current dispute (DEP-03 §"The dispute") takes no arm of any
+                // round: its arms are no arms, so `armed_here` and `ours` could never see one and
+                // it would arm on every pass of every window, as cl's cld364 did (regtest
+                // 2026-11-20/21: EYAAAAAA on 8082521c). Vector rearm_round_agree.json.
+                if !super::armers::in_current_dispute(&view.updates, &self.node_id) {
+                    return Ok(RearmPass::Idle("our fork is not in the current dispute"));
                 }
                 self.arm_rearm_round(ledger_id, &fork_key, cur.round + 1)
                     .await

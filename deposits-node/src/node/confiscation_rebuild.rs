@@ -322,8 +322,12 @@ fn rebuild_set_in(
         }
         state.total_deposit_balance() / 1000
     };
+    // On the reduced view this is the current dispute's voters; on the unreduced one (the
+    // fallback in `rebuild_matching`) the reading before DEP-03 §"The dispute", which only
+    // ever excuses more.
     let (recovery_voters, recovery_threshold) =
-        super::armers::lottery_voters_with(&view, grounds).ok_or("no recovery voters")?;
+        super::armers::lottery_voters_every_enter_with(&view, grounds)
+            .ok_or("no recovery voters")?;
     // DEP-03 §Grounded arms: under grounded-arms-v7 the shape counts grounded DisputeEnters only.
     let respectful = match grounds.respectful() {
         Some(r) => r?,
