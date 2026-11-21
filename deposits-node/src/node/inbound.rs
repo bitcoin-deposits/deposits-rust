@@ -2123,6 +2123,38 @@ impl Node {
             return;
         }
 
+        // DEP-03 §When the set is final: no dispute of a vault already confiscated, and no second
+        // DisputeEnter on a proof a fork of ours already entered and armed on. A re-sent contagion
+        // proof made us enter 12bc96d2 at 34763, 10 767 blocks after its confiscation, and that
+        // DisputeEnter's grounds convicted the only armer of its round 2 (regtest 2026-11-21).
+        {
+            let armed_on_it = self.armed_on_proof(ledger_id, &broadcast.proof.proof_hash());
+            let confiscated = !armed_on_it
+                && !matches!(
+                    broadcast.proof.evidence,
+                    deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend { .. }
+                )
+                && {
+                    let updates = self.fetch_lottery_updates(ledger_id).await;
+                    super::lottery_recovery::confiscation_height(
+                        &*self.wallet.chain_backend(),
+                        &updates,
+                    )
+                    .is_some()
+                };
+            if let Some(why) =
+                proof_dispute_refusal(&broadcast.proof.evidence, confiscated, armed_on_it)
+            {
+                tracing::info!(
+                    "Not disputing {} on proof {}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    &proof_hash_hex[..16],
+                    why
+                );
+                return;
+            }
+        }
+
         // 4. Check if we're a quorum member of the accused ledger
         if !self.is_quorum_member_of_ledger(ledger_id) {
             tracing::info!(
@@ -2322,6 +2354,23 @@ impl Node {
         ledgers
             .get(ledger_id)
             .is_some_and(|arc| arc.read().unwrap().state.parent_pubkey == self.node_id)
+    }
+
+    /// [`armed_on_proof_in`] over the forks of `ledger_id` we hold.
+    pub(crate) fn armed_on_proof(&self, ledger_id: &str, proof_hash: &[u8; 32]) -> bool {
+        let histories: Vec<Vec<deposits_core::SignedLedgerUpdate>> = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .iter()
+                .filter(|(k, _)| k.len() > 64 && k.starts_with(ledger_id))
+                .map(|(_, arc)| arc.read().unwrap().history.clone())
+                .collect()
+        };
+        armed_on_proof_in(
+            histories.iter().map(|h| h.as_slice()),
+            &self.node_id,
+            proof_hash,
+        )
     }
 
     pub(crate) fn is_quorum_member_of_ledger(&self, ledger_id: &str) -> bool {
@@ -2639,6 +2688,62 @@ pub(crate) fn fraud_proof_last_valid_seq(
     }
 }
 
+/// Why a verified proof must not open a dispute of its ledger, or `None` when it may
+/// (DEP-03 §When the set is final). `vault_confiscated`: the dispute's vault is already spent by
+/// its landed confiscation, so there is nothing left to dispute, and a DisputeEnter now would take
+/// no part in it anyway; a proof of an unauthorised spend of that vault is the exception, being
+/// about the spend itself. `armed_on_it`: a fork of ours already entered on this very proof and
+/// armed, so a re-sent copy has nothing to add. Mirrors cl's `enter-dispute` refusal and its
+/// contagion guard.
+pub(crate) fn proof_dispute_refusal(
+    evidence: &deposits_core::fraud::FraudEvidence,
+    vault_confiscated: bool,
+    armed_on_it: bool,
+) -> Option<&'static str> {
+    if armed_on_it {
+        return Some("a fork of ours already entered and armed on this proof (a re-sent copy)");
+    }
+    if vault_confiscated
+        && !matches!(
+            evidence,
+            deposits_core::fraud::FraudEvidence::UnauthorizedVaultSpend { .. }
+        )
+    {
+        return Some("its vault was confiscated; the dispute it would open is over");
+    }
+    None
+}
+
+/// Whether `forks` (each a fork's history) hold a DisputeEnter of `me` citing `proof_hash` and,
+/// after it on the same fork, a DisputeArmed of `me`.
+pub(crate) fn armed_on_proof_in<'a>(
+    forks: impl IntoIterator<Item = &'a [deposits_core::SignedLedgerUpdate]>,
+    me: &bitcoin::secp256k1::PublicKey,
+    proof_hash: &[u8; 32],
+) -> bool {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    forks.into_iter().any(|h| {
+        let enter = h.iter().find(|u| {
+            u.operator_id == *me
+                && matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeEnter { fraud_proof_hash: Some(p), .. }) if p == *proof_hash
+                )
+        });
+        enter.is_some_and(|e| {
+            h.iter().any(|u| {
+                u.operator_id == *me
+                    && u.sequence_number > e.sequence_number
+                    && matches!(
+                        LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::DisputeArmed { .. })
+                    )
+            })
+        })
+    })
+}
+
 /// Whether `evidence` is a `NonConformingCosignature` (contagion) presented
 /// against its own fault ledger. Contagion disputes the accused's *other*
 /// ledgers; the fault ledger is judged by its own dispute from before the
@@ -2750,6 +2855,114 @@ mod contagion_target_tests {
             vec![b.clone(), c.clone()],
         );
         assert_eq!(merged, vec![a, b, c]);
+    }
+}
+
+#[cfg(test)]
+mod late_proof_tests {
+    use super::{armed_on_proof_in, proof_dispute_refusal};
+    use deposits_core::fraud::{FraudBroadcast, FraudEvidence};
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::{SignedLedgerUpdate, TlvDecode};
+
+    /// ref6's own fork of 12bc96d2 (regtest 2026-11-21), from the shared vector: its
+    /// DisputeEnter at seq 9 (block 34763) on the re-sent contagion proof, then its arm at seq 20.
+    fn ref6_fork() -> (
+        Vec<SignedLedgerUpdate>,
+        bitcoin::secp256k1::PublicKey,
+        [u8; 32],
+        FraudEvidence,
+    ) {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/rearm_round_agree.json"))
+                .unwrap();
+        let me: bitcoin::secp256k1::PublicKey =
+            "02a417593a974f4fce663f30c8cbb8ab71c59093e9f8a877b018e24883b341acfd"
+                .parse()
+                .unwrap();
+        let case = v["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"].as_str().unwrap().starts_with("12bc96d2"))
+            .unwrap();
+        let fork: Vec<SignedLedgerUpdate> = case["updates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| {
+                SignedLedgerUpdate::tlv_decode(&hex::decode(h.as_str().unwrap()).unwrap()).unwrap()
+            })
+            .filter(|u| u.operator_id == me)
+            .collect();
+        let (hash, proof) = fork
+            .iter()
+            .find_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::DisputeEnter {
+                    fraud_proof_hash: Some(h),
+                    fraud_proof: Some(p),
+                    ..
+                }) => Some((h, p)),
+                _ => None,
+            })
+            .unwrap();
+        let b: FraudBroadcast = serde_json::from_str(&proof).unwrap();
+        (fork, me, hash, b.proof.evidence)
+    }
+
+    #[test]
+    fn a_fork_entered_and_armed_on_the_proof_is_found() {
+        let (fork, me, hash, _) = ref6_fork();
+        assert!(armed_on_proof_in([fork.as_slice()], &me, &hash));
+        assert!(
+            !armed_on_proof_in([fork.as_slice()], &me, &[7u8; 32]),
+            "another proof"
+        );
+        let other: bitcoin::secp256k1::PublicKey =
+            "02c30c1b294a94885384ff612fb8b3ad81115338797655ad66610cf4c83dda0253"
+                .parse()
+                .unwrap();
+        assert!(
+            !armed_on_proof_in([fork.as_slice()], &other, &hash),
+            "another member's fork"
+        );
+        // Entered but not armed yet: the proof may still arm it.
+        let entered: Vec<SignedLedgerUpdate> = fork
+            .iter()
+            .filter(|u| {
+                !matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeArmed { .. })
+                )
+            })
+            .cloned()
+            .collect();
+        assert!(!armed_on_proof_in([entered.as_slice()], &me, &hash));
+    }
+
+    /// DEP-03 §When the set is final, locally: the re-sent proof opens no dispute of the
+    /// confiscated 12bc96d2, a fresh one on an unconfiscated vault still does, and a proof of an
+    /// unauthorised spend of the vault is never refused for the spend having happened.
+    #[test]
+    fn no_dispute_of_a_confiscated_vault_nor_a_second_on_one_proof() {
+        let (_, _, _, evidence) = ref6_fork();
+        assert!(matches!(
+            evidence,
+            FraudEvidence::NonConformingCosignature { .. }
+        ));
+        assert!(proof_dispute_refusal(&evidence, true, false).is_some());
+        assert!(proof_dispute_refusal(&evidence, false, true).is_some());
+        assert_eq!(proof_dispute_refusal(&evidence, false, false), None);
+        let spend = FraudEvidence::UnauthorizedVaultSpend {
+            spent_ledger_id: "00".repeat(32),
+            governing_quorumbegin_seq: 8,
+            spend_tx_hex: String::new(),
+            spend_block_hash: [0; 32],
+            prevouts: Vec::new(),
+            challenge_update: None,
+            lapse_block_hash: None,
+        };
+        assert_eq!(proof_dispute_refusal(&spend, true, false), None);
     }
 }
 

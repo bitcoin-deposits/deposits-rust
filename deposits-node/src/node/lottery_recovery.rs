@@ -293,7 +293,9 @@ impl Node {
         // over every DisputeEnter it took the voters to the old QuorumBegin (regtest 8082521c,
         // 34651658, 12bc96d2: "no unspent output pays our participant set"). Vector
         // rearm_round_agree.json.
-        let updates = deposits_core::rotation_order::dispute_scope(&updates);
+        // DEP-03 §When the set is final: nor a DisputeEnter signed above the confiscation's block.
+        let confiscated_at = confiscation_height(&*self.wallet.chain_backend(), &updates);
+        let updates = deposits_core::rotation_order::dispute_scope_final(&updates, confiscated_at);
 
         let mut our_armed = None;
         let mut has_ledger_open = false;
