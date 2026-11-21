@@ -5293,6 +5293,7 @@ pub(crate) async fn find_replacement_collateral(
     exclude: &PledgeExclusion,
 ) -> Result<CollateralLookup, Error> {
     let utxos = crate::chain_backend::find_unspent_outputs_retrying(backend, script, retry).await?;
+    let utxos = without_custody_coins(backend, utxos);
     if let Some(u) = pick_pledge(&utxos, required_sats, 1, exclude) {
         return Ok(CollateralLookup::Found(
             deposits_core::messages::ReplacementCollateral {
@@ -5326,6 +5327,83 @@ pub(crate) async fn find_replacement_collateral(
         .map_or(CollateralLookup::NotFound, |value_sats| {
             CollateralLookup::Undersized { value_sats }
         }))
+}
+
+/// Whether output `vout` of `tx` is a lottery claim's output 0: a ledger's custody until it is
+/// spent (rotated into the ledger's vault), whatever our records say. Judged from the transaction
+/// alone: its input 0 spends output 0 of its prevout through a taproot SCRIPT path (the witness
+/// ends in a control block, 33 + 32k bytes with leaf version 0xc0) with nSequence 0xfffffffd (a
+/// full claim, DEP-03) or the reveal CSV (a subset claim), and the coin is its one output (a
+/// confiscation spends the vault the same way but has more than one; a re-arm spend carries a
+/// tier CSV).
+///
+/// Regtest 1121-next4c: ref6 claimed ad87b48b's lottery output e6184d32:0 as 0588521b's (found by
+/// script, before ff5b053), recorded the DisputeAcquire on 0588521b's fork, and then pledged the
+/// claim's output fdff3a5f:0 on 9e23c858, where a win would have spent ad87b48b's reserves. 14 of
+/// its 31 coins were claim outputs, 7 of them pledged; the claims of 4.99M sats were the smallest
+/// coins covering a 5000-sat need, so they were picked FIRST. Vector `custody_coin.json`.
+pub(crate) fn claim_output_shaped(tx: &bitcoin::Transaction, vout: u32) -> bool {
+    let Some(i) = tx.input.first() else {
+        return false;
+    };
+    let seq = i.sequence.to_consensus_u32();
+    let script_path = i.witness.len() >= 2
+        && i.witness.last().is_some_and(|cb| {
+            cb.len() >= 33 && (cb.len() - 33) % 32 == 0 && cb[0] & 0xfe == 0xc0
+        });
+    vout == 0
+        && tx.output.len() == 1
+        && i.previous_output.vout == 0
+        && script_path
+        && (seq == 0xffff_fffd
+            || seq == deposits_core::tapscript_reserves::LOTTERY_REVEAL_CSV_BLOCKS)
+}
+
+/// `utxos` without the coins that are a lottery claim's output 0 ([`claim_output_shaped`]),
+/// asked of the chain once per funding transaction (cached: a transaction never changes). A coin
+/// whose funding transaction cannot be fetched this pass is left out too: pledging a ledger's
+/// custody loses depositors' funds, skipping a coin for one pass costs a retry.
+pub(crate) fn without_custody_coins(
+    backend: &dyn crate::chain_backend::ChainBackend,
+    utxos: Vec<(crate::chain_backend::UnspentOutput, u32)>,
+) -> Vec<(crate::chain_backend::UnspentOutput, u32)> {
+    static SHAPED: std::sync::OnceLock<std::sync::Mutex<HashMap<bitcoin::OutPoint, bool>>> =
+        std::sync::OnceLock::new();
+    let cache = SHAPED.get_or_init(Default::default);
+    utxos
+        .into_iter()
+        .filter(|(u, _)| {
+            let known = cache.lock().unwrap().get(&u.outpoint).copied();
+            let custody = match known {
+                Some(c) => c,
+                None => match backend.get_tx(&u.outpoint.txid) {
+                    Ok(Some(tx)) => {
+                        let c = claim_output_shaped(&tx, u.outpoint.vout);
+                        cache.lock().unwrap().insert(u.outpoint, c);
+                        c
+                    }
+                    // Unknown to this backend (a test double): an ordinary coin.
+                    Ok(None) => false,
+                    Err(e) => {
+                        tracing::warn!(
+                            "pledge: {} left out this pass, its funding transaction is unreadable: {}",
+                            u.outpoint,
+                            e
+                        );
+                        return false;
+                    }
+                },
+            };
+            if custody {
+                tracing::info!(
+                    "pledge: {} ({} sats) is a lottery claim's output 0, a ledger's custody; never pledged",
+                    u.outpoint,
+                    u.value_sats
+                );
+            }
+            !custody
+        })
+        .collect()
 }
 
 /// Whether to arm without replacement collateral when none is available
@@ -6438,6 +6516,107 @@ mod pledge_pick_vector {
         assert!(!held.is_empty());
         let freed = super::fork_holds(&super::fork_events(&fork.history, &ref6, &|_| false), false, &[2]).0;
         assert!(freed.is_empty(), "023d42a6's binding round-2 acquire ends our round-1 arm");
+    }
+
+    /// `custody_coin.json`: real ref6 transactions. A claim's output 0 (full and subset) is
+    /// custody; faucet payments and a confiscation are not.
+    #[test]
+    fn custody_coins_match_the_shared_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/custody_coin.json")).unwrap();
+        let mut n = 0;
+        for c in v["cases"].as_array().unwrap() {
+            let tx: bitcoin::Transaction = bitcoin::consensus::encode::deserialize_hex(
+                c["hex"].as_str().unwrap(),
+            )
+            .unwrap();
+            assert_eq!(tx.compute_txid().to_string(), c["txid"].as_str().unwrap());
+            assert_eq!(
+                super::claim_output_shaped(&tx, c["vout"].as_u64().unwrap() as u32),
+                c["custody"].as_bool().unwrap(),
+                "{}",
+                c["name"].as_str().unwrap()
+            );
+            // Any other output of a claim is not output 0.
+            assert!(!super::claim_output_shaped(&tx, 1));
+            n += 1;
+        }
+        assert_eq!(n, 5);
+    }
+
+    /// The incident: ref6's coins as a 5000-sat pledge saw them. The 4.99M-sat claim outputs
+    /// are smaller than the 5M faucet coins, so the custody coin was the pick; without it the
+    /// pick is a faucet coin.
+    #[test]
+    fn a_claim_output_is_never_the_pick() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/custody_coin.json")).unwrap();
+        let txs: Vec<bitcoin::Transaction> = v["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| bitcoin::consensus::encode::deserialize_hex(c["hex"].as_str().unwrap()).unwrap())
+            .collect();
+        struct Chain(Vec<bitcoin::Transaction>);
+        type E = crate::error::Error;
+        impl crate::chain_backend::ChainBackend for Chain {
+            fn get_tip_height(&self) -> Result<u32, E> {
+                Ok(110)
+            }
+            fn get_block_hash(&self, _: u32) -> Result<bitcoin::BlockHash, E> {
+                Err(E::Wallet("fake".into()))
+            }
+            fn get_block_height_if_in_best_chain(&self, _: &bitcoin::BlockHash) -> Result<Option<u32>, E> {
+                Ok(None)
+            }
+            fn get_tx(&self, t: &bitcoin::Txid) -> Result<Option<bitcoin::Transaction>, E> {
+                Ok(self.0.iter().find(|x| x.compute_txid() == *t).cloned())
+            }
+            fn get_tx_block_height(&self, _: &bitcoin::Txid) -> Result<Option<u32>, E> {
+                Ok(Some(100))
+            }
+            fn is_output_unspent(&self, _: &bitcoin::Txid, _: u32) -> Result<Option<bool>, E> {
+                Ok(Some(true))
+            }
+            fn find_unspent_output_at(&self, _: &bitcoin::Script) -> Result<Option<UnspentOutput>, E> {
+                Ok(None)
+            }
+            fn find_spending_tx(
+                &self,
+                _: &bitcoin::OutPoint,
+                _: &bitcoin::Script,
+                _: u32,
+            ) -> Result<Option<bitcoin::Transaction>, E> {
+                Ok(None)
+            }
+            fn broadcast_tx(&self, _: &bitcoin::Transaction) -> Result<bitcoin::Txid, E> {
+                Err(E::Wallet("fake".into()))
+            }
+        }
+        let coin = |tx: &bitcoin::Transaction, vout: u32| {
+            (
+                UnspentOutput {
+                    outpoint: bitcoin::OutPoint::new(tx.compute_txid(), vout),
+                    value_sats: tx.output[vout as usize].value.to_sat(),
+                },
+                6u32,
+            )
+        };
+        // subset claim (4995330 sats), ref6's claim of ad87b48b (54994314), a faucet coin (5M).
+        let utxos = vec![coin(&txs[1], 0), coin(&txs[0], 0), coin(&txs[3], 0)];
+        let ex = PledgeExclusion::default();
+        assert_eq!(
+            pick_pledge(&utxos, 5_000, 1, &ex).unwrap().outpoint,
+            utxos[0].0.outpoint,
+            "the custody coin is the smallest: what ref6 pledged"
+        );
+        let chain = Chain(txs.clone());
+        let free = super::without_custody_coins(&chain, utxos.clone());
+        assert_eq!(free.len(), 1);
+        assert_eq!(
+            pick_pledge(&free, 5_000, 1, &ex).unwrap().outpoint,
+            utxos[2].0.outpoint
+        );
     }
 
     /// Local policy (not in the shared vector): a re-arm leaves the last `reserve` free coins
