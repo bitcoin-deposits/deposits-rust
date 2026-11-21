@@ -561,6 +561,11 @@ pub struct Node {
     /// History lengths at last cache fill. Used to detect when rescan is needed
     /// without doing the full O(history_len) scan every cycle.
     joined_ledger_cache_versions: Mutex<HashMap<String, usize>>,
+    /// How many ledgers were tracked at the last cache fill (all of them, not only ours: the
+    /// freshness check compared the tracked count against `joined_ledger_cache_versions`, which
+    /// holds only the ledgers we operate, so with any joined ledger or fork tracked the cache
+    /// never hit and every call rescanned).
+    joined_ledger_cache_total: Mutex<Option<usize>>,
 
     /// Joined ledger IDs that have been imported from Nostr (or attempted).
     /// Prevents re-importing on every reload cycle.
@@ -590,6 +595,9 @@ pub struct Node {
     /// they rest on is behind; re-judged once it catches up (see
     /// `parked_proofs`).
     parked_fraud_proofs: Mutex<parked_proofs::ParkedProofs<crate::nostr::FraudProofEvent>>,
+    /// Received fraud broadcasts that verified here recently, by content hash: a re-sent copy
+    /// skips the verification (see `inbound::RecentVerified`).
+    recent_verified_proofs: Mutex<inbound::RecentVerified>,
 
     /// Our dispute forks whose own updates did not all reach the relay;
     /// retried every periodic (see `fork_publish`).
