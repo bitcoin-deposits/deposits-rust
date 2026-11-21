@@ -1279,9 +1279,8 @@ impl Node {
         // arm) has an early `?` exit that used to leave the entry signed in memory only.
         // `publish_fork` queues it for the periodic retry if the relay refuses.
         if added_new_operations {
-            if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
-                tracing::error!("Failed to persist fork ledger after DisputeEnter: {}", e);
-            }
+            // Write-ahead: durable, or not published at all.
+            self.write_ahead_fork(&fork_key)?;
             let _ = self.publish_fork(&fork_key).await;
             added_new_operations = false;
         }
@@ -1897,8 +1896,11 @@ impl Node {
         // Sign the armed update on the fork
         self.sign_last_update(&fork_key)?;
 
-        // Persist the fork (new JSONL file with compound key as filename)
-        if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
+        // Persist the fork (new JSONL file with compound key as filename). Write-ahead: what we
+        // signed in this pass is durable before `publish_fork` below sends it, or not sent.
+        if added_new_operations {
+            self.write_ahead_fork(&fork_key)?;
+        } else if let Err(e) = self.handler.persist_ledger_to_disk(&fork_key) {
             tracing::error!("Failed to persist fork ledger: {}", e);
         }
 
@@ -2600,6 +2602,35 @@ impl Node {
             .try_into()
             .map_err(|_| Error::Protocol("Ledger ID must be 32 bytes".to_string()))?;
 
+        // A retry (a broadcast that failed after the write-ahead, or a restart) publishes the
+        // acquire we already signed at this sequence; it never signs a second one there.
+        if let Some(stored) = self
+            .handler
+            .find_our_fork(ledger_id)
+            .and_then(|k| self.own_update_at(&k, sequence))
+            .or_else(|| self.journaled_at(ledger_id, sequence))
+        {
+            if !matches!(
+                LedgerOperation::tlv_decode(&stored.message),
+                Ok(LedgerOperation::DisputeAcquire { .. })
+            ) {
+                return Err(Error::Protocol(format!(
+                    "seq {} of {} already holds another update of ours; not signing an acquire there",
+                    sequence,
+                    &ledger_id[..16.min(ledger_id.len())]
+                )));
+            }
+            self.nostr
+                .broadcast_ledger_update(&stored)
+                .await
+                .map_err(|e| Error::Protocol(format!("Failed to rebroadcast DisputeAcquire: {:?}", e)))?;
+            if let Some(k) = self.handler.find_our_fork(ledger_id) {
+                self.published_all(&k);
+            }
+            tracing::info!("DisputeAcquire already signed at seq {}: republished those bytes", sequence);
+            return Ok(true);
+        }
+
         let mut signed_update = SignedLedgerUpdate {
             message: message_bytes,
             message_type: 0x8001,
@@ -2633,72 +2664,71 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
-        // Broadcast to Nostr
-        self.nostr
-            .broadcast_ledger_update(&signed_update)
-            .await
-            .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeAcquire: {:?}", e)))?;
-
-        tracing::info!("DisputeAcquire published! We are now the operator.");
-
-        // Persist the DisputeAcquire to our OWN local fork ledger. Publishing
-        // to Nostr alone left the on-chain win invisible to every local
-        // reader: the DisputeAcquire never entered the winner's fork history,
-        // so `deposits-wallet ledger custody` / `dispute status` /
-        // `poll_dispute_acquire` (which scan the fork JSONL) still saw a
-        // DISPUTED ledger under the original operator. Apply the SAME update
-        // we just broadcast — byte-for-byte — through the state machine so
-        // `state.operator_key` rotates to us, the disputed state clears
-        // (`DisputeState::Normal`), the chain tip/sequence advance, and the
-        // fork file on disk records the resolution. Routed through
-        // `handler.commit_self_authored_update` (allowlisted, lock-serialized,
-        // no mid-apply awaits) so it can't race the fork's actor.
+        // WRITE-AHEAD (node::write_ahead): the acquire is durable before any relay sees it, and
+        // a failed persist means it is not published. It used to be broadcast first and recorded
+        // after, so a kill in between left it on the relays and not on our disk, and the claim's
+        // retry signed another at this sequence under a later header.
         //
-        // The fork is stored under a compound key
-        // (`<ledger_id>_<seq>_<pk16>`); locate it via `find_our_fork`. If we
-        // somehow have no local fork (e.g. a manual-recovery operator without
-        // a persisted fork), skip local persistence rather than fail — the
-        // broadcast already succeeded and losers reconverge from the relay.
-        if let Some(fork_key) = self.handler.find_our_fork(ledger_id) {
+        // Our own fork (stored under `<ledger_id>_<seq>_<pk16>`, via `find_our_fork`) takes it
+        // through `commit_self_authored_update` (allowlisted, lock-serialized, no mid-apply
+        // awaits, fsync'd), so `state.operator_key` rotates to us, the dispute clears and the
+        // fork file records the resolution. With no fork of ours (a manual-recovery operator)
+        // it is journaled under `signed/` instead.
+        let own_fork = self.handler.find_our_fork(ledger_id);
+        let mut fresh = false;
+        if let Some(fork_key) = &own_fork {
             match self.handler.commit_self_authored_update(
-                &fork_key,
+                fork_key,
                 &operation,
                 signed_update.clone(),
                 current_block,
             ) {
-                Ok(true) => {
-                    tracing::info!(
-                        "DisputeAcquire applied + persisted to local fork {} \
-                         (custody rotated to us, dispute cleared)",
-                        &fork_key[..16.min(fork_key.len())],
-                    );
-                    // DEP-06 §Residue: we owe it now, within the ledger's service_response_blocks.
-                    let conf_txid = claim_tx.input[0].previous_output.txid;
-                    match self.credit_residue(ledger_id, &fork_key, conf_txid).await {
-                        Ok(n) if n > 0 => {
-                            let _ = self.publish_fork(&fork_key).await;
-                        }
-                        Ok(_) => {}
-                        Err(e) => tracing::warn!("residue of {}: {}", &ledger_id[..8], e),
-                    }
-                }
+                Ok(true) => fresh = true,
                 Ok(false) => tracing::debug!(
-                    "DisputeAcquire already present on fork {} — skipping",
+                    "DisputeAcquire already present on fork {}",
                     &fork_key[..16.min(fork_key.len())],
                 ),
-                Err(e) => tracing::warn!(
-                    "Failed to persist DisputeAcquire to fork {}: {} \
-                     (broadcast still succeeded)",
-                    &fork_key[..16.min(fork_key.len())],
-                    e
-                ),
+                Err(e) => {
+                    return Err(Error::Protocol(format!(
+                        "DisputeAcquire not persisted to fork {}: {}; not publishing it",
+                        &fork_key[..16.min(fork_key.len())],
+                        e
+                    )))
+                }
             }
         } else {
-            tracing::debug!(
-                "No local fork for {} — skipping local DisputeAcquire persist \
-                 (broadcast already published)",
-                &ledger_id[..16.min(ledger_id.len())],
+            self.journal_signed(ledger_id, &signed_update)?;
+        }
+        let pending = match &own_fork {
+            Some(k) => Some(self.write_ahead(k, &signed_update, true)?),
+            None => None,
+        };
+
+        self.nostr
+            .broadcast_ledger_update(&signed_update)
+            .await
+            .map_err(|e| Error::Protocol(format!("Failed to broadcast DisputeAcquire: {:?}", e)))?;
+        if let Some(p) = &pending {
+            self.published(p);
+        }
+        tracing::info!("DisputeAcquire published! We are now the operator.");
+
+        if let (Some(fork_key), true) = (&own_fork, fresh) {
+            tracing::info!(
+                "DisputeAcquire applied + persisted to local fork {} (custody rotated to us, dispute cleared)",
+                &fork_key[..16.min(fork_key.len())],
             );
+            // DEP-06 §Residue: we owe it now, within the ledger's service_response_blocks.
+            let conf_txid = claim_tx.input[0].previous_output.txid;
+            match self.credit_residue(ledger_id, fork_key, conf_txid).await {
+                Ok(n) if n > 0 => {
+                    // Write-ahead for the credits: durable, or not published.
+                    self.write_ahead_fork(fork_key)?;
+                    let _ = self.publish_fork(fork_key).await;
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("residue of {}: {}", &ledger_id[..8], e),
+            }
         }
 
         Ok(true)
@@ -2922,17 +2952,18 @@ impl Node {
             }
         }
         self.sign_last_update(fork_key)?;
-        if let Err(e) = self.handler.persist_ledger_to_disk(fork_key) {
-            tracing::warn!("Failed to persist withdrawn fork {}: {}", fork_key, e);
-        }
         let update = fork_arc.read().unwrap().history.last().cloned();
         if let Some(update) = update {
+            // Write-ahead: durable (fsync'd), or not published. A broadcast that fails leaves
+            // the pending file for `publish_pending_updates`, which sends these bytes.
+            let pending = self.write_ahead(fork_key, &update, true)?;
             self.nostr
                 .broadcast_ledger_update(&update)
                 .await
                 .map_err(|e| {
                     Error::Protocol(format!("Failed to broadcast DisputeYield: {:?}", e))
                 })?;
+            self.published(&pending);
         }
         Ok(())
     }
@@ -3001,6 +3032,39 @@ impl Node {
             return self.withdraw_dispute(&fork_key, current_block).await;
         }
 
+        // Already signed at arm+1 (on a fork of ours, or journaled fork-less): publish those
+        // bytes; never sign a second update at that sequence.
+        let seq = our_armed.sequence_number + 1;
+        let stored = {
+            let keys: Vec<String> = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|k| k.len() > ledger_id.len() && k.starts_with(ledger_id))
+                .cloned()
+                .collect();
+            keys.iter()
+                .filter_map(|k| self.own_update_at(k, seq))
+                .find(|u| u.previous_hash == our_armed.chain_hash())
+                .or_else(|| self.journaled_at(ledger_id, seq))
+        };
+        if let Some(stored) = stored {
+            if !matches!(LedgerOperation::tlv_decode(&stored.message), Ok(LedgerOperation::DisputeYield)) {
+                return Err(Error::Protocol(format!(
+                    "seq {} of {} already holds another update of ours; not signing a yield there",
+                    seq,
+                    &ledger_id[..16.min(ledger_id.len())]
+                )));
+            }
+            self.nostr
+                .broadcast_ledger_update(&stored)
+                .await
+                .map_err(|e| Error::Protocol(format!("Failed to rebroadcast DisputeYield: {:?}", e)))?;
+            return Ok(());
+        }
+
         // Create DisputeYield operation
         let operation = LedgerOperation::DisputeYield;
         let message_bytes = operation.tlv_encode();
@@ -3050,7 +3114,8 @@ impl Node {
             )
             .map_err(|e| Error::Protocol(format!("operator sign: {}", e)))?;
 
-        // Broadcast to Nostr
+        // No ledger of ours holds it: journal it (fsync'd, kept) before any relay sees it.
+        self.journal_signed(ledger_id, &signed_update)?;
         self.nostr
             .broadcast_ledger_update(&signed_update)
             .await
@@ -5921,9 +5986,8 @@ impl Node {
             }
         }
         self.sign_last_update(fork_key).map_err(|e| e.to_string())?;
-        if let Err(e) = self.handler.persist_ledger_to_disk(fork_key) {
-            tracing::error!("Failed to persist fork ledger: {}", e);
-        }
+        // Write-ahead: durable, or not published.
+        self.write_ahead_fork(fork_key).map_err(|e| e.to_string())?;
         tracing::info!(
             "re-arm {}: lottery round {} unclaimed; armed round {}",
             &ledger_id[..16],

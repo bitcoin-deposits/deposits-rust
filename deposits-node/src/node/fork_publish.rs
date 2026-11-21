@@ -241,6 +241,7 @@ impl Node {
         match &result {
             Ok(n) => {
                 pending.remove(fork_key);
+                self.published_all(fork_key);
                 tracing::info!(
                     "Published dispute fork {}: {} own update(s) past the fork point",
                     &fork_key[..32.min(fork_key.len())],

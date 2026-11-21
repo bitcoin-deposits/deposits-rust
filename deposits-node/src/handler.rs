@@ -191,7 +191,7 @@ pub struct DepositsHandler {
     wallet: Arc<Wallet>,
 
     /// Data directory for persistence
-    data_dir: PathBuf,
+    pub(crate) data_dir: PathBuf,
 
     /// Enable periodic deposit metrics emission (every 60 seconds)
     /// Controlled by DEPOSITS_ENABLE_METRICS_EMITTER env var
@@ -2199,6 +2199,13 @@ impl DepositsHandler {
     /// Full compaction (rewrite) triggers every 1000 appends to cap file size.
     #[tracing::instrument(name = "persist_ledger_to_disk", skip(self), fields(ledger = &ledger_id[..16.min(ledger_id.len())]))]
     pub fn persist_ledger_to_disk(&self, ledger_id: &str) -> Result<(), String> {
+        self.persist_ledger_durable(ledger_id, false)
+    }
+
+    /// Persist `ledger_id`, reporting any write failure; with `sync`, fsync'd before returning.
+    /// Write-ahead (DEP-02 §Signing): an update we signed is persisted through this, and
+    /// published only when it returns `Ok`.
+    pub fn persist_ledger_durable(&self, ledger_id: &str, sync: bool) -> Result<(), String> {
         let t0 = std::time::Instant::now();
 
         // One persist at a time for this ledger, held across the I/O. Only
@@ -2245,7 +2252,7 @@ impl DepositsHandler {
             let ledger = ledger_arc.read().unwrap();
             let history_len = ledger.history.len();
             let written_next = Self::next_seq_after(&ledger.history);
-            Self::save_ledger_to_disk_streaming(ledger_id, &ledger, &self.data_dir, None);
+            Self::save_ledger_to_disk_checked(ledger_id, &ledger, &self.data_dir, None, sync)?;
             drop(ledger);
             self.mark_persisted(ledger_id, written_next);
 
@@ -2272,12 +2279,15 @@ impl DepositsHandler {
         } else if let Some(append) =
             self.persist_append_snapshot(ledger_id, &ledger_arc, next_seq.unwrap_or(0))
         {
-            let bytes = Self::append_updates_to_disk(
+            // On failure the cursor does not advance, so the next persist rewrites from here.
+            let bytes = Self::append_updates_to_disk_checked(
                 ledger_id,
                 append.state.as_ref(),
                 &append.updates,
                 &self.data_dir,
-            );
+                sync,
+            )
+            .map_err(|(_, e)| e)?;
             self.persist_append_commit(ledger_id, &append, bytes);
             let total_elapsed = t0.elapsed();
             if total_elapsed.as_millis() > 1 {
@@ -2732,12 +2742,25 @@ impl DepositsHandler {
         data_dir: &PathBuf,
         retain: Option<usize>,
     ) {
+        if let Err(e) = Self::save_ledger_to_disk_checked(ledger_id, ledger, data_dir, retain, false) {
+            tracing::error!("{}", e);
+        }
+    }
+
+    /// `save_ledger_to_disk_streaming`, reporting failure; with `sync`, the temp file is
+    /// fsync'd before the rename and the directory after it, so the write survives power loss.
+    fn save_ledger_to_disk_checked(
+        ledger_id: &str,
+        ledger: &Ledger,
+        data_dir: &PathBuf,
+        retain: Option<usize>,
+        sync: bool,
+    ) -> Result<(), String> {
         let t0 = std::time::Instant::now();
         let ledgers_dir = data_dir.join("ledgers");
         if !ledgers_dir.exists() {
             if let Err(e) = fs::create_dir_all(&ledgers_dir) {
-                tracing::error!("Failed to create ledgers dir: {}", e);
-                return;
+                return Err(format!("Failed to create ledgers dir: {}", e));
             }
         }
 
@@ -2754,8 +2777,7 @@ impl DepositsHandler {
         let file = match fs::File::create(&tmp_file) {
             Ok(f) => f,
             Err(e) => {
-                tracing::error!("Failed to create temp ledger file {}: {}", ledger_id, e);
-                return;
+                return Err(format!("Failed to create temp ledger file {}: {}", ledger_id, e));
             }
         };
 
@@ -2765,19 +2787,19 @@ impl DepositsHandler {
         // Stream role + state + updates directly to file — no intermediate Vec<String>
         let role_row = LedgerLogRow::Role { role: ledger.role };
         if let Ok(line) = serde_json::to_string(&role_row) {
-            let _ = writeln!(writer, "{}", line);
+            writeln!(writer, "{}", line).map_err(|e| format!("write {}: {}", ledger_id, e))?;
         }
 
         let state_row = LedgerLogRow::State(ledger.state.clone());
         if let Ok(line) = serde_json::to_string(&state_row) {
-            let _ = writeln!(writer, "{}", line);
+            writeln!(writer, "{}", line).map_err(|e| format!("write {}: {}", ledger_id, e))?;
         }
 
         // Write only the retained tail of history (or all if retain is None)
         for update in &ledger.history[start..] {
             let update_row = LedgerLogRow::Update(update.clone());
             if let Ok(line) = serde_json::to_string(&update_row) {
-                let _ = writeln!(writer, "{}", line);
+                writeln!(writer, "{}", line).map_err(|e| format!("write {}: {}", ledger_id, e))?;
             }
         }
 
@@ -2793,23 +2815,30 @@ impl DepositsHandler {
                     ts: *ts,
                 };
                 if let Ok(line) = serde_json::to_string(&row) {
-                    let _ = writeln!(writer, "{}", line);
+                    writeln!(writer, "{}", line).map_err(|e| format!("write {}: {}", ledger_id, e))?;
                 }
             }
         }
 
         if let Err(e) = writer.flush() {
-            tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
             let _ = fs::remove_file(&tmp_file);
-            return;
+            return Err(format!("Failed to flush ledger file {}: {}", ledger_id, e));
+        }
+        if sync {
+            if let Err(e) = writer.get_ref().sync_all() {
+                let _ = fs::remove_file(&tmp_file);
+                return Err(format!("Failed to fsync ledger file {}: {}", ledger_id, e));
+            }
         }
         drop(writer);
 
         // Atomic rename
         if let Err(e) = fs::rename(&tmp_file, &ledger_file) {
-            tracing::error!("Failed to rename ledger file {}: {}", ledger_id, e);
             let _ = fs::remove_file(&tmp_file);
-            return;
+            return Err(format!("Failed to rename ledger file {}: {}", ledger_id, e));
+        }
+        if sync {
+            sync_dir(&ledgers_dir).map_err(|e| format!("Failed to fsync ledgers dir: {}", e))?;
         }
 
         let total_elapsed = t0.elapsed();
@@ -2821,6 +2850,7 @@ impl DepositsHandler {
                 total_elapsed
             );
         }
+        Ok(())
     }
 
     // Keep old signature for callers that pass owned data
@@ -2839,6 +2869,24 @@ impl DepositsHandler {
         new_updates: &[SignedLedgerUpdate],
         data_dir: &PathBuf,
     ) -> u64 {
+        match Self::append_updates_to_disk_checked(ledger_id, current_state, new_updates, data_dir, false) {
+            Ok(n) => n,
+            Err((n, e)) => {
+                tracing::error!("{}", e);
+                n
+            }
+        }
+    }
+
+    /// `append_updates_to_disk`, reporting failure (with the bytes written before it); with
+    /// `sync`, the file is fsync'd after the append.
+    fn append_updates_to_disk_checked(
+        ledger_id: &str,
+        current_state: Option<&LedgerState>,
+        new_updates: &[SignedLedgerUpdate],
+        data_dir: &PathBuf,
+        sync: bool,
+    ) -> Result<u64, (u64, String)> {
         let ledgers_dir = data_dir.join("ledgers");
         let ledger_file = ledgers_dir.join(format!("{}.jsonl", ledger_id));
         let mut written = 0u64;
@@ -2846,8 +2894,7 @@ impl DepositsHandler {
         let file = match fs::OpenOptions::new().append(true).open(&ledger_file) {
             Ok(f) => f,
             Err(e) => {
-                tracing::error!("Failed to open ledger file for append {}: {}", ledger_id, e);
-                return written;
+                return Err((written, format!("Failed to open ledger file for append {}: {}", ledger_id, e)));
             }
         };
 
@@ -2859,8 +2906,7 @@ impl DepositsHandler {
             let state_row = LedgerLogRow::State(state.clone());
             if let Ok(line) = serde_json::to_string(&state_row) {
                 if let Err(e) = write!(writer, "\n{}", line) {
-                    tracing::error!("Failed to append state to ledger {}: {}", ledger_id, e);
-                    return written;
+                    return Err((written, format!("Failed to append state to ledger {}: {}", ledger_id, e)));
                 }
             }
         }
@@ -2869,17 +2915,21 @@ impl DepositsHandler {
             let update_row = LedgerLogRow::Update(update.clone());
             if let Ok(line) = serde_json::to_string(&update_row) {
                 if let Err(e) = write!(writer, "\n{}", line) {
-                    tracing::error!("Failed to append to ledger {}: {}", ledger_id, e);
-                    return written;
+                    return Err((written, format!("Failed to append to ledger {}: {}", ledger_id, e)));
                 }
                 written += 1 + line.len() as u64;
             }
         }
 
         if let Err(e) = writer.flush() {
-            tracing::error!("Failed to flush ledger file {}: {}", ledger_id, e);
+            return Err((written, format!("Failed to flush ledger file {}: {}", ledger_id, e)));
         }
-        written
+        if sync {
+            if let Err(e) = writer.get_ref().sync_data() {
+                return Err((written, format!("Failed to fsync ledger file {}: {}", ledger_id, e)));
+            }
+        }
+        Ok(written)
     }
 
     /// Append a single Nostr `created_at` row to an existing ledger JSONL.
@@ -3240,7 +3290,8 @@ impl DepositsHandler {
             ledger.history.push(update);
         }
 
-        self.persist_ledger_to_disk(ledger_id)?;
+        // Dispute updates (yield, acquire): durable before anyone publishes them.
+        self.persist_ledger_durable(ledger_id, true)?;
         Ok(true)
     }
 
@@ -3706,6 +3757,11 @@ mod load_profile {
             t.elapsed()
         );
     }
+}
+
+/// fsync a directory, so a rename or a new file in it survives power loss.
+pub(crate) fn sync_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 #[cfg(test)]
@@ -4919,5 +4975,66 @@ mod tests {
         assert!(handler
             .read_persisted_history_prefix("00".repeat(32).as_str(), 4)
             .is_none());
+    }
+}
+
+/// The fsync cost per operator update (node::write_ahead), measured: `FSYNC_BENCH_LEDGER=<a .jsonl> FSYNC_BENCH_DIR=<dir
+/// on the node's filesystem> cargo test -p deposits-node --lib fsync_cost -- --ignored --nocapture`.
+/// Persists N appended updates (the operator path: one append per update) with and without
+/// fsync, interleaved, and prints both.
+#[cfg(test)]
+mod fsync_bench {
+    use super::DepositsHandler;
+    use crate::node::write_ahead::write_pending;
+
+    #[test]
+    #[ignore]
+    fn fsync_cost() {
+        let src = std::path::PathBuf::from(std::env::var("FSYNC_BENCH_LEDGER").expect("FSYNC_BENCH_LEDGER"));
+        let base = std::path::PathBuf::from(std::env::var("FSYNC_BENCH_DIR").expect("FSYNC_BENCH_DIR"));
+        let n: u64 = std::env::var("FSYNC_BENCH_N").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
+        let id = src.file_stem().unwrap().to_str().unwrap().to_string();
+        let mut results = Vec::new();
+        for (round, sync) in [false, true, false, true].into_iter().enumerate() {
+            let dir = base.join(format!("run{round}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("ledgers")).unwrap();
+            std::fs::copy(&src, dir.join("ledgers").join(format!("{id}.jsonl"))).unwrap();
+            let wallet = std::sync::Arc::new(crate::wallet::Wallet::new_mock(dir.clone()));
+            let signer: std::sync::Arc<dyn deposits_signer_api::Signer> = std::sync::Arc::new(
+                deposits_signer_api::LocalSigner::new(bitcoin::secp256k1::SecretKey::from_slice(&[1u8; 32]).unwrap()),
+            );
+            let h = DepositsHandler::new(signer, wallet, dir.clone(), false).0;
+            let arc = h.ledgers.lock().unwrap().get(&id).cloned().expect("ledger loads");
+            let (hist_len, tip) = {
+                let l = arc.read().unwrap();
+                (l.history.len(), l.history.last().unwrap().clone())
+            };
+            let mut total = std::time::Duration::ZERO;
+            for i in 1..=n {
+                let mut u = tip.clone();
+                u.sequence_number = tip.sequence_number + i;
+                u.content_hash = [(i % 251) as u8; 32];
+                arc.write().unwrap().history.push(u.clone());
+                let t = std::time::Instant::now();
+                write_pending(&dir, &id, &u, sync).unwrap();
+                h.persist_ledger_durable(&id, sync).unwrap();
+                total += t.elapsed();
+                let _ = std::fs::remove_file(dir.join("pending").join(format!("{}_{}.json", id, u.sequence_number)));
+            }
+            let per = total / n as u32;
+            eprintln!("fsync={sync}: {n} updates on a {hist_len}-update ledger, {per:?} per write-ahead");
+            results.push((sync, per));
+        }
+        let avg = |s: bool| {
+            let v: Vec<_> = results.iter().filter(|r| r.0 == s).map(|r| r.1.as_secs_f64()).collect();
+            v.iter().sum::<f64>() / v.len() as f64
+        };
+        eprintln!(
+            "write-ahead per update: no fsync {:.3} ms, fsync {:.3} ms ({:+.1}%)",
+            avg(false) * 1e3,
+            avg(true) * 1e3,
+            (avg(true) / avg(false) - 1.0) * 100.0
+        );
     }
 }

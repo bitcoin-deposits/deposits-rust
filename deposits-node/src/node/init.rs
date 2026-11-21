@@ -736,10 +736,32 @@ impl Node {
     ) -> Result<String, Error> {
         self.sign_last_update(ledger_id)?;
         self.validate_chain_before_persist(ledger_id)?;
-        if let Err(e) = self.handler.persist_ledger_to_disk(ledger_id) {
-            tracing::warn!("Failed to persist ledger: {}", e);
-        }
-        self.broadcast_last_update(ledger_id).await
+        self.persist_then_broadcast_last(ledger_id, super::write_ahead::fsync_operator_updates())
+            .await
+    }
+
+    /// Write-ahead for the operator's tip: durable (and fsync'd when `sync`), then broadcast.
+    /// A failed persist returns `Err` and the update is never published.
+    pub(crate) async fn persist_then_broadcast_last(&self, ledger_id: &str, sync: bool) -> Result<String, Error> {
+        let update = {
+            let arc = self
+                .handler
+                .ledgers
+                .lock()
+                .unwrap()
+                .get(ledger_id)
+                .cloned()
+                .ok_or_else(|| Error::Protocol(format!("Ledger not found: {}", ledger_id)))?;
+            let l = arc.read().unwrap();
+            l.history
+                .last()
+                .cloned()
+                .ok_or_else(|| Error::Protocol("Ledger has no updates".to_string()))?
+        };
+        let pending = self.write_ahead(ledger_id, &update, sync)?;
+        let event_id = self.nostr.broadcast_ledger_update(&update).await?;
+        self.published(&pending);
+        Ok(event_id)
     }
 
     /// Mark a ledger as dirty (modified but not yet persisted).
