@@ -1708,6 +1708,34 @@ impl Node {
                     let tip = chain.get_tip_height().unwrap_or(0);
                     super::armers::pledge_failure(&*chain, &rc, tip, 0)
                 });
+                let custody_rearm = {
+                    let chain = self.wallet.chain_backend();
+                    let pledge = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout);
+                    let vault = {
+                        let l = fork_arc.read().unwrap();
+                        dispute_vault(&l.history, &self.node_id)
+                    };
+                    let check = tokio::task::spawn_blocking(move || {
+                        let funding = chain.get_tx(&pledge.txid).ok().flatten();
+                        let vault_unspent = vault.iter().flatten().any(|v| {
+                            matches!(chain.is_output_unspent(&v.txid, v.vout), Ok(Some(true)))
+                        });
+                        pledge_is_custody_rearm(funding.as_ref(), pledge.vout, vault_unspent)
+                    });
+                    matches!(
+                        tokio::time::timeout(std::time::Duration::from_secs(4), check).await,
+                        Ok(Ok(true))
+                    )
+                };
+                if custody_rearm {
+                    tracing::error!(
+                        "Our declared pledge {}:{} is a lottery claim's output 0 (a ledger's custody); \
+                         re-arming with a fresh pledge while the vault is unconfiscated",
+                        bitcoin::Txid::from_byte_array(rc.txid),
+                        rc.vout
+                    );
+                    true
+                } else {
                 match tokio::time::timeout(std::time::Duration::from_secs(4), check).await {
                     Ok(Ok(Ok(Some(why)))) => {
                         tracing::warn!("Our pledge no longer counts ({}); re-arming", why);
@@ -1718,6 +1746,7 @@ impl Node {
                         tracing::debug!("pledge check still running; keeping our arm for now");
                         false
                     }
+                }
                 }
             }
             _ => false,
@@ -2470,6 +2499,23 @@ impl Node {
             )),
             _ => None,
         };
+        // DEP-03 §"Claim transaction (multi-input)": input 1 MUST be the declared replacement
+        // collateral at its declared value; any other coin is a WinnerCollateralDeviation. So a
+        // declared pledge that is another lottery claim's output 0 (a ledger's custody) cannot be
+        // swapped for a fresh coin here: the claim is refused, and the pledge is replaced by a
+        // re-arm while the arm window is open, else by the next round's arm (regtest
+        // 1121-next4c: ref6 declared fdff3a5f:0, ad87b48b's custody, on 9e23c858).
+        if let Some((op, _)) = collateral {
+            let funding = self.wallet.chain_backend().get_tx(&op.txid);
+            if let Err(why) = claim_collateral_check(op, funding.as_ref().map(|t| t.as_ref())) {
+                tracing::error!(
+                    "REFUSING to claim the lottery of {}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    why
+                );
+                return Err(Error::Protocol(format!("claim refused: {}", why)));
+            }
+        }
         let claim_tx = deposits_core::tapscript_reserves::build_lottery_claim_tx(
             lottery_outpoint,
             lottery_amount,
@@ -5359,6 +5405,42 @@ pub(crate) fn claim_output_shaped(tx: &bitcoin::Transaction, vout: u32) -> bool 
             || seq == deposits_core::tapscript_reserves::LOTTERY_REVEAL_CSV_BLOCKS)
 }
 
+/// Whether a claim may spend `collateral` as its input 1, given its funding transaction as the
+/// chain answered (`Err` when the chain could not be read). Refused when the coin is a lottery
+/// claim's output 0 ([`claim_output_shaped`]): spending it moves a ledger's custody into this
+/// claim, and the claim may not spend any other coin instead (DEP-03 §Claim transaction).
+/// Refused too when its funding transaction cannot be read: asked again next pass.
+pub(crate) fn claim_collateral_check(
+    collateral: bitcoin::OutPoint,
+    funding: Result<Option<&bitcoin::Transaction>, &crate::error::Error>,
+) -> Result<(), String> {
+    match funding {
+        Ok(Some(tx)) if claim_output_shaped(tx, collateral.vout) => Err(format!(
+            "our declared collateral {} is a lottery claim's output 0, a ledger's custody; a claim \
+             must spend the declared pledge and nothing else, so it is not built (re-arm with a \
+             fresh pledge, or arm the next round)",
+            collateral
+        )),
+        Ok(_) => Ok(()),
+        Err(e) => Err(format!(
+            "the funding transaction of our collateral {} is unreadable ({}); not claiming this pass",
+            collateral, e
+        )),
+    }
+}
+
+/// Whether our latest arm's declared pledge must be replaced by a same-round re-arm (DEP-03
+/// §Eligibility snapshot: "a re-arm replaces the declaration"; its latest arm counts and moves
+/// E): it is a lottery claim's output 0, and the dispute's vault is still unspent, so no
+/// confiscation has fixed the participant set and the arm window can still take a re-arm.
+pub(crate) fn pledge_is_custody_rearm(
+    pledge_funding: Option<&bitcoin::Transaction>,
+    pledge_vout: u32,
+    vault_unspent: bool,
+) -> bool {
+    vault_unspent && pledge_funding.is_some_and(|tx| claim_output_shaped(tx, pledge_vout))
+}
+
 /// `utxos` without the coins that are a lottery claim's output 0 ([`claim_output_shaped`]),
 /// asked of the chain once per funding transaction (cached: a transaction never changes). A coin
 /// whose funding transaction cannot be fetched this pass is left out too: pledging a ledger's
@@ -5465,6 +5547,28 @@ pub(crate) fn committed_outpoints(
 /// someone other than `me`, as (acquirer, claim), each claim once. `None` when we never
 /// entered on this fork or no vault precedes the entry. Whether each binds is
 /// `acquire_binding`'s to judge.
+/// The vault the dispute our fork (`fork_history`) is in confiscates: the latest QuorumBegin at or
+/// below our DisputeEnter, or `None` when we never entered.
+pub(crate) fn dispute_vault(
+    fork_history: &[deposits_core::SignedLedgerUpdate],
+    me: &bitcoin::secp256k1::PublicKey,
+) -> Option<super::acquire_binding::Vault> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let enter_seq = fork_history
+        .iter()
+        .filter(|u| u.operator_id == *me)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeEnter { .. })
+            )
+        })
+        .map(|u| u.sequence_number)
+        .max()?;
+    super::acquire_binding::vault_at(fork_history, enter_seq)
+}
+
 pub(crate) fn dispute_acquire_candidates(
     fork_history: &[deposits_core::SignedLedgerUpdate],
     histories: &[&[deposits_core::SignedLedgerUpdate]],
@@ -6616,6 +6720,67 @@ mod pledge_pick_vector {
         assert_eq!(
             pick_pledge(&free, 5_000, 1, &ex).unwrap().outpoint,
             utxos[2].0.outpoint
+        );
+    }
+
+    /// ref6's 9e23c858 arm (seq 23, the fixture) declares fdff3a5f:0, ad87b48b's custody (a real
+    /// claim, in custody_coin.json). Its claim is refused; a faucet coin would be claimed with; an
+    /// unreadable funding transaction is refused for the pass. A same-round re-arm replaces it only
+    /// while the vault is unspent: 9e23c858's vault 6556e3bc:0 was confiscated (eac2120a), so
+    /// there the replacement is the next round's arm.
+    #[test]
+    fn ref6s_custody_pledge_is_never_claimed_with() {
+        use crate::handler::DepositsHandler;
+        use bitcoin::hashes::Hash;
+        use deposits_core::messages::LedgerOperation;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors");
+        let fork = DepositsHandler::load_single_ledger_from_jsonl(
+            "9e23c858c7537cd1c61476d0122ba056cf16607716f54aa31e3e6a2dc21f6689_000012_02a417593a974f4f",
+            &dir.join("ref6_lost_fork.jsonl"),
+        )
+        .unwrap();
+        let ref6 = fork.history.last().unwrap().operator_id;
+        let Some(LedgerOperation::DisputeArmed {
+            replacement_collateral: Some(rc),
+            ..
+        }) = super::latest_dispute_armed(&fork.history)
+        else {
+            panic!("ref6's fork ends in an arm with a pledge")
+        };
+        let pledge = bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(rc.txid), rc.vout);
+        assert_eq!(
+            pledge.to_string(),
+            "fdff3a5f90d57a71e0cf73b6c9565ad2f417708dbe96a26ef24d8b2eba4b5307:0"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/vectors/custody_coin.json")).unwrap();
+        let tx = |k: &str| -> bitcoin::Transaction {
+            let c = v["cases"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["name"].as_str().unwrap().contains(k))
+                .unwrap();
+            bitcoin::consensus::encode::deserialize_hex(c["hex"].as_str().unwrap()).unwrap()
+        };
+        let custody = tx("ad87b48b");
+        assert_eq!(custody.compute_txid(), pledge.txid);
+        assert!(super::claim_collateral_check(pledge, Ok(Some(&custody))).is_err());
+        let faucet = tx("(output 0)");
+        let faucet_coin = bitcoin::OutPoint::new(faucet.compute_txid(), 0);
+        assert!(super::claim_collateral_check(faucet_coin, Ok(Some(&faucet))).is_ok());
+        let e = crate::error::Error::Wallet("rpc down".into());
+        assert!(super::claim_collateral_check(faucet_coin, Err(&e)).is_err());
+        // Re-arm in the same round: only while the vault is unspent, only for a custody coin.
+        assert!(super::pledge_is_custody_rearm(Some(&custody), 0, true));
+        assert!(!super::pledge_is_custody_rearm(Some(&custody), 0, false));
+        assert!(!super::pledge_is_custody_rearm(Some(&faucet), 0, true));
+        assert!(!super::pledge_is_custody_rearm(None, 0, true));
+        let vault = super::dispute_vault(&fork.history, &ref6).unwrap();
+        assert_eq!(
+            vault[0].to_string(),
+            "6556e3bc21d138c52f50188fa0ba2edf546632b388783f5ee1e3dc9956b9cb8b:0",
+            "spent on chain by the confiscation eac2120a: no same-round re-arm here"
         );
     }
 
