@@ -3349,6 +3349,18 @@ impl DepositsHandler {
             if already {
                 return Ok(false);
             }
+            // The fold's dispute-state gate, which every member replaying this fork applies
+            // (`Ledger::validate_incoming_update`): an update it refuses must not enter OUR
+            // record either, or our fork holds what nobody else accepts (an acquire after our
+            // own yield: ref7 / c8b9b7b1, regtest 2026-11-21).
+            if !ledger.dispute_state_allows(operation) {
+                return Err(format!(
+                    "seq {}: operation {} not allowed in {:?} state",
+                    update.sequence_number,
+                    operation.discriminant(),
+                    ledger.state.dispute_state
+                ));
+            }
 
             // Run the state machine + conformance verifier so custody /
             // dispute state / balances advance (not just the chain tip).

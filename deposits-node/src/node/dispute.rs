@@ -2274,6 +2274,20 @@ impl Node {
             self.publish_custody_yield(ledger_id, &our_armed).await?;
             return Ok(true);
         }
+        // A later round's arm is decided by `rearm.rs` (`rearm_reveal_and_claim`), over THAT
+        // round's lottery. This pass builds ROUND 1's: a round-2-only armer is not in it, so it
+        // always "lost" and yielded, Tombstoning the fork for the round it armed in. ref7's
+        // c8b9b7b1 (regtest rearm-rust 2026-11-21): round-2 arm at seq 26, this pass's yield at
+        // 27 a minute later, then round 2 won, claimed and confirmed with no acquire possible.
+        if !super::dispute_tip::round1_pass_decides(&our_armed) {
+            tracing::debug!(
+                "Lottery for {}: our arm (seq {}) is for round {:?}; the re-arm pass decides it",
+                &ledger_id[..16.min(ledger_id.len())],
+                our_armed.sequence_number,
+                super::dispute_tip::arm_round(&our_armed)
+            );
+            return Ok(false);
+        }
         let lottery = ctx.build_lottery(self.wallet.network())?;
         let t_locate = std::time::Instant::now();
         let mut located = self.locate_lottery_output(&lottery, ctx.landed)?;
@@ -2435,6 +2449,30 @@ impl Node {
 
         let our_pubkey = self.node_id;
         let (_, winner_participant) = &participants[winner_index];
+
+        // Where the acquire goes, read off our fork BEFORE the claim is broadcast: the fork's
+        // real tip (after any QuorumAddMember that followed the arm), never `our_armed + 1`. A
+        // fork on which this arm's round already ended (our yield follows the arm) takes no
+        // acquire at any sequence, so the claim is not broadcast either (regtest rearm-rust
+        // 2026-11-21, ref7 / c8b9b7b1: arm 26, yield 27, a confirmed claim and an acquire
+        // computed at 27 and refused there). `node::dispute_tip`.
+        let acquire_at = {
+            let fork = self.handler.find_our_fork(ledger_id).and_then(|k| {
+                self.handler
+                    .ledgers
+                    .lock()
+                    .unwrap()
+                    .get(&k)
+                    .map(|arc| arc.read().unwrap().history.clone())
+            });
+            super::dispute_tip::acquire_slot(fork.as_deref(), our_armed).map_err(|why| {
+                Error::Protocol(format!(
+                    "{}: {}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    why
+                ))
+            })?
+        };
 
         // Build lottery participants list
         let lottery_participants: Vec<LotteryParticipant> =
@@ -2663,8 +2701,12 @@ impl Node {
         // `content_hash` (the old behavior) produced a `previous_hash`
         // that `import_ledger` rejected as a broken chain, so losing
         // cosigners could never converge onto the resolved chain.
-        let parent_chain_hash = our_armed.chain_hash();
-        let sequence = our_armed.sequence_number + 1;
+        //
+        // The parent is our FORK'S TIP (`acquire_at`), which is `our_armed` only when nothing
+        // followed the arm; `None` there means an acquire of ours already holds `sequence`.
+        let (sequence, parent) = acquire_at;
+        let parent = parent.unwrap_or_else(|| our_armed.clone());
+        let parent_chain_hash = parent.chain_hash();
         let ledger_id_bytes: [u8; 32] = hex::decode(ledger_id)
             .map_err(|e| Error::Protocol(format!("Invalid ledger_id: {}", e)))?
             .try_into()
@@ -2710,13 +2752,13 @@ impl Node {
             previous_hash: parent_chain_hash,
             content_hash: [0u8; 32],
             block_height: deposits_core::ledger::signing_header_after(
-                Some((our_armed.block_height, our_armed.block_hash)),
+                Some((parent.block_height, parent.block_hash)),
                 current_block,
                 current_block_hash,
             )
             .0,
             block_hash: deposits_core::ledger::signing_header_after(
-                Some((our_armed.block_height, our_armed.block_hash)),
+                Some((parent.block_height, parent.block_hash)),
                 current_block,
                 current_block_hash,
             )
@@ -3052,32 +3094,66 @@ impl Node {
         let current_block = self.wallet.get_block_height().unwrap_or(0);
         let current_block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
 
-        // Our own fork whose tip is this arm takes the yield through the ordinary append, so
+        // Our own fork holding this arm takes the yield through the ordinary append, so
         // it is recorded, persisted and tombstoned HERE too. It used to be broadcast only: the
         // fork stayed Armed in our own records for good, and its pledge was never released
         // (regtest 1120-next4: 86 of ref6's 151 forks entered and armed, never concluded
         // locally, 29 of them marked lottery_completed).
-        let own_fork = {
-            let tip = our_armed.chain_hash();
+        //
+        // The yield goes at that fork's REAL tip, which is the arm only when nothing followed it:
+        // an Armed fork also takes our QuorumAddMembers (ref7's 2fea4c6b, regtest 2026-11-21:
+        // arm 221, adds 222..228, and a yield computed at 222 refused every pass). A fork on which
+        // this arm's round already ended takes no second terminal update (`node::dispute_tip`).
+        let mut concluded: Option<SignedLedgerUpdate> = None;
+        let mut own_fork: Option<(String, SignedLedgerUpdate)> = None;
+        {
             let ledgers = self.handler.ledgers.lock().unwrap();
-            ledgers
-                .iter()
-                .find(|(k, arc)| {
-                    let l = arc.read().unwrap();
-                    k.len() > ledger_id.len()
-                        && k.starts_with(ledger_id)
-                        && super::rearm::is_our_fork(k, &l.state.parent_pubkey, &our_pubkey)
-                        && l.history.last().is_some_and(|u| u.chain_hash() == tip)
-                        && l.state
+            for (k, arc) in ledgers.iter() {
+                let l = arc.read().unwrap();
+                if !(k.len() > ledger_id.len()
+                    && k.starts_with(ledger_id)
+                    && super::rearm::is_our_fork(k, &l.state.parent_pubkey, &our_pubkey))
+                {
+                    continue;
+                }
+                match super::dispute_tip::after_our_arm(&l.history, our_armed) {
+                    super::dispute_tip::AfterArm::Append(tip)
+                        if l.state
                             .dispute_state
-                            .allows_operation(LedgerOperation::DisputeYield.discriminant())
-                })
-                .map(|(k, _)| k.clone())
-        };
-        // Sign a yield at arm+1 only if nothing of ours is there yet: a retry of this path (or a
+                            .allows_operation(LedgerOperation::DisputeYield.discriminant()) =>
+                    {
+                        own_fork = Some((k.clone(), tip.clone()));
+                        break;
+                    }
+                    super::dispute_tip::AfterArm::Concluded(u) => {
+                        concluded = Some(u.clone());
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(u) = concluded {
+            if !matches!(LedgerOperation::tlv_decode(&u.message), Ok(LedgerOperation::DisputeYield)) {
+                return Err(Error::Protocol(format!(
+                    "{}: our fork acquired this arm's round at seq {}; not yielding",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    u.sequence_number
+                )));
+            }
+            // Already yielded on our fork: publish those bytes, sign nothing.
+            self.nostr
+                .broadcast_ledger_update(&u)
+                .await
+                .map_err(|e| Error::Protocol(format!("Failed to rebroadcast DisputeYield: {:?}", e)))?;
+            return Ok(());
+        }
+        // Sign a yield at tip+1 only if nothing of ours is there yet: a retry of this path (or a
         // restart between the broadcast and the lottery marker) would otherwise sign a second
         // yield at the same sequence with another header, an equivocation by us.
-        match self.yield_backfill_for(ledger_id, our_armed, false).await {
+        let backfill_tip = own_fork.as_ref().map(|(_, t)| t.clone()).unwrap_or_else(|| our_armed.clone());
+        let own_fork = own_fork.map(|(k, _)| k);
+        match self.yield_backfill_for(ledger_id, &backfill_tip, false).await {
             super::yield_backfill::Backfill::Sign => {}
             super::yield_backfill::Backfill::Adopt(y) => {
                 if let Some(fork_key) = &own_fork {
