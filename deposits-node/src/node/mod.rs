@@ -705,6 +705,7 @@ pub mod cosign_policy;
 pub mod cosign_rounds;
 pub mod dereliction;
 pub mod dispute;
+pub mod dispute_tip;
 pub mod expiry_watch;
 pub mod fork_publish;
 pub mod heal;
