@@ -2493,7 +2493,7 @@ impl Node {
             super::dispute::ForkChoice::Create { bypassed } => {
                 for k in &bypassed {
                     tracing::warn!(
-                        "Punitive dispute on {}: not absorbed by our un-armed expiry fork {} \
+                        "Dispute on {}: not absorbed by our un-armed expiry fork {} \
                          (it stands down when its ground is answered); forking at {}",
                         &ledger_id[..16],
                         &k[..32.min(k.len())],

@@ -129,6 +129,12 @@ impl StateRowStrip {
     }
 }
 
+/// What every persisted `Update` row whose operation is a `QuorumBegin` contains: its message
+/// is the TLV of the operation, which opens with the discriminant record `[0, 1, 12]`, written
+/// by serde as a compact JSON array. A pre-filter only; the row is decoded before it counts
+/// (`DepositsHandler::read_persisted_quorum_begins_at`).
+pub(crate) const QUORUM_BEGIN_ROW_MARK: &str = "\"message\":[0,1,12,";
+
 /// JSONL row for append-only ledger log format
 /// - First line: Role variant (LedgerRole)
 /// - Second line: State variant (current LedgerState)
@@ -2118,6 +2124,48 @@ impl DepositsHandler {
         let mut updates: Vec<SignedLedgerUpdate> = by_hash.into_values().collect();
         updates.sort_by_key(|u| u.sequence_number);
         Some(updates)
+    }
+
+    /// The `QuorumBegin` updates of a ledger's persisted log with sequence in `(after, below)`,
+    /// in sequence order, one per sequence.
+    ///
+    /// The in-memory history is capped at [`Self::HISTORY_RETAIN`] updates, so a question about
+    /// a rotation older than that (the expiry stand-down's "a QuorumBegin after our fork point
+    /// whose spend confirmed", `expiry_watch`) cannot be answered from RAM. Streams the log and
+    /// decodes only the rows whose message is a `QuorumBegin` ([`QUORUM_BEGIN_ROW_MARK`]), so a
+    /// 2 GB log costs one sequential read and a handful of decodes, not a full parse.
+    pub fn read_persisted_quorum_begins_at(
+        data_dir: &std::path::Path,
+        ledger_id: &str,
+        after: u64,
+        below: u64,
+    ) -> Option<Vec<SignedLedgerUpdate>> {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::tlv::TlvDecode;
+        use std::io::BufRead;
+        let ledger_file = data_dir
+            .join("ledgers")
+            .join(format!("{}.jsonl", ledger_id));
+        let reader = std::io::BufReader::new(fs::File::open(&ledger_file).ok()?);
+        let mut by_seq: std::collections::BTreeMap<u64, SignedLedgerUpdate> = Default::default();
+        for line in reader.lines() {
+            let line = line.ok()?;
+            if !line.starts_with("{\"type\":\"Update\"") || !line.contains(QUORUM_BEGIN_ROW_MARK) {
+                continue;
+            }
+            if let Ok(LedgerLogRow::Update(u)) = serde_json::from_str::<LedgerLogRow>(&line) {
+                if u.sequence_number > after
+                    && u.sequence_number < below
+                    && matches!(
+                        LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::QuorumBegin { .. })
+                    )
+                {
+                    by_seq.entry(u.sequence_number).or_insert(u);
+                }
+            }
+        }
+        Some(by_seq.into_values().collect())
     }
 
     /// The first `n` updates (sequence 0..n) of a ledger's persisted chain,
