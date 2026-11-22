@@ -220,6 +220,14 @@ pub(crate) fn rungs_seen(
     (Some((seen_below, seen.clone())), seen)
 }
 
+/// Our expiry forks (by key) whose re-establishment after the fork point has its rotation spend
+/// confirmed, as the stand-down pass found it (strict-lottery-v8). A fork's ground does not
+/// un-answer, so an entry is never removed. Read by `Node::our_fork_kinds`; a fork not in it
+/// counts as unconfirmed until the next pass, which is also the pass that yields it.
+pub(crate) static REESTABLISHMENT_CONFIRMED: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::OnceLock::new();
+
 /// `QuorumBegin` rungs after a fork point, per (base ledger id, fork point): (every update after the
 /// fork point and below this sequence has been seen, in memory or read from the persisted log;
 /// the rungs of the QuorumBegins among them). What scrolls out of the in-memory window was seen
@@ -456,9 +464,17 @@ impl Node {
         };
         let candidates: Vec<Live> = live
             .into_iter()
-            .filter(|(_, _, reason, expiry, _, reestablished, on_spend, rungs_after, _)| {
-                (*reestablished || expiry_dispute_stands_down(reason, *expiry, height))
-                    && (!*on_spend || rotation_spend_confirmed(rungs_after))
+            .filter(|(fork_key, _, reason, expiry, _, reestablished, on_spend, rungs_after, _)| {
+                let spent = !*on_spend || rotation_spend_confirmed(rungs_after);
+                if *on_spend && *reestablished && spent {
+                    // For the fork choice (`Node::our_fork_kinds`): this fork's ground is answered.
+                    REESTABLISHMENT_CONFIRMED
+                        .get_or_init(Default::default)
+                        .lock()
+                        .unwrap()
+                        .insert(fork_key.clone());
+                }
+                (*reestablished || expiry_dispute_stands_down(reason, *expiry, height)) && spent
             })
             .collect();
 
@@ -782,5 +798,43 @@ mod tests {
             );
             assert_eq!(line.contains(crate::handler::QUORUM_BEGIN_ROW_MARK), is_qb);
         }
+    }
+
+    /// The shared vector's `ended` cases that name a `history_window_from`: the ledger's latest
+    /// QuorumBegin lies below the window an implementation holds in memory, and the stand-down
+    /// must still read it (from the state here). A window holding none is three updates from
+    /// `history_window_from` on.
+    #[test]
+    fn ended_below_the_window_matches_the_shared_vector() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../deposits-protocol/tests/vectors/expiry_dispute_ends.json"
+        ))
+        .unwrap();
+        let mut n = 0;
+        for c in v["ended"].as_array().unwrap() {
+            let Some(from) = c["history_window_from"].as_u64() else {
+                continue;
+            };
+            n += 1;
+            let qb = c["latest_quorum_begin_sequence"].as_u64().unwrap();
+            let window: Vec<SignedLedgerUpdate> =
+                (from..from + 3).map(|s| update([0; 32], s, pk(1))).collect();
+            assert!(qb < from, "{}", c["name"]);
+            assert_eq!(latest_quorum_begin_seq(&window), None);
+            let latest = base_latest_quorum_begin_seq(Some(qb), &window).unwrap();
+            assert_eq!(
+                deposits_core::types::expiry_dispute_ended_under(
+                    c["ruleset"].as_str().unwrap_or(""),
+                    c["last_valid_sequence"].as_u64().unwrap(),
+                    latest,
+                    c["confiscation_confirmed"].as_bool().unwrap(),
+                    c["rotation_spend_confirmed"].as_bool().unwrap_or(true),
+                ),
+                c["ended"].as_bool().unwrap(),
+                "{}",
+                c["name"]
+            );
+        }
+        assert!(n >= 1);
     }
 }

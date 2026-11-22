@@ -244,9 +244,10 @@ pub(crate) enum OwnForkKind {
     Tombstoned,
     /// Disputed on a lapsed quorum (`quorum_expired`) and never armed.
     ExpiryUnarmed,
-    /// An `ExpiryUnarmed` fork whose ground is answered: the base holds a `QuorumBegin` after its
-    /// fork point (judged from the ledger's state, not the in-memory window). It stands down
-    /// (`expiry_watch`), and no later dispute may use it: DEP-05 §"When a quorum_expired dispute
+    /// A `quorum_expired` fork, armed or not, whose ground is answered: the base holds a
+    /// `QuorumBegin` after its fork point (judged from the ledger's state, not the in-memory
+    /// window), under strict-lottery-v8 one whose rotation spend confirmed
+    /// ([`own_expiry_fork_kind`]). It stands down (`expiry_watch`), and no later dispute may use it: DEP-05 §"When a quorum_expired dispute
     /// ends", "A member MUST NOT let a live dispute on an earlier ground stand in for it" (signet
     /// soak, 2026-11-22: ref4's fork of 0aeebcc5 at 359090, re-established at 359228, absorbed
     /// the dispute of that quorum's own expiry at 12209: "Already have fork for ledger
@@ -254,6 +255,34 @@ pub(crate) enum OwnForkKind {
     ExpiryAnswered,
     /// Anything else live: a punitive dispute, or an armed one.
     Live,
+}
+
+/// The kind of our live fork on a `quorum_expired` `DisputeEnter` at `fork_last_valid_sequence`
+/// (`armed` if it holds a `DisputeArmed`), against the base's latest `QuorumBegin`, under the
+/// ruleset at the fork point. Vector `expiry_dispute_ends.json`, its `fork_reuse` cases.
+pub(crate) fn own_expiry_fork_kind(
+    ruleset_at_fork: &str,
+    fork_last_valid_sequence: u64,
+    armed: bool,
+    base_latest_quorum_begin_sequence: Option<u64>,
+    rotation_spend_confirmed: bool,
+) -> OwnForkKind {
+    let answered = base_latest_quorum_begin_sequence.is_some_and(|qb| {
+        deposits_core::types::expiry_dispute_ended_under(
+            ruleset_at_fork,
+            fork_last_valid_sequence,
+            qb,
+            false,
+            rotation_spend_confirmed,
+        )
+    });
+    if answered {
+        OwnForkKind::ExpiryAnswered
+    } else if armed {
+        OwnForkKind::Live
+    } else {
+        OwnForkKind::ExpiryUnarmed
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -327,25 +356,27 @@ impl Node {
             .filter(|(_, a)| !base.as_ref().is_some_and(|b| Arc::ptr_eq(b, a)))
             .map(|(k, a)| {
                 let l = a.read().unwrap();
-                let kind = match l.state.dispute_state {
-                    deposits_core::types::DisputeState::Tombstoned => OwnForkKind::Tombstoned,
-                    deposits_core::types::DisputeState::Disputed
-                        if super::expiry_watch::dispute_enter_is_expiry(
-                            &l.history,
-                            base_expiry,
-                        ) == Some(true) =>
-                    {
-                        let answered = super::expiry_watch::dispute_enter_last_valid(&l.history)
-                            .zip(base_qb)
-                            .is_some_and(|(lvs, qb)| {
-                                deposits_core::types::expiry_dispute_ended(lvs, qb, false)
-                            });
-                        if answered {
-                            OwnForkKind::ExpiryAnswered
-                        } else {
-                            OwnForkKind::ExpiryUnarmed
-                        }
-                    }
+                use deposits_core::types::DisputeState;
+                let state = l.state.dispute_state;
+                let expiry_lvs = matches!(state, DisputeState::Disputed | DisputeState::Armed)
+                    .then(|| {
+                        (super::expiry_watch::dispute_enter_is_expiry(&l.history, base_expiry)
+                            == Some(true))
+                        .then(|| super::expiry_watch::dispute_enter_last_valid(&l.history))
+                        .flatten()
+                    })
+                    .flatten();
+                let kind = match (state, expiry_lvs) {
+                    (DisputeState::Tombstoned, _) => OwnForkKind::Tombstoned,
+                    (_, Some(lvs)) => own_expiry_fork_kind(
+                        &l.state.active_ruleset_name,
+                        lvs,
+                        state == DisputeState::Armed,
+                        base_qb,
+                        super::expiry_watch::REESTABLISHMENT_CONFIRMED
+                            .get()
+                            .is_some_and(|s| s.lock().unwrap().contains(k)),
+                    ),
                     _ => OwnForkKind::Live,
                 };
                 (k.clone(), kind)
@@ -7100,6 +7131,40 @@ mod fork_choice_tests {
             fork_for_dispute(&fork(359_090), true, &ours),
             ForkChoice::Refuse(_)
         ));
+    }
+
+    /// The shared vector's `fork_reuse` cases (deposits-protocol/tests/vectors/
+    /// expiry_dispute_ends.json, identical in the spec and cl-deposits): our expiry fork, its
+    /// kind as `our_fork_kinds` computes it, and whether a new dispute uses it.
+    #[test]
+    fn fork_reuse_matches_the_shared_vector() {
+        let v: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../deposits-protocol/tests/vectors/expiry_dispute_ends.json"
+        ))
+        .unwrap();
+        let cases = v["fork_reuse"].as_array().unwrap();
+        assert!(cases.len() >= 8);
+        for c in cases {
+            let name = c["name"].as_str().unwrap();
+            let fork = key(c["fork_last_valid_sequence"].as_u64().unwrap());
+            let kind = super::own_expiry_fork_kind(
+                c["ruleset"].as_str().unwrap(),
+                c["fork_last_valid_sequence"].as_u64().unwrap(),
+                c["fork_armed"].as_bool().unwrap(),
+                c["latest_quorum_begin_sequence"].as_u64(),
+                c["rotation_spend_confirmed"].as_bool().unwrap(),
+            );
+            let choice = fork_for_dispute(
+                &key(c["new_last_valid_sequence"].as_u64().unwrap()),
+                c["new_punitive"].as_bool().unwrap(),
+                &[(fork.clone(), kind)],
+            );
+            assert_eq!(
+                choice == ForkChoice::Use(fork),
+                c["reuse"].as_bool().unwrap(),
+                "{name}: {kind:?} -> {choice:?}"
+            );
+        }
     }
 
     /// The fork at the proof's own base is used whatever else exists.
