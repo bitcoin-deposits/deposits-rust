@@ -107,6 +107,127 @@ pub(crate) fn latest_quorum_begin_seq(history: &[SignedLedgerUpdate]) -> Option<
     })
 }
 
+/// The sequence of a base ledger's latest `QuorumBegin`, judged from the LEDGER: its state's
+/// record of it (`LedgerState::quorum_begin_sequence`, kept across the RAM cap and a restart),
+/// or the newest one its in-memory history holds, whichever is later.
+///
+/// The in-memory history is a window (`DepositsHandler::HISTORY_RETAIN`, 50 000 updates), so on a
+/// busy ledger a rotation scrolls out of it in hours. Read from the window alone, a
+/// re-established quorum is forgotten and our expiry dispute stands for good, which DEP-05
+/// §"When a quorum_expired dispute ends" forbids (signet soak, 2026-11-22: ref4's un-armed fork of
+/// 0aeebcc5 at 359090; the base re-established at 359228..436154, tip 492248, window from 442249).
+pub(crate) fn base_latest_quorum_begin_seq(
+    state_quorum_begin_seq: Option<u64>,
+    history: &[SignedLedgerUpdate],
+) -> Option<u64> {
+    state_quorum_begin_seq.max(latest_quorum_begin_seq(history))
+}
+
+/// Whether `history` holds every update after `last_valid_sequence` the ledger has (its window
+/// starts at or before the update after the fork point). When it does not, a `QuorumBegin` after
+/// the fork point may lie below the window, on disk only.
+pub(crate) fn history_covers_after(history: &[SignedLedgerUpdate], last_valid_sequence: u64) -> bool {
+    history
+        .first()
+        .is_none_or(|u| u.sequence_number <= last_valid_sequence.saturating_add(1))
+}
+
+/// The rung txids of each `QuorumBegin` among `updates` whose sequence is after
+/// `last_valid_sequence` (strict-lottery-v8: a re-establishment ends an expiry dispute only once
+/// some rung of some such `QuorumBegin` confirmed).
+pub(crate) fn quorum_begin_rungs_after(
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: u64,
+) -> Vec<Vec<[u8; 32]>> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    updates
+        .iter()
+        .filter(|u| u.sequence_number > last_valid_sequence)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(op @ LedgerOperation::QuorumBegin { .. }) => {
+                Some(deposits_core::vault_spend::quorum_begin_rungs(&op))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// For our expiry fork with `fork_history`, against its base (`base_quorum_begin_seq` from the
+/// base's state, `base_history` its in-memory window): (re-established since the fork point;
+/// under `on_spend`, the rungs of each QuorumBegin after the fork point the window holds; and,
+/// when the window starts after the fork point, (fork point, the window's first and last
+/// sequences): below the first, the QuorumBegins are on disk only). Judged from the ledger, never the window
+/// alone (see [`base_latest_quorum_begin_seq`]).
+pub(crate) fn judge_reestablishment(
+    fork_history: &[SignedLedgerUpdate],
+    on_spend: bool,
+    base_quorum_begin_seq: Option<u64>,
+    base_history: &[SignedLedgerUpdate],
+) -> (bool, Vec<Vec<[u8; 32]>>, Option<(u64, u64, u64)>) {
+    let Some(lvs) = dispute_enter_last_valid(fork_history) else {
+        return (false, Vec::new(), None);
+    };
+    let reestablished = base_latest_quorum_begin_seq(base_quorum_begin_seq, base_history)
+        .is_some_and(|qb| deposits_core::types::expiry_dispute_ended(lvs, qb, false));
+    if !on_spend {
+        return (reestablished, Vec::new(), None);
+    }
+    let below = (!history_covers_after(base_history, lvs)).then(|| {
+        (
+            lvs,
+            base_history.first().map_or(0, |u| u.sequence_number),
+            base_history.last().map_or(0, |u| u.sequence_number),
+        )
+    });
+    (reestablished, quorum_begin_rungs_after(base_history, lvs), below)
+}
+
+/// One stand-down pass's rungs of the QuorumBegins after fork point `lvs`, for a base whose
+/// in-memory window spans `window_start..=window_end` and holds `in_window` (their rungs), given
+/// what earlier passes saw (`entry`, see [`PERSISTED_RUNGS`]). `read(after, below)` reads the
+/// persisted log's QuorumBegins in `(after, below)`; it is called only for a stretch never seen,
+/// and `None` from it (unread) leaves the entry as it was. Returns (the new entry, if any; every
+/// rung known after the fork point).
+pub(crate) fn rungs_seen(
+    entry: Option<(u64, Vec<Vec<[u8; 32]>>)>,
+    lvs: u64,
+    window_start: u64,
+    window_end: u64,
+    in_window: Vec<Vec<[u8; 32]>>,
+    read: impl FnOnce(u64, u64) -> Option<Vec<SignedLedgerUpdate>>,
+) -> (Option<(u64, Vec<Vec<[u8; 32]>>)>, Vec<Vec<[u8; 32]>>) {
+    let (mut seen_below, mut seen) = entry.unwrap_or((lvs.saturating_add(1), Vec::new()));
+    if window_start > seen_below {
+        match read(seen_below - 1, window_start) {
+            Some(updates) => {
+                seen.extend(quorum_begin_rungs_after(&updates, lvs));
+                seen_below = window_start;
+            }
+            None => {
+                let mut all = seen;
+                all.extend(in_window);
+                return (None, all);
+            }
+        }
+    }
+    for r in in_window {
+        if !seen.contains(&r) {
+            seen.push(r);
+        }
+    }
+    seen_below = seen_below.max(window_end.saturating_add(1));
+    (Some((seen_below, seen.clone())), seen)
+}
+
+/// `QuorumBegin` rungs after a fork point, per (base ledger id, fork point): (every update after the
+/// fork point and below this sequence has been seen, in memory or read from the persisted log;
+/// the rungs of the QuorumBegins among them). What scrolls out of the in-memory window was seen
+/// in it, so the log is read only for a stretch never seen, normally once per process.
+type PersistedRungs = HashMap<(String, u64), (u64, Vec<Vec<[u8; 32]>>)>;
+static PERSISTED_RUNGS: std::sync::OnceLock<std::sync::Mutex<PersistedRungs>> =
+    std::sync::OnceLock::new();
+
 /// The `reason` of the `DisputeEnter` on a fork branch, if it holds one.
 /// The newest `DisputeEnter` of a fork's history judged by its ground (DEP-05 §"The ground of a
 /// dispute"): `Some(true)` for a `quorum_expired` dispute, whatever label a legacy record carries.
@@ -186,16 +307,19 @@ impl Node {
 
     /// Periodic: withdraw each `quorum_expired` dispute we opened whose
     /// operator has since re-established the quorum, unless a confiscation is
-    /// already under way. An armed fork gets a `DisputeYield` (it is then
-    /// Tombstoned, so the confiscation and lottery tasks pass it by); a fork
-    /// not yet armed has nothing to yield (the state machine allows
-    /// `DisputeYield` only once armed) and is simply no longer pursued: the
-    /// watch does not re-fire on a quorum that has not expired.
+    /// already under way: a `DisputeYield` on our fork, armed or not (DEP-05
+    /// §"When a quorum_expired dispute ends", DEP-06 §"Where a yield is valid"),
+    /// which Tombstones it, so the confiscation and lottery tasks pass it by.
+    /// "Re-established" is judged from the ledger (its state's latest
+    /// QuorumBegin, and under v8 the rotations' rungs from disk when the
+    /// in-memory window no longer reaches the fork point), never from the
+    /// window alone, and never from the chain tip.
     pub(crate) async fn stand_down_reestablished_expiry_disputes(&self) {
         // (fork key, base id, reason, base expiry, fork state, re-established since the fork
         // point) for every fork of ours still live that was opened for a lapsed quorum.
         // (fork key, ledger id, reason, base expiry, state, re-established, on_spend, the rung
-        // txids of each QuorumBegin after the fork point).
+        // txids of each QuorumBegin after the fork point, and, when some of those lie below the
+        // base's in-memory window, (fork point, first and last sequence in the window)).
         type Live = (
             String,
             String,
@@ -205,6 +329,7 @@ impl Node {
             bool,
             bool,
             Vec<Vec<[u8; 32]>>,
+            Option<(u64, u64, u64)>,
         );
         let live: Vec<Live> = {
             let ledgers = self.handler.ledgers.lock().unwrap();
@@ -239,44 +364,23 @@ impl Node {
                     let reason = "quorum_expired".to_string();
                     // DEP-05 §"When a quorum_expired dispute ends": a QuorumBegin after the
                     // fork point answers the dispute's ground, whatever the tip says now.
-                    let lvs = dispute_enter_last_valid(&fork.history);
-                    let reestablished = match (lvs, base) {
-                        (Some(lvs), Some(b)) => latest_quorum_begin_seq(&b.read().unwrap().history)
-                            .is_some_and(|qb| {
-                                deposits_core::types::expiry_dispute_ended(lvs, qb, false)
-                            }),
-                        _ => false,
-                    };
                     // strict-lottery-v8, judged at the fork point (never by the QuorumBegin under
                     // judgement): only a re-establishment whose spend of the vault confirmed
                     // ends it. Collected here, asked of the chain below, outside the lock.
                     let on_spend = deposits_core::types::ruleset_expiry_ends_on_spend(
                         &fork.state.active_ruleset_name,
                     );
-                    let rungs_after: Vec<Vec<[u8; 32]>> = match (on_spend, lvs, base) {
-                        (true, Some(lvs), Some(b)) => {
-                            use deposits_core::TlvDecode;
-                            b.read()
-                                .unwrap()
-                                .history
-                                .iter()
-                                .rev()
-                                .take_while(|u| u.sequence_number > lvs)
-                                .filter_map(|u| {
-                                    match deposits_core::messages::LedgerOperation::tlv_decode(
-                                        &u.message,
-                                    ) {
-                                        Ok(
-                                            op @ deposits_core::messages::LedgerOperation::QuorumBegin {
-                                                ..
-                                            },
-                                        ) => Some(deposits_core::vault_spend::quorum_begin_rungs(&op)),
-                                        _ => None,
-                                    }
-                                })
-                                .collect()
+                    let (reestablished, rungs_after, below_window) = match base {
+                        Some(b) => {
+                            let b = b.read().unwrap();
+                            judge_reestablishment(
+                                &fork.history,
+                                on_spend,
+                                b.state.quorum_begin_sequence,
+                                &b.history,
+                            )
                         }
-                        _ => Vec::new(),
+                        None => (false, Vec::new(), None),
                     };
                     Some((
                         key.clone(),
@@ -287,12 +391,47 @@ impl Node {
                         reestablished,
                         on_spend,
                         rungs_after,
+                        below_window,
                     ))
                 })
                 .collect()
         };
         if live.is_empty() {
             return;
+        }
+
+        // QuorumBegins after a fork point that the base's in-memory window no longer holds, from
+        // its persisted log: read once per base and fork point, then kept current from the
+        // window itself (see PERSISTED_RUNGS), so the log is not re-read as the window scrolls.
+        let mut live = live;
+        for (_, base_id, _, _, _, _, _, rungs_after, below_window) in live.iter_mut() {
+            let Some((lvs, window_start, window_end)) = *below_window else {
+                continue;
+            };
+            let cache = PERSISTED_RUNGS.get_or_init(Default::default);
+            let key = (base_id.clone(), lvs);
+            let entry = cache.lock().unwrap().get(&key).cloned();
+            let dir = self.handler.data_dir.clone();
+            let id = base_id.clone();
+            let in_window = std::mem::take(rungs_after);
+            // Off the async runtime: a stretch never seen is a sequential read of the log.
+            let judged = tokio::task::spawn_blocking(move || {
+                let (entry, rungs) =
+                    rungs_seen(entry, lvs, window_start, window_end, in_window, |after, below| {
+                        crate::handler::DepositsHandler::read_persisted_quorum_begins_at(
+                            &dir, &id, after, below,
+                        )
+                    });
+                (entry, rungs)
+            })
+            .await;
+            let Ok((entry, rungs)) = judged else {
+                continue;
+            };
+            if let Some(entry) = entry {
+                cache.lock().unwrap().insert(key, entry);
+            }
+            *rungs_after = rungs;
         }
 
         // Live chain tip, as the watch that opened them reads it.
@@ -317,13 +456,13 @@ impl Node {
         };
         let candidates: Vec<Live> = live
             .into_iter()
-            .filter(|(_, _, reason, expiry, _, reestablished, on_spend, rungs_after)| {
+            .filter(|(_, _, reason, expiry, _, reestablished, on_spend, rungs_after, _)| {
                 (*reestablished || expiry_dispute_stands_down(reason, *expiry, height))
                     && (!*on_spend || rotation_spend_confirmed(rungs_after))
             })
             .collect();
 
-        for (fork_key, ledger_id, _, expiry, state, _, _, _) in candidates {
+        for (fork_key, ledger_id, _, expiry, state, _, _, _, _) in candidates {
             let prefix = &ledger_id[..16];
 
             // DEP-06 §Race (ruled 2026-11-14): a re-establishment ends our expiry
@@ -515,5 +654,133 @@ mod tests {
             Some("quorum_expired")
         );
         assert_eq!(dispute_enter_reason(&history[..1]), None);
+    }
+
+    /// A persisted `Update` row of the soak, as `SignedLedgerUpdate`.
+    fn soak_row(line: &str) -> SignedLedgerUpdate {
+        let mut v: serde_json::Value = serde_json::from_str(line).unwrap();
+        v.as_object_mut().unwrap().remove("type");
+        serde_json::from_value(v).unwrap()
+    }
+
+    /// Signet soak, ref4, ledger 0aeebcc5 (2026-11-22). Our un-armed `quorum_expired` fork at
+    /// 359090 (DisputeEnter 359091, the real row). The operator re-established at 359228 and
+    /// rotated three more times, to 436154 (real rows; each has a rung confirmed on signet:
+    /// 64fa8935… at 8212, 099729ed… at 9650, 8e3bce16… at 10529, 5cced468… at 11236). That quorum
+    /// expired again at 12209. The base's tip was 492248, so its 50 000-update in-memory window
+    /// began at 442249 and held no QuorumBegin at all. Judged from the window, the
+    /// re-establishment was forgotten: ref4 yielded only while `height <= quorum_expiry` (the
+    /// last refusal 04:47:33Z, block 12210 at 04:48:41Z) and never again, so the DisputeEnter
+    /// stood for good. The window here is the base's last three real rows.
+    #[test]
+    fn a_reestablishment_below_the_history_window_still_ends_the_dispute() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/signet-0aeebcc5");
+        let base_id = "0aeebcc51f7dc6142f8e7a804e96fbe441ddb852401ad3f55837f7d13155669b";
+        let enter = soak_row(
+            std::fs::read_to_string(dir.join("fork-dispute-enter.json"))
+                .unwrap()
+                .trim(),
+        );
+        let lvs = dispute_enter_last_valid(std::slice::from_ref(&enter)).unwrap();
+        assert_eq!(lvs, 359_090);
+
+        let log = std::fs::read_to_string(dir.join("ledgers").join(format!("{base_id}.jsonl")))
+            .unwrap();
+        let rows: Vec<SignedLedgerUpdate> = log.lines().map(soak_row).collect();
+        let window: Vec<SignedLedgerUpdate> = rows
+            .iter()
+            .filter(|u| u.sequence_number >= 442_249)
+            .cloned()
+            .collect();
+        assert_eq!(window.len(), 3);
+
+        // The defect: the window alone knows of no QuorumBegin.
+        assert_eq!(latest_quorum_begin_seq(&window), None);
+        // The ledger does: its state records the latest one (ref4's checkpoint of 0aeebcc5:
+        // quorum_begin_sequence 436154), and that ends the dispute (vector
+        // expiry_dispute_ends.json, "re-established, expired again": ended).
+        let qb = base_latest_quorum_begin_seq(Some(436_154), &window).unwrap();
+        assert_eq!(qb, 436_154);
+        assert!(deposits_core::types::expiry_dispute_ended(lvs, qb, false));
+        // Nor does a state that never saw one invent it, and a later one in the window wins.
+        assert_eq!(base_latest_quorum_begin_seq(None, &window), None);
+        assert_eq!(base_latest_quorum_begin_seq(Some(1), &rows), Some(436_154));
+
+        // The watch's own judgement of this fork against that base.
+        let (reestablished, in_window, below) =
+            judge_reestablishment(std::slice::from_ref(&enter), true, Some(436_154), &window);
+        assert!(reestablished, "the re-establishment at 359228..436154 ends the dispute");
+        assert!(in_window.is_empty());
+        assert_eq!(below, Some((359_090, 492_259, 492_261)));
+        // With the whole history in memory nothing is read from disk.
+        let (r, all, below) = judge_reestablishment(std::slice::from_ref(&enter), true, None, &rows);
+        assert!(r);
+        assert_eq!(all.len(), 4);
+        assert_eq!(below, None);
+
+        // v8: the rotations after the fork point are below the window, so their rungs come from
+        // disk, and only those after the fork point (325917 is before it).
+        assert!(!history_covers_after(&window, lvs));
+        assert!(history_covers_after(&rows, lvs));
+        assert!(quorum_begin_rungs_after(&window, lvs).is_empty());
+        let persisted = crate::handler::DepositsHandler::read_persisted_quorum_begins_at(
+            &dir,
+            base_id,
+            lvs,
+            window[0].sequence_number,
+        )
+        .unwrap();
+        assert_eq!(
+            persisted.iter().map(|u| u.sequence_number).collect::<Vec<_>>(),
+            vec![359_228, 389_318, 420_023, 436_154]
+        );
+        let rungs = quorum_begin_rungs_after(&persisted, lvs);
+        assert_eq!(rungs.len(), 4);
+        // 359228's rung confirmed at 8212 (txid display order is the reverse of the bytes).
+        let mut confirmed =
+            hex::decode("64fa8935f4dcc8c62e1c4be032547931ca67a719c440c86b35f7cbd65f9e419b").unwrap();
+        confirmed.reverse();
+        assert!(rungs[0].iter().any(|t| t[..] == confirmed[..]));
+        // The same read over the whole history agrees with the in-memory reading.
+        assert_eq!(quorum_begin_rungs_after(&rows, lvs), rungs);
+        // The watch reads the log once, then keeps up from the window as it scrolls.
+        let read_log = |after: u64, below: u64| {
+            crate::handler::DepositsHandler::read_persisted_quorum_begins_at(
+                &dir, base_id, after, below,
+            )
+        };
+        let (entry, first) = rungs_seen(None, lvs, 492_259, 492_261, Vec::new(), read_log);
+        assert_eq!(first, rungs);
+        assert_eq!(entry.as_ref().unwrap().0, 492_262);
+        let no_read = |_: u64, _: u64| -> Option<Vec<SignedLedgerUpdate>> {
+            panic!("a stretch already seen is not read again")
+        };
+        let (entry2, second) =
+            rungs_seen(entry.clone(), lvs, 492_261, 492_270, Vec::new(), no_read);
+        assert_eq!(second, rungs);
+        assert_eq!(entry2.unwrap().0, 492_271);
+        // A stretch that scrolled past unseen (window now from 500000) is read, from where the
+        // last pass stopped.
+        let mut asked = None;
+        let (_, third) = rungs_seen(entry.clone(), lvs, 500_000, 500_010, Vec::new(), |a, b| {
+            asked = Some((a, b));
+            Some(Vec::new())
+        });
+        assert_eq!(asked, Some((492_261, 500_000)));
+        assert_eq!(third, rungs);
+        // Unread is not "none": no entry is written, and what was known stands.
+        let (none, fourth) = rungs_seen(entry, lvs, 500_000, 500_010, Vec::new(), |_, _| None);
+        assert!(none.is_none());
+        assert_eq!(fourth, rungs);
+
+        // Every QuorumBegin row carries the pre-filter mark, and only those do.
+        for line in log.lines() {
+            let is_qb = matches!(
+                LedgerOperation::tlv_decode(&soak_row(line).message),
+                Ok(LedgerOperation::QuorumBegin { .. })
+            );
+            assert_eq!(line.contains(crate::handler::QUORUM_BEGIN_ROW_MARK), is_qb);
+        }
     }
 }

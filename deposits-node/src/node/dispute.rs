@@ -244,6 +244,14 @@ pub(crate) enum OwnForkKind {
     Tombstoned,
     /// Disputed on a lapsed quorum (`quorum_expired`) and never armed.
     ExpiryUnarmed,
+    /// An `ExpiryUnarmed` fork whose ground is answered: the base holds a `QuorumBegin` after its
+    /// fork point (judged from the ledger's state, not the in-memory window). It stands down
+    /// (`expiry_watch`), and no later dispute may use it: DEP-05 §"When a quorum_expired dispute
+    /// ends", "A member MUST NOT let a live dispute on an earlier ground stand in for it" (signet
+    /// soak, 2026-11-22: ref4's fork of 0aeebcc5 at 359090, re-established at 359228, absorbed
+    /// the dispute of that quorum's own expiry at 12209: "Already have fork for ledger
+    /// 0aeebcc5…: 0aeebcc51f7dc6142f8e7a804e96fbe4").
+    ExpiryAnswered,
     /// Anything else live: a punitive dispute, or an armed one.
     Live,
 }
@@ -277,7 +285,7 @@ pub(crate) fn fork_for_dispute(
                 "our fork {} at this base is over (yielded or lost)",
                 &exact[..32.min(exact.len())]
             )),
-            OwnForkKind::ExpiryUnarmed if punitive => ForkChoice::Refuse(format!(
+            OwnForkKind::ExpiryUnarmed | OwnForkKind::ExpiryAnswered if punitive => ForkChoice::Refuse(format!(
                 "our fork {} at this base is an un-armed expiry dispute; a punitive \
                  DisputeEnter cannot be appended to it",
                 &exact[..32.min(exact.len())]
@@ -290,6 +298,7 @@ pub(crate) fn fork_for_dispute(
         match kind {
             OwnForkKind::Tombstoned => {}
             OwnForkKind::ExpiryUnarmed if punitive => bypassed.push(k.clone()),
+            OwnForkKind::ExpiryAnswered => bypassed.push(k.clone()),
             _ => return ForkChoice::Use(k.clone()),
         }
     }
@@ -306,6 +315,10 @@ impl Node {
         let base_expiry = base
             .as_ref()
             .and_then(|b| b.read().unwrap().state.quorum_expiry);
+        let base_qb = base.as_ref().and_then(|b| {
+            let b = b.read().unwrap();
+            super::expiry_watch::base_latest_quorum_begin_seq(b.state.quorum_begin_sequence, &b.history)
+        });
         let mut out: Vec<(String, OwnForkKind)> = ledgers
             .iter()
             .filter(|(k, _)| {
@@ -322,7 +335,16 @@ impl Node {
                             base_expiry,
                         ) == Some(true) =>
                     {
-                        OwnForkKind::ExpiryUnarmed
+                        let answered = super::expiry_watch::dispute_enter_last_valid(&l.history)
+                            .zip(base_qb)
+                            .is_some_and(|(lvs, qb)| {
+                                deposits_core::types::expiry_dispute_ended(lvs, qb, false)
+                            });
+                        if answered {
+                            OwnForkKind::ExpiryAnswered
+                        } else {
+                            OwnForkKind::ExpiryUnarmed
+                        }
                     }
                     _ => OwnForkKind::Live,
                 };
@@ -7049,6 +7071,35 @@ mod fork_choice_tests {
             fork_for_dispute(&key(296_900), false, &ours),
             ForkChoice::Use(key(296_850))
         );
+    }
+
+    /// ref4, signet 2026-11-22: an un-armed quorum_expired fork of 0aeebcc5 at 359090, the
+    /// quorum re-established at 359228 (and rotated to 436154), and that quorum expired at
+    /// 12209. The dispute of the new expiry is on a new ground and forks afresh; the answered
+    /// fork stands down instead of standing in for it. Before a re-establishment the expiry
+    /// fork is still reused (`an_expiry_dispute_reuses_its_fork`).
+    #[test]
+    fn an_answered_expiry_fork_does_not_stand_in_for_a_new_ground() {
+        let fork = |seq: u64| {
+            format!(
+                "0aeebcc51f7dc6142f8e7a804e96fbe441ddb852401ad3f55837f7d13155669b_{}_03abec63a919379b",
+                seq
+            )
+        };
+        let ours = vec![(fork(359_090), OwnForkKind::ExpiryAnswered)];
+        for punitive in [false, true] {
+            assert_eq!(
+                fork_for_dispute(&fork(492_103), punitive, &ours),
+                ForkChoice::Create {
+                    bypassed: vec![fork(359_090)]
+                }
+            );
+        }
+        // At its own base it takes no punitive DisputeEnter, as an un-armed expiry fork.
+        assert!(matches!(
+            fork_for_dispute(&fork(359_090), true, &ours),
+            ForkChoice::Refuse(_)
+        ));
     }
 
     /// The fork at the proof's own base is used whatever else exists.
