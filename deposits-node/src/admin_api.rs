@@ -469,7 +469,7 @@ fn op_name(op: &deposits_core::messages::LedgerOperation) -> &'static str {
         Op::DisputeEnter { .. } => "DisputeEnter",
         Op::DisputeArmed { .. } => "DisputeArmed",
         Op::DisputeAcquire { .. } => "DisputeAcquire",
-        Op::DisputeYield => "DisputeYield",
+        Op::DisputeYield { .. } => "DisputeYield",
         _ => "Other",
     }
 }

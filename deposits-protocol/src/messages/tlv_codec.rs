@@ -185,6 +185,11 @@ mod ledger_op_tlv {
     pub const CHALLENGED_ANCHOR: u64 = 364; // QuorumChallenge
     /// DisputeArmed re-arm round (DEP-06 Phase 4, strict-lottery-v8): u32, absent = round 1.
     pub const REARM_ROUND: u64 = 366;
+    /// DisputeYield reasons (DEP-06 "What a yield must say", `yield-evidence-v9`): odd, so a
+    /// decoder that does not know them skips them. Each is 32 bytes.
+    pub const YIELD_LOST_TO: u64 = 367;
+    pub const YIELD_REESTABLISHED: u64 = 369;
+    pub const YIELD_EXCLUDED_BY: u64 = 371;
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -980,7 +985,21 @@ impl TlvEncode for LedgerOperation {
                     .bytes_field(CHALLENGED_TXID, challenged_txid)
                     .bytes_field(CHALLENGED_ANCHOR, challenged_anchor);
             }
-            Self::DisputeYield => {}
+            Self::DisputeYield {
+                lost_to,
+                reestablished,
+                excluded_by,
+            } => {
+                if let Some(t) = lost_to {
+                    builder = builder.bytes_field(YIELD_LOST_TO, t);
+                }
+                if let Some(h) = reestablished {
+                    builder = builder.bytes_field(YIELD_REESTABLISHED, h);
+                }
+                if let Some(t) = excluded_by {
+                    builder = builder.bytes_field(YIELD_EXCLUDED_BY, t);
+                }
+            }
             Self::LedgerClose => {}
             Self::Batch(ops) => {
                 // u16 BE count + repeated (u32 BE length-prefix, inner TLV bytes)
@@ -1363,7 +1382,11 @@ impl TlvDecode for LedgerOperation {
                 new_reserves_address: reader.read_string(NEW_RESERVES_ADDRESS)?,
                 confiscation_txid: reader.read_bytes_opt(CONFISCATION_TXID)?,
             }),
-            56 => Ok(Self::DisputeYield),
+            56 => Ok(Self::DisputeYield {
+                lost_to: reader.read_bytes_opt(YIELD_LOST_TO)?,
+                reestablished: reader.read_bytes_opt(YIELD_REESTABLISHED)?,
+                excluded_by: reader.read_bytes_opt(YIELD_EXCLUDED_BY)?,
+            }),
             57 => {
                 let armed_block = reader.read_u32(ARMED_BLOCK)?;
                 let commitment_hash = reader.read_bytes(COMMITMENT_HASH)?;

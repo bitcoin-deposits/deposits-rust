@@ -440,7 +440,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::FeeCollect { .. } => "FeeCollect",
         LedgerOperation::DisputeEnter { .. } => "DisputeEnter",
         LedgerOperation::DisputeAcquire { .. } => "DisputeAcquire",
-        LedgerOperation::DisputeYield => "DisputeYield",
+        LedgerOperation::DisputeYield { .. } => "DisputeYield",
         LedgerOperation::DisputeArmed { .. } => "DisputeArmed",
         LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
         LedgerOperation::QuorumChallenge { .. } => "QuorumChallenge",

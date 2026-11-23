@@ -44,20 +44,34 @@ pub const GROUNDED_ARMS_V7: &str = "grounded-arms-v7";
 /// a confiscation whose lottery includes a key the dispute's own grounds convict is not
 /// authorised.
 pub const STRICT_LOTTERY_V8: &str = "strict-lottery-v8";
+/// DEP-18 §yield-evidence-v9 (2026-11-23): `strict-lottery-v8`'s rules plus evidence-carrying
+/// yields (DEP-06 "What a yield must say"): a `DisputeYield` carries exactly one reason.
+pub const YIELD_EVIDENCE_V9: &str = "yield-evidence-v9";
+
+/// Whether a ruleset carries `strict-lottery-v8`'s gated rules (v8 itself and v9).
+fn carries_v8_rules(ruleset_name: &str) -> bool {
+    ruleset_name == STRICT_LOTTERY_V8 || ruleset_name == YIELD_EVIDENCE_V9
+}
+
+/// Evidence-carrying yields (DEP-06 "What a yield must say", `yield-evidence-v9`), judged under
+/// the ruleset in force at the dispute's fork point (the fork's own).
+pub fn ruleset_yield_evidence(ruleset_name: &str) -> bool {
+    ruleset_name == YIELD_EVIDENCE_V9
+}
 
 /// Whether a ruleset carries `anchor-ladder-v5`'s gated rules (v5 itself, v6 and v7).
 fn carries_v5_rules(ruleset_name: &str) -> bool {
     ruleset_name == ANCHOR_LADDER_V5
         || ruleset_name == BALANCE_ANCHOR_V6
         || ruleset_name == GROUNDED_ARMS_V7
-        || ruleset_name == STRICT_LOTTERY_V8
+        || carries_v8_rules(ruleset_name)
 }
 
 /// Grounded arms (DEP-03 §Grounded arms), judged under the ruleset in force at the dispute's
 /// fork point: an arm counts in the eligibility cut, and a `DisputeEnter` in the confiscation's
 /// shape, only if its `DisputeEnter` has grounds.
 pub fn ruleset_grounds_arms(ruleset_name: &str) -> bool {
-    ruleset_name == GROUNDED_ARMS_V7 || ruleset_name == STRICT_LOTTERY_V8
+    ruleset_name == GROUNDED_ARMS_V7 || carries_v8_rules(ruleset_name)
 }
 
 /// The strict lottery (DEP-03 §The accused never win, DEP-18 `strict-lottery-v8`), judged under
@@ -66,20 +80,20 @@ pub fn ruleset_grounds_arms(ruleset_name: &str) -> bool {
 /// is not authorised. Under an earlier ruleset such a lottery is still the cut of a subset of
 /// the arms, and authorised.
 pub fn ruleset_strict_lottery(ruleset_name: &str) -> bool {
-    ruleset_name == STRICT_LOTTERY_V8
+    carries_v8_rules(ruleset_name)
 }
 
 /// DEP-05 §Deposed operator under `strict-lottery-v8` (ruled 2026-11-10), judged under the ruleset
 /// of the ledger's latest `QuorumBegin`: a rotation does not end a fraud dispute, so a dispute on any
 /// ground other than `quorum_expired` freezes co-signing whatever its `last_valid_sequence`.
 pub fn ruleset_fraud_survives_rotation(ruleset_name: &str) -> bool {
-    ruleset_name == STRICT_LOTTERY_V8
+    carries_v8_rules(ruleset_name)
 }
 
 /// DEP-06 §Phase 4 under `strict-lottery-v8` (ruled 2026-11-10): a `DisputeAcquire` moves custody
 /// only once its `claim_txid` is confirmed on chain.
 pub fn ruleset_acquire_on_confirm(ruleset_name: &str) -> bool {
-    ruleset_name == STRICT_LOTTERY_V8
+    carries_v8_rules(ruleset_name)
 }
 
 /// DEP-05 §When a `quorum_expired` dispute ends, under `strict-lottery-v8` (ruled 2026-11-15, an
@@ -87,7 +101,7 @@ pub fn ruleset_acquire_on_confirm(ruleset_name: &str) -> bool {
 /// re-establishment ends an expiry dispute only once its spend of the vault confirms. A recorded
 /// `QuorumBegin` that is still unspent leaves the dispute standing, and the race goes on.
 pub fn ruleset_expiry_ends_on_spend(ruleset_name: &str) -> bool {
-    ruleset_name == STRICT_LOTTERY_V8
+    carries_v8_rules(ruleset_name)
 }
 
 /// DEP-06 §Spend challenge, `strict-lottery-v8` (ruled 2026-11-19): a rotating `QuorumBegin`
@@ -96,7 +110,7 @@ pub fn ruleset_expiry_ends_on_spend(ruleset_name: &str) -> bool {
 /// Gated on the ANSWERING `QuorumBegin`'s ruleset. Shared with cl-deposits'
 /// `:recorded-threshold-answer`; vector `rotation_answer_floor.json`.
 pub fn ruleset_recorded_threshold_answer(ruleset_name: &str) -> bool {
-    ruleset_name == STRICT_LOTTERY_V8
+    carries_v8_rules(ruleset_name)
 }
 
 /// DEP-06 §Authorised confiscation, the lottery's participant set: under a ruleset with the
@@ -156,7 +170,11 @@ pub fn ruleset_proves_vault_spends(ruleset_name: &str) -> bool {
 pub fn ruleset_requires_balance_commitments(ruleset_name: &str) -> bool {
     matches!(
         ruleset_name,
-        "balance-commit-v4" | "balance-anchor-v6" | "grounded-arms-v7" | "strict-lottery-v8"
+        "balance-commit-v4"
+            | "balance-anchor-v6"
+            | "grounded-arms-v7"
+            | "strict-lottery-v8"
+            | "yield-evidence-v9"
     )
 }
 
@@ -177,7 +195,9 @@ pub fn ruleset_known(ruleset_name: &str) -> bool {
 pub fn reserves_family(ruleset_name: &str) -> &'static str {
     match ruleset_name {
         "cltv-offset-v2" | "fee-cap-v3" | "balance-commit-v4" | "anchor-ladder-v5"
-        | "balance-anchor-v6" | "grounded-arms-v7" | "strict-lottery-v8" => "cltv-offset-v2",
+        | "balance-anchor-v6" | "grounded-arms-v7" | "strict-lottery-v8" | "yield-evidence-v9" => {
+            "cltv-offset-v2"
+        }
         _ => "",
     }
 }
@@ -225,8 +245,13 @@ pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> Ru
     }
 }
 
-/// The ruleset a new ledger names, and the reference policy's default target.
+/// The reference policy's target (DEP-18 §operator policy step 1): what a quorum moves to when
+/// every member declares it. Not yet `yield-evidence-v9`, which an operator names only by its
+/// own choice: one yield (an un-armed expiry disputant standing down for a punitive dispute) has
+/// no reason among its three.
 pub const POLICY_TARGET_RULESET: &str = STRICT_LOTTERY_V8;
+/// The ruleset a new ledger's `LedgerOpen` names.
+pub const NEW_LEDGER_RULESET: &str = STRICT_LOTTERY_V8;
 
 /// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
 /// next `QuorumBegin`. `strict-lottery-v8` when every member declares it, else
@@ -237,6 +262,8 @@ pub const POLICY_TARGET_RULESET: &str = STRICT_LOTTERY_V8;
 pub fn planned_ruleset(current: &str, declarations: &[Vec<String>]) -> String {
     if every_declares(POLICY_TARGET_RULESET, declarations) {
         POLICY_TARGET_RULESET.to_string()
+    } else if every_declares(STRICT_LOTTERY_V8, declarations) {
+        STRICT_LOTTERY_V8.to_string()
     } else if every_declares(GROUNDED_ARMS_V7, declarations) {
         GROUNDED_ARMS_V7.to_string()
     } else if every_declares(BALANCE_ANCHOR_V6, declarations) {
@@ -2339,7 +2366,7 @@ impl LedgerState {
                 next.quorum_at_fork.clear();
                 next.dispute_fork_sequence = 0;
             }
-            LedgerOperation::DisputeYield => {
+            LedgerOperation::DisputeYield { .. } => {
                 next.dispute_state = DisputeState::Tombstoned;
             }
             LedgerOperation::TransferLock {

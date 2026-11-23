@@ -917,7 +917,19 @@ pub enum LedgerOperation {
     /// - Must NOT be the entropy-selected winner
     ///
     /// Note: This is NOT "invalid" - it's simply a terminated branch.
-    DisputeYield,
+    ///
+    /// DEP-06 "What a yield must say" (`yield-evidence-v9`, TLVs 367/369/371, odd and TLV-only):
+    /// exactly one reason under that ruleset, none required under an earlier one.
+    DisputeYield {
+        /// The txid (wire bytes) of another participant's binding claim the yielder lost to.
+        lost_to: Option<[u8; 32]>,
+        /// The `content_hash` of the `QuorumBegin` that re-established the quorum after the
+        /// dispute's fork point.
+        reestablished: Option<[u8; 32]>,
+        /// The txid (wire bytes) of the confiscation or re-arm spend whose lottery the yielder
+        /// armed for and is not in.
+        excluded_by: Option<[u8; 32]>,
+    },
 
     // ========== Delivery (1) ==========
     /// Embed a wallet's request hash for certified delivery (see DEP-12).
@@ -963,6 +975,34 @@ pub enum LedgerOperation {
 pub const MAX_BATCH_OPS: usize = 64;
 
 impl LedgerOperation {
+    /// A `DisputeYield` carrying no reason (valid only under a ruleset before
+    /// `yield-evidence-v9`).
+    pub fn dispute_yield() -> Self {
+        Self::DisputeYield {
+            lost_to: None,
+            reestablished: None,
+            excluded_by: None,
+        }
+    }
+
+    /// How many reasons a `DisputeYield` carries (DEP-06 "What a yield must say"); `None` for
+    /// any other operation.
+    pub fn yield_reason_count(&self) -> Option<usize> {
+        match self {
+            Self::DisputeYield {
+                lost_to,
+                reestablished,
+                excluded_by,
+            } => Some(
+                [lost_to, reestablished, excluded_by]
+                    .iter()
+                    .filter(|r| r.is_some())
+                    .count(),
+            ),
+            _ => None,
+        }
+    }
+
     /// Return the 32-byte hash this operation embeds in its causally-
     /// significant fields, if any. Used by fraud-proof verification to
     /// confirm a `proof_hash` is bound into a specific update.
@@ -1020,7 +1060,7 @@ impl LedgerOperation {
             // Custody dispute operations
             Self::DisputeEnter { .. } => 54, // Opens dispute, transitions to DISPUTED
             Self::DisputeAcquire { .. } => 55, // Winner acquires custody
-            Self::DisputeYield => 56,        // Loser yields, branch tombstoned
+            Self::DisputeYield { .. } => 56,        // Loser yields, branch tombstoned
             Self::DisputeArmed { .. } => 57, // Pre-commitment, transitions to READY
             Self::DeliveryEmbed { .. } => 80,
             Self::LedgerClose => 60,
@@ -1056,7 +1096,7 @@ impl LedgerOperation {
             Self::FeeCollect { .. } => consts::MAINTENANCE_FEE_COLLECT,
             Self::DisputeEnter { .. } => consts::LEDGER_UPDATE,
             Self::DisputeAcquire { .. } => consts::LEDGER_UPDATE,
-            Self::DisputeYield => consts::LEDGER_UPDATE,
+            Self::DisputeYield { .. } => consts::LEDGER_UPDATE,
             Self::DisputeArmed { .. } => consts::LEDGER_UPDATE,
             Self::DeliveryEmbed { .. } => consts::LEDGER_UPDATE,
             Self::QuorumChallenge { .. } => consts::LEDGER_UPDATE,
@@ -1862,7 +1902,8 @@ impl BinaryCodec for LedgerOperation {
                 write_32(w, target_ledger_id)?;
                 write_pubkey(w, target_operator)?;
             }
-            Self::DisputeYield => {}
+            // The reasons are TLV-only, as the dispute anchor fields are.
+            Self::DisputeYield { .. } => {}
             Self::LedgerClose => {}
             Self::Batch(ops) => {
                 // Legacy fixed-shape encoder: emit a u16 count followed by
@@ -2269,7 +2310,11 @@ impl BinaryCodec for LedgerOperation {
                 confiscation_txid: None,
             }),
             // DisputeYield (56)
-            56 => Ok(Self::DisputeYield),
+            56 => Ok(Self::DisputeYield {
+                lost_to: None,
+                reestablished: None,
+                excluded_by: None,
+            }),
             // DisputeArmed (57)
             57 => {
                 let armed_block = read_u32(r)?;

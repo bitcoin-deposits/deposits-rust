@@ -290,6 +290,27 @@ impl Ledger {
                 };
             }
         }
+        // DEP-06 "What a yield must say" (`yield-evidence-v9`, judged at the fork point: the
+        // fork's own ruleset): a yield carries exactly one reason. Earlier rulesets: as before.
+        if let Some(n) = op.yield_reason_count() {
+            if n != 1
+                && deposits_protocol::types::ruleset_yield_evidence(&self.state.active_ruleset_name)
+            {
+                return false;
+            }
+        }
+        // DEP-06 "A claim after the claimant's own yield" (ruled 2026-11-23, the advantage rule):
+        // a yielded fork that armed takes its OWN disputant's acquire, structurally; whether it
+        // moves custody is the binding judgment with the round bound (deposits-node
+        // `acquire_binding::AcquireRef::min_round`). Another participant's acquire on it, or any
+        // acquire on a fork that never armed, is refused as before. Regtest c8b9b7b1
+        // (2026-11-21): ref7's round-2 claim confirmed after its own stray yield, and no acquire
+        // was valid anywhere. Mirrors cl's fold; vector claim_after_yield.json.
+        if let LedgerOperation::DisputeAcquire { new_custodian, .. } = op {
+            if self.state.dispute_state == deposits_protocol::DisputeState::Tombstoned {
+                return self.state.arm_round.is_some() && *new_custodian == self.state.parent_pubkey;
+            }
+        }
         self.state.dispute_state.allows_operation(op.discriminant())
     }
 
@@ -796,7 +817,7 @@ impl Ledger {
                     });
                 }
             }
-            LedgerOperation::DisputeYield => {
+            LedgerOperation::DisputeYield { .. } => {
                 // DisputeYield is unilateral — a candidate self-tombstoning.
                 // No cross-candidate validation needed in the new design.
             }
@@ -2685,6 +2706,145 @@ mod tests {
     /// DisputeYield is valid, against the vector shared with cl-deposits. Each case's `ops`
     /// are appended through the real path (`append_operation_with_block`: the state gate and
     /// the op rules), then one DisputeYield.
+    /// The fork's ops of a `claim_after_yield.json` case, through the real append path.
+    fn cay_fork(case: &serde_json::Value, me: PublicKey, other: PublicKey) -> Ledger {
+        let name = case["name"].as_str().unwrap();
+        let mut ledger = Ledger::new_as_operator(me, other.to_string(), 0);
+        ledger.state.quorum_state = QuorumState::Active;
+        ledger.state.active_ruleset_name = case["ruleset"].as_str().unwrap().to_string();
+        let arm = |commit: u8, round: Option<u32>| LedgerOperation::DisputeArmed {
+            armed_block: 100,
+            commitment_hash: [commit; 20],
+            target_reserves: "t".into(),
+            replacement_collateral: Some(crate::messages::ReplacementCollateral {
+                txid: [3; 32],
+                vout: 0,
+                amount: 50_000,
+            }),
+            rearm_round: round,
+        };
+        for o in case["ops"].as_array().unwrap() {
+            let op = match o["op"].as_str().unwrap() {
+                "enter" => LedgerOperation::DisputeEnter {
+                    last_valid_sequence: 0,
+                    reason: o["reason"].as_str().unwrap().into(),
+                    anchor_block_hash: None,
+                    anchor_block_height: None,
+                    fraud_proof_hash: None,
+                    fraud_proof: None,
+                },
+                "arm" => arm(0x11, None),
+                "arm_round_2" => arm(0x22, Some(2)),
+                "yield" => LedgerOperation::dispute_yield(),
+                other => panic!("{name}: unknown op {other}"),
+            };
+            ledger
+                .append_operation_with_block(op, 100, [0u8; 32])
+                .unwrap_or_else(|e| panic!("{name}: setup op {o} refused: {e:?}"));
+        }
+        ledger
+    }
+
+    /// DEP-06 "A claim after the claimant's own yield" (ruled 2026-11-23, the advantage rule),
+    /// `claim_after_yield.json` (shared with cl-deposits and the spec), the fold half: the fork
+    /// is `self`'s (its `parent_pubkey`); after its ops, one acquire by `self` or another
+    /// participant, taken (`accept`, custodian of record its author) or refused. The binding
+    /// half is deposits-node's `claim_after_yield_matches_the_shared_vector`.
+    #[test]
+    fn claim_after_yield_fold_vector() {
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/vectors/claim_after_yield.json")).unwrap();
+        let (me, other) = (test_pubkey(), test_pubkey_2());
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 8);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let mut ledger = cay_fork(case, me, other);
+            assert_eq!(ledger.state.parent_pubkey, me, "{name}");
+            let custodian = if case["acquire_by"] == "self" { me } else { other };
+            let got = ledger.append_operation_with_block(
+                LedgerOperation::DisputeAcquire {
+                    new_custodian: custodian,
+                    claim_txid: [4; 32],
+                    new_reserves_address: String::new(),
+                    confiscation_txid: None,
+                },
+                100,
+                [0u8; 32],
+            );
+            assert_eq!(
+                if got.is_ok() { "accept" } else { "reject" },
+                case["fold"].as_str().unwrap(),
+                "{name}: {got:?}"
+            );
+            if got.is_ok() {
+                assert_eq!(ledger.state.operator_key, custodian, "{name}: custodian of record");
+                assert_eq!(ledger.state.dispute_state, deposits_protocol::DisputeState::Normal);
+            }
+        }
+    }
+
+    /// DEP-06 "What a yield must say" (`yield-evidence-v9`), `yield_evidence.json`, the fold
+    /// half: an entered, armed fork under the case's ruleset takes the case's yield or refuses
+    /// it (under v9, exactly one reason; earlier rulesets, any). The judge half is
+    /// deposits-node's `yield_evidence_matches_the_shared_vector`.
+    #[test]
+    fn yield_evidence_fold_vector() {
+        use bitcoin::hashes::Hash as _;
+        use std::str::FromStr as _;
+        let v: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/vectors/yield_evidence.json")).unwrap();
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 24);
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let r = &case["reasons"];
+            let txid = |k: &str| {
+                r[k].as_str()
+                    .map(|t| bitcoin::Txid::from_str(t).unwrap().to_byte_array())
+            };
+            let reestablished: Option<[u8; 32]> = r["reestablished"]
+                .as_str()
+                .map(|h| hex::decode(h).unwrap().try_into().unwrap());
+            let mut l = Ledger::new_as_operator(test_pubkey(), test_pubkey_2().to_string(), 0);
+            l.state.quorum_state = QuorumState::Active;
+            l.state.active_ruleset_name = case["ruleset"].as_str().unwrap().to_string();
+            for op in [
+                LedgerOperation::DisputeEnter {
+                    last_valid_sequence: 0,
+                    reason: "equivocation".into(),
+                    anchor_block_hash: None,
+                    anchor_block_height: None,
+                    fraud_proof_hash: None,
+                    fraud_proof: None,
+                },
+                LedgerOperation::DisputeArmed {
+                    armed_block: 100,
+                    commitment_hash: [1; 20],
+                    target_reserves: "t".into(),
+                    replacement_collateral: None,
+                    rearm_round: None,
+                },
+            ] {
+                l.append_operation_with_block(op, 100, [0; 32]).unwrap();
+            }
+            let got = l.append_operation_with_block(
+                LedgerOperation::DisputeYield {
+                    lost_to: txid("lost_to"),
+                    reestablished,
+                    excluded_by: txid("excluded_by"),
+                },
+                100,
+                [0; 32],
+            );
+            assert_eq!(
+                if got.is_ok() { "accept" } else { "reject" },
+                case["fold"].as_str().unwrap(),
+                "{name}: {got:?}"
+            );
+        }
+    }
+
     #[test]
     fn dispute_yield_states_vector() {
         let v: serde_json::Value =
@@ -2729,7 +2889,7 @@ mod tests {
                     "arm" => arm(0x11, true, None),
                     "arm_bare" => arm(0x11, false, None),
                     "arm_round_2" => arm(0x22, true, Some(2)),
-                    "yield" => LedgerOperation::DisputeYield,
+                    "yield" => LedgerOperation::dispute_yield(),
                     "acquire" => LedgerOperation::DisputeAcquire {
                         new_custodian: test_pubkey_2(),
                         claim_txid: [4; 32],
@@ -2748,7 +2908,7 @@ mod tests {
                 "{name}: state before the yield"
             );
             let got =
-                ledger.append_operation_with_block(LedgerOperation::DisputeYield, 100, [0u8; 32]);
+                ledger.append_operation_with_block(LedgerOperation::dispute_yield(), 100, [0u8; 32]);
             assert_eq!(
                 if got.is_ok() { "accept" } else { "reject" },
                 case["yield"].as_str().unwrap(),

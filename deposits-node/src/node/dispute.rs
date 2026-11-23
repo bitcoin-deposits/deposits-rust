@@ -2324,7 +2324,13 @@ impl Node {
                 bitcoin::Txid::from_byte_array(won.claim),
                 won.round
             );
-            self.publish_custody_yield(ledger_id, &our_armed).await?;
+            // DEP-06 "What a yield must say", reason 1: the winning claim we lost to.
+            let reason = LedgerOperation::DisputeYield {
+                lost_to: Some(won.claim),
+                reestablished: None,
+                excluded_by: None,
+            };
+            self.publish_custody_yield(ledger_id, &our_armed, reason).await?;
             return Ok(true);
         }
         // A later round's arm is decided by `rearm.rs` (`rearm_reveal_and_claim`), over THAT
@@ -2423,6 +2429,24 @@ impl Node {
             return Ok(false);
         };
 
+        // DEP-06 "What a yield must say", reason 3: the landed lottery (its set is final once
+        // the confiscation confirms) does not include us although we armed. Yield naming the
+        // confiscation that created it. Before this, an excluded armer could only "lose" a draw
+        // it was not in.
+        if !ctx.participants.iter().any(|(pk, _)| *pk == our_pubkey) {
+            tracing::info!(
+                "Lottery for {}: we armed but are not in the landed lottery ({}); yielding",
+                &ledger_id[..16.min(ledger_id.len())],
+                lottery_outpoint.txid
+            );
+            let reason = LedgerOperation::DisputeYield {
+                lost_to: None,
+                reestablished: None,
+                excluded_by: Some(lottery_outpoint.txid.to_byte_array()),
+            };
+            self.publish_custody_yield(ledger_id, &our_armed, reason).await?;
+            return Ok(true);
+        }
         let (subset, ordered_preimages, winner_index) =
             match lottery_claim_path(&ctx.preimages, confirmations >= LOTTERY_REVEAL_CSV_BLOCKS) {
                 LotteryClaimPath::Full(pre) => {
@@ -2449,11 +2473,23 @@ impl Node {
 
         let (winner_pubkey, _) = &ctx.participants[winner_index];
         if *winner_pubkey != our_pubkey {
+            // DEP-06 "What a yield must say" (yield-evidence-v9): a draw we computed as lost is
+            // no reason yet. Wait for the winner's claim to bind; `lost_to_another` above yields
+            // naming it, and our pledge stays held until then.
+            if self.our_fork_needs_yield_evidence(ledger_id, &our_armed) {
+                tracing::info!(
+                    "We lost the lottery for ledger {}; awaiting the winner's binding claim to \
+                     name (yield-evidence-v9)",
+                    &ledger_id[..16]
+                );
+                return Ok(false);
+            }
             tracing::info!(
                 "We lost the lottery for ledger {}. Publishing DisputeYield.",
                 &ledger_id[..16]
             );
-            self.publish_custody_yield(ledger_id, &our_armed).await?;
+            self.publish_custody_yield(ledger_id, &our_armed, LedgerOperation::dispute_yield())
+                .await?;
             return Ok(true);
         }
         tracing::info!("We won the lottery for ledger {}!", &ledger_id[..16]);
@@ -3094,8 +3130,16 @@ impl Node {
     /// (`expiry_watch::stand_down_reestablished_expiry_disputes`). A fork
     /// write like `auto_arm_for_dispute_with_anchor`'s: the fork has no actor,
     /// and its only other writer does not touch it once it is Tombstoned.
-    pub(crate) async fn withdraw_dispute(&self, fork_key: &str, height: u32) -> Result<(), Error> {
-        use deposits_core::messages::LedgerOperation;
+    ///
+    /// `reason` is the `DisputeYield` to append, carrying its evidence (DEP-06 "What a yield
+    /// must say"): under `yield-evidence-v9` the fold refuses one without exactly one reason, so
+    /// none is ever signed.
+    pub(crate) async fn withdraw_dispute(
+        &self,
+        fork_key: &str,
+        height: u32,
+        reason: deposits_core::messages::LedgerOperation,
+    ) -> Result<(), Error> {
 
         let fork_arc = self
             .handler
@@ -3108,7 +3152,7 @@ impl Node {
         let block_hash = self.wallet.get_block_hash().unwrap_or([0u8; 32]);
         {
             let mut fork = fork_arc.write().unwrap();
-            fork.append_operation_with_block(LedgerOperation::DisputeYield, height, block_hash)
+            fork.append_operation_with_block(reason, height, block_hash)
                 .map_err(|e| Error::Protocol(format!("DisputeYield refused: {:?}", e)))?;
             if let Some(update) = fork.history.last_mut() {
                 update.operator_id = self.node_id;
@@ -3131,11 +3175,32 @@ impl Node {
         Ok(())
     }
 
-    /// Publish DisputeYield as a loser
+    /// Whether our fork holding `our_armed` judges yields under `yield-evidence-v9` (DEP-06 "What a
+    /// yield must say"): a draw we merely computed as lost is then no reason to yield yet.
+    pub(crate) fn our_fork_needs_yield_evidence(
+        &self,
+        ledger_id: &str,
+        our_armed: &deposits_core::SignedLedgerUpdate,
+    ) -> bool {
+        let tip = our_armed.chain_hash();
+        let ledgers = self.handler.ledgers.lock().unwrap();
+        ledgers.iter().any(|(k, arc)| {
+            let l = arc.read().unwrap();
+            k.starts_with(ledger_id)
+                && super::rearm::is_our_fork(k, &l.state.parent_pubkey, &self.node_id)
+                && l.history.iter().any(|u| u.chain_hash() == tip)
+                && deposits_core::types::ruleset_yield_evidence(&l.state.active_ruleset_name)
+        })
+    }
+
+    /// Publish DisputeYield as a loser. `reason` is the yield to sign, carrying its evidence
+    /// (DEP-06 "What a yield must say"; [`LedgerOperation::dispute_yield`] when none is known,
+    /// which only a ruleset before `yield-evidence-v9` takes).
     pub(crate) async fn publish_custody_yield(
         &self,
         ledger_id: &str,
         our_armed: &deposits_core::SignedLedgerUpdate,
+        reason: deposits_core::messages::LedgerOperation,
     ) -> Result<(), Error> {
         use bitcoin::hashes::{sha256, Hash};
         use deposits_core::messages::LedgerOperation;
@@ -3173,7 +3238,7 @@ impl Node {
                     super::dispute_tip::AfterArm::Append(tip)
                         if l.state
                             .dispute_state
-                            .allows_operation(LedgerOperation::DisputeYield.discriminant()) =>
+                            .allows_operation(LedgerOperation::dispute_yield().discriminant()) =>
                     {
                         own_fork = Some((k.clone(), tip.clone()));
                         break;
@@ -3187,7 +3252,7 @@ impl Node {
             }
         }
         if let Some(u) = concluded {
-            if !matches!(LedgerOperation::tlv_decode(&u.message), Ok(LedgerOperation::DisputeYield)) {
+            if !matches!(LedgerOperation::tlv_decode(&u.message), Ok(LedgerOperation::DisputeYield { .. })) {
                 return Err(Error::Protocol(format!(
                     "{}: our fork acquired this arm's round at seq {}; not yielding",
                     &ledger_id[..16.min(ledger_id.len())],
@@ -3210,8 +3275,11 @@ impl Node {
             super::yield_backfill::Backfill::Sign => {}
             super::yield_backfill::Backfill::Adopt(y) => {
                 if let Some(fork_key) = &own_fork {
+                    // The op those bytes carry (with whatever reason they were signed with).
+                    let op = LedgerOperation::tlv_decode(&y.message)
+                        .unwrap_or_else(|_| LedgerOperation::dispute_yield());
                     self.handler
-                        .commit_self_authored_update(fork_key, &LedgerOperation::DisputeYield, y.clone(), y.block_height)
+                        .commit_self_authored_update(fork_key, &op, y.clone(), y.block_height)
                         .map_err(Error::Protocol)?;
                 }
                 tracing::info!(
@@ -3226,7 +3294,7 @@ impl Node {
             }
         }
         if let Some(fork_key) = own_fork {
-            return self.withdraw_dispute(&fork_key, current_block).await;
+            return self.withdraw_dispute(&fork_key, current_block, reason).await;
         }
 
         // Already signed at arm+1 (on a fork of ours, or journaled fork-less): publish those
@@ -3248,7 +3316,7 @@ impl Node {
                 .or_else(|| self.journaled_at(ledger_id, seq))
         };
         if let Some(stored) = stored {
-            if !matches!(LedgerOperation::tlv_decode(&stored.message), Ok(LedgerOperation::DisputeYield)) {
+            if !matches!(LedgerOperation::tlv_decode(&stored.message), Ok(LedgerOperation::DisputeYield { .. })) {
                 return Err(Error::Protocol(format!(
                     "seq {} of {} already holds another update of ours; not signing a yield there",
                     seq,
@@ -3263,7 +3331,7 @@ impl Node {
         }
 
         // Create DisputeYield operation
-        let operation = LedgerOperation::DisputeYield;
+        let operation = reason;
         let message_bytes = operation.tlv_encode();
 
         // Build update continuing from our DisputeArmed. Chain on the
@@ -5773,7 +5841,7 @@ pub(crate) fn dispute_acquire_candidates(
     me: &bitcoin::secp256k1::PublicKey,
 ) -> Option<(
     super::acquire_binding::Vault,
-    Vec<(bitcoin::secp256k1::PublicKey, [u8; 32])>,
+    Vec<(bitcoin::secp256k1::PublicKey, [u8; 32], u32)>,
 )> {
     use deposits_core::messages::LedgerOperation;
     use deposits_core::TlvDecode;
@@ -5789,8 +5857,11 @@ pub(crate) fn dispute_acquire_candidates(
         .map(|u| u.sequence_number)
         .max()?;
     let vault = super::acquire_binding::vault_at(fork_history, enter_seq)?;
-    let mut candidates: Vec<(bitcoin::secp256k1::PublicKey, [u8; 32])> = Vec::new();
+    // Each with its round bound (DEP-06 "A claim after the claimant's own yield":
+    // `acquire_binding::min_round`), read off the history that carries it.
+    let mut candidates: Vec<(bitcoin::secp256k1::PublicKey, [u8; 32], u32)> = Vec::new();
     for h in histories {
+        let all: Vec<&deposits_core::SignedLedgerUpdate> = h.iter().collect();
         for u in h
             .iter()
             .filter(|u| u.sequence_number > enter_seq && u.operator_id != *me)
@@ -5801,8 +5872,9 @@ pub(crate) fn dispute_acquire_candidates(
                 ..
             }) = LedgerOperation::tlv_decode(&u.message)
             {
-                if new_custodian != *me && !candidates.iter().any(|(_, c)| *c == claim_txid) {
-                    candidates.push((u.operator_id, claim_txid));
+                if new_custodian != *me && !candidates.iter().any(|(_, c, _)| *c == claim_txid) {
+                    let min = super::acquire_binding::min_round_for(&all, u);
+                    candidates.push((u.operator_id, claim_txid, min));
                 }
             }
         }
@@ -5942,7 +6014,18 @@ pub(crate) fn fork_events(
                 }),
                 round: rearm_round.unwrap_or(1),
             }),
-            Ok(LedgerOperation::DisputeYield) => Some(ForkEvent::Yield),
+            // DEP-06 "An invalid yield is void": a yield naming a transaction (`lost_to`,
+            // `excluded_by`) that is not confirmed frees no pledge; it reads as absent until it
+            // is. One naming none (an earlier ruleset's, or `reestablished`, checked when it was
+            // signed) counts as before. Mirrors cl's YIELD-EVIDENCE-SEEN-P.
+            Ok(LedgerOperation::DisputeYield {
+                lost_to,
+                excluded_by,
+                ..
+            }) => match lost_to.or(excluded_by) {
+                Some(t) if !confirmed(&bitcoin::Txid::from_byte_array(t)) => None,
+                _ => Some(ForkEvent::Yield),
+            },
             Ok(LedgerOperation::DisputeAcquire { claim_txid, .. }) => {
                 let txid = bitcoin::Txid::from_byte_array(claim_txid);
                 Some(ForkEvent::Acquire {
@@ -6454,12 +6537,14 @@ impl Node {
             return Vec::new();
         }
         let due: Vec<(ab::Vault, [u8; 32])> =
-            candidates.iter().map(|(_, c)| (vault.clone(), *c)).collect();
+            candidates.iter().map(|(_, c, _)| (vault.clone(), *c)).collect();
         ab::note_verdicts(backend, &due);
         candidates
             .into_iter()
-            .filter_map(|(acquirer, claim)| {
-                ab::binds_round(&vault, &claim).map(|round| OtherAcquire {
+            .filter_map(|(acquirer, claim, min)| {
+                ab::binds_round(&vault, &claim)
+                    .filter(|r| *r >= min)
+                    .map(|round| OtherAcquire {
                     acquirer,
                     claim,
                     round,
@@ -7219,7 +7304,7 @@ fn ledger_op_name(message: &[u8]) -> &'static str {
     match LedgerOperation::tlv_decode(message) {
         Ok(LedgerOperation::DisputeEnter { .. }) => "DisputeEnter",
         Ok(LedgerOperation::DisputeArmed { .. }) => "DisputeArmed",
-        Ok(LedgerOperation::DisputeYield) => "DisputeYield",
+        Ok(LedgerOperation::DisputeYield { .. }) => "DisputeYield",
         Ok(LedgerOperation::DisputeAcquire { .. }) => "DisputeAcquire",
         Ok(_) => "other",
         Err(_) => "undecodable",

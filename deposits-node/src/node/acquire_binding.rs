@@ -98,6 +98,165 @@ pub(crate) fn judge_acquire_round(
     (AcquireVerdict::NotThisLottery, 0)
 }
 
+/// DEP-06 "What a yield must say" (`yield-evidence-v9`, ruled 2026-11-23): the verdict on a
+/// `DisputeYield`'s reason. Shared with cl's `judge-yield`; vector `yield_evidence.json`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum YieldVerdict {
+    Valid,
+    Invalid,
+    /// No verdict yet: something named is unknown or unconfirmed; asked again later.
+    Pending,
+}
+
+impl YieldVerdict {
+    /// The vector's spelling.
+    pub(crate) fn name(&self) -> &'static str {
+        match self {
+            YieldVerdict::Valid => "valid",
+            YieldVerdict::Invalid => "invalid",
+            YieldVerdict::Pending => "pending",
+        }
+    }
+}
+
+/// What a judge knows when it judges a yield (see [`judge_yield`]).
+pub(crate) struct YieldContext<'a> {
+    /// The fork's ruleset (the fork point's).
+    pub ruleset: &'a str,
+    /// The yield's signed `block_height`.
+    pub yield_height: u32,
+    /// The round of the yielder's latest arm before the yield.
+    pub arm_round: u32,
+    /// The yielder's x-only key.
+    pub yielder: [u8; 32],
+    /// The scriptPubKeys of every `target_reserves` the yielder declared in the dispute.
+    pub targets: &'a [bitcoin::ScriptBuf],
+    /// Every replacement collateral outpoint the yielder declared in the dispute.
+    pub pledges: &'a [OutPoint],
+    /// The dispute's vault outpoints ([`judge_acquire`]).
+    pub vaults: &'a [OutPoint],
+    /// The fork's latest `DisputeEnter`: its reason and `last_valid_sequence`.
+    pub dispute_reason: &'a str,
+    pub last_valid_sequence: u64,
+    /// The operator chain's `QuorumBegin`s: (`content_hash`, sequence, rotation spend confirmed).
+    pub quorum_begins: &'a [([u8; 32], u64, bool)],
+    /// The x-only keys of the lottery an `excluded_by` names, as the judge rebuilt it.
+    pub participants: &'a [[u8; 32]],
+}
+
+/// The round of the lottery `txid` created for the dispute of `vaults`: 1 when it spends a
+/// vault, one more for each confirmed re-arm spend walked back (each spending output 0 of the
+/// previous). `tx` answers a transaction and whether it is confirmed.
+pub(crate) fn lottery_tx_round(
+    tx: impl Fn(&Txid) -> Option<(Transaction, bool)>,
+    vaults: &[OutPoint],
+    txid: &Txid,
+) -> (AcquireVerdict, u32) {
+    let mut cur = *txid;
+    for round in 1..=(MAX_ROUNDS as u32 + 1) {
+        let Some((t, confirmed)) = tx(&cur) else {
+            return (AcquireVerdict::Unconfirmed, 0);
+        };
+        if t.input.iter().any(|i| vaults.contains(&i.previous_output)) {
+            return (AcquireVerdict::Binds, round);
+        }
+        if !(confirmed && rearm_shaped(&t)) || t.input[0].previous_output.vout != 0 {
+            return (AcquireVerdict::NotThisLottery, 0);
+        }
+        cur = t.input[0].previous_output.txid;
+    }
+    (AcquireVerdict::NotThisLottery, 0)
+}
+
+/// The verdict on a `DisputeYield` carrying `lost_to` / `reestablished` / `excluded_by`, and
+/// why (the vector's `why`). `tx` answers a transaction and its block height (None:
+/// unconfirmed), or None when the judge does not know it. Checked in the vector's order.
+pub(crate) fn judge_yield(
+    tx: impl Fn(&Txid) -> Option<(Transaction, Option<u32>)>,
+    ctx: &YieldContext<'_>,
+    lost_to: Option<[u8; 32]>,
+    reestablished: Option<[u8; 32]>,
+    excluded_by: Option<[u8; 32]>,
+) -> (YieldVerdict, &'static str) {
+    use bitcoin::hashes::Hash;
+    use YieldVerdict::*;
+    if !deposits_core::types::ruleset_yield_evidence(ctx.ruleset) {
+        return (Valid, "legacy");
+    }
+    let named = [lost_to, reestablished, excluded_by]
+        .iter()
+        .filter(|r| r.is_some())
+        .count();
+    if named != 1 {
+        return (Invalid, "no-reason");
+    }
+    let confirmed = |t: &Txid| tx(t).map(|(t, h)| (t, h.is_some()));
+    // The named transaction: confirmed, and at or below the yield's height.
+    let seen = |t: &Txid| -> Result<Transaction, (YieldVerdict, &'static str)> {
+        match tx(t) {
+            Some((t, Some(h))) if h <= ctx.yield_height => Ok(t),
+            Some((_, Some(_))) => Err((Invalid, "early")),
+            _ => Err((Pending, "unconfirmed")),
+        }
+    };
+    if let Some(l) = lost_to {
+        let t = Txid::from_byte_array(l);
+        let claim = match seen(&t) {
+            Ok(c) => c,
+            Err(v) => return v,
+        };
+        let (v, round) = judge_acquire_round(confirmed, ctx.vaults, &t);
+        return match v {
+            AcquireVerdict::Unconfirmed => (Pending, "unconfirmed"),
+            AcquireVerdict::NotAClaim | AcquireVerdict::NotThisLottery => (Invalid, v.reason()),
+            AcquireVerdict::Binds if round < ctx.arm_round => (Invalid, "earlier-round"),
+            AcquireVerdict::Binds => {
+                let own_target = claim
+                    .output
+                    .first()
+                    .is_some_and(|o| ctx.targets.contains(&o.script_pubkey));
+                let own_pledge = claim
+                    .input
+                    .get(1)
+                    .is_some_and(|i| ctx.pledges.contains(&i.previous_output));
+                if own_target || own_pledge {
+                    (Invalid, "own-claim")
+                } else {
+                    (Valid, "valid")
+                }
+            }
+        };
+    }
+    if let Some(h) = reestablished {
+        if !crate::node::expiry_watch::is_expiry_reason(ctx.dispute_reason) {
+            return (Invalid, "not-expiry");
+        }
+        let Some((_, seq, spent)) = ctx.quorum_begins.iter().find(|(q, _, _)| *q == h) else {
+            return (Pending, "unknown-quorum-begin");
+        };
+        if *seq <= ctx.last_valid_sequence {
+            return (Invalid, "not-after-fork-point");
+        }
+        if !spent {
+            return (Pending, "rotation-unconfirmed");
+        }
+        return (Valid, "valid");
+    }
+    let t = Txid::from_byte_array(excluded_by.expect("one reason is named"));
+    if let Err(v) = seen(&t) {
+        return v;
+    }
+    match lottery_tx_round(confirmed, ctx.vaults, &t) {
+        (AcquireVerdict::Unconfirmed, _) => (Pending, "unconfirmed"),
+        (AcquireVerdict::Binds, round) if round < ctx.arm_round => (Invalid, "earlier-round"),
+        (AcquireVerdict::Binds, _) if ctx.participants.contains(&ctx.yielder) => {
+            (Invalid, "in-lottery")
+        }
+        (AcquireVerdict::Binds, _) => (Valid, "valid"),
+        _ => (Invalid, "not-this-lottery"),
+    }
+}
+
 /// [`judge_acquire`] against a chain backend.
 pub(crate) fn judge_acquire_on(
     backend: &dyn crate::chain_backend::ChainBackend,
@@ -132,6 +291,81 @@ pub(crate) struct AcquireRef {
     pub vault: Option<Vault>,
     pub claim: [u8; 32],
     pub custodian: bitcoin::secp256k1::PublicKey,
+    /// DEP-06 "A claim after the claimant's own yield" (the advantage rule): when the acquirer
+    /// yielded after its latest arm, the round its claim must bind (that arm's or a later one);
+    /// 0 when there is no bound ([`min_round`]).
+    pub min_round: u32,
+}
+
+impl AcquireRef {
+    /// Whether this acquire is known to bind against `vault`, with its round bound.
+    pub(crate) fn binds_on(&self, vault: &[OutPoint]) -> bool {
+        binds(vault, &self.claim)
+            && (self.min_round == 0
+                || binds_round(vault, &self.claim).is_some_and(|r| r >= self.min_round))
+    }
+}
+
+/// One of an acquirer's own dispute operations before its acquire, oldest first, as
+/// [`min_round`] reads them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OwnOp {
+    Arm(u32),
+    Yield,
+    Acquire,
+}
+
+/// DEP-06 "A claim after the claimant's own yield": when a yield follows the acquirer's latest
+/// arm, its acquire must bind that arm's round or a later one, and that round is the bound;
+/// otherwise 0 (no bound). Shared with cl's `acquire-min-round`; vector claim_after_yield.json.
+pub(crate) fn min_round(ops: &[OwnOp]) -> u32 {
+    let (mut arm, mut yielded) = (0, false);
+    for o in ops {
+        match o {
+            OwnOp::Arm(r) => (arm, yielded) = (*r, false),
+            OwnOp::Yield => yielded = true,
+            OwnOp::Acquire => yielded = false,
+        }
+    }
+    if yielded {
+        arm
+    } else {
+        0
+    }
+}
+
+/// [`min_round`] of the acquire at `sorted[i]`, from its author's updates before it.
+fn min_round_at(sorted: &[&deposits_core::SignedLedgerUpdate], i: usize) -> u32 {
+    min_round_for(&sorted[..i], sorted[i])
+}
+
+/// [`min_round`] of `acquire`, from its author's updates in `history` below its sequence (any
+/// order: a relay fetch mixes forks, and only the author's own updates are read).
+pub(crate) fn min_round_for<'a>(
+    history: impl IntoIterator<Item = &'a &'a deposits_core::SignedLedgerUpdate>,
+    acquire: &deposits_core::SignedLedgerUpdate,
+) -> u32 {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    let me = acquire.operator_id;
+    let mut mine: Vec<&deposits_core::SignedLedgerUpdate> = history
+        .into_iter()
+        .copied()
+        .filter(|u| u.operator_id == me && u.sequence_number < acquire.sequence_number)
+        .collect();
+    mine.sort_by_key(|u| u.sequence_number);
+    let ops: Vec<OwnOp> = mine
+        .iter()
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message).ok()? {
+            LedgerOperation::DisputeArmed { rearm_round, .. } => {
+                Some(OwnOp::Arm(rearm_round.unwrap_or(1)))
+            }
+            LedgerOperation::DisputeYield { .. } => Some(OwnOp::Yield),
+            LedgerOperation::DisputeAcquire { .. } => Some(OwnOp::Acquire),
+            _ => None,
+        })
+        .collect();
+    min_round(&ops)
 }
 
 /// A `QuorumBegin`'s vault: the vault outpoint of every rung of its fee ladder (DEP-03), rung
@@ -186,6 +420,7 @@ pub(crate) fn acquires_in(
             vault,
             claim: claim_txid,
             custodian: new_custodian,
+            min_round: min_round_at(&sorted, i),
         });
     }
     out
@@ -456,5 +691,281 @@ mod tests {
             "46a66b127e0e3afd04f2e4399681128399caab6d6133320c7d02d3569f5c3c79:0"
         );
         assert_eq!(judge_case(c), AcquireVerdict::NotThisLottery);
+    }
+
+    use bitcoin::hashes::Hash as _;
+
+    fn cay_vector() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../deposits-core/tests/vectors/claim_after_yield.json"
+        ))
+        .unwrap()
+    }
+
+    fn key_of(b: u8) -> bitcoin::secp256k1::PublicKey {
+        use bitcoin::secp256k1::{PublicKey, Secp256k1, SecretKey};
+        PublicKey::from_secret_key(&Secp256k1::new(), &SecretKey::from_slice(&[b; 32]).unwrap())
+    }
+
+    /// DEP-06 "A claim after the claimant's own yield" (ruled 2026-11-23, the advantage rule),
+    /// against the vector shared with cl-deposits and the spec: for every acquire the fold takes,
+    /// the round bound, the claim's binding judgment, whether custody moves (and `binds_on`
+    /// agrees), and what the claimant's fork still holds.
+    #[test]
+    fn claim_after_yield_matches_the_shared_vector() {
+        let v = cay_vector();
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 8);
+        for c in cases {
+            let name = c["name"].as_str().unwrap();
+            // The fold half (taken or refused, and the custodian of record) is deposits-core's
+            // `claim_after_yield_fold_vector`; a refused acquire has nothing to judge.
+            if c["fold"] == "reject" {
+                continue;
+            }
+            let claim: [u8; 32] = c["claim_txid"]
+                .as_str()
+                .map(|t| Txid::from_str(t).unwrap().to_byte_array())
+                .unwrap_or([4; 32]);
+            // The round bound from the acquirer's own ops (production reads the same off the
+            // fork's history: `min_round_at`, exercised on ref7's real fork in dispute_tip).
+            let ops: Vec<OwnOp> = c["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|o| match o["op"].as_str().unwrap() {
+                    "arm" => Some(OwnOp::Arm(1)),
+                    "arm_round_2" => Some(OwnOp::Arm(2)),
+                    "yield" => Some(OwnOp::Yield),
+                    _ => None,
+                })
+                .collect();
+            let a = AcquireRef {
+                vault: None,
+                claim,
+                custodian: key_of(1),
+                min_round: min_round(&ops),
+            };
+            assert_eq!(a.min_round as u64, c["min_round"].as_u64().unwrap(), "{name}: min_round");
+            let txs = view(c);
+            let vaults: Vec<OutPoint> = c["vaults"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| {
+                    OutPoint::new(
+                        Txid::from_str(v["txid"].as_str().unwrap()).unwrap(),
+                        v["vout"].as_u64().unwrap() as u32,
+                    )
+                })
+                .collect();
+            let (verdict, round) =
+                judge_acquire_round(|t| txs.get(t).cloned(), &vaults, &Txid::from_byte_array(claim));
+            assert_eq!(verdict.reason(), c["binding"].as_str().unwrap(), "{name}: binding");
+            assert_eq!(round as u64, c["round"].as_u64().unwrap(), "{name}: round");
+            let moves = verdict == AcquireVerdict::Binds && round >= a.min_round;
+            assert_eq!(
+                if moves { "self" } else { "none" },
+                c["custodian"].as_str().unwrap(),
+                "{name}: custodian"
+            );
+            // The production predicate agrees, once the verdict is cached as `note_verdicts` would.
+            if verdict.is_final() {
+                if let Some(k) = key(&vaults, &claim) {
+                    verdicts().lock().unwrap().insert(k, verdict);
+                    if verdict == AcquireVerdict::Binds {
+                        rounds().lock().unwrap().insert(k, round);
+                    }
+                }
+                assert_eq!(a.binds_on(&vaults), moves, "{name}: binds_on");
+            }
+            // What the claimant's fork still holds: the pledge_pick fork fold.
+            let events: Vec<crate::node::dispute::ForkEvent> = c["ops"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|o| match o["op"].as_str().unwrap() {
+                    "enter" => crate::node::dispute::ForkEvent::Enter,
+                    "arm" => crate::node::dispute::ForkEvent::Arm {
+                        pledge: Some(OutPoint::from_str(&format!("{}:0", "d4".repeat(32))).unwrap()),
+                        round: 1,
+                    },
+                    "arm_round_2" => crate::node::dispute::ForkEvent::Arm {
+                        pledge: Some(OutPoint::from_str(&format!("{}:0", "d5".repeat(32))).unwrap()),
+                        round: 2,
+                    },
+                    "yield" => crate::node::dispute::ForkEvent::Yield,
+                    other => panic!("{other}"),
+                })
+                .chain(std::iter::once(crate::node::dispute::ForkEvent::Acquire {
+                    claim: OutPoint::new(Txid::from_byte_array(claim), 0),
+                    binds: moves,
+                }))
+                .collect();
+            let (pledges, custody) = crate::node::dispute::fork_holds(&events, false, &[]);
+            let held = &c["held"];
+            assert_eq!(
+                pledges.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                held["pledges"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.as_str().unwrap().to_string())
+                    .collect::<Vec<_>>(),
+                "{name}: held pledges"
+            );
+            assert_eq!(
+                custody.map(|p| p.to_string()),
+                held["custody"].as_str().map(str::to_string),
+                "{name}: held custody"
+            );
+        }
+    }
+
+    fn ye_vector() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../deposits-core/tests/vectors/yield_evidence.json"
+        ))
+        .unwrap()
+    }
+
+    /// A vector `reasons` object: txids (display hex) as wire bytes, the reestablished hash as
+    /// written.
+    fn ye_reasons(r: &serde_json::Value) -> (Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>) {
+        let txid = |k: &str| r[k].as_str().map(|t| Txid::from_str(t).unwrap().to_byte_array());
+        let hash = r["reestablished"]
+            .as_str()
+            .map(|h| hex::decode(h).unwrap().try_into().unwrap());
+        (txid("lost_to"), hash, txid("excluded_by"))
+    }
+
+    /// DEP-06 "What a yield must say" (`yield-evidence-v9`), against the vector shared with
+    /// cl-deposits and the spec: the reasons on the wire, and the judge.
+    #[test]
+    fn yield_evidence_matches_the_shared_vector() {
+        use deposits_core::messages::LedgerOperation;
+        use deposits_core::{TlvDecode, TlvEncode};
+        let v = ye_vector();
+        for w in v["wire"].as_array().unwrap() {
+            let (lost_to, reestablished, excluded_by) = ye_reasons(&w["reasons"]);
+            let op = LedgerOperation::DisputeYield {
+                lost_to,
+                reestablished,
+                excluded_by,
+            };
+            assert_eq!(hex::encode(op.tlv_encode()), w["hex"].as_str().unwrap(), "{}", w["name"]);
+            assert_eq!(
+                LedgerOperation::tlv_decode(&hex::decode(w["hex"].as_str().unwrap()).unwrap())
+                    .unwrap(),
+                op,
+                "{}",
+                w["name"]
+            );
+        }
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 24);
+        for c in cases {
+            let name = c["name"].as_str().unwrap();
+            let (lost_to, reestablished, excluded_by) = ye_reasons(&c["reasons"]);
+            // (The fold half is deposits-core's `yield_evidence_fold_vector`.)
+            // The judge.
+            let txs: HashMap<Txid, (Transaction, Option<u32>)> = c["txs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| {
+                    let input = t["inputs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|i| TxIn {
+                            previous_output: OutPoint::new(
+                                Txid::from_str(i["txid"].as_str().unwrap()).unwrap(),
+                                i["vout"].as_u64().unwrap() as u32,
+                            ),
+                            script_sig: ScriptBuf::new(),
+                            sequence: Sequence(i["sequence"].as_u64().unwrap() as u32),
+                            witness: Default::default(),
+                        })
+                        .collect();
+                    let output = t["outputs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|o| TxOut {
+                            value: Amount::from_sat(1000),
+                            script_pubkey: ScriptBuf::from_hex(o.as_str().unwrap()).unwrap(),
+                        })
+                        .collect();
+                    (
+                        Txid::from_str(t["txid"].as_str().unwrap()).unwrap(),
+                        (
+                            Transaction {
+                                version: Version::TWO,
+                                lock_time: LockTime::ZERO,
+                                input,
+                                output,
+                            },
+                            t["height"].as_u64().map(|h| h as u32),
+                        ),
+                    )
+                })
+                .collect();
+            let outpoints = |a: &serde_json::Value| -> Vec<OutPoint> {
+                a.as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|p| {
+                        OutPoint::new(
+                            Txid::from_str(p["txid"].as_str().unwrap()).unwrap(),
+                            p["vout"].as_u64().unwrap() as u32,
+                        )
+                    })
+                    .collect()
+            };
+            let x32 = |s: &serde_json::Value| -> [u8; 32] {
+                hex::decode(s.as_str().unwrap()).unwrap().try_into().unwrap()
+            };
+            let y = &c["yielder"];
+            let targets: Vec<ScriptBuf> = y["targets"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| ScriptBuf::from_hex(t.as_str().unwrap()).unwrap())
+                .collect();
+            let pledges = outpoints(&y["pledges"]);
+            let vaults = outpoints(&c["vaults"]);
+            let qbs: Vec<([u8; 32], u64, bool)> = c["quorum_begins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|q| {
+                    (
+                        x32(&q["hash"]),
+                        q["seq"].as_u64().unwrap(),
+                        q["spend_confirmed"].as_bool().unwrap(),
+                    )
+                })
+                .collect();
+            let participants: Vec<[u8; 32]> =
+                c["participants"].as_array().unwrap().iter().map(x32).collect();
+            let ctx = YieldContext {
+                ruleset: c["ruleset"].as_str().unwrap(),
+                yield_height: c["yield_height"].as_u64().unwrap() as u32,
+                arm_round: c["arm_round"].as_u64().unwrap() as u32,
+                yielder: x32(&y["xonly"]),
+                targets: &targets,
+                pledges: &pledges,
+                vaults: &vaults,
+                dispute_reason: c["dispute"]["reason"].as_str().unwrap(),
+                last_valid_sequence: c["dispute"]["last_valid_sequence"].as_u64().unwrap(),
+                quorum_begins: &qbs,
+                participants: &participants,
+            };
+            let (verdict, why) =
+                judge_yield(|t| txs.get(t).cloned(), &ctx, lost_to, reestablished, excluded_by);
+            assert_eq!(verdict.name(), c["verdict"].as_str().unwrap(), "{name}: verdict");
+            assert_eq!(why, c["why"].as_str().unwrap(), "{name}: why");
+        }
     }
 }

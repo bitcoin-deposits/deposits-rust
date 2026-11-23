@@ -3703,7 +3703,7 @@ mod load_tests {
             r#"{"type":"State","garbled": [1,2,"#.to_string(),
             row(&LedgerLogRow::Update(update(
                 1,
-                &LedgerOperation::DisputeYield,
+                &LedgerOperation::dispute_yield(),
             ))),
         ];
         let path = write(dir.path(), "a", &lines);
@@ -3723,7 +3723,7 @@ mod load_tests {
             state_row("first"),
             row(&LedgerLogRow::Update(update(
                 5,
-                &LedgerOperation::DisputeYield,
+                &LedgerOperation::dispute_yield(),
             ))),
             state_row("last"),
         ];
@@ -3746,17 +3746,17 @@ mod load_tests {
             state_row("first"),
             row(&LedgerLogRow::Update(update(
                 5,
-                &LedgerOperation::DisputeYield,
+                &LedgerOperation::dispute_yield(),
             ))),
             state_row("middle"),
             row(&LedgerLogRow::Update(update(
                 6,
-                &LedgerOperation::DisputeYield,
+                &LedgerOperation::dispute_yield(),
             ))),
             state_row("last"),
             row(&LedgerLogRow::Update(update(
                 7,
-                &LedgerOperation::DisputeYield,
+                &LedgerOperation::dispute_yield(),
             ))),
         ];
         let path = write(dir.path(), "s", &lines);
@@ -3804,7 +3804,7 @@ mod load_tests {
             "\n{}",
             row(&LedgerLogRow::Update(update(
                 8,
-                &LedgerOperation::DisputeYield
+                &LedgerOperation::dispute_yield()
             )))
         )
         .unwrap();
@@ -3828,7 +3828,7 @@ mod load_tests {
         let snap = format!(r#"{{"type":"State","pad":"{}"}}"#, fat);
         let upd = row(&LedgerLogRow::Update(update(
             1,
-            &LedgerOperation::DisputeYield,
+            &LedgerOperation::dispute_yield(),
         )));
         let mut soaked = vec![row(&LedgerLogRow::Role {
             role: LedgerRole::Partner,
@@ -3885,7 +3885,7 @@ mod load_tests {
         match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::DisputeEnter { .. }) => "enter",
             Ok(LedgerOperation::DisputeArmed { .. }) => "armed",
-            Ok(LedgerOperation::DisputeYield) => "yield",
+            Ok(LedgerOperation::DisputeYield { .. }) => "yield",
             Ok(LedgerOperation::DisputeAcquire { .. }) => "acquire",
             Ok(_) => "other",
             Err(_) => "undecodable",

@@ -153,6 +153,28 @@ pub(crate) fn quorum_begin_rungs_after(
         .collect()
 }
 
+/// The QuorumBegins after `last_valid_sequence` in `updates`, each as (`content_hash`, rung
+/// txids): what a `yield-evidence-v9` stand-down names (DEP-06 "What a yield must say", reason
+/// `reestablished`).
+pub(crate) fn quorum_begins_after(
+    updates: &[SignedLedgerUpdate],
+    last_valid_sequence: u64,
+) -> Vec<([u8; 32], Vec<[u8; 32]>)> {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::TlvDecode;
+    updates
+        .iter()
+        .filter(|u| u.sequence_number > last_valid_sequence)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+            Ok(op @ LedgerOperation::QuorumBegin { .. }) => Some((
+                u.content_hash,
+                deposits_core::vault_spend::quorum_begin_rungs(&op),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
 /// For our expiry fork with `fork_history`, against its base (`base_quorum_begin_seq` from the
 /// base's state, `base_history` its in-memory window): (re-established since the fork point;
 /// under `on_spend`, the rungs of each QuorumBegin after the fork point the window holds; and,
@@ -322,6 +344,43 @@ impl Node {
     /// QuorumBegin, and under v8 the rotations' rungs from disk when the
     /// in-memory window no longer reaches the fork point), never from the
     /// window alone, and never from the chain tip.
+    /// The `content_hash` of a QuorumBegin of `ledger_id` after `lvs` whose rotation spend is
+    /// confirmed (some rung in a block): the in-memory window first, then the persisted log.
+    pub(crate) async fn reestablishing_quorum_begin(&self, ledger_id: &str, lvs: u64) -> Option<[u8; 32]> {
+        use bitcoin::hashes::Hash as _;
+        let mut found = {
+            let ledgers = self.handler.ledgers.lock().unwrap();
+            ledgers
+                .get(ledger_id)
+                .map(|b| quorum_begins_after(&b.read().unwrap().history, lvs))
+                .unwrap_or_default()
+        };
+        if found.is_empty() {
+            let dir = self.handler.data_dir.clone();
+            let id = ledger_id.to_string();
+            let from_disk = tokio::task::spawn_blocking(move || {
+                crate::handler::DepositsHandler::read_persisted_quorum_begins_at(&dir, &id, lvs, u64::MAX)
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+            found = quorum_begins_after(&from_disk, lvs);
+        }
+        found.into_iter().rev().find_map(|(hash, rungs)| {
+            rungs
+                .iter()
+                .any(|t| {
+                    matches!(
+                        self.wallet
+                            .tx_block_height(bitcoin::Txid::from_byte_array(*t)),
+                        Ok(Some(_))
+                    )
+                })
+                .then_some(hash)
+        })
+    }
+
     pub(crate) async fn stand_down_reestablished_expiry_disputes(&self) {
         // (fork key, base id, reason, base expiry, fork state, re-established since the fork
         // point) for every fork of ours still live that was opened for a lapsed quorum.
@@ -512,7 +571,43 @@ impl Node {
                 continue;
             }
 
-            if let Err(e) = self.withdraw_dispute(&fork_key, height).await {
+            // DEP-06 "What a yield must say": the yield names the re-establishing QuorumBegin (its
+            // content hash), one after the fork point whose rotation spend is confirmed. Under
+            // yield-evidence-v9 a stand-down without one is not signed: the tip-based arm above
+            // (`expiry_dispute_stands_down`) names nothing. Earlier rulesets: carried when found.
+            let (v9, lvs) = {
+                let ledgers = self.handler.ledgers.lock().unwrap();
+                ledgers
+                    .get(&fork_key)
+                    .map(|f| {
+                        let f = f.read().unwrap();
+                        (
+                            deposits_core::types::ruleset_yield_evidence(
+                                &f.state.active_ruleset_name,
+                            ),
+                            dispute_enter_last_valid(&f.history),
+                        )
+                    })
+                    .unwrap_or((false, None))
+            };
+            let named = match lvs {
+                Some(lvs) => self.reestablishing_quorum_begin(&ledger_id, lvs).await,
+                None => None,
+            };
+            if v9 && named.is_none() {
+                tracing::info!(
+                    "Expiry dispute on {}: no re-establishing QuorumBegin with a confirmed \
+                     rotation spend to name (yield-evidence-v9); not standing down yet",
+                    prefix
+                );
+                continue;
+            }
+            let reason = deposits_core::messages::LedgerOperation::DisputeYield {
+                lost_to: None,
+                reestablished: named,
+                excluded_by: None,
+            };
+            if let Err(e) = self.withdraw_dispute(&fork_key, height, reason).await {
                 tracing::warn!("Expiry dispute on {}: DisputeYield: {}", prefix, e);
                 continue;
             }
@@ -543,7 +638,7 @@ mod tests {
 
     fn update(ledger: [u8; 32], seq: u64, operator_id: PublicKey) -> SignedLedgerUpdate {
         SignedLedgerUpdate {
-            message: LedgerOperation::DisputeYield.tlv_encode(),
+            message: LedgerOperation::dispute_yield().tlv_encode(),
             message_type: 0x8001,
             operator_id,
             ledger_id: ledger,

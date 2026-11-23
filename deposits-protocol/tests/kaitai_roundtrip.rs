@@ -453,7 +453,7 @@ fn custody_acquire() {
 
 #[test]
 fn custody_yield() {
-    test_roundtrip(&LedgerOperation::DisputeYield);
+    test_roundtrip(&LedgerOperation::dispute_yield());
 }
 
 #[test]

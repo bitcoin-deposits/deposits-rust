@@ -53,7 +53,7 @@ fn op_of(kind: &str, arg: Option<u64>) -> LedgerOperation {
             fraud_proof_hash: None,
             fraud_proof: None,
         },
-        _ => LedgerOperation::DisputeYield,
+        _ => LedgerOperation::dispute_yield(),
     }
 }
 

@@ -216,7 +216,7 @@ fn dispute_yield_tombstones_ledger() {
     };
     net.op_mut("alice").ledger.apply_operation(&arm_op).unwrap();
 
-    let yield_op = deposits_protocol::LedgerOperation::DisputeYield;
+    let yield_op = deposits_protocol::LedgerOperation::dispute_yield();
     net.op_mut("alice")
         .ledger
         .apply_operation(&yield_op)

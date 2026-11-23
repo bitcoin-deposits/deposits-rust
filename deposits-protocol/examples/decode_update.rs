@@ -70,7 +70,7 @@ fn opname(op: &LedgerOperation) -> &'static str {
         O::TransferFail { .. } => "TransferFail",
         O::DisputeEnter { .. } => "DisputeEnter",
         O::DisputeAcquire { .. } => "DisputeAcquire",
-        O::DisputeYield => "DisputeYield",
+        O::DisputeYield { .. } => "DisputeYield",
         O::DisputeArmed { .. } => "DisputeArmed",
         O::DeliveryEmbed { .. } => "DeliveryEmbed",
         O::QuorumChallenge { .. } => "QuorumChallenge",

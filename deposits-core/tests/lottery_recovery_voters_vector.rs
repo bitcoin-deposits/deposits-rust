@@ -169,7 +169,7 @@ fn build(us: &[(u64, u8, &'static str, Vec<u64>)]) -> Vec<SignedLedgerUpdate> {
                 "open" => open(),
                 "qb" => qb(&args.iter().map(|a| *a as u8).collect::<Vec<_>>()),
                 "enter" => enter(args[0]),
-                "yield" => LedgerOperation::DisputeYield,
+                "yield" => LedgerOperation::dispute_yield(),
                 _ => unreachable!(),
             };
             upd(*seq, *author, &op)

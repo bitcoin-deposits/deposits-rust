@@ -1,0 +1,1495 @@
+{
+ "_doc": "DEP-06 \"What a yield must say\" (yield-evidence-v9, DEP-18; ruled 2026-11-23). Under yield-evidence-v9 a DisputeYield carries exactly one reason, each 32 bytes: lost_to (TLV 367, a claim txid), reestablished (TLV 369, a QuorumBegin update's content_hash), excluded_by (TLV 371, a confiscation or re-arm spend txid). `wire`: the DisputeYield operation's encoding with each reason (hashes as here: txids in display hex are stored as their wire bytes, i.e. reversed; the reestablished hash as written). `cases`: `fold` is whether a fork under `ruleset` takes the yield (structural: exactly one reason under yield-evidence-v9, anything under an earlier ruleset). `verdict` (valid | invalid | pending) and `why` are the judge's answer, checked in this order: legacy (ruleset without the rule) -> no-reason; lost_to: unconfirmed (unknown or no height), early (its height > yield_height), then the acquire_binding judgment against `vaults` (unconfirmed | not-a-claim | not-this-lottery), earlier-round (the round it closes < arm_round), own-claim (output 0 pays one of the yielder's `targets` or input 1 spends one of its `pledges`); reestablished: not-expiry (the dispute's reason is not quorum_expired), unknown-quorum-begin, not-after-fork-point (seq <= last_valid_sequence), rotation-unconfirmed; excluded_by: unconfirmed, early, the lottery's round walked back like a claim's input (the named tx spends a vault: round 1; a confirmed re-arm-shaped tx spending output 0 of the previous: one more; else not-this-lottery), earlier-round, in-lottery (the yielder's xonly is among `participants`, the set the judge rebuilt for that lottery). txs: `height` null = unconfirmed; `outputs` are scriptPubKeys (hex). arm_round is the yielder's latest arm's round before the yield. Shared by the spec, deposits-rust (deposits-core/tests/vectors/yield_evidence.json) and cl-deposits (inspect/vectors/yield_evidence.json).",
+ "wire": [
+  {
+   "name": "no reason",
+   "reasons": {},
+   "hex": "000138"
+  },
+  {
+   "name": "lost_to",
+   "reasons": {
+    "lost_to": "aec5e39800000000000000000000000000000000000000000000000000000001"
+   },
+   "hex": "000138fd016f200100000000000000000000000000000000000000000000000000000098e3c5ae"
+  },
+  {
+   "name": "reestablished",
+   "reasons": {
+    "reestablished": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+   },
+   "hex": "000138fd0171200102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
+  },
+  {
+   "name": "excluded_by",
+   "reasons": {
+    "excluded_by": "c8b9b7b100000000000000000000000000000000000000000000000000000002"
+   },
+   "hex": "000138fd01732002000000000000000000000000000000000000000000000000000000b1b7b9c8"
+  }
+ ],
+ "cases": [
+  {
+   "name": "lost_to: another participant's binding round-1 claim, confirmed before the yield",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming the yielder's own claim (output 0 pays its target_reserves)",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "own-claim",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming the yielder's own claim (input 1 spends its declared collateral)",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "own-claim",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+       "vout": 1,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming a claim that does not bind (another lottery's output)",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-this-lottery",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+     "height": 90,
+     "inputs": [
+      {
+       "txid": "9898989898989898989898989898989898989898989898989898989898989898",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming a re-arm spend, not a claim",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-a-claim",
+   "yield_height": 300,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "height": 250,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": [
+      "51202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming a claim for an earlier round than the yielder's arm",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "earlier-round",
+   "yield_height": 110,
+   "arm_round": 2,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming a round-2 claim, the yielder armed round 2",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 270,
+   "arm_round": 2,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "height": 250,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": [
+      "51202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 260,
+     "inputs": [
+      {
+       "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming a claim that confirmed after the yield was signed: early",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "early",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 115,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "lost_to naming an unconfirmed claim: no verdict yet",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "pending",
+   "why": "unconfirmed",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": null,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "c8b9b7b1 under yield-evidence-v9: ref7's round-2 yield could name only its own later claim",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "early",
+   "yield_height": 255,
+   "arm_round": 2,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "height": 250,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": [
+      "51202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 260,
+     "inputs": [
+      {
+       "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "reestablished: a QuorumBegin after the fork point, rotation spend confirmed",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [
+    {
+     "hash": "5151515151515151515151515151515151515151515151515151515151515151",
+     "seq": 12,
+     "spend_confirmed": true
+    }
+   ],
+   "participants": []
+  },
+  {
+   "name": "reestablished naming a QuorumBegin at the fork point, not after it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-after-fork-point",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [
+    {
+     "hash": "5151515151515151515151515151515151515151515151515151515151515151",
+     "seq": 10,
+     "spend_confirmed": true
+    }
+   ],
+   "participants": []
+  },
+  {
+   "name": "reestablished whose rotation spend is unconfirmed: no verdict yet",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "accept",
+   "verdict": "pending",
+   "why": "rotation-unconfirmed",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [
+    {
+     "hash": "5151515151515151515151515151515151515151515151515151515151515151",
+     "seq": 12,
+     "spend_confirmed": false
+    }
+   ],
+   "participants": []
+  },
+  {
+   "name": "reestablished naming a QuorumBegin the judge does not hold: no verdict yet",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "accept",
+   "verdict": "pending",
+   "why": "unknown-quorum-begin",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "reestablished on a punitive dispute: a rotation does not end it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-expiry",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [
+    {
+     "hash": "5151515151515151515151515151515151515151515151515151515151515151",
+     "seq": 12,
+     "spend_confirmed": true
+    }
+   ],
+   "participants": []
+  },
+  {
+   "name": "excluded_by: the confiscation's lottery, the yielder not among its participants",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "excluded_by": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "excluded_by naming a lottery the yielder is in",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "excluded_by": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "in-lottery",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "7777777777777777777777777777777777777777777777777777777777777777",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "excluded_by: a round-2 re-arm spend's lottery, the yielder armed round 2 and is not in it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "excluded_by": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 255,
+   "arm_round": 2,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "height": 250,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": [
+      "51202c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "excluded_by naming round 1's lottery when the yielder armed round 2",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "excluded_by": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "earlier-round",
+   "yield_height": 255,
+   "arm_round": 2,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "excluded_by naming a transaction that is not this dispute's lottery",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "excluded_by": "9999999999999999999999999999999999999999999999999999999999999999"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-this-lottery",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+     "height": 90,
+     "inputs": [
+      {
+       "txid": "9898989898989898989898989898989898989898989898989898989898989898",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "no reason under yield-evidence-v9: the fold refuses it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {},
+   "fold": "reject",
+   "verdict": "invalid",
+   "why": "no-reason",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "two reasons under yield-evidence-v9: the fold refuses it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+    "excluded_by": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+   },
+   "fold": "reject",
+   "verdict": "invalid",
+   "why": "no-reason",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51200b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ]
+  },
+  {
+   "name": "no reason under strict-lottery-v8: accepted, judged as before",
+   "ruleset": "strict-lottery-v8",
+   "reasons": {},
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "legacy",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  },
+  {
+   "name": "a reason under strict-lottery-v8 is not judged (even one that would fail)",
+   "ruleset": "strict-lottery-v8",
+   "reasons": {
+    "lost_to": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "legacy",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "height": 100,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51201c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c"
+     ]
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "height": 105,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": [
+      "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+     ]
+    }
+   ],
+   "dispute": {
+    "reason": "non_conforming_update",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": []
+  }
+ ]
+}

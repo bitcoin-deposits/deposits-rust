@@ -298,7 +298,7 @@ mod tests {
     /// The yield the fork's owner signs at arm+1 (signature irrelevant to the store).
     fn yield_on(tip: &SignedLedgerUpdate, header: u32) -> SignedLedgerUpdate {
         let mut y = SignedLedgerUpdate {
-            message: LedgerOperation::DisputeYield.tlv_encode(),
+            message: LedgerOperation::dispute_yield().tlv_encode(),
             message_type: 0x8001,
             operator_id: tip.operator_id,
             ledger_id: tip.ledger_id,
@@ -331,7 +331,7 @@ mod tests {
             // Write-ahead (as withdraw_dispute): the pending file, then the record, fsync'd.
             write_pending(dir.path(), KEY, &y, true).unwrap();
             assert_eq!(
-                h.commit_self_authored_update(KEY, &LedgerOperation::DisputeYield, y.clone(), y.block_height),
+                h.commit_self_authored_update(KEY, &LedgerOperation::dispute_yield(), y.clone(), y.block_height),
                 Ok(true)
             );
             // KILLED: no broadcast, nothing removed.

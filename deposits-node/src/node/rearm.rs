@@ -1252,6 +1252,31 @@ impl Node {
                 .cloned()
                 .ok_or_else(|| format!("no round-{} arm on our fork", round))?
         };
+        // DEP-06 "What a yield must say", reason 3: we armed for this round and its lottery (the
+        // output `cur.outpoint`, created by its re-arm spend) does not include us. Yield naming
+        // that spend; there is nothing to reveal or claim.
+        let me_x = self.node_id.x_only_public_key().0;
+        if !cur.lottery.participants.iter().any(|p| p.pubkey == me_x) {
+            let key = (ledger_id.to_string(), round, "yield");
+            if !rearm_done().lock().unwrap().contains(&key) {
+                let reason = LedgerOperation::DisputeYield {
+                    lost_to: None,
+                    reestablished: None,
+                    excluded_by: Some(cur.outpoint.txid.to_byte_array()),
+                };
+                self.publish_custody_yield(ledger_id, &our_armed, reason)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                rearm_done().lock().unwrap().insert(key);
+                tracing::info!(
+                    "re-arm {}: round {}: armed but not in its lottery ({}); yielded",
+                    pfx,
+                    round,
+                    cur.outpoint.txid
+                );
+            }
+            return Ok(());
+        }
         let preimage = self
             .round_preimage(ledger_id, round)
             .ok_or("no preimage for the round")?;
@@ -1303,10 +1328,24 @@ impl Node {
         let me = self.node_id.x_only_public_key().0;
         if parts[winner].1.pubkey != me {
             let key = (ledger_id.to_string(), round, "yield");
+            // DEP-06 "What a yield must say" (yield-evidence-v9): a lost draw is no reason yet;
+            // the winner's binding claim is (`lost_to_another`, the claim-or-yield pass).
+            if self.our_fork_needs_yield_evidence(ledger_id, &our_armed) {
+                tracing::debug!(
+                    "re-arm {}: round {}: lost the draw; awaiting the winner's binding claim (yield-evidence-v9)",
+                    pfx,
+                    round
+                );
+                return Ok(());
+            }
             if !rearm_done().lock().unwrap().contains(&key) {
-                self.publish_custody_yield(ledger_id, &our_armed)
-                    .await
-                    .map_err(|e| e.to_string())?;
+                self.publish_custody_yield(
+                    ledger_id,
+                    &our_armed,
+                    deposits_core::messages::LedgerOperation::dispute_yield(),
+                )
+                .await
+                .map_err(|e| e.to_string())?;
                 rearm_done().lock().unwrap().insert(key);
                 tracing::info!("re-arm {}: re-arm round {}: yielded", pfx, round);
             }

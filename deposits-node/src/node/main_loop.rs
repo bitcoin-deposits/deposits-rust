@@ -178,10 +178,22 @@ pub(crate) fn acquire_moves_custody_away(
     on_confirm: bool,
     binds: impl Fn(&[bitcoin::OutPoint], &[u8; 32]) -> bool,
 ) -> bool {
-    !foreign_acquire_claims(fetched, operator, fallback, |v, c| {
-        !on_confirm || v.is_some_and(|v| binds(v, c))
-    })
-    .is_empty()
+    // An acquire after its author's own yield (DEP-06 "A claim after the claimant's own yield")
+    // moves custody only by the binding judgment with its round bound, under every ruleset.
+    super::acquire_binding::acquires_in(fetched, usize::MAX, fallback)
+        .iter()
+        .filter(|a| a.custodian != *operator)
+        .any(|a| {
+            if a.min_round > 0 {
+                a.vault.as_ref().is_some_and(|v| {
+                    binds(v, &a.claim)
+                        && super::acquire_binding::binds_round(v, &a.claim)
+                            .is_some_and(|r| r >= a.min_round)
+                })
+            } else {
+                !on_confirm || a.vault.as_ref().is_some_and(|v| binds(v, &a.claim))
+            }
+        })
 }
 
 /// Whether a relay fetch holds a `LedgerOpen`, i.e. reaches genesis. The
@@ -3312,7 +3324,7 @@ mod joined_cache_tests {
                 (op.tlv_encode(), op.message_type())
             }
             None => {
-                let op = LedgerOperation::DisputeYield;
+                let op = LedgerOperation::dispute_yield();
                 (op.tlv_encode(), op.message_type())
             }
         };

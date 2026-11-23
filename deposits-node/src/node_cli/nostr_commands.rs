@@ -2847,7 +2847,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
+                LedgerOperation::DisputeYield { .. } => ("DisputeYield", String::new()),
                 LedgerOperation::DeliveryEmbed {
                     target_ledger_id, ..
                 } => (

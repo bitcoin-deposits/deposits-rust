@@ -141,7 +141,7 @@ fn summarize_fork(
             LedgerOperation::DisputeAcquire { .. } => {
                 s.has_dispute_acquire = true;
             }
-            LedgerOperation::DisputeYield => {
+            LedgerOperation::DisputeYield { .. } => {
                 s.has_dispute_yield = true;
             }
             _ => {}

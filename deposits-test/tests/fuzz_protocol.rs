@@ -676,7 +676,7 @@ fn op_name(op: &LedgerOperation) -> &'static str {
         LedgerOperation::DisputeEnter { .. } => "DisputeEnter",
         LedgerOperation::DisputeArmed { .. } => "DisputeArmed",
         LedgerOperation::DisputeAcquire { .. } => "DisputeAcquire",
-        LedgerOperation::DisputeYield => "DisputeYield",
+        LedgerOperation::DisputeYield { .. } => "DisputeYield",
         LedgerOperation::DeliveryEmbed { .. } => "DeliveryEmbed",
         LedgerOperation::QuorumChallenge { .. } => "QuorumChallenge",
         LedgerOperation::LedgerClose => "LedgerClose",
@@ -818,7 +818,7 @@ fn validate_per_op_as_cosigner(
                 && armed_candidates.contains(new_custodian)
                 && claim_txid != &[0u8; 32]
         }
-        LedgerOperation::DisputeYield => {
+        LedgerOperation::DisputeYield { .. } => {
             // A real cosigner validates DisputeYield against the entropy_block_hash
             // from the winning DisputeAcquire they've already observed. Our sim
             // doesn't track acquires separately, so we only require the yielder
@@ -971,7 +971,7 @@ impl ProtocolSim {
                     }
                 }
             } else {
-                let yield_op = LedgerOperation::DisputeYield;
+                let yield_op = LedgerOperation::dispute_yield();
                 let replica = self.operators[branch.disputer].replicas[&victim].clone();
                 match apply_with_dispute_gate(&replica, &yield_op) {
                     Ok(new) => {
@@ -1944,7 +1944,7 @@ fn gen_adversary_op(sim: &ProtocolSim, proposer: usize, rng: &mut Rng) -> Option
                 new_reserves_address: format!("bcrt1q_adv_self_{}", proposer),
                 confiscation_txid: None,
             },
-            _ => LedgerOperation::DisputeYield,
+            _ => LedgerOperation::dispute_yield(),
         };
         return Some(GeneratedOp {
             op: o,

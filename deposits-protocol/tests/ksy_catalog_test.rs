@@ -1027,7 +1027,7 @@ fn build_all_test_ops() -> Vec<(&'static str, LedgerOperation)> {
                 confiscation_txid: None,
             },
         ),
-        ("DisputeYield", LedgerOperation::DisputeYield),
+        ("DisputeYield", LedgerOperation::dispute_yield()),
         ("LedgerClose", LedgerOperation::LedgerClose),
     ]
 }

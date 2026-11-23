@@ -1,0 +1,482 @@
+{
+ "_doc": "DEP-06 \"A claim after the claimant's own yield: the claimant is custodian\" (ruled 2026-11-23, the advantage rule). Each case builds a fork of a fresh ledger whose disputant is `self` by applying `ops` in order (every one accepted; ops as in dispute_yield_states.json: `enter`, `arm` (round 1), `arm_round_2` (rearm_round 2, fresh commitment), `yield`), then one DisputeAcquire whose new_custodian is `acquire_by` (`self`, the fork's disputant, or `other`). `fold` is whether the fork takes it. When it does, `min_round` is the round of the fork's latest DisputeArmed before its own yield (the acquire must bind that round or a later one), and the acquire's claim `claim_txid` is judged as acquire_binding.json judges one (`vaults`, `txs`, same format): `binding` is the verdict, `round` the round a binding claim closes (0 otherwise). `custodian` is `self` iff the fold took it, it binds, and round >= min_round; else `none` (the acquire is treated as absent). The first case is the shape of regtest rearm-rust c8b9b7b1 (2026-11-21): deposits-rust ref7 armed round 2 only (seq 26), a since-fixed bug yielded at seq 27, and ref7 then won round 2 with claim aec5e398... (txids here are synthetic; the real fork is deposits-rust deposits-node/tests/vectors/ref7_rearm_yielded_fork.jsonl). Shared by the spec, deposits-rust (deposits-core/tests/vectors/claim_after_yield.json) and cl-deposits (inspect/vectors/claim_after_yield.json). `held`: what the claimant's own fork still holds once the acquire is judged (the pledge_pick.json fork fold: an `arm` pledges d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4:0 in round 1 and d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5:0 in round 2, a `yield` frees it, the acquire's claim output 0 is custody iff it binds with its round bound): the yield's release stands, and a binding claim's output is custody, never pledgeable.",
+ "cases": [
+  {
+   "name": "c8b9b7b1 shape: round-2 arm, yield, then its own binding round-2 claim: custodian",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm_round_2"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 2,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "binds",
+   "round": 2,
+   "custodian": "self",
+   "held": {
+    "pledges": [],
+    "custody": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae:0"
+   }
+  },
+  {
+   "name": "a non-binding claim after the yield (another lottery's output): treated as absent",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm_round_2"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 2,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "9898989898989898989898989898989898989898989898989898989898989898",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "9999999999999999999999999999999999999999999999999999999999999999",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "not-this-lottery",
+   "round": 0,
+   "custodian": "none",
+   "held": {
+    "pledges": [],
+    "custody": null
+   }
+  },
+  {
+   "name": "an unconfirmed claim after the yield: no custody yet",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm_round_2"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 2,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": false,
+     "inputs": [
+      {
+       "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "unconfirmed",
+   "round": 0,
+   "custodian": "none",
+   "held": {
+    "pledges": [],
+    "custody": null
+   }
+  },
+  {
+   "name": "a claim of an earlier round than the arm the yield followed: treated as absent",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm"
+    },
+    {
+     "op": "arm_round_2"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 2,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "binds",
+   "round": 1,
+   "custodian": "none",
+   "held": {
+    "pledges": [],
+    "custody": null
+   }
+  },
+  {
+   "name": "round-1 arm, yield, own binding round-1 claim: custodian",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 1,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "binds",
+   "round": 1,
+   "custodian": "self",
+   "held": {
+    "pledges": [],
+    "custody": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae:0"
+   }
+  },
+  {
+   "name": "another participant's acquire on our yielded fork: refused",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm_round_2"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "other",
+   "fold": "reject"
+  },
+  {
+   "name": "an un-armed fork's yield, then an acquire: refused (it never held a claim leaf)",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "quorum_expired"
+    },
+    {
+     "op": "yield"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "reject"
+  },
+  {
+   "name": "control: an armed fork, no yield, its own binding claim: custodian (no round bound)",
+   "ruleset": "strict-lottery-v8",
+   "ops": [
+    {
+     "op": "enter",
+     "reason": "non_conforming_update"
+    },
+    {
+     "op": "arm_round_2"
+    }
+   ],
+   "acquire_by": "self",
+   "fold": "accept",
+   "min_round": 0,
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [
+    {
+     "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1",
+       "vout": 0,
+       "sequence": 144
+      }
+     ],
+     "outputs": 1
+    },
+    {
+     "txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+     "confirmed": true,
+     "inputs": [
+      {
+       "txid": "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2",
+       "vout": 0,
+       "sequence": 4294967293
+      },
+      {
+       "txid": "d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4",
+       "vout": 0,
+       "sequence": 4294967293
+      }
+     ],
+     "outputs": 1
+    }
+   ],
+   "claim_txid": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae",
+   "binding": "binds",
+   "round": 2,
+   "custodian": "self",
+   "held": {
+    "pledges": [],
+    "custody": "aeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeaeae:0"
+   }
+  }
+ ]
+}

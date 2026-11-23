@@ -2151,7 +2151,7 @@ mod embedding {
 
     #[test]
     fn embedded_hash_returns_none_for_unsupported_ops() {
-        assert!(LedgerOperation::DisputeYield.embedded_hash().is_none());
+        assert!(LedgerOperation::dispute_yield().embedded_hash().is_none());
         assert!(LedgerOperation::LedgerClose.embedded_hash().is_none());
     }
 
@@ -2288,7 +2288,7 @@ mod embedding {
         let proof = proof_for(ledger);
         let ph = proof.proof_hash();
 
-        let history = vec![fixture(1, ledger, LedgerOperation::DisputeYield)];
+        let history = vec![fixture(1, ledger, LedgerOperation::dispute_yield())];
         let embedding = ProofEmbedding {
             ledger_id: hex::encode(ledger),
             sequence: 1,

@@ -74,5 +74,5 @@ fn ruleset_naming_vector() {
         }
         n += 1;
     }
-    assert_eq!(n, 48);
+    assert_eq!(n, 57);
 }

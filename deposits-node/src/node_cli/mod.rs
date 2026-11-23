@@ -335,9 +335,10 @@ RECOVERY SUBCOMMANDS:
                     if a violation is confirmed
     recovery prepare <ledger_id>
                     Prepare as a candidate for custody acquisition
-    recovery release <ledger_id>
+    recovery release <ledger_id> [--lost-to <txid> | --reestablished <hash> | --excluded-by <txid>]
                     Publish `DisputeYield` to close a candidate branch
-                    that won't be selected
+                    that won't be selected, naming why (DEP-06; required
+                    under yield-evidence-v9)
     recovery complete <ledger_id> [--new-custodian <pubkey>]
                     Complete recovery once the quorum agrees on a winner
     recovery status <ledger_id>
@@ -1655,7 +1656,7 @@ pub fn format_operation(msg_type: u16, message: &[u8]) -> (String, String) {
                         ),
                     )
                 }
-                LedgerOperation::DisputeYield => ("DisputeYield", String::new()),
+                LedgerOperation::DisputeYield { .. } => ("DisputeYield", String::new()),
                 LedgerOperation::DeliveryEmbed {
                     target_ledger_id, ..
                 } => (

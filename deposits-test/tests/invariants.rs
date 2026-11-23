@@ -900,7 +900,7 @@ fn invariant_l2_lottery_liveness() {
         .op("alice")
         .ledger
         .state
-        .apply(&LedgerOperation::DisputeYield)
+        .apply(&LedgerOperation::dispute_yield())
         .is_ok();
 
     let has_exits = acquire_ok && yield_ok;

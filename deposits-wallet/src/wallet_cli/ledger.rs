@@ -413,7 +413,7 @@ fn format_operation(op: &LedgerOperation) -> (String, Option<deposits_core::type
         LedgerOperation::DisputeEnter { .. } => ("DisputeEnter".to_string(), None),
         LedgerOperation::DisputeArmed { .. } => ("DisputeArmed".to_string(), None),
         LedgerOperation::DisputeAcquire { .. } => ("DisputeAcquire".to_string(), None),
-        LedgerOperation::DisputeYield => ("DisputeYield".to_string(), None),
+        LedgerOperation::DisputeYield { .. } => ("DisputeYield".to_string(), None),
         LedgerOperation::DeliveryEmbed { .. } => ("DeliveryEmbed".to_string(), None),
         LedgerOperation::QuorumChallenge { .. } => ("QuorumChallenge".to_string(), None),
         LedgerOperation::LedgerClose => ("LedgerClose".to_string(), None),
@@ -888,7 +888,7 @@ async fn ledger_custody(args: &[String]) -> Result<(), Box<dyn std::error::Error
                         },
                     ));
                 }
-                LedgerOperation::DisputeYield => {
+                LedgerOperation::DisputeYield { .. } => {
                     println!("seq {:>4} | block {:>6} | 🏳️ CUSTODY YIELDED", seq, block);
                     println!(
                         "         |              |   Candidate: {}...",

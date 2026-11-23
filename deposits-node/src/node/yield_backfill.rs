@@ -69,7 +69,7 @@ pub(crate) fn backfill_decision(
         [one] => {
             let is_yield = matches!(
                 LedgerOperation::tlv_decode(&one.message),
-                Ok(LedgerOperation::DisputeYield)
+                Ok(LedgerOperation::DisputeYield { .. })
             );
             if is_yield && one.previous_hash == tip.chain_hash() {
                 Backfill::Adopt((*one).clone())
@@ -155,7 +155,9 @@ impl super::Node {
             match self.yield_backfill_for(&ledger_id, &tip, true).await {
                 Backfill::Adopt(y) => match self.handler.commit_self_authored_update(
                     &fork_key,
-                    &LedgerOperation::DisputeYield,
+                    // the op those bytes carry, reason and all
+                    &LedgerOperation::tlv_decode(&y.message)
+                        .unwrap_or_else(|_| LedgerOperation::dispute_yield()),
                     y.clone(),
                     y.block_height,
                 ) {
@@ -218,13 +220,57 @@ mod tests {
         }
     }
 
+    /// DEP-06 "An invalid yield is void": a yield naming a transaction that is not confirmed
+    /// frees no pledge (it reads as absent), and frees it once that transaction confirms; a
+    /// reasonless yield (an earlier ruleset's) frees it as before. The same fork with the
+    /// reason's check removed would free the pledge in every row.
+    #[test]
+    fn a_yield_whose_named_transaction_is_unconfirmed_frees_no_pledge() {
+        use crate::node::dispute::{fork_events, fork_holds};
+        use bitcoin::hashes::Hash as _;
+        let me = key(1);
+        let pledged = LedgerOperation::DisputeArmed {
+            armed_block: 100,
+            commitment_hash: [1; 20],
+            target_reserves: "t".into(),
+            replacement_collateral: Some(deposits_core::messages::ReplacementCollateral {
+                txid: [7; 32],
+                vout: 1,
+                amount: 50_000,
+            }),
+            rearm_round: None,
+        };
+        let a = signed(&me, 10, [0; 32], &pledged, 100);
+        let named = [0xab; 32];
+        let held = |y: &LedgerOperation, confirmed: bool| {
+            let h = vec![a.clone(), signed(&me, 11, a.chain_hash(), y, 101)];
+            let c = move |t: &bitcoin::Txid| confirmed && t.to_byte_array() == named;
+            fork_holds(&fork_events(&h, &me.public_key(), &c), false, &[]).0.len()
+        };
+        let lost_to = LedgerOperation::DisputeYield {
+            lost_to: Some(named),
+            reestablished: None,
+            excluded_by: None,
+        };
+        let excluded_by = LedgerOperation::DisputeYield {
+            lost_to: None,
+            reestablished: None,
+            excluded_by: Some(named),
+        };
+        assert_eq!(held(&lost_to, false), 1, "lost_to unconfirmed: the pledge is held");
+        assert_eq!(held(&lost_to, true), 0, "lost_to confirmed: freed");
+        assert_eq!(held(&excluded_by, false), 1, "excluded_by unconfirmed: held");
+        assert_eq!(held(&excluded_by, true), 0, "excluded_by confirmed: freed");
+        assert_eq!(held(&LedgerOperation::dispute_yield(), false), 0, "a reasonless yield: freed");
+    }
+
     /// ref6's disk: our arm at the tip, `lottery_completed`, our yield on the relay.
     #[test]
     fn ref6s_shape_adopts_the_published_bytes() {
         let me = key(1);
         let tip = signed(&me, 23, [0; 32], &arm(), 100);
-        let y = signed(&me, 24, tip.chain_hash(), &LedgerOperation::DisputeYield, 140);
-        let other = signed(&key(2), 24, tip.chain_hash(), &LedgerOperation::DisputeYield, 141);
+        let y = signed(&me, 24, tip.chain_hash(), &LedgerOperation::dispute_yield(), 140);
+        let other = signed(&key(2), 24, tip.chain_hash(), &LedgerOperation::dispute_yield(), 141);
         let relay = vec![other.clone(), y.clone(), y.clone()];
         assert_eq!(
             backfill_decision(&tip, &me.public_key(), Ok(&relay), true),
@@ -290,25 +336,25 @@ mod tests {
             let mut relay = Vec::new();
             let r = next();
             if r & 1 != 0 {
-                relay.push(signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, 140));
+                relay.push(signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), 140));
             }
             if r & 2 != 0 {
                 // The equivocation the old code could produce: our second yield, another header.
-                relay.push(signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, 150));
+                relay.push(signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), 150));
             }
             if r & 4 != 0 {
                 relay.push(signed(&me, seq + 1, tip.chain_hash(), &arm(), 160));
             }
             if r & 8 != 0 {
-                relay.push(signed(&them, seq + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, 140));
+                relay.push(signed(&them, seq + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), 140));
             }
             if r & 16 != 0 {
                 // Ours, at another sequence: irrelevant here.
-                relay.push(signed(&me, seq + 2, [9; 32], &LedgerOperation::DisputeYield, 170));
+                relay.push(signed(&me, seq + 2, [9; 32], &LedgerOperation::dispute_yield(), 170));
             }
             if r & 32 != 0 {
                 // Tampered: claims to be ours, signature does not verify.
-                let mut t = signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, 180);
+                let mut t = signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), 180);
                 t.operator_signature[0] ^= 1;
                 relay.push(t);
             }
@@ -340,7 +386,7 @@ mod tests {
                 Backfill::Sign => {
                     signed_fresh += 1;
                     assert!(!failed && !published, "signed without knowing nothing of ours went out");
-                    let fresh = signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, 200 + (next() % 50) as u32);
+                    let fresh = signed(&me, seq + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), 200 + (next() % 50) as u32);
                     ours_after.insert(fresh.content_hash);
                 }
                 Backfill::Hold(_) => {}
@@ -377,7 +423,7 @@ mod tests {
         assert_eq!(held(&ledger.history).len(), 1, "the arm holds its pledge");
 
         // The relay's yield, as published: ref6's, chained onto the arm, at arm+1.
-        let mut y = signed(&key_of_bytes(), tip.sequence_number + 1, tip.chain_hash(), &LedgerOperation::DisputeYield, tip.block_height + 3);
+        let mut y = signed(&key_of_bytes(), tip.sequence_number + 1, tip.chain_hash(), &LedgerOperation::dispute_yield(), tip.block_height + 3);
         y.operator_id = ref6;
         y.content_hash = y.compute_hash();
 
@@ -389,12 +435,12 @@ mod tests {
         let (handler, _rx) = DepositsHandler::new(signer, wallet, dir.path().to_path_buf(), false);
         handler.ledgers.lock().unwrap().insert(key.into(), std::sync::Arc::new(std::sync::RwLock::new(ledger)));
         assert_eq!(
-            handler.commit_self_authored_update(key, &LedgerOperation::DisputeYield, y.clone(), y.block_height),
+            handler.commit_self_authored_update(key, &LedgerOperation::dispute_yield(), y.clone(), y.block_height),
             Ok(true)
         );
         // Idempotent: the same bytes again add nothing.
         assert_eq!(
-            handler.commit_self_authored_update(key, &LedgerOperation::DisputeYield, y.clone(), y.block_height),
+            handler.commit_self_authored_update(key, &LedgerOperation::dispute_yield(), y.clone(), y.block_height),
             Ok(false)
         );
         let arc = handler.ledgers.lock().unwrap().get(key).cloned().unwrap();

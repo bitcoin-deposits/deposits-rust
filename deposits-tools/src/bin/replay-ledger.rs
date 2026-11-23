@@ -323,7 +323,7 @@ fn format_op(op: &LedgerOperation) -> String {
             "DisputeAcquire  new_custodian={}",
             short_pubkey(new_custodian)
         ),
-        LedgerOperation::DisputeYield => "DisputeYield".to_string(),
+        LedgerOperation::DisputeYield { .. } => "DisputeYield".to_string(),
         LedgerOperation::DisputeArmed { armed_block, .. } => {
             format!("DisputeArmed  block={}", armed_block)
         }

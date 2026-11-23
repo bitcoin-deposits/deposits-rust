@@ -117,13 +117,13 @@ impl Node {
                         .map(|m| m.supported_rulesets.clone());
                     let current =
                         if st.active_ruleset_name.is_empty() && st.quorum_members.is_empty() {
-                            deposits_core::types::POLICY_TARGET_RULESET.to_string()
+                            deposits_core::types::NEW_LEDGER_RULESET.to_string()
                         } else {
                             st.active_ruleset_name.clone()
                         };
                     deposits_core::types::proposed_ruleset(&current, declaration.as_deref())
                 })
-                .unwrap_or_else(|| deposits_core::types::POLICY_TARGET_RULESET.to_string())
+                .unwrap_or_else(|| deposits_core::types::NEW_LEDGER_RULESET.to_string())
         };
 
         let proposed_terms = crate::node::coordination::ConsentProposedTerms {

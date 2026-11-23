@@ -48,7 +48,7 @@ pub(crate) fn after_our_arm<'a>(
     };
     for u in &history[at + 1..] {
         match LedgerOperation::tlv_decode(&u.message) {
-            Ok(LedgerOperation::DisputeAcquire { .. }) | Ok(LedgerOperation::DisputeYield) => {
+            Ok(LedgerOperation::DisputeAcquire { .. }) | Ok(LedgerOperation::DisputeYield { .. }) => {
                 return AfterArm::Concluded(u)
             }
             Ok(LedgerOperation::DisputeArmed { .. }) => {
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(y.sequence_number, 27);
         assert!(matches!(
             LedgerOperation::tlv_decode(&y.message),
-            Ok(LedgerOperation::DisputeYield)
+            Ok(LedgerOperation::DisputeYield { .. })
         ));
 
         assert_eq!(after_our_arm(&fork.history, &arm), AfterArm::Concluded(y));
@@ -225,15 +225,32 @@ mod tests {
             acquire_slot(Some(&fork.history), &arm).expect_err("no acquire on a yielded round");
         assert!(refused.contains("seq 27"), "{refused}");
 
-        // And the fold agrees: an acquire chained on the yield is not a valid update, for any
-        // member replaying the fork, nor for our own record.
-        assert!(!fork.dispute_state_allows(&acquire_op(ref7)));
+        // The fold, since the advantage rule (DEP-06 "A claim after the claimant's own yield",
+        // ruled 2026-11-23): ref7's OWN acquire chained on its yield is a valid update for every
+        // member replaying the fork, and for our own record, so custody orphaned this way has a
+        // custodian of record once the claim binds. It was refused before the ruling. Another
+        // participant's acquire on ref7's yielded fork is still refused.
+        let other = bitcoin::secp256k1::PublicKey::from_secret_key(
+            &Secp256k1::new(),
+            &SecretKey::from_slice(&[9; 32]).unwrap(),
+        );
+        assert_eq!(fork.state.parent_pubkey, ref7, "the fork is ref7's");
+        assert!(fork.dispute_state_allows(&acquire_op(ref7)));
+        assert!(!fork.dispute_state_allows(&acquire_op(other)));
         let dir = tempfile::TempDir::new().unwrap();
         let h = handler_with(dir.path(), fork.clone());
-        let a28 = child(y, 28, &acquire_op(ref7));
+        let o28 = child(y, 28, &acquire_op(other));
         assert!(h
-            .commit_self_authored_update(C8B9, &acquire_op(ref7), a28.clone(), a28.block_height)
+            .commit_self_authored_update(C8B9, &acquire_op(other), o28.clone(), o28.block_height)
             .is_err());
+        let a28 = child(y, 28, &acquire_op(ref7));
+        h.commit_self_authored_update(C8B9, &acquire_op(ref7), a28.clone(), a28.block_height)
+            .expect("ref7's own acquire after its own yield is recorded");
+        // It moves custody only if its claim binds round 2 or later: the arm the yield followed.
+        let recorded = h.ledgers.lock().unwrap().get(C8B9).unwrap().read().unwrap().clone();
+        assert_eq!(recorded.state.operator_key, ref7);
+        let refs = crate::node::acquire_binding::acquires_in(&recorded.history, usize::MAX, None);
+        assert_eq!(refs.last().unwrap().min_round, 2, "the real fork's round bound");
 
         // The round-1 pass would not have decided for this arm, so it never yields it.
         assert!(!round1_pass_decides(&arm));
@@ -334,7 +351,7 @@ mod tests {
             },
         );
         h.push(r1.clone());
-        h.push(child(&r1, 27, &LedgerOperation::DisputeYield));
+        h.push(child(&r1, 27, &LedgerOperation::dispute_yield()));
         let r2b = child(
             h.last().unwrap(),
             28,
@@ -416,7 +433,7 @@ mod tests {
         let y = child(
             &tip,
             tip.sequence_number + 1,
-            &LedgerOperation::DisputeYield,
+            &LedgerOperation::dispute_yield(),
         );
         assert_eq!(
             (y.sequence_number, y.previous_hash),

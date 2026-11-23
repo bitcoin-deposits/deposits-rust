@@ -63,6 +63,7 @@ pub fn lookup(name: &str) -> Option<&'static Ruleset> {
         "balance-anchor-v6" => Some(&BALANCE_ANCHOR_V6),
         "grounded-arms-v7" => Some(&GROUNDED_ARMS_V7),
         "strict-lottery-v8" => Some(&STRICT_LOTTERY_V8),
+        "yield-evidence-v9" => Some(&YIELD_EVIDENCE_V9),
         _ => None,
     }
 }
@@ -91,6 +92,7 @@ pub fn all_supported_names() -> Vec<&'static str> {
         BALANCE_ANCHOR_V6.name,
         GROUNDED_ARMS_V7.name,
         STRICT_LOTTERY_V8.name,
+        YIELD_EVIDENCE_V9.name,
     ]
 }
 
@@ -199,6 +201,14 @@ pub static GROUNDED_ARMS_V7: Ruleset = Ruleset {
 /// confiscation whose lottery includes a key the dispute's own grounds convict is not authorised.
 pub static STRICT_LOTTERY_V8: Ruleset = Ruleset {
     name: "strict-lottery-v8",
+    tier_config_factory: cltv_offset_v2_tier_config,
+};
+
+/// DEP-18 §yield-evidence-v9: the `cltv-offset-v2` reserves cascade, with `strict-lottery-v8`'s
+/// rules plus evidence-carrying yields (DEP-06 "What a yield must say", gated in
+/// deposits-protocol's `ruleset_yield_evidence`).
+pub static YIELD_EVIDENCE_V9: Ruleset = Ruleset {
+    name: "yield-evidence-v9",
     tier_config_factory: cltv_offset_v2_tier_config,
 };
 

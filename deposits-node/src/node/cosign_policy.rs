@@ -121,7 +121,7 @@ pub(crate) fn refusal_for(
                 acquire_confirmed: acquires.iter().any(|a| {
                     a.vault
                         .as_ref()
-                        .is_some_and(|v| super::acquire_binding::binds(v, &a.claim))
+                        .is_some_and(|v| a.binds_on(v))
                 }),
             })
         })

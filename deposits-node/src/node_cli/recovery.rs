@@ -1402,10 +1402,36 @@ pub async fn recovery_spend(args: &[String]) -> Result<(), Box<dyn std::error::E
 pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut ledger_id: Option<String> = None;
     let mut config_args = Vec::new();
+    // DEP-06 "What a yield must say": the yield's reason, required under yield-evidence-v9
+    // (a fork under that ruleset refuses a yield with none). Txids in display hex; the
+    // QuorumBegin's content hash as printed.
+    let (mut lost_to, mut reestablished, mut excluded_by) = (None, None, None);
+    let hash32 = |v: Option<&String>, reverse: bool| -> Result<[u8; 32], String> {
+        let mut b: [u8; 32] = hex::decode(v.ok_or("a 32-byte hex value is required")?)
+            .map_err(|e| e.to_string())?
+            .try_into()
+            .map_err(|_| "expected 32 bytes".to_string())?;
+        if reverse {
+            b.reverse();
+        }
+        Ok(b)
+    };
 
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--lost-to" => {
+                lost_to = Some(hash32(args.get(i + 1), true)?);
+                i += 1;
+            }
+            "--reestablished" => {
+                reestablished = Some(hash32(args.get(i + 1), false)?);
+                i += 1;
+            }
+            "--excluded-by" => {
+                excluded_by = Some(hash32(args.get(i + 1), true)?);
+                i += 1;
+            }
             arg if arg.starts_with("--") => {
                 config_args.push(args[i].clone());
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -1490,7 +1516,17 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         .get_tip_height()
         .map_err(|e| format!("Failed to get block height: {:?}", e))?;
 
-    let custody_release = LedgerOperation::DisputeYield;
+    let custody_release = LedgerOperation::DisputeYield {
+        lost_to,
+        reestablished,
+        excluded_by,
+    };
+    if custody_release.yield_reason_count() != Some(1) {
+        println!(
+            "  Note: no single reason given (--lost-to TXID | --reestablished HASH | \
+             --excluded-by TXID); a ledger under yield-evidence-v9 refuses such a yield"
+        );
+    }
     let message_bytes = custody_release.tlv_encode();
 
     let sequence = our_armed.sequence_number + 1;
@@ -2594,11 +2630,31 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
     let mut candidates: Vec<(PublicKey, u32, SignedLedgerUpdate)> = Vec::new();
     let mut our_latest: Option<SignedLedgerUpdate> = None;
     let mut our_armed_block: Option<u32> = None;
+    // The ledger's ruleset as its latest QuorumBegin / QuorumUpgrade names it (by sequence).
+    let mut ruleset_named: Option<(u64, String)> = None;
 
     for event in events.iter() {
         if let Ok(tlv_bytes) = BASE64.decode(&event.content) {
             if let Ok(update) = SignedLedgerUpdate::tlv_decode(&tlv_bytes) {
                 if let Ok(op) = LedgerOperation::tlv_decode(&update.message) {
+                    let named = match &op {
+                        LedgerOperation::QuorumBegin {
+                            protocol_version: Some(v),
+                            ..
+                        } => Some(v.clone()),
+                        LedgerOperation::QuorumUpgrade {
+                            new_protocol_version,
+                        } => Some(new_protocol_version.clone()),
+                        _ => None,
+                    };
+                    if let Some(v) = named {
+                        if ruleset_named
+                            .as_ref()
+                            .is_none_or(|(seq, _)| update.sequence_number > *seq)
+                        {
+                            ruleset_named = Some((update.sequence_number, v));
+                        }
+                    }
                     if let LedgerOperation::DisputeArmed { armed_block, .. } = op {
                         candidates.push((update.operator_id, armed_block, update.clone()));
                         if update.operator_id == our_pubkey {
@@ -2761,10 +2817,19 @@ pub async fn recovery_claim_new(args: &[String]) -> Result<(), Box<dyn std::erro
             "  Hash: {}...",
             &hex::encode(signed_update.content_hash)[..16]
         );
+    } else if ruleset_named.as_ref().is_some_and(|(_, v)| {
+        deposits_core::types::ruleset_yield_evidence(v)
+    }) {
+        // DEP-06 "What a yield must say" (yield-evidence-v9): a lost draw is no reason yet.
+        println!("You did NOT win. Under yield-evidence-v9 a yield names the winning claim:");
+        println!(
+            "  once the winner's claim confirms, run 'recovery release {} --lost-to <claim txid>'.",
+            ledger_id
+        );
     } else {
         println!("You did NOT win. Publishing DisputeYield...");
 
-        let operation = LedgerOperation::DisputeYield;
+        let operation = LedgerOperation::dispute_yield();
         let message_bytes = operation.tlv_encode();
 
         let sequence = our_latest.sequence_number + 1;
