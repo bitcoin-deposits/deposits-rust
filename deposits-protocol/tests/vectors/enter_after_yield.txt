@@ -6,7 +6,8 @@
 # entry before a quorum_expired one; then content hash ascending), the first counted and each
 # later one at a higher sequence replacing it, except over a fork carrying its author's
 # DisputeAcquire, which nothing supersedes; and the disputant takes part through that entry and
-# the updates on its fork's chain only.  Superseding never ends a pledge (DEP-03 "When a pledge is
+# the updates past its fork point on the chain it is on (from that chain's first entry, so a
+# continuation shares its fork's) only.  Superseding never ends a pledge (DEP-03 "When a pledge is
 # live"): a pledge on a superseded fork stays held until its own valid yield or a binding claim of
 # its round or a later one.
 #

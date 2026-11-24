@@ -636,6 +636,7 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
         });
         let mut cur = es[0];
         let mut fork = fork_members(updates, cur.0);
+        // (`fork`: the counted fork's own updates, for the acquire block)
         for e in &es[1..] {
             let acquired = fork.iter().any(|&i| {
                 matches!(
@@ -651,10 +652,11 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
                 fork = fork_members(updates, cur.0);
             }
         }
-        // A disputant takes part through its counted DisputeEnter and the updates on that fork's
-        // chain only: any other entry it signed (below Q, superseded, not superseding) names no
-        // fork point, and an update on another of its forks is no part of the dispute (vectors
-        // rearm_round_agree.json, enter_after_yield.txt).
+        // A disputant takes part through its counted DisputeEnter and the updates on that entry's
+        // chain past its fork point only (the chain it is on, from its first entry: a continuation
+        // shares its fork's): any other entry it signed (below Q, superseded, not superseding)
+        // names no fork point, and an update on another of its forks is no part of the dispute
+        // (vectors rearm_round_agree.json, enter_after_yield.txt).
         let ch = updates[cur.0].content_hash;
         for (i, u) in updates.iter().enumerate() {
             if u.operator_id == updates[cur.0].operator_id
@@ -664,8 +666,12 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
                 keep[i] = true;
             }
         }
-        for i in fork {
-            if updates[i].sequence_number > cur.2 {
+        for i in chain_members(updates, cur.0) {
+            let enter = matches!(
+                LedgerOperation::tlv_decode(&updates[i].message),
+                Ok(LedgerOperation::DisputeEnter { .. })
+            );
+            if updates[i].sequence_number > cur.2 && !enter {
                 keep[i] = true;
             }
         }
@@ -676,6 +682,33 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
         .filter(|(_, k)| *k)
         .map(|(u, _)| u.clone())
         .collect()
+}
+
+/// The indices of the updates on the chain `updates[at]` is on: back by `previous_hash` through its
+/// author's updates to the first, then every one of the author's updates chained from that one
+/// (continuation entries included), found in one pass in sequence order.
+fn chain_members(updates: &[SignedLedgerUpdate], at: usize) -> Vec<usize> {
+    let author = updates[at].operator_id;
+    let mut mine: Vec<usize> = (0..updates.len())
+        .filter(|&i| updates[i].operator_id == author)
+        .collect();
+    mine.sort_by_key(|&i| updates[i].sequence_number);
+    let mut root = at;
+    while let Some(&p) = mine
+        .iter()
+        .find(|&&i| i != root && updates[i].chain_hash() == updates[root].previous_hash)
+    {
+        root = p;
+    }
+    let mut hashes = std::collections::HashSet::from([updates[root].chain_hash()]);
+    let mut out = vec![root];
+    for i in mine {
+        if i != root && hashes.contains(&updates[i].previous_hash) {
+            hashes.insert(updates[i].chain_hash());
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// The indices of the updates on the fork the DisputeEnter `updates[enter]` opens: its author's
