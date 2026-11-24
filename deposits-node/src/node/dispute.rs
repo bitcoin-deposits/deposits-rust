@@ -2329,6 +2329,7 @@ impl Node {
                 lost_to: Some(won.claim),
                 reestablished: None,
                 excluded_by: None,
+                superseded_by: None,
             };
             self.publish_custody_yield(ledger_id, &our_armed, reason).await?;
             return Ok(true);
@@ -2443,6 +2444,7 @@ impl Node {
                 lost_to: None,
                 reestablished: None,
                 excluded_by: Some(lottery_outpoint.txid.to_byte_array()),
+                superseded_by: None,
             };
             self.publish_custody_yield(ledger_id, &our_armed, reason).await?;
             return Ok(true);

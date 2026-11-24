@@ -335,7 +335,8 @@ RECOVERY SUBCOMMANDS:
                     if a violation is confirmed
     recovery prepare <ledger_id>
                     Prepare as a candidate for custody acquisition
-    recovery release <ledger_id> [--lost-to <txid> | --reestablished <hash> | --excluded-by <txid>]
+    recovery release <ledger_id> [--lost-to <txid> | --reestablished <hash> | --excluded-by <txid>
+                                  | --superseded-by <hash>]
                     Publish `DisputeYield` to close a candidate branch
                     that won't be selected, naming why (DEP-06; required
                     under yield-evidence-v9)

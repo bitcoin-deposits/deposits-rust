@@ -606,6 +606,7 @@ impl Node {
                 lost_to: None,
                 reestablished: named,
                 excluded_by: None,
+                superseded_by: None,
             };
             if let Err(e) = self.withdraw_dispute(&fork_key, height, reason).await {
                 tracing::warn!("Expiry dispute on {}: DisputeYield: {}", prefix, e);

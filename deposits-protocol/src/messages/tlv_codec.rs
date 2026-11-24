@@ -190,6 +190,7 @@ mod ledger_op_tlv {
     pub const YIELD_LOST_TO: u64 = 367;
     pub const YIELD_REESTABLISHED: u64 = 369;
     pub const YIELD_EXCLUDED_BY: u64 = 371;
+    pub const YIELD_SUPERSEDED_BY: u64 = 373;
     pub const OFFER_EVENT_ID: u64 = 310; // [u8; 32], DormancyAccept
     pub const ACCEPTED_TOTAL: u64 = 312; // u64, DormancyAccept
     pub const EXIT_ADDRESS: u64 = 300; // scriptPubKey bytes, ExitRequest
@@ -989,6 +990,7 @@ impl TlvEncode for LedgerOperation {
                 lost_to,
                 reestablished,
                 excluded_by,
+                superseded_by,
             } => {
                 if let Some(t) = lost_to {
                     builder = builder.bytes_field(YIELD_LOST_TO, t);
@@ -998,6 +1000,9 @@ impl TlvEncode for LedgerOperation {
                 }
                 if let Some(t) = excluded_by {
                     builder = builder.bytes_field(YIELD_EXCLUDED_BY, t);
+                }
+                if let Some(h) = superseded_by {
+                    builder = builder.bytes_field(YIELD_SUPERSEDED_BY, h);
                 }
             }
             Self::LedgerClose => {}
@@ -1386,6 +1391,7 @@ impl TlvDecode for LedgerOperation {
                 lost_to: reader.read_bytes_opt(YIELD_LOST_TO)?,
                 reestablished: reader.read_bytes_opt(YIELD_REESTABLISHED)?,
                 excluded_by: reader.read_bytes_opt(YIELD_EXCLUDED_BY)?,
+                superseded_by: reader.read_bytes_opt(YIELD_SUPERSEDED_BY)?,
             }),
             57 => {
                 let armed_block = reader.read_u32(ARMED_BLOCK)?;

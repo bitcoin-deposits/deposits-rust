@@ -2795,7 +2795,7 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(include_str!("../tests/vectors/yield_evidence.json")).unwrap();
         let cases = v["cases"].as_array().unwrap();
-        assert!(cases.len() >= 24);
+        assert!(cases.len() >= 35);
         for case in cases {
             let name = case["name"].as_str().unwrap();
             let r = &case["reasons"];
@@ -2803,9 +2803,11 @@ mod tests {
                 r[k].as_str()
                     .map(|t| bitcoin::Txid::from_str(t).unwrap().to_byte_array())
             };
-            let reestablished: Option<[u8; 32]> = r["reestablished"]
-                .as_str()
-                .map(|h| hex::decode(h).unwrap().try_into().unwrap());
+            let hash = |k: &str| -> Option<[u8; 32]> {
+                r[k].as_str()
+                    .map(|h| hex::decode(h).unwrap().try_into().unwrap())
+            };
+            let reestablished = hash("reestablished");
             let mut l = Ledger::new_as_operator(test_pubkey(), test_pubkey_2().to_string(), 0);
             l.state.quorum_state = QuorumState::Active;
             l.state.active_ruleset_name = case["ruleset"].as_str().unwrap().to_string();
@@ -2833,6 +2835,7 @@ mod tests {
                     lost_to: txid("lost_to"),
                     reestablished,
                     excluded_by: txid("excluded_by"),
+                    superseded_by: hash("superseded_by"),
                 },
                 100,
                 [0; 32],

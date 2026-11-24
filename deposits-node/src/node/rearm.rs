@@ -1263,6 +1263,7 @@ impl Node {
                     lost_to: None,
                     reestablished: None,
                     excluded_by: Some(cur.outpoint.txid.to_byte_array()),
+                    superseded_by: None,
                 };
                 self.publish_custody_yield(ledger_id, &our_armed, reason)
                     .await

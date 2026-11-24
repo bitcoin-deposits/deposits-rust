@@ -142,6 +142,28 @@ pub(crate) struct YieldContext<'a> {
     pub quorum_begins: &'a [([u8; 32], u64, bool)],
     /// The x-only keys of the lottery an `excluded_by` names, as the judge rebuilt it.
     pub participants: &'a [[u8; 32]],
+    /// The ledger this fork is of (its id).
+    pub ledger: [u8; 32],
+    /// The sequence of the yielded fork's own `DisputeEnter`.
+    pub fork_enter_seq: u64,
+    /// The `DisputeEnter`s the judge holds, for a `superseded_by`.
+    pub enters: &'a [EnterRef],
+}
+
+/// A `DisputeEnter` as a `superseded_by` judgment reads it.
+#[derive(Clone, Debug)]
+pub(crate) struct EnterRef {
+    /// Its `content_hash`.
+    pub hash: [u8; 32],
+    /// Its signer's x-only key.
+    pub by: [u8; 32],
+    /// The ledger it is of.
+    pub ledger: [u8; 32],
+    pub seq: u64,
+    /// Its reason is not `quorum_expired`.
+    pub punitive: bool,
+    /// It is on the ledger (its signer's chain of that ledger holds it).
+    pub on_ledger: bool,
 }
 
 /// The round of the lottery `txid` created for the dispute of `vaults`: 1 when it spends a
@@ -168,8 +190,8 @@ pub(crate) fn lottery_tx_round(
     (AcquireVerdict::NotThisLottery, 0)
 }
 
-/// The verdict on a `DisputeYield` carrying `lost_to` / `reestablished` / `excluded_by`, and
-/// why (the vector's `why`). `tx` answers a transaction and its block height (None:
+/// The verdict on a `DisputeYield` carrying `lost_to` / `reestablished` / `excluded_by` /
+/// `superseded_by`, and why (the vector's `why`). `tx` answers a transaction and its block height (None:
 /// unconfirmed), or None when the judge does not know it. Checked in the vector's order.
 pub(crate) fn judge_yield(
     tx: impl Fn(&Txid) -> Option<(Transaction, Option<u32>)>,
@@ -177,13 +199,14 @@ pub(crate) fn judge_yield(
     lost_to: Option<[u8; 32]>,
     reestablished: Option<[u8; 32]>,
     excluded_by: Option<[u8; 32]>,
+    superseded_by: Option<[u8; 32]>,
 ) -> (YieldVerdict, &'static str) {
     use bitcoin::hashes::Hash;
     use YieldVerdict::*;
     if !deposits_core::types::ruleset_yield_evidence(ctx.ruleset) {
         return (Valid, "legacy");
     }
-    let named = [lost_to, reestablished, excluded_by]
+    let named = [lost_to, reestablished, excluded_by, superseded_by]
         .iter()
         .filter(|r| r.is_some())
         .count();
@@ -242,6 +265,34 @@ pub(crate) fn judge_yield(
         }
         return (Valid, "valid");
     }
+    if let Some(h) = superseded_by {
+        // DEP-06, reason 4 (ruled 2026-11-24): only a fork that never armed, superseded by its
+        // disputant's own later DisputeEnter of the same ledger that is on the ledger.
+        if ctx.arm_round > 0 {
+            return (Invalid, "armed");
+        }
+        let Some(e) = superseded_judge_find(ctx.enters, &h) else {
+            return (Pending, "unknown-dispute-enter");
+        };
+        if e.by != ctx.yielder {
+            return (Invalid, "other-disputant");
+        }
+        if e.ledger != ctx.ledger {
+            return (Invalid, "other-ledger");
+        }
+        let later = if e.punitive {
+            e.seq >= ctx.fork_enter_seq
+        } else {
+            e.seq > ctx.fork_enter_seq
+        };
+        if !later {
+            return (Invalid, "not-later");
+        }
+        if !e.on_ledger {
+            return (Invalid, "not-on-ledger");
+        }
+        return (Valid, "valid");
+    }
     let t = Txid::from_byte_array(excluded_by.expect("one reason is named"));
     if let Err(v) = seen(&t) {
         return v;
@@ -255,6 +306,10 @@ pub(crate) fn judge_yield(
         (AcquireVerdict::Binds, _) => (Valid, "valid"),
         _ => (Invalid, "not-this-lottery"),
     }
+}
+
+fn superseded_judge_find<'a>(enters: &'a [EnterRef], h: &[u8; 32]) -> Option<&'a EnterRef> {
+    enters.iter().find(|e| e.hash == *h)
 }
 
 /// [`judge_acquire`] against a chain backend.
@@ -831,12 +886,16 @@ mod tests {
 
     /// A vector `reasons` object: txids (display hex) as wire bytes, the reestablished hash as
     /// written.
-    fn ye_reasons(r: &serde_json::Value) -> (Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>) {
+    #[allow(clippy::type_complexity)]
+    fn ye_reasons(
+        r: &serde_json::Value,
+    ) -> (Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>, Option<[u8; 32]>) {
         let txid = |k: &str| r[k].as_str().map(|t| Txid::from_str(t).unwrap().to_byte_array());
-        let hash = r["reestablished"]
-            .as_str()
-            .map(|h| hex::decode(h).unwrap().try_into().unwrap());
-        (txid("lost_to"), hash, txid("excluded_by"))
+        let hash = |k: &str| {
+            r[k].as_str()
+                .map(|h| hex::decode(h).unwrap().try_into().unwrap())
+        };
+        (txid("lost_to"), hash("reestablished"), txid("excluded_by"), hash("superseded_by"))
     }
 
     /// DEP-06 "What a yield must say" (`yield-evidence-v9`), against the vector shared with
@@ -847,11 +906,12 @@ mod tests {
         use deposits_core::{TlvDecode, TlvEncode};
         let v = ye_vector();
         for w in v["wire"].as_array().unwrap() {
-            let (lost_to, reestablished, excluded_by) = ye_reasons(&w["reasons"]);
+            let (lost_to, reestablished, excluded_by, superseded_by) = ye_reasons(&w["reasons"]);
             let op = LedgerOperation::DisputeYield {
                 lost_to,
                 reestablished,
                 excluded_by,
+                superseded_by,
             };
             assert_eq!(hex::encode(op.tlv_encode()), w["hex"].as_str().unwrap(), "{}", w["name"]);
             assert_eq!(
@@ -863,10 +923,10 @@ mod tests {
             );
         }
         let cases = v["cases"].as_array().unwrap();
-        assert!(cases.len() >= 24);
+        assert!(cases.len() >= 35);
         for c in cases {
             let name = c["name"].as_str().unwrap();
-            let (lost_to, reestablished, excluded_by) = ye_reasons(&c["reasons"]);
+            let (lost_to, reestablished, excluded_by, superseded_by) = ye_reasons(&c["reasons"]);
             // (The fold half is deposits-core's `yield_evidence_fold_vector`.)
             // The judge.
             let txs: HashMap<Txid, (Transaction, Option<u32>)> = c["txs"]
@@ -947,6 +1007,19 @@ mod tests {
                     )
                 })
                 .collect();
+            let enters: Vec<EnterRef> = c["enters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|e| EnterRef {
+                    hash: x32(&e["hash"]),
+                    by: x32(&e["by"]),
+                    ledger: x32(&e["ledger"]),
+                    seq: e["seq"].as_u64().unwrap(),
+                    punitive: !crate::node::expiry_watch::is_expiry_reason(e["reason"].as_str().unwrap()),
+                    on_ledger: e["on_ledger"].as_bool().unwrap(),
+                })
+                .collect();
             let participants: Vec<[u8; 32]> =
                 c["participants"].as_array().unwrap().iter().map(x32).collect();
             let ctx = YieldContext {
@@ -961,9 +1034,19 @@ mod tests {
                 last_valid_sequence: c["dispute"]["last_valid_sequence"].as_u64().unwrap(),
                 quorum_begins: &qbs,
                 participants: &participants,
+                ledger: x32(&c["ledger"]),
+                fork_enter_seq: c["fork_enter_seq"].as_u64().unwrap(),
+                enters: &enters,
             };
             let (verdict, why) =
-                judge_yield(|t| txs.get(t).cloned(), &ctx, lost_to, reestablished, excluded_by);
+                judge_yield(
+                    |t| txs.get(t).cloned(),
+                    &ctx,
+                    lost_to,
+                    reestablished,
+                    excluded_by,
+                    superseded_by,
+                );
             assert_eq!(verdict.name(), c["verdict"].as_str().unwrap(), "{name}: verdict");
             assert_eq!(why, c["why"].as_str().unwrap(), "{name}: why");
         }

@@ -1,5 +1,5 @@
 {
- "_doc": "DEP-06 \"What a yield must say\" (yield-evidence-v9, DEP-18; ruled 2026-11-23). Under yield-evidence-v9 a DisputeYield carries exactly one reason, each 32 bytes: lost_to (TLV 367, a claim txid), reestablished (TLV 369, a QuorumBegin update's content_hash), excluded_by (TLV 371, a confiscation or re-arm spend txid). `wire`: the DisputeYield operation's encoding with each reason (hashes as here: txids in display hex are stored as their wire bytes, i.e. reversed; the reestablished hash as written). `cases`: `fold` is whether a fork under `ruleset` takes the yield (structural: exactly one reason under yield-evidence-v9, anything under an earlier ruleset). `verdict` (valid | invalid | pending) and `why` are the judge's answer, checked in this order: legacy (ruleset without the rule) -> no-reason; lost_to: unconfirmed (unknown or no height), early (its height > yield_height), then the acquire_binding judgment against `vaults` (unconfirmed | not-a-claim | not-this-lottery), earlier-round (the round it closes < arm_round), own-claim (output 0 pays one of the yielder's `targets` or input 1 spends one of its `pledges`); reestablished: not-expiry (the dispute's reason is not quorum_expired), unknown-quorum-begin, not-after-fork-point (seq <= last_valid_sequence), rotation-unconfirmed; excluded_by: unconfirmed, early, the lottery's round walked back like a claim's input (the named tx spends a vault: round 1; a confirmed re-arm-shaped tx spending output 0 of the previous: one more; else not-this-lottery), earlier-round, in-lottery (the yielder's xonly is among `participants`, the set the judge rebuilt for that lottery). txs: `height` null = unconfirmed; `outputs` are scriptPubKeys (hex). arm_round is the yielder's latest arm's round before the yield. Shared by the spec, deposits-rust (deposits-core/tests/vectors/yield_evidence.json) and cl-deposits (inspect/vectors/yield_evidence.json).",
+ "_doc": "DEP-06 \"What a yield must say\" (yield-evidence-v9, DEP-18; ruled 2026-11-23). Under yield-evidence-v9 a DisputeYield carries exactly one reason, each 32 bytes: lost_to (TLV 367, a claim txid), reestablished (TLV 369, a QuorumBegin update's content_hash), excluded_by (TLV 371, a confiscation or re-arm spend txid), superseded_by (TLV 373, the content_hash of the yielder's own later DisputeEnter; ruled 2026-11-24). `wire`: the DisputeYield operation's encoding with each reason (hashes as here: txids in display hex are stored as their wire bytes, i.e. reversed; the reestablished and superseded_by hashes as written). `cases`: `fold` is whether a fork under `ruleset` takes the yield (structural: exactly one reason under yield-evidence-v9, anything under an earlier ruleset). `verdict` (valid | invalid | pending) and `why` are the judge's answer, checked in this order: legacy (ruleset without the rule) -> no-reason; lost_to: unconfirmed (unknown or no height), early (its height > yield_height), then the acquire_binding judgment against `vaults` (unconfirmed | not-a-claim | not-this-lottery), earlier-round (the round it closes < arm_round), own-claim (output 0 pays one of the yielder's `targets` or input 1 spends one of its `pledges`); reestablished: not-expiry (the dispute's reason is not quorum_expired), unknown-quorum-begin, not-after-fork-point (seq <= last_valid_sequence), rotation-unconfirmed; excluded_by: unconfirmed, early, the lottery's round walked back like a claim's input (the named tx spends a vault: round 1; a confirmed re-arm-shaped tx spending output 0 of the previous: one more; else not-this-lottery), earlier-round, in-lottery (the yielder's xonly is among `participants`, the set the judge rebuilt for that lottery); superseded_by: armed (arm_round > 0: the fork armed), unknown-dispute-enter (not among `enters`, the DisputeEnters the judge holds), other-disputant (`by` is not the yielder), other-ledger (`ledger` is not the case's), not-later (a punitive entry, reason not quorum_expired, at a seq below fork_enter_seq, the yielded fork's own DisputeEnter; an expiry entry at a seq not above it), not-on-ledger. txs: `height` null = unconfirmed; `outputs` are scriptPubKeys (hex). arm_round is the yielder's latest arm's round before the yield. Shared by the spec, deposits-rust (deposits-core/tests/vectors/yield_evidence.json) and cl-deposits (inspect/vectors/yield_evidence.json).",
  "wire": [
   {
    "name": "no reason",
@@ -26,6 +26,13 @@
     "excluded_by": "c8b9b7b100000000000000000000000000000000000000000000000000000002"
    },
    "hex": "000138fd01732002000000000000000000000000000000000000000000000000000000b1b7b9c8"
+  },
+  {
+   "name": "superseded_by",
+   "reasons": {
+    "superseded_by": "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"
+   },
+   "hex": "000138fd017520fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"
   }
  ],
  "cases": [
@@ -98,7 +105,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming the yielder's own claim (output 0 pays its target_reserves)",
@@ -169,7 +179,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming the yielder's own claim (input 1 spends its declared collateral)",
@@ -240,7 +253,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming a claim that does not bind (another lottery's output)",
@@ -325,7 +341,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming a re-arm spend, not a claim",
@@ -391,7 +410,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming a claim for an earlier round than the yielder's arm",
@@ -462,7 +484,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming a round-2 claim, the yielder armed round 2",
@@ -547,7 +572,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming a claim that confirmed after the yield was signed: early",
@@ -618,7 +646,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "lost_to naming an unconfirmed claim: no verdict yet",
@@ -689,7 +720,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "c8b9b7b1 under yield-evidence-v9: ref7's round-2 yield could name only its own later claim",
@@ -774,7 +808,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "reestablished: a QuorumBegin after the fork point, rotation spend confirmed",
@@ -817,7 +854,10 @@
      "spend_confirmed": true
     }
    ],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "reestablished naming a QuorumBegin at the fork point, not after it",
@@ -860,7 +900,10 @@
      "spend_confirmed": true
     }
    ],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "reestablished whose rotation spend is unconfirmed: no verdict yet",
@@ -903,7 +946,10 @@
      "spend_confirmed": false
     }
    ],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "reestablished naming a QuorumBegin the judge does not hold: no verdict yet",
@@ -940,7 +986,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "reestablished on a punitive dispute: a rotation does not end it",
@@ -983,7 +1032,10 @@
      "spend_confirmed": true
     }
    ],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "excluded_by: the confiscation's lottery, the yielder not among its participants",
@@ -1038,7 +1090,10 @@
    "participants": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   ]
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "excluded_by naming a lottery the yielder is in",
@@ -1094,7 +1149,10 @@
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "7777777777777777777777777777777777777777777777777777777777777777",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   ]
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "excluded_by: a round-2 re-arm spend's lottery, the yielder armed round 2 and is not in it",
@@ -1163,7 +1221,10 @@
    "participants": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   ]
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "excluded_by naming round 1's lottery when the yielder armed round 2",
@@ -1218,7 +1279,10 @@
    "participants": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   ]
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "excluded_by naming a transaction that is not this dispute's lottery",
@@ -1273,7 +1337,532 @@
    "participants": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
+  },
+  {
+   "name": "superseded_by: an un-armed fork, our punitive DisputeEnter on the same ledger, on the ledger",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
    ]
+  },
+  {
+   "name": "superseded_by: our later expiry DisputeEnter (a higher sequence) on the same ledger",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "valid",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 15,
+     "reason": "quorum_expired",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by on a fork that armed",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "armed",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming another disputant's DisputeEnter",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "other-disputant",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming a DisputeEnter of another ledger",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "other-ledger",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming a DisputeEnter at a lower sequence",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-later",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 9,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming an expiry DisputeEnter at the same sequence (not a later one)",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-later",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "quorum_expired",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming a DisputeEnter that is not on the ledger",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "invalid",
+   "why": "not-on-ledger",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": false
+    }
+   ]
+  },
+  {
+   "name": "superseded_by naming a DisputeEnter the judge does not hold: no verdict yet",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "pending",
+   "why": "unknown-dispute-enter",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
+  },
+  {
+   "name": "superseded_by with a second reason: the fold refuses it",
+   "ruleset": "yield-evidence-v9",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+    "reestablished": "5151515151515151515151515151515151515151515151515151515151515151"
+   },
+   "fold": "reject",
+   "verdict": "invalid",
+   "why": "no-reason",
+   "yield_height": 110,
+   "arm_round": 0,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": [
+    {
+     "hash": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e",
+     "by": "7777777777777777777777777777777777777777777777777777777777777777",
+     "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+     "seq": 11,
+     "reason": "equivocation",
+     "on_ledger": true
+    }
+   ]
+  },
+  {
+   "name": "superseded_by under strict-lottery-v8 is not judged",
+   "ruleset": "strict-lottery-v8",
+   "reasons": {
+    "superseded_by": "5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e5e"
+   },
+   "fold": "accept",
+   "verdict": "valid",
+   "why": "legacy",
+   "yield_height": 110,
+   "arm_round": 1,
+   "yielder": {
+    "xonly": "7777777777777777777777777777777777777777777777777777777777777777",
+    "targets": [
+     "51207a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a"
+    ],
+    "pledges": [
+     {
+      "txid": "d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7d7",
+      "vout": 1
+     }
+    ]
+   },
+   "vaults": [
+    {
+     "txid": "1111111111111111111111111111111111111111111111111111111111111111",
+     "vout": 0
+    }
+   ],
+   "txs": [],
+   "dispute": {
+    "reason": "quorum_expired",
+    "last_valid_sequence": 10
+   },
+   "quorum_begins": [],
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "no reason under yield-evidence-v9: the fold refuses it",
@@ -1308,7 +1897,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "two reasons under yield-evidence-v9: the fold refuses it",
@@ -1383,7 +1975,10 @@
    "participants": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-   ]
+   ],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "no reason under strict-lottery-v8: accepted, judged as before",
@@ -1418,7 +2013,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   },
   {
    "name": "a reason under strict-lottery-v8 is not judged (even one that would fail)",
@@ -1489,7 +2087,10 @@
     "last_valid_sequence": 10
    },
    "quorum_begins": [],
-   "participants": []
+   "participants": [],
+   "ledger": "1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d",
+   "fork_enter_seq": 11,
+   "enters": []
   }
  ]
 }

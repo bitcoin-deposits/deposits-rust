@@ -251,11 +251,13 @@ mod tests {
             lost_to: Some(named),
             reestablished: None,
             excluded_by: None,
+            superseded_by: None,
         };
         let excluded_by = LedgerOperation::DisputeYield {
             lost_to: None,
             reestablished: None,
             excluded_by: Some(named),
+            superseded_by: None,
         };
         assert_eq!(held(&lost_to, false), 1, "lost_to unconfirmed: the pledge is held");
         assert_eq!(held(&lost_to, true), 0, "lost_to confirmed: freed");

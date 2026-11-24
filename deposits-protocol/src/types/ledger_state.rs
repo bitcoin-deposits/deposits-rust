@@ -246,16 +246,15 @@ pub fn upgrade_verdict(from: &str, to: &str, declarations: &[Vec<String>]) -> Ru
 }
 
 /// The reference policy's target (DEP-18 §operator policy step 1): what a quorum moves to when
-/// every member declares it. Not yet `yield-evidence-v9`, which an operator names only by its
-/// own choice: one yield (an un-armed expiry disputant standing down for a punitive dispute) has
-/// no reason among its three.
-pub const POLICY_TARGET_RULESET: &str = STRICT_LOTTERY_V8;
-/// The ruleset a new ledger's `LedgerOpen` names.
-pub const NEW_LEDGER_RULESET: &str = STRICT_LOTTERY_V8;
+/// every member declares it.
+pub const POLICY_TARGET_RULESET: &str = YIELD_EVIDENCE_V9;
+/// The ruleset a new ledger's `LedgerOpen` names: the policy target, as cl-deposits'
+/// `+current-ruleset+` is both.
+pub const NEW_LEDGER_RULESET: &str = POLICY_TARGET_RULESET;
 
 /// DEP-18 §operator policy, not consensus: the ruleset an operator names at its
-/// next `QuorumBegin`. `strict-lottery-v8` when every member declares it, else
-/// `grounded-arms-v7`, else `balance-anchor-v6` when every member declares it;
+/// next `QuorumBegin`. `yield-evidence-v9` when every member declares it, else
+/// `strict-lottery-v8`, else `grounded-arms-v7`, else `balance-anchor-v6` when every member declares it;
 /// otherwise a `balance-commit-v4` ledger keeps it (`anchor-ladder-v5` lacks
 /// `MissingBalanceCommitment`), any other moves to `anchor-ladder-v5` when every
 /// member declares it; else the current ruleset, else `cltv-offset-v2`.

@@ -929,6 +929,9 @@ pub enum LedgerOperation {
         /// The txid (wire bytes) of the confiscation or re-arm spend whose lottery the yielder
         /// armed for and is not in.
         excluded_by: Option<[u8; 32]>,
+        /// The `content_hash` of the yielder's own later `DisputeEnter` on the same ledger that
+        /// supersedes this un-armed fork (ruled 2026-11-24).
+        superseded_by: Option<[u8; 32]>,
     },
 
     // ========== Delivery (1) ==========
@@ -982,6 +985,7 @@ impl LedgerOperation {
             lost_to: None,
             reestablished: None,
             excluded_by: None,
+            superseded_by: None,
         }
     }
 
@@ -993,8 +997,9 @@ impl LedgerOperation {
                 lost_to,
                 reestablished,
                 excluded_by,
+                superseded_by,
             } => Some(
-                [lost_to, reestablished, excluded_by]
+                [lost_to, reestablished, excluded_by, superseded_by]
                     .iter()
                     .filter(|r| r.is_some())
                     .count(),
@@ -2310,11 +2315,7 @@ impl BinaryCodec for LedgerOperation {
                 confiscation_txid: None,
             }),
             // DisputeYield (56)
-            56 => Ok(Self::DisputeYield {
-                lost_to: None,
-                reestablished: None,
-                excluded_by: None,
-            }),
+            56 => Ok(Self::dispute_yield()),
             // DisputeArmed (57)
             57 => {
                 let armed_block = read_u32(r)?;

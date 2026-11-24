@@ -1405,7 +1405,8 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
     // DEP-06 "What a yield must say": the yield's reason, required under yield-evidence-v9
     // (a fork under that ruleset refuses a yield with none). Txids in display hex; the
     // QuorumBegin's content hash as printed.
-    let (mut lost_to, mut reestablished, mut excluded_by) = (None, None, None);
+    let (mut lost_to, mut reestablished, mut excluded_by, mut superseded_by) =
+        (None, None, None, None);
     let hash32 = |v: Option<&String>, reverse: bool| -> Result<[u8; 32], String> {
         let mut b: [u8; 32] = hex::decode(v.ok_or("a 32-byte hex value is required")?)
             .map_err(|e| e.to_string())?
@@ -1430,6 +1431,10 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
             }
             "--excluded-by" => {
                 excluded_by = Some(hash32(args.get(i + 1), true)?);
+                i += 1;
+            }
+            "--superseded-by" => {
+                superseded_by = Some(hash32(args.get(i + 1), false)?);
                 i += 1;
             }
             arg if arg.starts_with("--") => {
@@ -1520,11 +1525,13 @@ pub async fn recovery_release(args: &[String]) -> Result<(), Box<dyn std::error:
         lost_to,
         reestablished,
         excluded_by,
+        superseded_by,
     };
     if custody_release.yield_reason_count() != Some(1) {
         println!(
             "  Note: no single reason given (--lost-to TXID | --reestablished HASH | \
-             --excluded-by TXID); a ledger under yield-evidence-v9 refuses such a yield"
+             --excluded-by TXID | --superseded-by HASH); a ledger under yield-evidence-v9 \
+             refuses such a yield"
         );
     }
     let message_bytes = custody_release.tlv_encode();
