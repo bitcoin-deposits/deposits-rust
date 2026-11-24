@@ -1,34 +1,43 @@
 # DEP-06 "A yield binds only its author" (ruled 2026-11-24, "latest counts"): no other member
 # reads a yield, and a disputant's later DisputeEnter supersedes its earlier fork for the scope
 # (DEP-03 "The dispute": voters, accused set, arms) whatever that fork's yield says, or whether it
-# yielded at all, with two exceptions, the same in every scope and in an ingest: a fork its author
-# acquired on (a DisputeAcquire on it) is never superseded, and at the same sequence only a
-# punitive entry supersedes an expiry one.  Superseding never ends a pledge (DEP-03 "When a pledge is live"): a pledge on a
-# superseded fork stays held until its own valid yield or a binding claim of its round or a later
-# one.
+# yielded at all.  The scope is a function of the SET of updates, never of their order: a
+# disputant's entries at or above Q in the canonical order (sequence; at one sequence a punitive
+# entry before a quorum_expired one; then content hash ascending), the first counted and each
+# later one at a higher sequence replacing it, except over a fork carrying its author's
+# DisputeAcquire, which nothing supersedes; and the disputant takes part through that entry and
+# the updates on its fork's chain only.  Superseding never ends a pledge (DEP-03 "When a pledge is
+# live"): a pledge on a superseded fork stays held until its own valid yield or a binding claim of
+# its round or a later one.
 #
 # deposits-rust: deposits-core/tests/enter_after_yield_vector.rs (rotation_order::dispute_scope,
 # the scope cases) and deposits-node node::dispute (forks_hold, the pledge cases).  cl-deposits:
-# inspect/lottery-test.lisp (dispute-scope; the ingest's rule, entry-supersedes-p, fed each case's
-# updates in order, must end on the scope's counted entry; superseded-entry /
-# superseded-pledges-held and fork-pledges-held for the pledge cases).
+# inspect/lottery-test.lisp (dispute-scope; superseded-entry / superseded-pledges-held and
+# fork-pledges-held for the pledge cases) and inspect/node-test.lisp (its ingest, in every arrival
+# order).  Both run each scope case in every order of its updates (all permutations up to six
+# updates; else the input order, its reverse and 300 shuffles) and require the same scope.
 #
 # Scope cases:
 #   case <name> ... end
-#   u <who> <seq> <kind> [args] [h=<height>] [as=<tag>]
+#   u <who> <seq> <kind> [args] [h=<height>] [as=<tag>] [on=<tag>]
 #       who: o = the ledger's operator, a..z = disputants; tag <who>:<seq>, or as=<tag>.
 #       kinds: open | other | qb | enter <lvs> [punitive] [cont] | arm [<round>] | acquire
 #              | yield [lost_to=<name>] [excluded_by=<name>] [reestablished=<tag>] [superseded_by=<tag>]
 #   expect <tag> ...         dispute_scope's kept updates, in input order
-# Building them: ledger_id 32 x 0x09, block_hash 32 x 0x01, previous_hash 32 x 0, signature
-# 64 x 0, block_height h (default 0); each who a distinct key; a punitive enter's reason
-# "equivocation", any other "quorum_expired"; a yield's TLVs SHA256("tx:" || name) for lost_to /
-# excluded_by and SHA256("enter_after_yield:" || tag) for reestablished / superseded_by (the
-# scope reads none of them); an arm: armed_block 0, commitment 20 x 0, target "", rearm_round
+# Building them: each who's key the compressed public key of the secret key 32 x <its character
+# code>; ledger_id 32 x 0x09, block_hash 32 x 0x01, signature 64 x 0, no cosignatures, block_height
+# h (default 0); content_hash the update's DEP-02 hash and its chain hash SHA256(content_hash ||
+# signature), as for any update.  previous_hash: an operator update's, the chain hash of the
+# operator's update before it (32 x 0 for the first); an enter's, the chain hash of the operator's
+# update at its last_valid_sequence, or with "cont" of its fork's latest update (a continuation
+# onto the fork's tip); any other disputant update's, the chain hash of the latest update on its
+# fork (its latest DisputeEnter's, or on=<tag>'s); a chain hash of a tag no update carries is
+# SHA256(SHA256("enter_after_yield:" || tag) || 64 x 0).  A punitive enter's reason "equivocation", any
+# other "quorum_expired"; a yield's TLVs SHA256("tx:" || name) for lost_to / excluded_by, and for
+# reestablished / superseded_by the content hash of the update tagged so (SHA256("enter_after_yield:"
+# || tag) when there is none); an arm: armed_block 0, commitment 20 x 0, target "", rearm_round
 # <round> when > 1; an acquire: new_custodian the key of "m", claim_txid SHA256("tx:claim"),
-# new_reserves_address "".  A disputant update's previous_hash is the chain hash of the latest
-# update on its fork (its latest DisputeEnter's); an enter's is the operator's update at its
-# last_valid_sequence, or with "cont" its fork's latest update (a continuation onto the fork's tip).
+# new_reserves_address "".
 #
 # Pledge cases, one disputant's (our) forks of one ledger:
 #   pledge <name> ... end
@@ -198,7 +207,7 @@ u a 6 enter 5 punitive
 u a 6 enter 5 as=a:6e
 expect o:0 o:5 a:6
 end
-# 16. Same sequence, same kind: the first stays.
+# 16. Same sequence, same kind: the lower content hash counts, whatever the order.
 case same-sequence-same-kind
 u o 0 open
 u o 5 qb
@@ -216,6 +225,28 @@ u o 8 other
 u a 9 enter 8 cont
 u a 10 arm
 expect o:0 o:5 o:8 a:9 a:10
+end
+# 18. An acquire arriving after a later entry: the acquired fork stands, the later entry is out.
+case acquire-after-later-entry
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u o 10 other
+u a 11 enter 10
+u a 8 acquire on=a:6
+expect o:0 o:5 a:6 a:7 o:10 a:8
+end
+# 19. A superseded fork's arm above the counted fork point is no part of the dispute: only the
+#     counted fork's chain is.
+case superseded-fork-arm-out
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm on=a:6
+u a 6 enter 5 punitive as=a:6p
+u a 7 arm on=a:6p as=a:7p
+expect o:0 o:5 a:6p a:7p
 end
 
 # P1. An armed fork superseded by our re-entry keeps its pledge; the new fork's is held too.

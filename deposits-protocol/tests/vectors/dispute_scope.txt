@@ -6,6 +6,11 @@
 #   u <who> <seq> open|qb|enter <lvs>|other     (who: o = the operator, a..z = disputants)
 #   expect <who>:<seq> ...                       (the kept updates, in input order)
 #   end
+# Chaining (a disputant takes part through its counted fork's CHAIN only): an operator update's
+# previous_hash is the chain hash of the operator's update before it (32 x 0 for the first); a
+# DisputeEnter's, the chain hash of the operator's update at its last_valid_sequence (32 x 0 when
+# there is none); any other disputant update's, the chain hash of that disputant's latest update
+# since its latest DisputeEnter.  content_hash is the update's DEP-02 hash.
 #
 # 1. The soak case (2026-11-02): a's old dispute (on a vault since rotated) and its arm drop;
 #    its new DisputeEnter and everything after it stay.

@@ -35,7 +35,7 @@ fn opt<'a>(w: &'a [&'a str], k: &str) -> Option<&'a str> {
     w.iter().find_map(|t| t.strip_prefix(k))
 }
 
-fn op_of(w: &[&str]) -> LedgerOperation {
+fn op_of(w: &[&str], refh: &dyn Fn(&str) -> [u8; 32]) -> LedgerOperation {
     match w[0] {
         "open" => LedgerOperation::LedgerOpen {
             operator_id: key('o'),
@@ -98,9 +98,9 @@ fn op_of(w: &[&str]) -> LedgerOperation {
         },
         "yield" => LedgerOperation::DisputeYield {
             lost_to: opt(w, "lost_to=").map(txid),
-            reestablished: opt(w, "reestablished=").map(tag_hash),
+            reestablished: opt(w, "reestablished=").map(refh),
             excluded_by: opt(w, "excluded_by=").map(txid),
-            superseded_by: opt(w, "superseded_by=").map(tag_hash),
+            superseded_by: opt(w, "superseded_by=").map(refh),
         },
         _ => LedgerOperation::dispute_yield(),
     }
@@ -114,6 +114,7 @@ fn enter_after_yield_vector() {
     let mut tags: Vec<String> = Vec::new();
     let mut fork_of: Vec<String> = Vec::new(); // the enter tag each disputant update is on
     let mut cases = 0;
+    let mut orderings = 0;
     let mut in_case = false;
     for line in text
         .lines()
@@ -138,12 +139,15 @@ fn enter_after_yield_vector() {
                 let tag = opt(rest, "as=")
                     .map(String::from)
                     .unwrap_or(format!("{}:{}", who, seq));
-                let op = op_of(rest);
+                let built = |t: &str| tags.iter().position(|x| x == t).map(|i| &ups[i]);
+                let refh = |t: &str| built(t).map(|u| u.content_hash).unwrap_or_else(|| tag_hash(t));
+                let chain_of = |t: &str| built(t).map(|u| u.chain_hash()).unwrap_or_else(|| chain_of(t));
+                let op = op_of(rest, &refh);
                 let previous_hash = if who == 'o' {
                     (0..ups.len())
                         .rev()
                         .find(|&i| ups[i].operator_id == key('o'))
-                        .map(|i| chain_of(&tags[i]))
+                        .map(|i| ups[i].chain_hash())
                         .unwrap_or([0; 32])
                 } else if rest[0] == "enter" && !rest.contains(&"cont") {
                     if rest.contains(&"offledger") {
@@ -173,19 +177,21 @@ fn enter_after_yield_vector() {
                 } else {
                     tag_hash_fork(&ups, &tags, &fork_of, &previous_hash)
                 };
-                ups.push(SignedLedgerUpdate {
+                let mut u = SignedLedgerUpdate {
                     message: op.tlv_encode(),
                     message_type: 1,
                     operator_id: key(who),
                     ledger_id: [9; 32],
                     sequence_number: seq,
                     previous_hash,
-                    content_hash: tag_hash(&tag),
+                    content_hash: [0; 32],
                     block_height: opt(rest, "h=").map(|x| x.parse().unwrap()).unwrap_or(0),
                     block_hash: [1; 32],
                     operator_signature: [0; 64],
                     cosignatures: Vec::new(),
-                });
+                };
+                u.content_hash = u.compute_hash();
+                ups.push(u);
                 tags.push(tag);
                 fork_of.push(fork);
             }
@@ -198,12 +204,27 @@ fn enter_after_yield_vector() {
                 let want: Vec<String> = w[1..].iter().map(|s| s.to_string()).collect();
                 assert_eq!(got, want, "case {}", name);
                 cases += 1;
+                // a function of the SET: every order of the same updates, the same scope
+                let mut sorted_want = want.clone();
+                sorted_want.sort();
+                let orders = permutations_or_shuffles(ups.len());
+                for ord in &orders {
+                    let perm: Vec<SignedLedgerUpdate> = ord.iter().map(|&i| ups[i].clone()).collect();
+                    let mut got: Vec<String> = dispute_scope(&perm)
+                        .iter()
+                        .map(|k| tags[ups.iter().position(|u| u == k).unwrap()].clone())
+                        .collect();
+                    got.sort();
+                    assert_eq!(got, sorted_want, "case {} in order {:?}", name, ord);
+                }
+                orderings += orders.len();
             }
             "end" => {}
             _ => panic!("case {}: {}", name, line),
         }
     }
-    assert_eq!(cases, 17);
+    assert_eq!(cases, 19);
+    assert!(orderings > 1000, "{} orders", orderings);
 }
 
 /// The fork (its DisputeEnter's tag) of the update whose content hash is `prev`.
@@ -215,4 +236,39 @@ fn tag_hash_fork(
 ) -> String {
     let i = ups.iter().position(|u| u.chain_hash() == *prev).unwrap();
     fork_of[i].clone()
+}
+
+/// Every permutation of 0..n when n <= 6, else the identity, its reverse and 300 fixed shuffles
+/// (a 31-bit LCG seeded at 1), as cl-deposits' PERMUTATIONS-OR-SHUFFLES.
+fn permutations_or_shuffles(n: usize) -> Vec<Vec<usize>> {
+    fn perms(l: &[usize]) -> Vec<Vec<usize>> {
+        if l.is_empty() {
+            return vec![vec![]];
+        }
+        let mut out = Vec::new();
+        for (k, &x) in l.iter().enumerate() {
+            let mut rest = l.to_vec();
+            rest.remove(k);
+            for mut p in perms(&rest) {
+                p.insert(0, x);
+                out.push(p);
+            }
+        }
+        out
+    }
+    let ids: Vec<usize> = (0..n).collect();
+    if n <= 6 {
+        return perms(&ids);
+    }
+    let mut out = vec![ids.clone(), ids.iter().rev().copied().collect()];
+    let mut seed: u64 = 1;
+    for _ in 0..300 {
+        let mut v = ids.clone();
+        for i in (1..n).rev() {
+            seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+            v.swap(i, (seed % (i as u64 + 1)) as usize);
+        }
+        out.push(v);
+    }
+    out
 }

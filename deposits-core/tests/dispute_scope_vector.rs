@@ -76,7 +76,7 @@ fn update(who: char, seq: u64, op: &LedgerOperation) -> SignedLedgerUpdate {
 #[test]
 fn dispute_scope_vector() {
     let text = include_str!("../../deposits-protocol/tests/vectors/dispute_scope.txt");
-    let (mut name, mut ups, mut cases) = (String::new(), Vec::new(), 0);
+    let (mut name, mut ups, mut cases) = (String::new(), Vec::<SignedLedgerUpdate>::new(), 0);
     let mut tags: Vec<(char, u64)> = Vec::new();
     for line in text
         .lines()
@@ -93,11 +93,28 @@ fn dispute_scope_vector() {
             "u" => {
                 let who = w[1].chars().next().unwrap();
                 let seq: u64 = w[2].parse().unwrap();
-                ups.push(update(
+                let mut u = update(
                     who,
                     seq,
                     &op_of(w[3], w.get(4).map(|s| s.parse().unwrap())),
-                ));
+                );
+                let chain_at = |pred: &dyn Fn(usize) -> bool| {
+                    (0..ups.len())
+                        .rev()
+                        .find(|&i| pred(i))
+                        .map(|i| ups[i].chain_hash())
+                        .unwrap_or([0; 32])
+                };
+                u.previous_hash = if who == 'o' {
+                    chain_at(&|i| tags[i].0 == 'o')
+                } else if w[3] == "enter" {
+                    let lvs: u64 = w[4].parse().unwrap();
+                    chain_at(&|i| tags[i] == ('o', lvs))
+                } else {
+                    chain_at(&|i| tags[i].0 == who)
+                };
+                u.content_hash = u.compute_hash();
+                ups.push(u);
                 tags.push((who, seq));
             }
             "expect" => {
