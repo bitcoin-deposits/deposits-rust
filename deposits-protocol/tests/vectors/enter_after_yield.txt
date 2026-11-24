@@ -1,0 +1,286 @@
+# DEP-06 "A yield binds only its author" (ruled 2026-11-24): the one place another member acts on
+# a yield is a disputant's later DisputeEnter arriving on its yielded fork.  It is taken only on a
+# valid verdict; pending counts as live, so the new entry waits (and is asked again on the next
+# tip), and so does one after an invalid yield.  superseded_by is judged from the updates alone;
+# lost_to, excluded_by and reestablished use the chain view.  Read through DEP-03 "The dispute"
+# (dispute_scope): a disputant counts through its latest DisputeEnter at or above Q, past a
+# yielded fork only on a valid verdict (then at the same sequence too).
+#
+# deposits-rust: deposits-core/tests/enter_after_yield_vector.rs (rotation_order::dispute_scope_with,
+# reentry_yield_verdict).  cl-deposits: inspect/lottery-test.lisp (dispute-scope :chain,
+# reentry-yield-verdict, and the ingest's reentry-takes-p).
+#
+#   u <who> <seq> <kind> [args] [h=<height>] [on=<tag>] [as=<tag>]
+#       who: o = the ledger's operator, a..z = disputants.  The update's tag is <who>:<seq>, or
+#       as=<tag>.  h: its signed block_height (default 0).
+#       kinds: open | other | qb [tx=<name>] | enter <lvs> [punitive] [offledger] | arm [<round>]
+#              | yield [lost_to=<name>] [excluded_by=<name>] [reestablished=<tag>] [superseded_by=<tag>]
+#   chain <name> <height>    transaction <name> confirmed at <height>; any other is unconfirmed
+#   nochain                  the judge has no chain view: a chain reason reads as published
+#   verdict <tag> valid|invalid|pending    reentry_yield_verdict of that yield
+#   expect <tag> ...         dispute_scope's kept updates, in input order
+#   end
+#
+# Building the updates (both harnesses alike):
+#   ledger_id = 32 x 0x09, block_hash = 32 x 0x01, operator_signature = 64 x 0, block_height = h.
+#   Each who is a distinct key.  An update's content hash is the implementation's own:
+#   deposits-rust sets the field to SHA256("enter_after_yield:" || tag) (it is not recomputed),
+#   cl-deposits computes it from the header (DEP-02); its chain hash is SHA256(content hash ||
+#   signature) either way.  REF(tag) = the content hash, and CHAIN(tag) the chain hash, of the
+#   update built earlier in the case under that tag; of a tag not built (yet), SHA256 of
+#   "enter_after_yield:" || tag, and SHA256 of that || 64 x 0.  txid(name) = SHA256("tx:" ||
+#   name), internal byte order.
+#   previous_hash: the operator's: CHAIN(its previous update) (32 x 0 at seq 0).  A
+#   DisputeEnter's: CHAIN("o:<lvs>"), or 32 x 0xEE when offledger.  Any other disputant update's:
+#   CHAIN(the latest update on its fork so far), the fork being on=<tag> or else its author's
+#   latest DisputeEnter so far.  A punitive enter's reason is "equivocation", any other
+#   "quorum_expired".  A QuorumBegin's new_outpoint_txid is txid(<name>) (32 x 0x01 without
+#   tx=).  A yield's TLVs: lost_to / excluded_by = txid(<name>), reestablished / superseded_by =
+#   REF(<tag>).  An arm: armed_block 0, commitment 20 x 0, target "", rearm_round <round> when > 1.
+#
+# 1. lost_to, the claim confirmed at or below the yield's height: valid, the new entry is taken.
+case lost-to-valid-takes
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield lost_to=C h=100
+u o 10 other
+u a 11 enter 10
+chain C 90
+verdict a:8 valid
+expect o:0 o:5 o:10 a:11
+end
+# 2. lost_to, the claim not confirmed: pending counts as live; the new entry waits.
+case lost-to-pending-waits
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield lost_to=C h=100
+u o 10 other
+u a 11 enter 10
+verdict a:8 pending
+expect o:0 o:5 a:6 a:7 a:8 o:10
+end
+# 3. lost_to, the claim confirmed above the yield's height (named before it existed): invalid,
+#    void; the yielded fork is still the disputant's and the new entry waits.
+case lost-to-early-invalid-waits
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield lost_to=C h=100
+u o 10 other
+u a 11 enter 10
+chain C 150
+verdict a:8 invalid
+expect o:0 o:5 a:6 a:7 a:8 o:10
+end
+# 4. No chain view: lost_to reads as published.
+case lost-to-no-chain-view
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield lost_to=C h=100
+u o 10 other
+u a 11 enter 10
+nochain
+verdict a:8 valid
+expect o:0 o:5 o:10 a:11
+end
+# 5. excluded_by, the lottery's transaction confirmed: valid, taken.
+case excluded-by-valid-takes
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield excluded_by=L h=100
+u o 10 other
+u a 11 enter 10
+chain L 100
+verdict a:8 valid
+expect o:0 o:5 o:10 a:11
+end
+# 6. excluded_by, not confirmed: pending, waits; b, who never yielded, is unaffected.
+case excluded-by-pending-waits
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u b 6 enter 5
+u a 7 arm
+u a 8 yield excluded_by=L h=100
+u o 10 other
+u a 11 enter 10
+u b 11 other
+verdict a:8 pending
+expect o:0 o:5 a:6 b:6 a:7 a:8 o:10 b:11
+end
+# 7. reestablished, the QuorumBegin after the fork point and its rotation confirmed: valid; the
+#    new entry (at a fork point before that QuorumBegin, so Q does not move past the old fork)
+#    is taken.
+case reestablished-valid-takes
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 7 other
+u a 8 enter 7 as=a:8e
+u o 9 qb tx=R
+u a 10 yield reestablished=o:9 h=100 on=a:6
+chain R 99
+verdict a:10 valid
+expect o:0 o:5 o:7 a:8e o:9 a:10
+end
+# 8. reestablished, its rotation not confirmed: pending; the expiry fork stays and the new entry waits.
+case reestablished-pending-waits
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 7 other
+u a 8 enter 7 as=a:8e
+u o 9 qb tx=R
+u a 10 yield reestablished=o:9 h=100 on=a:6
+verdict a:10 pending
+expect o:0 o:5 a:6 o:7 o:9 a:10
+end
+# 9. reestablished naming a QuorumBegin at or before the fork point: invalid; waits.
+case reestablished-before-fork-point-invalid
+u o 0 open
+u o 5 qb tx=R
+u a 6 enter 5
+u o 7 other
+u a 8 enter 7 as=a:8e
+u a 9 yield reestablished=o:5 h=100 on=a:6
+chain R 50
+verdict a:9 invalid
+expect o:0 o:5 a:6 o:7 a:9
+end
+# 10. Q moves past the old fork (a later QuorumBegin at or below the new fork point): the old
+#     fork is no part of the dispute whatever its yield says; the new entry counts.
+case quorum-begin-past-old-fork
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 9 qb tx=R
+u a 10 yield reestablished=o:9 h=100 on=a:6
+u o 12 other
+u a 13 enter 12
+verdict a:10 pending
+expect o:0 o:5 o:9 o:12 a:13
+end
+# 11. superseded_by (chain-free): the un-armed expiry fork yields naming its disputant's own later
+#     punitive DisputeEnter, on the ledger: valid, taken.  No chain view is needed.
+case superseded-by-valid-takes
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 7 other
+u a 8 enter 7 punitive
+u a 9 yield superseded_by=a:8 h=100 on=a:6
+verdict a:9 valid
+expect o:0 o:5 o:7 a:8 a:9
+end
+# 12. superseded_by at the SAME sequence (a punitive entry at the expiry fork's own fork point):
+#     valid, and the same-sequence entry may replace it.
+case superseded-by-same-sequence
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 6 enter 5 punitive as=a:6p
+u a 9 yield superseded_by=a:6p h=100 on=a:6
+verdict a:9 valid
+expect o:0 o:5 a:6 a:6p a:9
+end
+# 13. superseded_by, the operator's update the new entry forks from not held: pending; waits.
+case superseded-by-base-unknown-pending
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 8 enter 7 punitive
+u a 9 yield superseded_by=a:8 h=100 on=a:6
+verdict a:9 pending
+expect o:0 o:5 a:6 a:9
+end
+# 14. superseded_by, the named entry not held at all: pending; another later entry waits too.
+case superseded-by-unknown-enter-pending
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 11 other
+u a 9 yield superseded_by=a:8 h=100 on=a:6
+u a 12 enter 11
+verdict a:9 pending
+expect o:0 o:5 a:6 o:11 a:9
+end
+# 15. superseded_by on a fork that ARMED before its yield: invalid; waits.
+case superseded-by-armed-invalid
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u o 7 other
+u a 8 enter 7 punitive
+u a 9 yield superseded_by=a:8 h=100 on=a:6
+verdict a:9 invalid
+expect o:0 o:5 a:6 a:7 o:7 a:9
+end
+# 16. superseded_by naming an entry that does not chain onto the ledger: invalid; waits.
+case superseded-by-off-ledger-invalid
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 7 other
+u a 8 enter 7 punitive offledger
+u a 9 yield superseded_by=a:8 h=100 on=a:6
+verdict a:9 invalid
+expect o:0 o:5 a:6 o:7 a:9
+end
+# 17. superseded_by naming ANOTHER disputant's entry: invalid; a's new entry waits, b's counts.
+case superseded-by-other-disputant-invalid
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u o 7 other
+u b 8 enter 7 punitive
+u a 9 yield superseded_by=b:8 h=100 on=a:6
+u a 10 enter 7 punitive
+verdict a:9 invalid
+expect o:0 o:5 a:6 o:7 b:8 a:9
+end
+# 18. Two reasons: invalid; waits.
+case two-reasons-invalid
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield lost_to=C excluded_by=L h=100
+u o 10 other
+u a 11 enter 10
+chain C 90
+chain L 90
+verdict a:8 invalid
+expect o:0 o:5 a:6 a:7 a:8 o:10
+end
+# 19. A yield naming no reason (an earlier ruleset's): valid, taken, as before the ruling.
+case legacy-yield-takes
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 yield h=100
+u o 10 other
+u a 11 enter 10
+verdict a:8 valid
+expect o:0 o:5 o:10 a:11
+end
+# 20. No yield on the old fork: the latest entry counts, as before (DEP-03 "The dispute").
+case no-yield-latest-counts
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u o 10 other
+u a 11 enter 10
+expect o:0 o:5 o:10 a:11
+end

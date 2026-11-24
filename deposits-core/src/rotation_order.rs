@@ -368,6 +368,211 @@ pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 3
         .map(|(_, t)| t)
 }
 
+/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): the verdict another member gives
+/// a disputant's `DisputeYield` when that disputant's later `DisputeEnter` would replace the
+/// yielded fork. It is the one place a yield is read by anyone but its author (no voters,
+/// lottery set, tier or round reads it). `Pending` counts as live: the new entry waits, and is
+/// asked again (every caller recomputes, so on the next tip).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReentryVerdict {
+    Valid,
+    Invalid,
+    Pending,
+}
+
+/// A chain view for [`reentry_yield_verdict`]: a txid (internal byte order) to the height of the
+/// block confirming it, `None` while unconfirmed or unknown.
+pub type ChainView<'a> = &'a dyn Fn(&[u8; 32]) -> Option<u32>;
+
+type ChainViewFn = Box<dyn Fn(&[u8; 32]) -> Option<u32> + Send + Sync>;
+static YIELD_CHAIN_VIEW: std::sync::OnceLock<ChainViewFn> = std::sync::OnceLock::new();
+
+/// Install the process's chain view for [`dispute_scope`] (the node does, once, at start).
+/// Without one, the chain reasons of a yield read as published, as cl's do with no chain view.
+pub fn set_yield_chain_view(f: ChainViewFn) -> bool {
+    YIELD_CHAIN_VIEW.set(f).is_ok()
+}
+
+fn installed_chain_view() -> Option<ChainView<'static>> {
+    YIELD_CHAIN_VIEW
+        .get()
+        .map(|b| b.as_ref() as ChainView<'static>)
+}
+
+fn is_expiry_reason(reason: &str) -> bool {
+    reason.replace('-', "_") == "quorum_expired"
+}
+
+/// The updates on the fork `enter` opens: its author's non-`DisputeEnter` updates chained (each
+/// `previous_hash` the `chain_hash` of the one before) from it.
+fn fork_from<'a>(
+    updates: &'a [SignedLedgerUpdate],
+    enter: &SignedLedgerUpdate,
+) -> Vec<&'a SignedLedgerUpdate> {
+    let mut hashes = vec![enter.chain_hash()];
+    let mut out: Vec<&SignedLedgerUpdate> = Vec::new();
+    loop {
+        let before = out.len();
+        for u in updates
+            .iter()
+            .filter(|u| u.operator_id == enter.operator_id)
+        {
+            if out.iter().any(|o| std::ptr::eq(*o, u)) || !hashes.contains(&u.previous_hash) {
+                continue;
+            }
+            if matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeEnter { .. })
+            ) {
+                continue;
+            }
+            hashes.push(u.chain_hash());
+            out.push(u);
+        }
+        if out.len() == before {
+            return out;
+        }
+    }
+}
+
+/// DEP-06 "A yield binds only its author": the verdict on `yld`, the `DisputeYield` on the fork
+/// `enter` opens, as another member reads it when that disputant enters again. Mirrors cl's
+/// REENTRY-YIELD-VERDICT; vector `enter_after_yield.txt`.
+///
+/// No reason: valid (a yield before yield-evidence-v9; the v9 fold refuses one). More than one:
+/// invalid. `superseded_by` is judged from `updates` alone (chain-free): invalid if the fork armed
+/// before the yield, pending until the named `DisputeEnter` is held, invalid if another
+/// disputant's or ledger's or not later (a punitive one at or after the fork's own entry, any
+/// other strictly after), pending until the operator's update it forks from is held, invalid if
+/// it does not chain onto it. The others use `chain` (`None`: as published): `lost_to` and
+/// `excluded_by` are pending until the named transaction confirms, invalid if it confirmed above
+/// the yield's height; `reestablished` needs an expiry dispute and a `QuorumBegin` of the
+/// operator's after the fork point, pending until it is held and its rotation confirmed.
+pub fn reentry_yield_verdict(
+    updates: &[SignedLedgerUpdate],
+    enter: &SignedLedgerUpdate,
+    yld: &SignedLedgerUpdate,
+    chain: Option<ChainView<'_>>,
+) -> ReentryVerdict {
+    use ReentryVerdict::*;
+    let Ok(LedgerOperation::DisputeEnter {
+        last_valid_sequence: lvs,
+        reason,
+        ..
+    }) = LedgerOperation::tlv_decode(&enter.message)
+    else {
+        return Invalid;
+    };
+    let Ok(LedgerOperation::DisputeYield {
+        lost_to,
+        reestablished,
+        excluded_by,
+        superseded_by,
+    }) = LedgerOperation::tlv_decode(&yld.message)
+    else {
+        return Invalid;
+    };
+    let named = [lost_to, reestablished, excluded_by, superseded_by]
+        .iter()
+        .filter(|r| r.is_some())
+        .count();
+    if named == 0 {
+        return Valid;
+    }
+    if named > 1 {
+        return Invalid;
+    }
+    let origin = updates
+        .iter()
+        .find(|u| u.sequence_number == 0)
+        .map(|u| u.operator_id);
+    let confirmed = |t: &[u8; 32]| -> Option<Option<u32>> { chain.map(|c| c(t)) };
+    if let Some(t) = lost_to.or(excluded_by) {
+        return match confirmed(&t) {
+            None => Valid,
+            Some(None) => Pending,
+            Some(Some(h)) if h > yld.block_height => Invalid,
+            Some(Some(_)) => Valid,
+        };
+    }
+    if let Some(q) = reestablished {
+        if !is_expiry_reason(&reason) {
+            return Invalid;
+        }
+        let qb = updates.iter().find_map(|u| {
+            if Some(u.operator_id) != origin || u.content_hash != q {
+                return None;
+            }
+            match LedgerOperation::tlv_decode(&u.message) {
+                Ok(LedgerOperation::QuorumBegin {
+                    new_outpoint_txid, ..
+                }) => Some((u.sequence_number, new_outpoint_txid)),
+                _ => None,
+            }
+        });
+        let Some((qseq, rotation)) = qb else {
+            return Pending;
+        };
+        if qseq <= lvs {
+            return Invalid;
+        }
+        return match confirmed(&rotation) {
+            Some(None) => Pending,
+            _ => Valid,
+        };
+    }
+    let Some(s) = superseded_by else {
+        return Invalid;
+    };
+    let armed = fork_from(updates, enter).iter().any(|u| {
+        u.sequence_number < yld.sequence_number
+            && matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeArmed { .. })
+            )
+    });
+    if armed {
+        return Invalid;
+    }
+    let Some((n, n_lvs, n_reason)) = updates.iter().find_map(|u| {
+        if u.content_hash != s {
+            return None;
+        }
+        match LedgerOperation::tlv_decode(&u.message) {
+            Ok(LedgerOperation::DisputeEnter {
+                last_valid_sequence,
+                reason,
+                ..
+            }) => Some((u, last_valid_sequence, reason)),
+            _ => None,
+        }
+    }) else {
+        return Pending;
+    };
+    if n.operator_id != yld.operator_id {
+        return Invalid;
+    }
+    if n.ledger_id != enter.ledger_id {
+        return Invalid;
+    }
+    let later = if is_expiry_reason(&n_reason) {
+        n.sequence_number > enter.sequence_number
+    } else {
+        n.sequence_number >= enter.sequence_number
+    };
+    if !later {
+        return Invalid;
+    }
+    match updates
+        .iter()
+        .find(|u| Some(u.operator_id) == origin && u.sequence_number == n_lvs)
+    {
+        None => Pending,
+        Some(base) if base.chain_hash() != n.previous_hash => Invalid,
+        Some(_) => Valid,
+    }
+}
+
 /// DEP-03 §"The dispute": the updates of a disputed ledger (its operator's and every
 /// disputant's, as the relay or our forks hold them) reduced to the current dispute. A disputant
 /// may hold an older `DisputeEnter` on a vault the ledger has since rotated away (a dispute that
@@ -381,7 +586,21 @@ pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 3
 /// (signet soak, 2026-11-02: a stale DisputeEnter moved the watch's fork point, its anchor
 /// missed the confiscation, and its challenge lapsed into contagion against honest members).
 /// Vector `tests/vectors/dispute_scope.txt`.
+///
+/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): a later `DisputeEnter` replaces a
+/// fork that yielded only when [`reentry_yield_verdict`] finds that yield valid (then one at the
+/// same sequence may too: a punitive entry superseding the fork); while it is invalid or pending
+/// the yielded fork stays counted and the new entry waits. The chain view is the process's
+/// ([`set_yield_chain_view`]); [`dispute_scope_with`] takes one. Vector `enter_after_yield.txt`.
 pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> {
+    dispute_scope_with(updates, installed_chain_view())
+}
+
+/// [`dispute_scope`] with the chain view `chain` (`None`: a yield's chain reasons as published).
+pub fn dispute_scope_with(
+    updates: &[SignedLedgerUpdate],
+    chain: Option<ChainView<'_>>,
+) -> Vec<SignedLedgerUpdate> {
     let Some(origin) = updates
         .iter()
         .find(|u| u.sequence_number == 0)
@@ -389,14 +608,15 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
     else {
         return updates.to_vec();
     };
-    let enters: Vec<(bitcoin::secp256k1::PublicKey, u64, u64)> = updates
+    let enters: Vec<(usize, u64, u64)> = updates
         .iter()
-        .filter(|u| u.operator_id != origin)
-        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+        .enumerate()
+        .filter(|(_, u)| u.operator_id != origin)
+        .filter_map(|(i, u)| match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::DisputeEnter {
                 last_valid_sequence,
                 ..
-            }) => Some((u.operator_id, u.sequence_number, last_valid_sequence)),
+            }) => Some((i, u.sequence_number, last_valid_sequence)),
             _ => None,
         })
         .collect();
@@ -415,16 +635,44 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
         .map(|u| u.sequence_number)
         .max()
         .unwrap_or(0);
-    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q
+    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q, past a
+    // yielded fork only on a valid verdict (DEP-06 "A yield binds only its author")
+    let mut by: Vec<([u8; 33], Vec<(usize, u64, u64)>)> = Vec::new();
+    for e in enters.iter().filter(|e| e.2 >= q) {
+        let k = updates[e.0].operator_id.serialize();
+        match by.iter_mut().find(|(o, _)| *o == k) {
+            Some((_, v)) => v.push(*e),
+            None => by.push((k, vec![*e])),
+        }
+    }
     let mut fork_of: std::collections::HashMap<[u8; 33], (u64, u64)> = Default::default();
-    for (op, seq, lvs) in &enters {
-        if *lvs < q {
-            continue;
+    for (k, mut es) in by {
+        es.sort_by_key(|e| e.1); // stable: input order among equal sequences
+        let mut cur = es[0];
+        for e in &es[1..] {
+            let fork = fork_from(updates, &updates[cur.0]);
+            let yld = fork
+                .iter()
+                .filter(|u| {
+                    matches!(
+                        LedgerOperation::tlv_decode(&u.message),
+                        Ok(LedgerOperation::DisputeYield { .. })
+                    )
+                })
+                .max_by_key(|u| u.sequence_number);
+            let take = match yld {
+                None => e.1 > cur.1,
+                Some(y) => {
+                    e.1 >= cur.1
+                        && reentry_yield_verdict(updates, &updates[cur.0], y, chain)
+                            == ReentryVerdict::Valid
+                }
+            };
+            if take {
+                cur = *e;
+            }
         }
-        let e = fork_of.entry(op.serialize()).or_insert((*seq, *lvs));
-        if *seq > e.0 {
-            *e = (*seq, *lvs);
-        }
+        fork_of.insert(k, (cur.1, cur.2));
     }
     // A disputant takes part through its counted DisputeEnter only: a repeat entry it signed
     // after it, below Q (or at or above Q but superseded), names no fork point and carries no

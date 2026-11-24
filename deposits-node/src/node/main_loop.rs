@@ -1590,6 +1590,19 @@ impl Node {
     }
 
     pub async fn run(self: &Arc<Self>) -> Result<(), Error> {
+        // DEP-06 "A yield binds only its author": a disputant's later DisputeEnter replaces its
+        // yielded fork only on a valid verdict, and lost_to / excluded_by / reestablished are
+        // judged against the chain (rotation_order::dispute_scope). Once per process.
+        {
+            use bitcoin::hashes::Hash as _;
+            let wallet = Arc::clone(&self.wallet);
+            deposits_core::rotation_order::set_yield_chain_view(Box::new(move |t| {
+                wallet
+                    .tx_block_height(bitcoin::Txid::from_byte_array(*t))
+                    .ok()
+                    .flatten()
+            }));
+        }
         // Apply-edge dispute driver. When an actor signals
         // `dispute_wakeup` (after observing a fork-branch
         // DisputeArmed), fire `auto_confiscate` immediately instead

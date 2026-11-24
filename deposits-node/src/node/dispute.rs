@@ -3142,6 +3142,19 @@ impl Node {
         height: u32,
         reason: deposits_core::messages::LedgerOperation,
     ) -> Result<(), Error> {
+        // DEP-06 "A yield binds only its author": our own judge first.
+        let (history, me) = {
+            let fork_arc = self.handler.ledgers.lock().unwrap().get(fork_key).cloned();
+            let Some(fork_arc) = fork_arc else {
+                return Err(Error::Protocol(format!("Fork not found: {}", fork_key)));
+            };
+            let l = fork_arc.read().unwrap();
+            (l.history.clone(), self.node_id)
+        };
+        if let Some(tip) = history.last() {
+            let ledger_id = fork_key.split('_').next().unwrap_or(fork_key);
+            self.yield_self_check_or_hold(ledger_id, &history, &me, tip, &reason, height)?;
+        }
 
         let fork_arc = self
             .handler
@@ -3175,6 +3188,53 @@ impl Node {
             self.published(&pending);
         }
         Ok(())
+    }
+
+    /// [`yield_self_check`] over `history` and every other local history of `ledger_id` (our
+    /// other forks, the replica), against the chain: `Err` unless the verdict is `Valid`, so an
+    /// invalid yield is never signed and a pending one is retried on a later pass.
+    pub(crate) fn yield_self_check_or_hold(
+        &self,
+        ledger_id: &str,
+        history: &[deposits_core::SignedLedgerUpdate],
+        me: &bitcoin::secp256k1::PublicKey,
+        tip: &deposits_core::SignedLedgerUpdate,
+        reason: &deposits_core::messages::LedgerOperation,
+        height: u32,
+    ) -> Result<(), Error> {
+        use bitcoin::hashes::Hash as _;
+        use deposits_core::rotation_order::ReentryVerdict;
+        let mut updates: Vec<deposits_core::SignedLedgerUpdate> = history.to_vec();
+        for (k, arc) in self.handler.ledgers.lock().unwrap().iter() {
+            if k.starts_with(ledger_id) {
+                for u in arc.read().unwrap().history.iter() {
+                    if !updates.iter().any(|x| x == u) {
+                        updates.push(u.clone());
+                    }
+                }
+            }
+        }
+        let wallet = std::sync::Arc::clone(&self.wallet);
+        let view = move |t: &[u8; 32]| {
+            wallet
+                .tx_block_height(bitcoin::Txid::from_byte_array(*t))
+                .ok()
+                .flatten()
+        };
+        match yield_self_check(&updates, me, tip, reason, height, Some(&view)) {
+            ReentryVerdict::Valid => Ok(()),
+            v => {
+                let why = format!(
+                    "DisputeYield on {} not signed: our own judge reads it {:?} (DEP-06 \"A yield \
+                     binds only its author\"){}",
+                    &ledger_id[..16.min(ledger_id.len())],
+                    v,
+                    if v == ReentryVerdict::Pending { "; waiting" } else { "" }
+                );
+                tracing::warn!("{}", why);
+                Err(Error::Protocol(why))
+            }
+        }
     }
 
     /// Whether our fork holding `our_armed` judges yields under `yield-evidence-v9` (DEP-06 "What a
@@ -3332,6 +3392,15 @@ impl Node {
             return Ok(());
         }
 
+        // DEP-06 "A yield binds only its author": our own judge first.
+        self.yield_self_check_or_hold(
+            ledger_id,
+            std::slice::from_ref(our_armed),
+            &our_pubkey,
+            our_armed,
+            &reason,
+            current_block,
+        )?;
         // Create DisputeYield operation
         let operation = reason;
         let message_bytes = operation.tlv_encode();
@@ -5991,6 +6060,57 @@ pub(crate) fn fork_holds(
     (pledges.into_iter().map(|(p, _)| p).collect(), custody)
 }
 
+/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): the verdict the other members will
+/// give the yield `reason` that we, `me`, would sign at `height` on top of `tip`, when we enter
+/// again ([`deposits_core::rotation_order::reentry_yield_verdict`], over `updates`: our fork's
+/// history and whatever else we hold of the ledger). A builder signs only on `Valid`: `Invalid`
+/// is never signed or broadcast, `Pending` waits. The fork it judges is opened by our latest
+/// DisputeEnter in `updates`; with none (a fork-less journal), a placeholder at sequence 0.
+pub(crate) fn yield_self_check(
+    updates: &[deposits_core::SignedLedgerUpdate],
+    me: &bitcoin::secp256k1::PublicKey,
+    tip: &deposits_core::SignedLedgerUpdate,
+    reason: &deposits_core::messages::LedgerOperation,
+    height: u32,
+    chain: Option<deposits_core::rotation_order::ChainView<'_>>,
+) -> deposits_core::rotation_order::ReentryVerdict {
+    use deposits_core::messages::LedgerOperation;
+    use deposits_core::{TlvDecode, TlvEncode};
+    let enter = updates
+        .iter()
+        .filter(|u| u.operator_id == *me)
+        .filter(|u| {
+            matches!(
+                LedgerOperation::tlv_decode(&u.message),
+                Ok(LedgerOperation::DisputeEnter { .. })
+            )
+        })
+        .max_by_key(|u| u.sequence_number)
+        .cloned()
+        .unwrap_or_else(|| {
+            let mut e = tip.clone();
+            e.message = LedgerOperation::DisputeEnter {
+                last_valid_sequence: 0,
+                reason: String::new(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
+                fraud_proof_hash: None,
+                fraud_proof: None,
+            }
+            .tlv_encode();
+            e.operator_id = *me;
+            e.sequence_number = 0;
+            e
+        });
+    let mut yld = tip.clone();
+    yld.message = reason.tlv_encode();
+    yld.operator_id = *me;
+    yld.sequence_number = tip.sequence_number + 1;
+    yld.previous_hash = tip.chain_hash();
+    yld.block_height = height;
+    deposits_core::rotation_order::reentry_yield_verdict(updates, &enter, &yld, chain)
+}
+
 /// Our dispute operations in `history`, oldest first; an acquire's `binds` from `confirmed`
 /// (whether its claim txid is in a block).
 pub(crate) fn fork_events(
@@ -7310,5 +7430,154 @@ fn ledger_op_name(message: &[u8]) -> &'static str {
         Ok(LedgerOperation::DisputeAcquire { .. }) => "DisputeAcquire",
         Ok(_) => "other",
         Err(_) => "undecodable",
+    }
+}
+
+/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): a yield builder runs the judge
+/// before signing (`withdraw_dispute`, `publish_custody_yield` through `yield_self_check_or_hold`).
+#[cfg(test)]
+mod yield_self_check_tests {
+    use super::yield_self_check;
+    use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
+    use deposits_core::rotation_order::ReentryVerdict;
+    use deposits_core::{SignedLedgerUpdate, TlvEncode};
+
+    fn key(c: u8) -> bitcoin::secp256k1::PublicKey {
+        let secp = bitcoin::secp256k1::Secp256k1::new();
+        let sk = bitcoin::secp256k1::SecretKey::from_slice(&[c; 32]).unwrap();
+        bitcoin::secp256k1::PublicKey::from_secret_key(&secp, &sk)
+    }
+
+    fn up(who: u8, seq: u64, prev: [u8; 32], op: LedgerOperation) -> SignedLedgerUpdate {
+        SignedLedgerUpdate {
+            message: op.tlv_encode(),
+            message_type: 1,
+            operator_id: key(who),
+            ledger_id: [9; 32],
+            sequence_number: seq,
+            previous_hash: prev,
+            content_hash: [seq as u8 ^ who; 32],
+            block_height: 0,
+            block_hash: [1; 32],
+            operator_signature: [0; 64],
+            cosignatures: Vec::new(),
+        }
+    }
+
+    /// The operator's chain (open, a QuorumBegin at 5) and our expiry fork entered at 5.
+    fn fork() -> (Vec<SignedLedgerUpdate>, [u8; 32]) {
+        let open = up(
+            1,
+            0,
+            [0; 32],
+            LedgerOperation::LedgerOpen {
+                operator_id: key(1),
+                reserves_id: "r".into(),
+                genesis_block: 0,
+                reserves_amount: 1,
+                collateral_amount: 1,
+                protocol_version: None,
+            },
+        );
+        let qb = up(
+            1,
+            5,
+            open.chain_hash(),
+            LedgerOperation::QuorumBegin {
+                exit_cutoff_height: None,
+                exit_outputs: Vec::new(),
+                splice_in_outpoint: None,
+                splice_in_amount: None,
+                reference_feerate: None,
+                dormancy_outputs: Vec::new(),
+                migration_manifest: Vec::new(),
+                migration_receiver: None,
+                migration_vout: None,
+                consumed_notice: None,
+                rotation_rungs: vec![],
+                reserves_id: "r".into(),
+                spending_txid: [0; 32],
+                new_outpoint_txid: [1; 32],
+                new_outpoint_vout: 0,
+                amount: 1,
+                quorum_expiry: 1_000_000,
+                ledger_hash: [0; 32],
+                quorum_members: vec![QuorumMemberRef::pubkey_only(key(2))],
+                collateral_amount: 1,
+                protocol_version: Some("cltv-offset-v2".into()),
+            },
+        );
+        let enter = up(
+            2,
+            6,
+            qb.chain_hash(),
+            LedgerOperation::DisputeEnter {
+                last_valid_sequence: 5,
+                reason: "quorum_expired".into(),
+                anchor_block_hash: None,
+                anchor_block_height: None,
+                fraud_proof_hash: None,
+                fraud_proof: None,
+            },
+        );
+        let qb_hash = qb.content_hash;
+        (vec![open, qb, enter], qb_hash)
+    }
+
+    fn reason(
+        lost_to: Option<[u8; 32]>,
+        reestablished: Option<[u8; 32]>,
+        superseded_by: Option<[u8; 32]>,
+    ) -> LedgerOperation {
+        LedgerOperation::DisputeYield {
+            lost_to,
+            reestablished,
+            excluded_by: None,
+            superseded_by,
+        }
+    }
+
+    #[test]
+    fn a_yield_builder_signs_only_what_its_own_judge_finds_valid() {
+        let (h, qb) = fork();
+        let me = key(2);
+        let tip = h.last().unwrap();
+        let claim = [0xC1; 32];
+        let unconfirmed = |_: &[u8; 32]| None;
+        let confirmed = |t: &[u8; 32]| (*t == claim).then_some(90u32);
+        let v = |r: &LedgerOperation, chain: deposits_core::rotation_order::ChainView<'_>| {
+            yield_self_check(&h, &me, tip, r, 100, Some(chain))
+        };
+        // pending: the claim we name is not confirmed yet -> wait
+        assert_eq!(
+            v(&reason(Some(claim), None, None), &unconfirmed),
+            ReentryVerdict::Pending
+        );
+        // valid once it confirms at or below the yield's height
+        assert_eq!(
+            v(&reason(Some(claim), None, None), &confirmed),
+            ReentryVerdict::Valid
+        );
+        // ...and invalid if it confirmed above it (named before it existed): never signed
+        let late = |t: &[u8; 32]| (*t == claim).then_some(150u32);
+        assert_eq!(
+            v(&reason(Some(claim), None, None), &late),
+            ReentryVerdict::Invalid
+        );
+        // invalid: a re-establishment at or before the fork point
+        assert_eq!(
+            v(&reason(None, Some(qb), None), &confirmed),
+            ReentryVerdict::Invalid
+        );
+        // pending: superseded by a DisputeEnter nobody holds
+        assert_eq!(
+            v(&reason(None, None, Some([0xDE; 32])), &confirmed),
+            ReentryVerdict::Pending
+        );
+        // two reasons: invalid
+        assert_eq!(
+            v(&reason(Some(claim), Some(qb), None), &confirmed),
+            ReentryVerdict::Invalid
+        );
     }
 }
