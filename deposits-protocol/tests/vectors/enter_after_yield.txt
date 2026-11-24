@@ -1,20 +1,23 @@
 # DEP-06 "A yield binds only its author" (ruled 2026-11-24, "latest counts"): no other member
 # reads a yield, and a disputant's later DisputeEnter supersedes its earlier fork for the scope
 # (DEP-03 "The dispute": voters, accused set, arms) whatever that fork's yield says, or whether it
-# yielded at all.  Superseding never ends a pledge (DEP-03 "When a pledge is live"): a pledge on a
+# yielded at all, with two exceptions, the same in every scope and in an ingest: a fork its author
+# acquired on (a DisputeAcquire on it) is never superseded, and at the same sequence only a
+# punitive entry supersedes an expiry one.  Superseding never ends a pledge (DEP-03 "When a pledge is live"): a pledge on a
 # superseded fork stays held until its own valid yield or a binding claim of its round or a later
 # one.
 #
 # deposits-rust: deposits-core/tests/enter_after_yield_vector.rs (rotation_order::dispute_scope,
 # the scope cases) and deposits-node node::dispute (forks_hold, the pledge cases).  cl-deposits:
-# inspect/lottery-test.lisp (dispute-scope; superseded-entry / superseded-pledges-held and
-# fork-pledges-held), and its ingest takes the same entries (supersedes-fork-p, node-test).
+# inspect/lottery-test.lisp (dispute-scope; the ingest's rule, entry-supersedes-p, fed each case's
+# updates in order, must end on the scope's counted entry; superseded-entry /
+# superseded-pledges-held and fork-pledges-held for the pledge cases).
 #
-# Scope cases, every new entry taken:
+# Scope cases:
 #   case <name> ... end
 #   u <who> <seq> <kind> [args] [h=<height>] [as=<tag>]
 #       who: o = the ledger's operator, a..z = disputants; tag <who>:<seq>, or as=<tag>.
-#       kinds: open | other | qb | enter <lvs> [punitive] | arm [<round>]
+#       kinds: open | other | qb | enter <lvs> [punitive] [cont] | arm [<round>] | acquire
 #              | yield [lost_to=<name>] [excluded_by=<name>] [reestablished=<tag>] [superseded_by=<tag>]
 #   expect <tag> ...         dispute_scope's kept updates, in input order
 # Building them: ledger_id 32 x 0x09, block_hash 32 x 0x01, previous_hash 32 x 0, signature
@@ -22,7 +25,10 @@
 # "equivocation", any other "quorum_expired"; a yield's TLVs SHA256("tx:" || name) for lost_to /
 # excluded_by and SHA256("enter_after_yield:" || tag) for reestablished / superseded_by (the
 # scope reads none of them); an arm: armed_block 0, commitment 20 x 0, target "", rearm_round
-# <round> when > 1.
+# <round> when > 1; an acquire: new_custodian the key of "m", claim_txid SHA256("tx:claim"),
+# new_reserves_address "".  A disputant update's previous_hash is the chain hash of the latest
+# update on its fork (its latest DisputeEnter's); an enter's is the operator's update at its
+# last_valid_sequence, or with "cont" its fork's latest update (a continuation onto the fork's tip).
 #
 # Pledge cases, one disputant's (our) forks of one ledger:
 #   pledge <name> ... end
@@ -153,15 +159,14 @@ u a 9 yield superseded_by=a:8 h=100
 u a 12 enter 11
 expect o:0 o:5 o:11 a:12
 end
-# 12. A punitive entry at the expiry fork's own sequence: both entries are in the scope (the
-#     fork point is the same).
-case same-sequence-both-kept
+# 12. Same sequence, a punitive entry over an expiry one: it supersedes (DEP-06 reason 4).
+case same-sequence-punitive-over-expiry
 u o 0 open
 u o 5 qb
 u a 6 enter 5
 u a 6 enter 5 punitive as=a:6p
 u a 9 yield superseded_by=a:6p h=100
-expect o:0 o:5 a:6 a:6p a:9
+expect o:0 o:5 a:6p a:9
 end
 # 13. A later QuorumBegin at or below the new fork point: Q moves past the old fork.
 case quorum-begin-past-old-fork
@@ -173,6 +178,44 @@ u a 10 yield reestablished=o:9 h=100
 u o 12 other
 u a 13 enter 12
 expect o:0 o:5 o:9 o:12 a:13
+end
+# 14. A fork its author acquired on is never superseded: the later entry is not taken.
+case reentry-over-acquired-fork
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u a 8 acquire
+u o 10 other
+u a 11 enter 10
+expect o:0 o:5 a:6 a:7 a:8 o:10
+end
+# 15. Same sequence, an expiry entry after a punitive one: not taken.
+case same-sequence-expiry-over-punitive
+u o 0 open
+u o 5 qb
+u a 6 enter 5 punitive
+u a 6 enter 5 as=a:6e
+expect o:0 o:5 a:6
+end
+# 16. Same sequence, same kind: the first stays.
+case same-sequence-same-kind
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 6 enter 5 h=1 as=a:6b
+expect o:0 o:5 a:6
+end
+# 17. A continuation: an entry chained onto the fork's own tip counts from its own fork point.
+case continuation-onto-fork-tip
+u o 0 open
+u o 5 qb
+u a 6 enter 5
+u a 7 arm
+u o 8 other
+u a 9 enter 8 cont
+u a 10 arm
+expect o:0 o:5 o:8 a:9 a:10
 end
 
 # P1. An armed fork superseded by our re-entry keeps its pledge; the new fork's is held too.

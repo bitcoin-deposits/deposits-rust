@@ -90,6 +90,12 @@ fn op_of(w: &[&str]) -> LedgerOperation {
                 .and_then(|r| r.parse().ok())
                 .filter(|r: &u32| *r > 1),
         },
+        "acquire" => LedgerOperation::DisputeAcquire {
+            new_custodian: key('m'),
+            claim_txid: txid("claim"),
+            new_reserves_address: String::new(),
+            confiscation_txid: None,
+        },
         "yield" => LedgerOperation::DisputeYield {
             lost_to: opt(w, "lost_to=").map(txid),
             reestablished: opt(w, "reestablished=").map(tag_hash),
@@ -139,7 +145,7 @@ fn enter_after_yield_vector() {
                         .find(|&i| ups[i].operator_id == key('o'))
                         .map(|i| chain_of(&tags[i]))
                         .unwrap_or([0; 32])
-                } else if rest[0] == "enter" {
+                } else if rest[0] == "enter" && !rest.contains(&"cont") {
                     if rest.contains(&"offledger") {
                         [0xEE; 32]
                     } else {
@@ -197,7 +203,7 @@ fn enter_after_yield_vector() {
             _ => panic!("case {}: {}", name, line),
         }
     }
-    assert_eq!(cases, 13);
+    assert_eq!(cases, 17);
 }
 
 /// The fork (its DisputeEnter's tag) of the update whose content hash is `prev`.

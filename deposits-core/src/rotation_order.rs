@@ -420,9 +420,9 @@ fn fork_from<'a>(
     }
 }
 
-/// DEP-06 "A yield binds only its author": the verdict on `yld`, the `DisputeYield` on the fork
-/// `enter` opens, as another member reads it when that disputant enters again. Mirrors cl's
-/// REENTRY-YIELD-VERDICT; vector `enter_after_yield.txt`.
+/// DEP-06 "What a yield must say": the verdict on `yld`, the `DisputeYield` on the fork `enter`
+/// opens, as its builder's own judge reads it before signing (deposits-node `yield_self_check`).
+/// Mirrors cl's REENTRY-YIELD-VERDICT.
 ///
 /// No reason: valid (a yield before yield-evidence-v9; the v9 fold refuses one). More than one:
 /// invalid. `superseded_by` is judged from `updates` alone (chain-free): invalid if the fork armed
@@ -584,14 +584,17 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
     else {
         return updates.to_vec();
     };
-    let enters: Vec<(bitcoin::secp256k1::PublicKey, u64, u64)> = updates
+    // (index, sequence, last_valid_sequence, expiry reason)
+    let enters: Vec<(usize, u64, u64, bool)> = updates
         .iter()
-        .filter(|u| u.operator_id != origin)
-        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
+        .enumerate()
+        .filter(|(_, u)| u.operator_id != origin)
+        .filter_map(|(i, u)| match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::DisputeEnter {
                 last_valid_sequence,
+                reason,
                 ..
-            }) => Some((u.operator_id, u.sequence_number, last_valid_sequence)),
+            }) => Some((i, u.sequence_number, last_valid_sequence, is_expiry_reason(&reason))),
             _ => None,
         })
         .collect();
@@ -610,29 +613,48 @@ pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> 
         .map(|u| u.sequence_number)
         .max()
         .unwrap_or(0);
-    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q
-    let mut fork_of: std::collections::HashMap<[u8; 33], (u64, u64)> = Default::default();
-    for (op, seq, lvs) in &enters {
-        if *lvs < q {
-            continue;
-        }
-        let e = fork_of.entry(op.serialize()).or_insert((*seq, *lvs));
-        if *seq > e.0 {
-            *e = (*seq, *lvs);
+    // Each disputant's counted DisputeEnter: of its entries at or above Q, in sequence order, the
+    // latest -- except that a fork whose author acquired on it is never superseded, and at the
+    // same sequence only a punitive entry supersedes an expiry one (DEP-03 "The dispute"; cl's
+    // ingest takes exactly these, SUPERSEDES-FORK-P).
+    let mut by: Vec<([u8; 33], Vec<(usize, u64, u64, bool)>)> = Vec::new();
+    for e in enters.iter().filter(|e| e.2 >= q) {
+        let k = updates[e.0].operator_id.serialize();
+        match by.iter_mut().find(|(o, _)| *o == k) {
+            Some((_, v)) => v.push(*e),
+            None => by.push((k, vec![*e])),
         }
     }
-    // A disputant takes part through its counted DisputeEnter only: a repeat entry it signed
-    // after it, below Q (or at or above Q but superseded), names no fork point and carries no
-    // grounds, so it is not in the scope (vector rearm_round_agree.json, late_enter, repeat_enter).
+    let mut fork_of: std::collections::HashMap<[u8; 33], (u64, [u8; 32])> = Default::default();
+    for (k, mut es) in by {
+        es.sort_by_key(|e| e.1); // stable: input order among equal sequences
+        let mut cur = es[0];
+        for e in &es[1..] {
+            let acquired = fork_from(updates, &updates[cur.0]).iter().any(|u| {
+                matches!(
+                    LedgerOperation::tlv_decode(&u.message),
+                    Ok(LedgerOperation::DisputeAcquire { .. })
+                )
+            });
+            let take = !acquired && (e.1 > cur.1 || (e.1 == cur.1 && cur.3 && !e.3));
+            if take {
+                cur = *e;
+            }
+        }
+        fork_of.insert(k, (cur.2, updates[cur.0].content_hash));
+    }
+    // A disputant takes part through its counted DisputeEnter only: any other entry it signed
+    // (below Q, superseded, or not superseding) names no fork point and carries no grounds, so it
+    // is not in the scope (vector rearm_round_agree.json, late_enter, repeat_enter).
     updates
         .iter()
         .filter(|u| {
             u.operator_id == origin
                 || fork_of
                     .get(&u.operator_id.serialize())
-                    .is_some_and(|(seq, lvs)| {
+                    .is_some_and(|(lvs, counted)| {
                         u.sequence_number > *lvs
-                            && (u.sequence_number == *seq
+                            && (u.content_hash == *counted
                                 || !matches!(
                                     LedgerOperation::tlv_decode(&u.message),
                                     Ok(LedgerOperation::DisputeEnter { .. })
