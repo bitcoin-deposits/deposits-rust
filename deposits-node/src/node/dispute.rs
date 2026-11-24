@@ -3142,7 +3142,7 @@ impl Node {
         height: u32,
         reason: deposits_core::messages::LedgerOperation,
     ) -> Result<(), Error> {
-        // DEP-06 "A yield binds only its author": our own judge first.
+        // DEP-06 "What a yield must say": our own judge first.
         let (history, me) = {
             let fork_arc = self.handler.ledgers.lock().unwrap().get(fork_key).cloned();
             let Some(fork_arc) = fork_arc else {
@@ -3225,8 +3225,8 @@ impl Node {
             ReentryVerdict::Valid => Ok(()),
             v => {
                 let why = format!(
-                    "DisputeYield on {} not signed: our own judge reads it {:?} (DEP-06 \"A yield \
-                     binds only its author\"){}",
+                    "DisputeYield on {} not signed: our own judge reads it {:?} (DEP-06 \"What a \
+                     yield must say\"){}",
                     &ledger_id[..16.min(ledger_id.len())],
                     v,
                     if v == ReentryVerdict::Pending { "; waiting" } else { "" }
@@ -3392,7 +3392,7 @@ impl Node {
             return Ok(());
         }
 
-        // DEP-06 "A yield binds only its author": our own judge first.
+        // DEP-06 "What a yield must say": our own judge first.
         self.yield_self_check_or_hold(
             ledger_id,
             std::slice::from_ref(our_armed),
@@ -6003,6 +6003,20 @@ pub(crate) enum ForkEvent {
     },
 }
 
+/// DEP-03 "When a pledge is live" over every fork of ours, each `(events, others)` as
+/// [`fork_holds`] reads it: what each holds, in order. Every fork is judged by its own events,
+/// whether or not a later `DisputeEnter` of ours superseded it (ruled 2026-11-24: superseding
+/// never ends a pledge; our forks are separate records, kept until voided). Vector
+/// `enter_after_yield.txt`, its pledge cases (cl-deposits passes the same file).
+pub(crate) fn forks_hold(
+    forks: &[(Vec<ForkEvent>, Vec<u32>)],
+) -> Vec<(Vec<bitcoin::OutPoint>, Option<bitcoin::OutPoint>)> {
+    forks
+        .iter()
+        .map(|(events, others)| fork_holds(events, false, others))
+        .collect()
+}
+
 /// What one of our forks holds against a new pledge (DEP-03 "Replacement collateral
 /// declaration", a coin pledged in a live dispute): `(pledges, custody)`.
 ///
@@ -6060,9 +6074,9 @@ pub(crate) fn fork_holds(
     (pledges.into_iter().map(|(p, _)| p).collect(), custody)
 }
 
-/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): the verdict the other members will
-/// give the yield `reason` that we, `me`, would sign at `height` on top of `tip`, when we enter
-/// again ([`deposits_core::rotation_order::reentry_yield_verdict`], over `updates`: our fork's
+/// DEP-06 "What a yield must say": our own judge's verdict on the yield `reason` that we, `me`,
+/// would sign at `height` on top of `tip`
+/// ([`deposits_core::rotation_order::reentry_yield_verdict`], over `updates`: our fork's
 /// history and whatever else we hold of the ledger). A builder signs only on `Valid`: `Invalid`
 /// is never signed or broadcast, `Pending` waits. The fork it judges is opened by our latest
 /// DisputeEnter in `updates`; with none (a fork-less journal), a placeholder at sequence 0.
@@ -6581,20 +6595,22 @@ impl Node {
         };
         let confirmed = |t: &bitcoin::Txid| matches!(self.wallet.tx_block_height(*t), Ok(Some(_)));
         let backend = self.wallet.chain_backend();
-        for (k, mine) in ours {
+        let mut forks: Vec<(Vec<ForkEvent>, Vec<u32>)> = Vec::new();
+        for (k, mine) in &ours {
             if k.starts_with(ledger_id) {
-                let (declared, _) = committed_outpoints(&mine, &self.node_id);
+                let (declared, _) = committed_outpoints(mine, &self.node_id);
                 if let Some(op) = declared.last() {
                     ex.own = Some(*op);
                 }
             }
             let others: Vec<u32> = self
-                .others_binding_acquires(&k, backend.as_ref())
+                .others_binding_acquires(k, backend.as_ref())
                 .into_iter()
                 .map(|a| a.round)
                 .collect();
-            let (pledges, custody) =
-                fork_holds(&fork_events(&mine, &self.node_id, &confirmed), false, &others);
+            forks.push((fork_events(mine, &self.node_id, &confirmed), others));
+        }
+        for ((k, mine), (pledges, custody)) in ours.into_iter().zip(forks_hold(&forks)) {
             // Name every holder, so a coin that stays taken can be traced to the fork that holds it
             // (regtest 1121-next4c: 24 of ref6's coins, held by 25 forks the rule reads as live).
             for p in &pledges {
@@ -7433,7 +7449,120 @@ fn ledger_op_name(message: &[u8]) -> &'static str {
     }
 }
 
-/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): a yield builder runs the judge
+/// DEP-03 "When a pledge is live" (ruled 2026-11-24): superseding never ends a pledge. The pledge
+/// cases of the shared vector `deposits-protocol/tests/vectors/enter_after_yield.txt` through
+/// `forks_hold` (cl-deposits passes the same file).
+#[cfg(test)]
+mod enter_after_yield_pledge_tests {
+    use super::{forks_hold, ForkEvent};
+    use bitcoin::hashes::{sha256, Hash};
+
+    fn coin(name: &str) -> bitcoin::OutPoint {
+        let h = sha256::Hash::hash(format!("tx:{}", name).as_bytes()).to_byte_array();
+        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array(h), 0)
+    }
+
+    /// One fork's operations as the vector writes them; a void yield is `None` until seen.
+    enum Op {
+        Enter,
+        Arm(&'static str, u32),
+        Yield { seen: bool },
+        Acquire { binds: bool },
+    }
+
+    #[test]
+    fn enter_after_yield_pledge_cases() {
+        let text: &'static str =
+            include_str!("../../../deposits-protocol/tests/vectors/enter_after_yield.txt");
+        let mut forks: Vec<Vec<Op>> = Vec::new();
+        let mut others: Vec<u32> = Vec::new();
+        let mut name = "";
+        let mut cases = 0;
+        let mut in_pledge = false;
+        for line in text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
+            let w: Vec<&'static str> = line.split_whitespace().collect();
+            match w[0] {
+                "pledge" => {
+                    in_pledge = true;
+                    name = w[1];
+                    forks.clear();
+                    others.clear();
+                }
+                "end" => in_pledge = false,
+                _ if !in_pledge => {}
+                "fork" => {
+                    let n: usize = w[1].parse().unwrap();
+                    while forks.len() < n {
+                        forks.push(Vec::new());
+                    }
+                    forks[n - 1].push(match (w[2], w.get(3).copied()) {
+                        ("enter", _) => Op::Enter,
+                        ("arm", Some(c)) => {
+                            Op::Arm(c, w.get(4).map(|r| r.parse().unwrap()).unwrap_or(1))
+                        }
+                        ("yield", Some(v)) => Op::Yield { seen: v == "seen" },
+                        ("acquire", Some(v)) => Op::Acquire { binds: v == "binds" },
+                        x => panic!("case {}: {:?}", name, x),
+                    });
+                }
+                // Our forks are separate records: a later DisputeEnter of ours opens the next one
+                // and changes nothing of this one's.
+                "supersede" => {}
+                "later-seen" => {
+                    let n: usize = w[1].parse().unwrap();
+                    for op in forks[n - 1].iter_mut() {
+                        if let Op::Yield { seen } = op {
+                            *seen = true;
+                        }
+                    }
+                }
+                "others" => others.push(w[1].parse().unwrap()),
+                "held" => {
+                    let input: Vec<(Vec<ForkEvent>, Vec<u32>)> = forks
+                        .iter()
+                        .map(|ops| {
+                            let ev = ops
+                                .iter()
+                                .filter_map(|o| match o {
+                                    Op::Enter => Some(ForkEvent::Enter),
+                                    Op::Arm(c, r) => Some(ForkEvent::Arm {
+                                        pledge: Some(coin(c)),
+                                        round: *r,
+                                    }),
+                                    Op::Yield { seen: true } => Some(ForkEvent::Yield),
+                                    Op::Yield { seen: false } => None,
+                                    Op::Acquire { binds } => Some(ForkEvent::Acquire {
+                                        claim: coin("claim"),
+                                        binds: *binds,
+                                    }),
+                                })
+                                .collect();
+                            (ev, others.clone())
+                        })
+                        .collect();
+                    let mut got: Vec<bitcoin::OutPoint> = forks_hold(&input)
+                        .into_iter()
+                        .flat_map(|(p, _)| p)
+                        .collect();
+                    let mut want: Vec<bitcoin::OutPoint> =
+                        w[1..].iter().filter(|c| **c != "-").map(|c| coin(c)).collect();
+                    got.sort();
+                    want.sort();
+                    assert_eq!(got, want, "pledge case {}", name);
+                    cases += 1;
+                }
+                _ => panic!("pledge case {}: {}", name, line),
+            }
+        }
+        assert_eq!(cases, 8);
+    }
+}
+
+/// DEP-06 "What a yield must say": a yield builder runs the judge
 /// before signing (`withdraw_dispute`, `publish_custody_yield` through `yield_self_check_or_hold`).
 #[cfg(test)]
 mod yield_self_check_tests {

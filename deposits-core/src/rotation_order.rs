@@ -368,11 +368,11 @@ pub fn latest_quorum_begin_txid(history: &[SignedLedgerUpdate]) -> Option<[u8; 3
         .map(|(_, t)| t)
 }
 
-/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): the verdict another member gives
-/// a disputant's `DisputeYield` when that disputant's later `DisputeEnter` would replace the
-/// yielded fork. It is the one place a yield is read by anyone but its author (no voters,
-/// lottery set, tier or round reads it). `Pending` counts as live: the new entry waits, and is
-/// asked again (every caller recomputes, so on the next tip).
+/// DEP-06 "What a yield must say": the verdict a yield builder's own judge gives the yield it
+/// would sign ([`reentry_yield_verdict`]; deposits-node `yield_self_check`): it signs only on
+/// `Valid`, never signs an `Invalid` one, and waits on a `Pending` one. (A yield binds only its
+/// author, ruled 2026-11-24: no other member reads it, and a later `DisputeEnter` supersedes the
+/// fork for scope whatever it says, [`dispute_scope`].)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReentryVerdict {
     Valid,
@@ -383,21 +383,6 @@ pub enum ReentryVerdict {
 /// A chain view for [`reentry_yield_verdict`]: a txid (internal byte order) to the height of the
 /// block confirming it, `None` while unconfirmed or unknown.
 pub type ChainView<'a> = &'a dyn Fn(&[u8; 32]) -> Option<u32>;
-
-type ChainViewFn = Box<dyn Fn(&[u8; 32]) -> Option<u32> + Send + Sync>;
-static YIELD_CHAIN_VIEW: std::sync::OnceLock<ChainViewFn> = std::sync::OnceLock::new();
-
-/// Install the process's chain view for [`dispute_scope`] (the node does, once, at start).
-/// Without one, the chain reasons of a yield read as published, as cl's do with no chain view.
-pub fn set_yield_chain_view(f: ChainViewFn) -> bool {
-    YIELD_CHAIN_VIEW.set(f).is_ok()
-}
-
-fn installed_chain_view() -> Option<ChainView<'static>> {
-    YIELD_CHAIN_VIEW
-        .get()
-        .map(|b| b.as_ref() as ChainView<'static>)
-}
 
 fn is_expiry_reason(reason: &str) -> bool {
     reason.replace('-', "_") == "quorum_expired"
@@ -587,20 +572,11 @@ pub fn reentry_yield_verdict(
 /// missed the confiscation, and its challenge lapsed into contagion against honest members).
 /// Vector `tests/vectors/dispute_scope.txt`.
 ///
-/// DEP-06 "A yield binds only its author" (ruled 2026-11-24): a later `DisputeEnter` replaces a
-/// fork that yielded only when [`reentry_yield_verdict`] finds that yield valid (then one at the
-/// same sequence may too: a punitive entry superseding the fork); while it is invalid or pending
-/// the yielded fork stays counted and the new entry waits. The chain view is the process's
-/// ([`set_yield_chain_view`]); [`dispute_scope_with`] takes one. Vector `enter_after_yield.txt`.
+/// Latest counts (ruled 2026-11-24, DEP-06 "A yield binds only its author"): a later
+/// `DisputeEnter` supersedes the disputant's earlier fork for the scope whatever that fork's yield
+/// says, or whether it yielded at all. Superseding ends no pledge (DEP-03 "When a pledge is live";
+/// deposits-node `forks_hold`). Vector `enter_after_yield.txt`.
 pub fn dispute_scope(updates: &[SignedLedgerUpdate]) -> Vec<SignedLedgerUpdate> {
-    dispute_scope_with(updates, installed_chain_view())
-}
-
-/// [`dispute_scope`] with the chain view `chain` (`None`: a yield's chain reasons as published).
-pub fn dispute_scope_with(
-    updates: &[SignedLedgerUpdate],
-    chain: Option<ChainView<'_>>,
-) -> Vec<SignedLedgerUpdate> {
     let Some(origin) = updates
         .iter()
         .find(|u| u.sequence_number == 0)
@@ -608,15 +584,14 @@ pub fn dispute_scope_with(
     else {
         return updates.to_vec();
     };
-    let enters: Vec<(usize, u64, u64)> = updates
+    let enters: Vec<(bitcoin::secp256k1::PublicKey, u64, u64)> = updates
         .iter()
-        .enumerate()
-        .filter(|(_, u)| u.operator_id != origin)
-        .filter_map(|(i, u)| match LedgerOperation::tlv_decode(&u.message) {
+        .filter(|u| u.operator_id != origin)
+        .filter_map(|u| match LedgerOperation::tlv_decode(&u.message) {
             Ok(LedgerOperation::DisputeEnter {
                 last_valid_sequence,
                 ..
-            }) => Some((i, u.sequence_number, last_valid_sequence)),
+            }) => Some((u.operator_id, u.sequence_number, last_valid_sequence)),
             _ => None,
         })
         .collect();
@@ -635,44 +610,16 @@ pub fn dispute_scope_with(
         .map(|u| u.sequence_number)
         .max()
         .unwrap_or(0);
-    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q, past a
-    // yielded fork only on a valid verdict (DEP-06 "A yield binds only its author")
-    let mut by: Vec<([u8; 33], Vec<(usize, u64, u64)>)> = Vec::new();
-    for e in enters.iter().filter(|e| e.2 >= q) {
-        let k = updates[e.0].operator_id.serialize();
-        match by.iter_mut().find(|(o, _)| *o == k) {
-            Some((_, v)) => v.push(*e),
-            None => by.push((k, vec![*e])),
-        }
-    }
+    // each disputant's fork point: its latest DisputeEnter (by sequence) at or above Q
     let mut fork_of: std::collections::HashMap<[u8; 33], (u64, u64)> = Default::default();
-    for (k, mut es) in by {
-        es.sort_by_key(|e| e.1); // stable: input order among equal sequences
-        let mut cur = es[0];
-        for e in &es[1..] {
-            let fork = fork_from(updates, &updates[cur.0]);
-            let yld = fork
-                .iter()
-                .filter(|u| {
-                    matches!(
-                        LedgerOperation::tlv_decode(&u.message),
-                        Ok(LedgerOperation::DisputeYield { .. })
-                    )
-                })
-                .max_by_key(|u| u.sequence_number);
-            let take = match yld {
-                None => e.1 > cur.1,
-                Some(y) => {
-                    e.1 >= cur.1
-                        && reentry_yield_verdict(updates, &updates[cur.0], y, chain)
-                            == ReentryVerdict::Valid
-                }
-            };
-            if take {
-                cur = *e;
-            }
+    for (op, seq, lvs) in &enters {
+        if *lvs < q {
+            continue;
         }
-        fork_of.insert(k, (cur.1, cur.2));
+        let e = fork_of.entry(op.serialize()).or_insert((*seq, *lvs));
+        if *seq > e.0 {
+            *e = (*seq, *lvs);
+        }
     }
     // A disputant takes part through its counted DisputeEnter only: a repeat entry it signed
     // after it, below Q (or at or above Q but superseded), names no fork point and carries no

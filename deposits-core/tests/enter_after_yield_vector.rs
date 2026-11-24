@@ -1,14 +1,13 @@
-//! DEP-06 "A yield binds only its author" (ruled 2026-11-24): `rotation_order::dispute_scope_with`
-//! and `reentry_yield_verdict` against the shared vector
-//! `deposits-protocol/tests/vectors/enter_after_yield.txt` (cl-deposits passes the same file,
-//! through its dispute-scope and its ingest's reentry-takes-p).
+//! DEP-06 "A yield binds only its author" (ruled 2026-11-24, latest counts):
+//! `rotation_order::dispute_scope` against the scope cases of the shared vector
+//! `deposits-protocol/tests/vectors/enter_after_yield.txt` (cl-deposits passes the same file;
+//! its pledge cases run in deposits-node, `enter_after_yield_pledge_tests`).
 
 use bitcoin::hashes::{sha256, Hash};
 use deposits_core::messages::{LedgerOperation, QuorumMemberRef};
-use deposits_core::rotation_order::{dispute_scope_with, reentry_yield_verdict, ReentryVerdict};
+use deposits_core::rotation_order::dispute_scope;
 use deposits_core::types::SignedLedgerUpdate;
 use deposits_core::TlvEncode;
-use std::collections::HashMap;
 
 fn key(c: char) -> bitcoin::secp256k1::PublicKey {
     let secp = bitcoin::secp256k1::Secp256k1::new();
@@ -108,9 +107,8 @@ fn enter_after_yield_vector() {
     let mut ups: Vec<SignedLedgerUpdate> = Vec::new();
     let mut tags: Vec<String> = Vec::new();
     let mut fork_of: Vec<String> = Vec::new(); // the enter tag each disputant update is on
-    let mut chain: HashMap<[u8; 32], u32> = HashMap::new();
-    let mut no_chain = false;
-    let (mut cases, mut verdicts) = (0, 0);
+    let mut cases = 0;
+    let mut in_case = false;
     for line in text
         .lines()
         .map(str::trim)
@@ -119,13 +117,14 @@ fn enter_after_yield_vector() {
         let w: Vec<&str> = line.split_whitespace().collect();
         match w[0] {
             "case" => {
+                in_case = true;
                 name = w[1].to_string();
                 ups.clear();
                 tags.clear();
                 fork_of.clear();
-                chain.clear();
-                no_chain = false;
             }
+            "pledge" => in_case = false,
+            _ if !in_case => {}
             "u" => {
                 let who = w[1].chars().next().unwrap();
                 let seq: u64 = w[2].parse().unwrap();
@@ -184,31 +183,8 @@ fn enter_after_yield_vector() {
                 tags.push(tag);
                 fork_of.push(fork);
             }
-            "chain" => {
-                chain.insert(txid(w[1]), w[2].parse().unwrap());
-            }
-            "nochain" => no_chain = true,
-            "verdict" => {
-                let i = tags.iter().position(|t| t == w[1]).unwrap();
-                let e = tags.iter().position(|t| *t == fork_of[i]).unwrap();
-                let view = |t: &[u8; 32]| chain.get(t).copied();
-                let got = reentry_yield_verdict(
-                    &ups,
-                    &ups[e],
-                    &ups[i],
-                    if no_chain { None } else { Some(&view) },
-                );
-                let want = match w[2] {
-                    "valid" => ReentryVerdict::Valid,
-                    "invalid" => ReentryVerdict::Invalid,
-                    _ => ReentryVerdict::Pending,
-                };
-                assert_eq!(got, want, "case {}: verdict on {}", name, w[1]);
-                verdicts += 1;
-            }
             "expect" => {
-                let view = |t: &[u8; 32]| chain.get(t).copied();
-                let kept = dispute_scope_with(&ups, if no_chain { None } else { Some(&view) });
+                let kept = dispute_scope(&ups);
                 let got: Vec<String> = kept
                     .iter()
                     .map(|k| tags[ups.iter().position(|u| u == k).unwrap()].clone())
@@ -217,10 +193,11 @@ fn enter_after_yield_vector() {
                 assert_eq!(got, want, "case {}", name);
                 cases += 1;
             }
-            _ => {}
+            "end" => {}
+            _ => panic!("case {}: {}", name, line),
         }
     }
-    assert_eq!((cases, verdicts), (20, 19));
+    assert_eq!(cases, 13);
 }
 
 /// The fork (its DisputeEnter's tag) of the update whose content hash is `prev`.
